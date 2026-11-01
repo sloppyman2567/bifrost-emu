@@ -30,7 +30,38 @@ jobs:
           test -x build/release-sdl0-gl0/bifrost-emu
           test -x build/release-sdl1-gl1/bifrost-emu
       - name: Check SDL Wayland helper lifetime and recovery
-        run: make test-android-sdl-backend USE_SDL2=1 USE_THUNK_GL=1
+        run: |
+          if pkg-config --exists sdl3; then
+            make test-android-sdl-backend USE_SDL2=1 USE_THUNK_GL=1
+          else
+            echo "::notice::skipped: this image has no SDL3 development package"
+          fi
+
+  clang-build:
+    name: Headless build with clang
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make python3
+      - name: Build headless configuration
+        run: make -j2 CC=clang CXX=clang++ USE_SDL2=0 USE_THUNK_GL=0
+
+  script-modes:
+    name: Scripts with a shebang are executable
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check modes recorded in git
+        run: |
+          status=0
+          while IFS=$'\t' read -r meta path; do
+            case "$meta" in 100644*) ;; *) continue ;; esac
+            if [ "$(head -c2 -- "$path")" = '#!' ]; then echo "not executable: $path"; status=1; fi
+          done < <(git ls-files -s -- Scripts Tools)
+          exit $status
 
   guest-correctness:
     name: Guest correctness and glibc runtime
@@ -40,7 +71,7 @@ jobs:
       - name: Install host and AArch64 build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3 curl libffi-dev gcc-aarch64-linux-gnu
+          sudo apt-get install -y build-essential python3 curl libffi-dev gcc-aarch64-linux-gnu libwayland-bin qemu-user
       - name: Provision checksum-pinned musl toolchain
         run: |
           python3 Scripts/Setup/test_musl_fetch.py
@@ -64,6 +95,8 @@ jobs:
         run: |
           ./Scripts/Testing/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --unit --quick --strict
           ./Scripts/Testing/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --unit --quick --strict --no-jit
+      - name: Run JIT regressions on older emulated host CPUs
+        run: bash Scripts/Testing/test_host_cpu_models.sh build/release-sdl0-gl0/bifrost-emu
       - name: Run filesystem sandbox boundary regressions
         run: ./Scripts/Testing/run_tests.sh --emu build/release-sdl0-gl0/bifrost-emu --integration --strict --filter '^test_sandbox$'
       - name: Run JIT differential verification
