@@ -35,9 +35,9 @@ for aslr in fixed random; do
                 BIFROST_ANDROID_DEVICE_TEST=1 BIFROST_TIER2_HITS=32 "${settings[@]}" "${service_env[@]}" timeout -s KILL 30 \
                 "$emu" "${args[@]}" "${service_args[@]}" --android-runtime --rootfs "$runtime" \
                 /data/local/tmp/bootstrap > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
-            rg -q '^android_bionic_bootstrap: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
-            rg -q '^Bionic: Binder device and prctl passed$' "$log" || { cat "$log" >&2; exit 1; }
-            if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
+            grep -qE '^android_bionic_bootstrap: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
+            grep -qE '^Bionic: Binder device and prctl passed$' "$log" || { cat "$log" >&2; exit 1; }
+            if grep -qE 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
             echo "Bionic bootstrap: $aslr $mode services=$services passed"
         done
     done
@@ -64,8 +64,8 @@ for mode in jit interp tier2; do
     env -u BIFROST_ROOT SDL_AUDIODRIVER=dummy BIFROST_TIER2="$tier" BIFROST_TIER2_HITS=32 \
         timeout -s KILL 60 "$emu" "${args[@]}" --android-runtime --rootfs "$runtime" \
         /data/local/tmp/aaudio_thread > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
-    rg -q '^android_aaudio_thread: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
-    if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
+    grep -qE '^android_aaudio_thread: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
+    if grep -qE 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
     echo "Bionic AAudio callback thread: $mode passed"
 done
 # Managed libOpenSLES adapter: PCM buffer-queue players over managed libaaudio.
@@ -95,8 +95,8 @@ for mode in jit interp tier2; do
     env -u BIFROST_ROOT SDL_AUDIODRIVER=dummy BIFROST_TIER2="$tier" BIFROST_TIER2_HITS=32 \
         timeout -s KILL 60 "$emu" "${args[@]}" --android-runtime --rootfs "$runtime" \
         /data/local/tmp/opensles_player > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
-    rg -q '^android_opensles_player: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
-    if rg -q 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
+    grep -qE '^android_opensles_player: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
+    if grep -qE 'Fatal signal|CANNOT LINK|\[crash\]' "$log"; then cat "$log" >&2; exit 1; fi
     echo "Bionic OpenSL ES player: $mode passed"
 done
 # Images without a linker64 PT_INTERP run themselves with AT_BASE 0 (a static executable, or linker64
@@ -119,14 +119,14 @@ for mode in jit interp; do
     log="$task_tmp/noninterp-static-$mode.log"
     status=0
     run_noninterp /data/local/tmp/android_static_image > "$log" 2>&1 || status=$?
-    [[ "$status" == 7 ]] && rg -q '^android_static_image: ran without PT_INTERP$' "$log" || { cat "$log" >&2; exit 1; }
+    [[ "$status" == 7 ]] && grep -qE '^android_static_image: ran without PT_INTERP$' "$log" || { cat "$log" >&2; exit 1; }
     log="$task_tmp/noninterp-linker-$mode.log"
     run_noninterp /system/bin/linker64 /data/local/tmp/android_noninterp_exec child > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
-    rg -q '^android_noninterp_exec: linker64 loaded its program$' "$log" || { cat "$log" >&2; exit 1; }
+    grep -qE '^android_noninterp_exec: linker64 loaded its program$' "$log" || { cat "$log" >&2; exit 1; }
     log="$task_tmp/noninterp-exec-$mode.log"
     run_noninterp /data/local/tmp/android_noninterp_exec > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
-    rg -q '^android_noninterp_exec: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
-    if rg -q 'Fatal signal|CANNOT LINK|\[crash\]|requires a Bionic linker64' "$log" "$task_tmp"/noninterp-*-"$mode".log; then
+    grep -qE '^android_noninterp_exec: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
+    if grep -qE 'Fatal signal|CANNOT LINK|\[crash\]|requires a Bionic linker64' "$log" "$task_tmp"/noninterp-*-"$mode".log; then
         cat "$log" >&2; exit 1
     fi
     echo "Bionic images without PT_INTERP: $mode passed"

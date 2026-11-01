@@ -19,21 +19,21 @@ run_probe() {
     "$EMU" "$@" > "$log" 2>&1 || rc=$?
     if [[ $rc == 77 ]]; then cat "$log"; exit 77; fi
     if [[ $rc != 0 ]]; then cat "$log"; exit "$rc"; fi
-    rg -q 'window_stats: ALL PASS' "$log"
+    grep -qE 'window_stats: ALL PASS' "$log"
 }
 # Override inherited diagnostics so each invocation checks a distinct mode. Stats are opt-in: the guest's
 # title stays its own until --window-stats (or a mode) asks for them.
 unset BIFROST_WINDOW_STATS BIFROST_WINDOW_STATS_TITLE BIFROST_WINDOW_STATS_MODE
 export BIFROST_WINDOW_STATS_WINDOW=0 BIFROST_WINDOW_STATS_OVERLAY=0 BIFROST_RENDER_LOG=1
 run_probe "$TASK_TMP/default.log" Tests/Apps/test_window_stats.elf
-[[ $(rg -c '^\[render\]' "$TASK_TMP/default.log") == 2 ]]
+[[ $(grep -cE '^\[render\]' "$TASK_TMP/default.log") == 2 ]]
 export BIFROST_WINDOW_STATS_MODE=1   # in the environment a mode only picks a layout; it does not turn stats on
 run_probe "$TASK_TMP/env-mode.log" Tests/Apps/test_window_stats.elf
 unset BIFROST_WINDOW_STATS_MODE
 export BIFROST_WINDOW_STATS=0
 run_probe "$TASK_TMP/env-disabled.log" Tests/Apps/test_window_stats.elf
 run_probe "$TASK_TMP/title.log" --window_stats Tests/Apps/test_window_stats.elf title
-rg -q 'idle 0.0 FPS' "$TASK_TMP/title.log"
+grep -qE 'idle 0.0 FPS' "$TASK_TMP/title.log"
 # Modes: 1/minimal and 2/normal show the title; 3/overlay leaves it alone (the overlay needs an Android window).
 unset BIFROST_WINDOW_STATS BIFROST_WINDOW_STATS_TITLE
 for mode in 1 minimal 2 normal; do
@@ -49,9 +49,9 @@ run_probe "$TASK_TMP/off-mode.log" --no-window-stats --window-stats-mode 2 Tests
 if "$EMU" --window-stats-mode loud Tests/Apps/test_window_stats.elf > "$TASK_TMP/bad-mode.log" 2>&1; then
     cat "$TASK_TMP/bad-mode.log"; exit 1
 fi
-rg -q 'takes 1 \(minimal\), 2 \(normal\) or 3 \(overlay\)' "$TASK_TMP/bad-mode.log"
+grep -qE 'takes 1 \(minimal\), 2 \(normal\) or 3 \(overlay\)' "$TASK_TMP/bad-mode.log"
 run_probe "$TASK_TMP/disabled.log" --window-stats --no-window-stats-title --no-render-log Tests/Apps/test_window_stats.elf
-if rg -q '^\[render\]' "$TASK_TMP/disabled.log"; then cat "$TASK_TMP/disabled.log"; exit 1; fi
+if grep -qE '^\[render\]' "$TASK_TMP/disabled.log"; then cat "$TASK_TMP/disabled.log"; exit 1; fi
 unset BIFROST_WINDOW_STATS BIFROST_WINDOW_STATS_TITLE
 run_probe "$TASK_TMP/all-disabled.log" --no-window-stats Tests/Apps/test_window_stats.elf
 printf 'window_stats regression: ALL PASS\n'

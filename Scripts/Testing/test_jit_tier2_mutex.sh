@@ -15,7 +15,7 @@ for ((i=0; i<20; ++i)); do
         timeout -s KILL 15 "$emu" "$fixture" > "$log" 2>&1 || {
             cat "$log" >&2; exit 1;
         }
-    rg -q 'counter = 8000 .* OK' "$log" && rg -q 'test_pthread_mutex: ALL PASS' "$log" || {
+    grep -qE 'counter = 8000 .* OK' "$log" && grep -qE 'test_pthread_mutex: ALL PASS' "$log" || {
         cat "$log" >&2; exit 1;
     }
 done
