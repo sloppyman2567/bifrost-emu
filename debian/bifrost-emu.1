@@ -15,7 +15,7 @@ executable, in the user's data directory or system-wide; create one with \fB\-\-
 .TP
 .B \-\-setup\-rootfs [\-\-system | \-\-prefix DIR | \-\-full | \-\-profile NAME | \-\-games | \-\-uninstall]
 Download the glibc and musl toolchains (about 235 MB) and install a guest rootfs, then exit.
-\fB\-\-games\fR adds the libraries games need as profile "games".
+\fB\-\-games\fR adds the libraries Linux games need as profile "games". Android apps use neither: Asgard brings its own.
 .TP
 .BI \-\-rootfs " PATH"
 Use PATH as the guest's root: libraries come from it and guest paths are confined to it.

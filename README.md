@@ -157,7 +157,7 @@ bifrost-emu my_dynamic_app.elf         # finds the rootfs automatically
 `--setup-rootfs` runs the checkout's `Scripts/Setup/install-rootfs.sh` and passes its options on: `--system`,
 `--prefix DIR`, `--full` (more real-world libraries), `--profile NAME`, `--games` and `--uninstall`.
 
-Games need more libraries than the base rootfs. `--setup-rootfs --games` downloads OpenAL, SDL2_ttf, Vorbis, libpng,
+Linux games need more libraries than the base rootfs; Android apps use neither, because Asgard brings its own. `--setup-rootfs --games` downloads OpenAL, SDL2_ttf, Vorbis, libpng,
 libjpeg, libcurl and their dependencies into a `games` profile; `--rootfs-profile games` selects it and `--rootfs-list`
 shows what is installed. Without any flag, the first rootfs found next to the executable, in the user's data directory
 or system-wide supplies the libraries, like `qemu-aarch64 -L`, and the guest still sees host paths; `--rootfs PATH`

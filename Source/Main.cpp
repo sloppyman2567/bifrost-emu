@@ -116,14 +116,14 @@ static void print_start_page() {
     if (!asgard.empty())
         printf("    %-38sopen the app library\n", from_checkout ? "Scripts/Android/asgard.py launcher" : "asgard launcher");
     printf("\n  Status\n");
-    print_status_line("Libraries (rootfs)", !arm64emu::library_root().empty(), "bifrost-emu --setup-rootfs");
-    print_status_line("Game libraries", games, "bifrost-emu --setup-rootfs --games");
+    print_status_line("Linux libraries", !arm64emu::library_root().empty(), "bifrost-emu --setup-rootfs");
+    print_status_line("Linux game libraries", games, "bifrost-emu --setup-rootfs --games");
     print_status_line("Android (Asgard)", !asgard.empty(), setup_asgard);
     printf("\n  Common options\n"
-           "    --setup-rootfs          install or update the libraries programs need\n"
-           "    --setup-rootfs --games  add the libraries games need\n"
-           "    --rootfs-list           list the installed libraries\n"
-           "    --rootfs-profile NAME   use other libraries, e.g. games\n"
+           "    --setup-rootfs          install or update the libraries Linux programs need\n"
+           "    --setup-rootfs --games  add the libraries Linux games need\n"
+           "    --rootfs-list           list the installed Linux libraries\n"
+           "    --rootfs-profile NAME   use other Linux libraries, e.g. games\n"
            "    --guest-ld              use the program's own ld.so (experimental)\n"
            "    --window-stats          show FPS and load in the window\n"
            "    --no-jit                interpreter only, for debugging\n"
@@ -135,8 +135,10 @@ static void print_help(bool all) {
            "         bifrost-emu <app.apk|.apkm|.apks|.xapk> [-d]   install and run an Android app\n"
            "         Options go before the program: anything after it goes to the program.\n"
            "\n  Libraries\n"
-           "    --setup-rootfs [OPTS]   build and install the guest rootfs, then exit\n"
+           "    --setup-rootfs [OPTS]   build and install the rootfs Linux programs use, then exit\n"
            "                            (--games, --system, --prefix DIR, --full, --uninstall)\n"
+           "                            --games adds the libraries Linux games need. Android apps\n"
+           "                            use neither: Asgard brings its own\n"
            "    --rootfs-profile NAME   use the installed rootfs profile NAME for libraries\n"
            "    --rootfs-list           list installed rootfs profiles and exit\n"
            "    --rootfs PATH           guest root for libraries and paths (BIFROST_ROOT)\n"

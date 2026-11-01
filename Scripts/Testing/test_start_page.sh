@@ -23,9 +23,9 @@ refuse() {  # name, pattern, text
 system_has() { [[ -e /usr/local/share/bifrost/$1 || -e /usr/share/bifrost/$1 ]]; }
 page=$(run)
 if system_has rootfs; then echo "SKIP rootfs missing (a system rootfs is installed)"
-else expect "rootfs missing names its fix" 'Libraries \(rootfs\) +not installed +bifrost-emu --setup-rootfs$' "$page"; fi
+else expect "rootfs missing names its fix" 'Linux libraries +not installed +bifrost-emu --setup-rootfs$' "$page"; fi
 if system_has rootfs.d/games; then echo "SKIP games missing (a system games profile is installed)"
-else expect "games missing names its fix" 'Game libraries +not installed +bifrost-emu --setup-rootfs --games$' "$page"; fi
+else expect "games missing names its fix" 'Linux game libraries +not installed +bifrost-emu --setup-rootfs --games$' "$page"; fi
 if system_has asgard; then echo "SKIP Asgard missing (a system Asgard is installed)"
 else
     expect "Asgard missing is reported" 'Android \(Asgard\) +not installed' "$page"
@@ -39,8 +39,8 @@ touch "$WORK/xdg/bifrost/rootfs/lib/ld-musl-aarch64.so.1" "$WORK/xdg/bifrost/roo
 mkdir -p "$WORK/xdg/bifrost/asgard/Scripts/Android" "$WORK/xdg/bifrost/asgard/Tools/android-tools"
 touch "$WORK/xdg/bifrost/asgard/Scripts/Android/asgard.py"
 page=$(run)
-expect "rootfs found" 'Libraries \(rootfs\) +installed' "$page"
-expect "games profile found" 'Game libraries +installed' "$page"
+expect "rootfs found" 'Linux libraries +installed' "$page"
+expect "games profile found" 'Linux game libraries +installed' "$page"
 if system_has asgard; then echo "SKIP a script without its toolchain (a system Asgard is installed)"
 else expect "a script without its toolchain is not set up" 'Android \(Asgard\) +not installed' "$page"; fi
 install -m 0755 /dev/null "$WORK/xdg/bifrost/asgard/Tools/android-tools/aapt2"

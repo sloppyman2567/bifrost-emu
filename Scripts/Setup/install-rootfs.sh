@@ -8,7 +8,7 @@
 #   ./Scripts/Setup/install-rootfs.sh --prefix DIR   # DIR/share/bifrost/rootfs
 #   ./Scripts/Setup/install-rootfs.sh --full         # also real-world and curl libraries
 #   ./Scripts/Setup/install-rootfs.sh --profile NAME # a named rootfs: <data>/rootfs.d/NAME (bifrost-emu --rootfs-profile NAME)
-#   ./Scripts/Setup/install-rootfs.sh --games        # also game libraries (OpenAL, SDL2_ttf, Vorbis, ...); profile "games"
+#   ./Scripts/Setup/install-rootfs.sh --games        # also Linux game libraries (OpenAL, SDL2_ttf, Vorbis, ...); profile "games"
 #   ./Scripts/Setup/install-rootfs.sh --rebuild      # with --games: rebuild from scratch instead of updating an existing install
 #   ./Scripts/Setup/install-rootfs.sh --no-fetch     # never download; use toolchains already in Tools/
 #   ./Scripts/Setup/install-rootfs.sh --uninstall    # remove the rootfs at the chosen location

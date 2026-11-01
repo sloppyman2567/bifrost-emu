@@ -52,7 +52,7 @@ programs behave the same with or without a rootfs that has them. A copy the prog
 RUNPATH/RPATH, `LD_LIBRARY_PATH`) is loaded as guest code, and so is `libX11` (the X11 wire-protocol test needs the
 real one). Audio libraries load their real copy when the rootfs has one. Under `--guest-ld` a real rootfs file is
 always used, as with the native linker. A rootfs without the real library falls back to the thunk; the thunk's OpenAL
-is a small stub, which is why games need the `games` profile below.
+is a small stub, which is why Linux games need the `games` profile below.
 
 ## Installing one
 
@@ -82,8 +82,9 @@ script once as your user before `sudo make install-rootfs`. `DESTDIR` and
 
 ### Game libraries
 
+The rootfs and its profiles are for Linux programs; Android apps use neither, because Asgard brings its own.
 `--games` (profile `games` unless `--profile` says otherwise) runs `Scripts/Setup/fetch-game-libs.py`, which downloads
-pinned Debian `trixie` arm64 packages for the libraries games link against and their dependencies (about 70 packages: OpenAL,
+pinned Debian `trixie` arm64 packages for the libraries Linux games link against and their dependencies (about 70 packages: OpenAL,
 SDL2_ttf/image/mixer, Vorbis/Opus/FLAC/mpg123/libsndfile, libpng/jpeg/tiff/webp, FreeType, libcurl with its TLS stack, SQLite, libxml2),
 unpacks only their shared libraries into `usr/lib`, rebuilds `ld.so.cache` and records the packages in
 `etc/bifrost-game-libs.txt`. Checked: Packages.xz against the `Release` file's SHA-256 and every `.deb` against the index
