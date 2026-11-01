@@ -165,4 +165,15 @@ four CRCs are checked. The CoreMark source is not bundled with the repo.
 5. Update this inventory only when category definitions or setup
    requirements change.
 
+A fixture must not depend on the machine that built or runs it. CI builds with the pinned Bootlin toolchain (GCC 13, musl
+1.2.5, `fetch-musl-toolchain.sh --bootlin`) under an account that is not UID 1000; a build with `musl.cc`'s GCC 11 and older musl,
+run as UID 1000, hid all three of these:
+
+- Inline asm declares every register it writes, `v8`-`v15` included: the compiler keeps values there across the block.
+  Check a recorded hash against more than QEMU, since QEMU reproduces the fixture's own mistake.
+- `clone()` in musl 1.2.5 refuses `CLONE_THREAD`, `CLONE_SETTLS` and `CLONE_CHILD_CLEARTID` with `EINVAL`, without a
+  syscall. Use `svc` for a raw thread.
+- `getuid()` is the host account unless `--android-runtime` is on, while Binder's sender UID is always the emulator's
+  process identity (`/proc/self/status`). Do not compare one with the other.
+
 

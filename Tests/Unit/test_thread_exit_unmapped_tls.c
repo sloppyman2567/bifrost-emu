@@ -48,6 +48,22 @@ static int child(void* a) {
     __builtin_unreachable();
 }
 
+// musl 1.2.5's clone() refuses CLONE_THREAD and CLONE_SETTLS without making the syscall. The child
+// starts on `stack` with the other registers copied, so x9 and x10 carry its entry and argument.
+static long raw_clone(int (*fn)(void*), void* stack, long flags, void* arg, void* tls) {
+    register long x0 __asm__("x0") = flags;
+    register void* x1 __asm__("x1") = stack;
+    register long x2 __asm__("x2") = 0;  // parent_tid
+    register void* x3 __asm__("x3") = tls;
+    register long x4 __asm__("x4") = 0;  // child_tid
+    register long x8 __asm__("x8") = 220;  // clone
+    register void* x9 __asm__("x9") = fn;
+    register void* x10 __asm__("x10") = arg;
+    __asm__ volatile("svc #0\n cbnz x0, 1f\n mov x0, x10\n blr x9\n 1:"
+                     : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8), "r"(x9), "r"(x10) : "memory");
+    return x0;
+}
+
 // Recycles same-size ranges so the freed hole is claimed from another thread too.
 static void* churn(void* a) {
     (void)a;
@@ -77,9 +93,9 @@ int main(void) {
         a->base = base;
         a->tls = tls;
         atomic_fetch_add(&live, 1);
-        int flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
-                    CLONE_SYSVSEM | CLONE_SETTLS;
-        if (clone(child, base + STACK - 0x2000, flags, a, NULL, tls, NULL) < 0) {
+        long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
+                     CLONE_SYSVSEM | CLONE_SETTLS;
+        if (raw_clone(child, base + STACK - 0x2000, flags, a, tls) < 0) {
             puts("FAIL: clone");
             return 3;
         }

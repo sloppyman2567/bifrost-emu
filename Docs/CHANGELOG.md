@@ -65,6 +65,11 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - **`test_jit_mt_publication`:** it exited 1 without a message, so its later checks had not run since syscalls began leaving
   generated code on October 25. It assumed one `run_block` finishes a sigreturn; it now runs the pending syscall, and all
   its checks pass. It names a failure now, too.
+- **Three fixtures failed on CI's compiler and account; the emulator was not at fault.** `jit_fp_ldst_cache` wrote `v8`-`v15`
+  undeclared, and its section 3 hash had been recorded from the corrupted loop (corrected value checked on the JIT, the
+  interpreter, QEMU and natively on x86). `test_thread_exit_unmapped_tls` used libc `clone()`, which musl 1.2.5 refuses for
+  these flags. `android_service_manager` compared Binder's answer with the host UID, so it only passed at listed UIDs such
+  as 1000. The local workflow check missed them because it reused fixtures built with `musl.cc`'s toolchain, under UID 1000.
 
 ### Firefox starts (2026-11-01)
 

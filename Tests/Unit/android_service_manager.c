@@ -124,6 +124,17 @@ static uint32_t lookup(int fd, const char *name) {
         return ~0u;
     return release_reply(fd, &reply) ? ~0u : handle;
 }
+// Binder's sender UID is the emulator's process identity, which /proc/self/status reports. Without
+// --android-runtime, getuid() is the host account instead and says nothing about Binder.
+static uid_t binder_sender_uid(void) {
+    char line[128];
+    unsigned uid = -1;
+    FILE *status = fopen("/proc/self/status", "r");
+    while (status && fgets(line, sizeof line, status))
+        if (sscanf(line, "Uid: %u", &uid) == 1) break;
+    if (status) fclose(status);
+    return uid;
+}
 int main(void) {
     int server = open("/dev/binder", O_RDWR | O_NONBLOCK),
         client = open("/dev/binder", O_RDWR | O_NONBLOCK);
@@ -151,7 +162,7 @@ int main(void) {
         u32(2);u32(-1);u32(0x7fffffff);u32(2);if(method==2)u32(2);
         CHECK(transact(client,method,0,0,&reply));
         const int32_t* values=(void*)(uintptr_t)reply.buffer;
-        uid_t uid = getuid();
+        uid_t uid = binder_sender_uid();
         if (method == 2 && uid != 0 && uid != 1000 && uid != 1013 && uid != 1047) {
             // The same fixture is included in a real APK under its app UID.
             // platform.xml grants score access to media/cameraserver, not apps.

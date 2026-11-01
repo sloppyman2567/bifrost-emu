@@ -112,13 +112,14 @@ int main(void) {
             "stp d16, d17, [%0, #128]\n stp d18, d19, [%0, #144]\n stp d20, d21, [%0, #160]\n stp d22, d23, [%0, #176]\n"
             "stp d24, d25, [%0, #192]\n stp d26, d27, [%0, #208]\n stp d28, d29, [%0, #224]\n stp d30, d31, [%0, #240]\n"
             : : "r"(out), "r"(in)
-            : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v16", "v17", "v18", "v19", "v20", "v21", "v22",
-              "v23", "v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31", "memory");
+            : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15",
+              "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29",
+              "v30", "v31", "memory");
         for (int i = 0; i < 32; ++i) { uint64_t b; memcpy(&b, &out[i], 8); mix(b); }
     }
     got[ng++] = h;
 
-    static const uint64_t want[] = {0x7c0e4962a5131518ull, 0xb226370b286e2e64ull, 0x60d3c0bb6c8a9752ull};
+    static const uint64_t want[] = {0x7c0e4962a5131518ull, 0xb226370b286e2e64ull, 0xfe3cd8d1a6bccc21ull};
     int fails = 0;
     for (int i = 0; i < ng; ++i)
         if (got[i] != want[i]) { ++fails; printf("NG section %d: got %016llx want %016llx\n", i + 1, (unsigned long long)got[i], (unsigned long long)want[i]); }
