@@ -15,6 +15,9 @@ class Memory;
 // when libc is not mapped, is not glibc, or has no such symbol.
 uint64_t find_guest_libc_symbol(const Memory& mem, const std::string& symbol);
 
+// The same for a function, e.g. the GLIBC_PRIVATE __ctype_init.
+uint64_t find_guest_libc_function(const Memory& mem, const std::string& symbol);
+
 // Guest address of `symbol` (a defined function in .dynsym) in the glibc ld.so mapped in `mem`,
 // e.g. the GLIBC_PRIVATE _dl_allocate_tls; 0 when there is none.
 uint64_t find_guest_loader_symbol(const Memory& mem, const std::string& symbol);

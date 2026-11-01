@@ -647,10 +647,16 @@ private:
     std::atomic<bool> libc_single_threaded_looked_up_{false};
     // glibc TLS block (TPIDR_EL0) for a thread the emulator creates itself. The built-in linker lays it
     // out from its own objects; under --guest-ld the objects are the guest ld.so's, so it asks that
-    // ld.so (_dl_allocate_tls) for a block with the real DTV and TLS images. 0 on failure.
+    // ld.so (_dl_allocate_tls) for a block with the real DTV and TLS images. Either way the block then
+    // gets the libc setup glibc's start_thread would do. 0 on failure.
     uint64_t allocate_thread_tls_();
+    uint64_t allocate_thread_block_();
+    // Runs a guest function on the interpreter and a throwaway vCPU with this TLS block.
+    uint64_t call_on_scratch_cpu_(uint64_t fn, uint64_t tls, const int64_t* args, size_t n_args);
     uint64_t guest_dl_allocate_tls_ = 0;
     bool guest_dl_allocate_tls_looked_up_ = false;
+    uint64_t ctype_init_ = 0;
+    bool ctype_init_looked_up_ = false;
     // ── Futex table ───────────────────────────────────────────────────
     // (sharded — see futex_shards_ above. The old single-mutex + single-map
     // design was)

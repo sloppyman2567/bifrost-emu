@@ -64,6 +64,10 @@ uint64_t find_guest_libc_symbol(const Memory& mem, const std::string& symbol) {
     return find_symbol(mem, is_glibc_libc, STT_OBJECT, symbol);
 }
 
+uint64_t find_guest_libc_function(const Memory& mem, const std::string& symbol) {
+    return find_symbol(mem, is_glibc_libc, STT_FUNC, symbol);
+}
+
 uint64_t find_guest_loader_symbol(const Memory& mem, const std::string& symbol) {
     return find_symbol(mem, is_glibc_loader, STT_FUNC, symbol);
 }

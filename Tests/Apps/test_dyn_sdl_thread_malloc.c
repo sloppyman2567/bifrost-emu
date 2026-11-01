@@ -15,11 +15,13 @@
  */
 #include <ctype.h>
 #include <dlfcn.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static volatile int bad;
+static const unsigned short *main_ctype;
 
 static void churn(const char *who) {
     unsigned char *p[256];
@@ -44,6 +46,12 @@ static int sdl_thread(void *arg) {
     (void)arg;
     volatile int letter = 'q';
     char text[64];
+    /* The thread runs glibc's __ctype_init: it follows setlocale even where a new TLS block defaults to "C". */
+    if (*__ctype_b_loc() != main_ctype) {
+        bad = 1;
+        printf("the SDL thread's ctype table is not the process locale's\n");
+        return 1;
+    }
     snprintf(text, sizeof text, "%.3f|%5d", 3.14159, 42);
     if (!isalpha(letter) || toupper(letter) != 'Q' || strtod("2.5", 0) != 2.5 || strcmp(text, "3.142|   42") != 0) {
         bad = 1;
@@ -59,6 +67,8 @@ int main(void) {
     void *(*create)(int (*)(void *), const char *, void *) = sdl ? dlsym(sdl, "SDL_CreateThread") : 0;
     void (*wait)(void *, int *) = sdl ? dlsym(sdl, "SDL_WaitThread") : 0;
     if (!create || !wait) { printf("test_dyn_sdl_thread_malloc: SDL thunk unavailable, skipping\n"); return 77; }
+    setlocale(LC_CTYPE, "C.UTF-8"); /* may fail where the locale is not installed: the default still has to match */
+    main_ctype = *__ctype_b_loc();
     void *thread = create(sdl_thread, "churn", 0);
     int status = 0;
     churn("main");

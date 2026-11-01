@@ -1199,7 +1199,36 @@ void Emulator::mark_guest_multithreaded_() {
     // The exported variable is a char; neighbouring bytes belong to other variables.
     if (libc_single_threaded_addr_) mem_.store<uint8_t>(libc_single_threaded_addr_, 0);
 }
+uint64_t Emulator::call_on_scratch_cpu_(uint64_t fn, uint64_t tls, const int64_t* args, size_t n_args) {
+    CPU scratch;
+    scratch.copy_arch_state_from(main_cpu_);
+    scratch.tpidr_el0 = tls;
+    scratch.tpidrro_el0 = tls;
+    scratch.tid = next_tid_.fetch_add(1);
+    scratch.is_fork_process = false;
+    return call_guest_function(scratch, fn, args, n_args, nullptr, 0);
+}
 uint64_t Emulator::allocate_thread_tls_() {
+    const uint64_t tls = allocate_thread_block_();
+    if (!tls) return 0;
+    // glibc's start_thread calls __ctype_init before user code (nptl/pthread_create.c), and these threads
+    // never pass through it. A new TLS block holds null ctype pointers before glibc 2.42 (isalpha and even
+    // %.3f go wrong) and the C locale's since then, whatever setlocale chose. musl has no such function.
+    static std::mutex lookup_mutex;
+    uint64_t ctype_init;
+    {
+        std::lock_guard<std::mutex> lock(lookup_mutex);
+        if (!ctype_init_looked_up_) {
+            ctype_init_ = guest_linker_ ? find_guest_libc_function(mem_, "__ctype_init")
+                                        : dyn_linker_->resolve_symbol("__ctype_init");
+            ctype_init_looked_up_ = true;
+        }
+        ctype_init = ctype_init_;
+    }
+    if (ctype_init) call_on_scratch_cpu_(ctype_init, tls, nullptr, 0);
+    return tls;
+}
+uint64_t Emulator::allocate_thread_block_() {
     if (!dyn_linker_) return 0;
     if (!guest_linker_) return dyn_linker_->allocate_thread_tls(mem_);
     // _dl_allocate_tls calls malloc: make sure it takes its locks (the caller is about to run a thread).
@@ -1220,14 +1249,8 @@ uint64_t Emulator::allocate_thread_tls_() {
     // per-thread state for the duration of the call.
     const uint64_t scratch_tls = dyn_linker_->allocate_thread_tls(mem_);
     if (!scratch_tls) return 0;
-    CPU scratch;
-    scratch.copy_arch_state_from(main_cpu_);
-    scratch.tpidr_el0 = scratch_tls;
-    scratch.tpidrro_el0 = scratch_tls;
-    scratch.tid = next_tid_.fetch_add(1);
-    scratch.is_fork_process = false;
     const int64_t null_mem = 0;
-    return call_guest_function(scratch, allocate_tls, &null_mem, 1, nullptr, 0);
+    return call_on_scratch_cpu_(allocate_tls, scratch_tls, &null_mem, 1);
 }
 uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     // Allocate a guest stack. 256 KiB is plenty for the game's worker
