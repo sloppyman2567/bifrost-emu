@@ -15,7 +15,8 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.1](archive/CHANGELOG-
 - The `RAM` title field and the overlay's `Emulator` figure counted only the windowed process's `VmRSS`. They now show
   the whole session's memory by PSS: the app, its Binder realm and their descendants
   ([details](window-stats.md)). Azur Lane read 2.70 GiB while the realm held 3.21 GiB, by a separate `smaps_rollup` snapshot. The
-  new sampler matched such a snapshot on that live realm (2.816 GiB against 2.82). It has not yet run inside a game window.
+  new sampler matched such a snapshot on that live realm (2.816 GiB against 2.82). In an Azur Lane window it shows
+  `RAM 3349/33567 MB` and `3.3 GB` at 60 FPS; its effect on frame pacing has not been measured.
 
 ### Other CPUs, compilers and distributions (2026-11-01)
 
