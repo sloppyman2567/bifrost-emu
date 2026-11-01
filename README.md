@@ -54,9 +54,9 @@ that every feature has an automated test or a recorded capture.
 | Program | Kind | Status |
 |---|---|---|
 | [SpongeBob – Krusty Cook-Off 5.12.0](Docs/Apps/spongebob.md) | Android, Unity/IL2CPP | User-confirmed cooking levels, outfits and menus at native resolution. Child-age path; the adult path waits on Google Play services. |
-| [Azur Lane 9.3.7](Docs/Apps/azur-lane.md) | Android, Unity/IL2CPP | User-reported playable (2026-10-29). Loading and title/login screens captured earlier; no gameplay capture. |
+| [Azur Lane 9.3.7](Docs/Apps/azur-lane.md) | Android, Unity/IL2CPP | User-reported playable online through a finished battle, with audio and pause/resume (2026-11-01). Home screen captured at 60 FPS. |
 | The Battle Cats 15.6.1 | Android | User-reported playable (2026-10-29). |
-| Umamusume: Pretty Derby | Android, Unity | Global 1.35.2: user-reported playable (2026-10-29). JP 2.32.0: blocked by the game's device integrity check when it connects. |
+| [Umamusume: Pretty Derby](Docs/Apps/umamusume.md) | Android, Unity | Global 1.35.2: user-reported playable, title, home and Career story captured at 30 FPS (2026-11-01). JP 2.32.0: blocked by the game's device integrity check when it connects. |
 | Subway Surfers 3.70.3 | Android, Unity/IL2CPP | User-reported playable, ads work (2026-10-29). |
 | Geometry Dash Lite 2.2.148 | Android, Cocos2d-x | User-reported playable (2026-10-29); ads only somewhat stable. |
 | YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
@@ -75,8 +75,9 @@ that every feature has an automated test or a recorded capture.
 
 User-supplied captures, not benchmarks. Android shots are from October 14, 2026
 (Bifrost 2.0.0-alpha.1); the Linux games are from October 2 to 4. More are in the
-[SpongeBob gallery](Docs/Apps/spongebob.md#screenshots-2026-10-14) and
-[Azur Lane gallery](Docs/Apps/azur-lane.md#screenshots-2026-10-14).
+[SpongeBob gallery](Docs/Apps/spongebob.md#screenshots-2026-10-14),
+[Azur Lane gallery](Docs/Apps/azur-lane.md#screenshots-2026-10-14) and
+[Umamusume gallery](Docs/Apps/umamusume.md#screenshots-2026-11-01), which is from November 1 (2.0.0-alpha.3).
 
 <table>
 <tr>

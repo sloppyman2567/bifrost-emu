@@ -29,9 +29,9 @@ callbacks, surfaces and small exact-frame codec probes in both engines.
 
 Per-app results are recorded in `Scripts/Android/compatibility.json` (shown by
 `asgard compat`), each with the version and date it was checked. A person played
-SpongeBob: Krusty Cook-Off; Azur Lane, The Battle Cats, Umamusume Global,
-Subway Surfers and Geometry Dash Lite are playable on the maintainer's report,
-with no capture. YouTube shows its home screen. Firefox reaches its onboarding and
+SpongeBob: Krusty Cook-Off. Azur Lane and Umamusume Global are playable on the
+maintainer's report, with screenshots on their pages; The Battle Cats, Subway Surfers
+and Geometry Dash Lite on the report alone, with no capture. YouTube shows its home screen. Firefox reaches its onboarding and
 browser screens, but pages do not load. Hungry Shark World, Hungry
 Shark Evolution and Uptodown start and run a bounded session. Roblox, TrickCal
 and Umamusume JP are blocked by the app itself (Umamusume JP at a device
