@@ -4,8 +4,8 @@ Installed version: 5.12.0 (`com.tiltingpoint.spongebob`, pulled from the user's
 phone). Runtime contracts and the bug history behind each checkpoint are in
 [the Android runtime guide](../Android/ANDROID_RUNTIME.md).
 
-As of 2026-10-14 the user plays cooking levels, completes them, opens Settings
-and Help Center, and the main HUD stays after closing Settings. Play renders
+As of 2026-11-01 the user plays cooking levels, reaching level 16, at about 60 FPS on 2.0.0-alpha.3. As of 2026-10-14
+they complete levels, open Settings and Help Center, and the main HUD stays after closing Settings. Play renders
 at the host display's native density (2560x1384 or 3440x1384 px, 320 dpi on a
 200%-scaled 3440x1440 monitor). The child-age path is required: the adult path
 stalled at 73% on Firebase/Google Play services.
@@ -18,24 +18,44 @@ running, without a fatal exception or the earlier FirebaseInstanceId
 "Google Play services missing" error. The adult-age path has not been
 retested on this build.
 
-## Screenshots (2026-10-14)
+## Screenshots (2026-11-01)
 
-User-supplied captures from Bifrost 2.0.0-alpha.1 show the following scenes.
-The titles report Android EGL at 3440x1384 and the Radeon RX 7600 renderer.
-Their displayed 32.0–56.5 FPS values are momentary presentation statistics,
-not a benchmark average or a claim of sustained frame pacing.
+User-supplied captures from Bifrost 2.0.0-alpha.3, from the session that reached level 16. The titles report Android EGL
+at 3440x1384 and the Radeon RX 7600 renderer. All four read about 60 FPS at 16.7 ms with the machine's CPU at 9-12% and
+GPU at 18-22%. These are momentary readings, not a benchmark or a claim of sustained frame pacing.
 
-Cooking gameplay:
+| Time | Screen | FPS | RAM (title bar) | VRAM (whole machine) |
+|---|---|---|---|---|
+| 11:55:43 | Lobby | 60.0 | 4665 MB | 4.3 GB |
+| 11:56:13 | Cooking, start of a level | 59.9 | 4296 MB | 4.6 GB |
+| 11:57:54 | Cooking, end of a level | 60.0 | 4291 MB | 4.6 GB |
+| 12:00:17 | Restaurant progress | 59.9 | 4921 MB | 4.8 GB |
 
-![SpongeBob cooking gameplay with customer orders](../Images/SpongeBob-2026-10-14/gameplay.png)
+The title bar's RAM is the whole session by PSS ([window stats](../window-stats.md)). No other game was running.
+
+Lobby and progression HUD:
+
+![SpongeBob lobby and progression HUD at level 16](../Images/SpongeBob-2026-11-01/lobby.png)
+
+Cooking gameplay with customer orders:
+
+![SpongeBob cooking gameplay with customer orders](../Images/SpongeBob-2026-11-01/gameplay.png)
+
+End of a level, with the target passed:
+
+![SpongeBob cooking level near its end, at 28 of 26 customers](../Images/SpongeBob-2026-11-01/level-end.png)
+
+Restaurant progress (the account's user ID is covered):
+
+![SpongeBob restaurant progress screen](../Images/SpongeBob-2026-11-01/progress.png)
+
+### Earlier screens (2026-10-14)
+
+From Bifrost 2.0.0-alpha.1, for screens the newer set does not show.
 
 Level-14 pause menu:
 
 ![SpongeBob level-14 pause menu](../Images/SpongeBob-2026-10-14/pause-menu.png)
-
-Lobby and progression HUD:
-
-![SpongeBob lobby and progression HUD](../Images/SpongeBob-2026-10-14/lobby.png)
 
 Help Center article rendered inside the game:
 

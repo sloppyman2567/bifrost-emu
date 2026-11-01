@@ -11,8 +11,8 @@
       "name": "SpongeBob: Krusty Cook-Off",
       "tested_version": "5.12.0",
       "status": "playable",
-      "checked": "2026-10-14",
-      "evidence": "The maintainer plays and completes cooking levels, Settings and Help Center; screenshots in the app page.",
+      "checked": "2026-11-01",
+      "evidence": "The maintainer plays and completes cooking levels, reaching level 16 at about 60 FPS, and uses Settings and Help Center; screenshots in the app page.",
       "notes": [
         "Choose the child-age path in the game: the adult-age path needs Google Play services (microG) and stalled at 73%; it was not retested on this build.",
         "Rewarded ads do not complete (Kidoz ad stays on its loading screen)."
