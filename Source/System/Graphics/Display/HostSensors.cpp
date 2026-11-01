@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <dirent.h>
+#include <fcntl.h>
 #include <fstream>
 #include <functional>
 #include <set>
@@ -93,6 +94,90 @@ static bool has_prefix(const std::string &text, const char *prefix) { return tex
 
 HostSensors::HostSensors(std::string proc_root, std::string sys_root)
     : proc_(std::move(proc_root)), sys_(std::move(sys_root)) {}
+
+namespace detail {
+bool parse_parent_pid(const std::string &stat, long &parent) {
+  // "pid (comm) state ppid ...": comm may hold anything, so count from the last ')'.
+  const auto close = stat.rfind(')');
+  if (close == std::string::npos) return false;
+  char state = 0;
+  return sscanf(stat.c_str() + close + 1, " %c %ld", &state, &parent) == 2;
+}
+bool parse_kb_field(const std::string &text, const char *field, uint64_t &bytes) {
+  const std::string name = field;
+  for (size_t at = 0; at < text.size();) {
+    if (!text.compare(at, name.size(), name)) {
+      char *end = nullptr;
+      const char *value = text.c_str() + at + name.size();
+      const auto kb = strtoull(value, &end, 10);
+      if (end == value) return false;
+      bytes = kb * 1024;
+      return true;
+    }
+    const auto next = text.find('\n', at);
+    if (next == std::string::npos) break;
+    at = next + 1;
+  }
+  return false;
+}
+std::string realm_socket(const std::string &cmdline) {
+  bool next_is_socket = false;
+  for (size_t at = 0; at < cmdline.size();) {
+    auto end = cmdline.find('\0', at);
+    if (end == std::string::npos) end = cmdline.size();
+    const std::string argument = cmdline.substr(at, end - at);
+    if (next_is_socket) return argument;
+    next_is_socket = argument == "--android-binder-broker" || argument == "--asgard-broker";
+    at = end + 1;
+  }
+  return {};
+}
+}  // namespace detail
+
+// Plain read(2): the sampler thread may still be running while the process's static objects are destroyed.
+static std::string read_proc_file(const std::string &path) {
+  std::string text;
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return text;
+  char buffer[4096];
+  for (ssize_t got; text.size() < 1048576 && (got = ::read(fd, buffer, sizeof(buffer))) > 0;)
+    text.append(buffer, size_t(got));
+  close(fd);
+  return text;
+}
+
+uint64_t session_memory(const std::string &proc_root, long self) {
+  const auto file = [&](long pid, const char *name) {
+    return read_proc_file(proc_root + "/" + std::to_string(pid) + "/" + name);
+  };
+  DIR *dir = opendir(proc_root.c_str());
+  if (!dir) return 0;
+  const std::string realm = detail::realm_socket(file(self, "cmdline"));
+  std::set<long> members{self};
+  std::map<long, long> parents;
+  while (const dirent *entry = readdir(dir)) {
+    const std::string name = entry->d_name;
+    if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) continue;
+    const long pid = strtol(name.c_str(), nullptr, 10);
+    long parent = 0;
+    if (detail::parse_parent_pid(file(pid, "stat"), parent)) parents[pid] = parent;
+    if (!realm.empty() && detail::realm_socket(file(pid, "cmdline")) == realm) members.insert(pid);
+  }
+  closedir(dir);
+  for (bool grew = true; grew;) {
+    grew = false;
+    for (const auto &[pid, parent] : parents)
+      if (members.count(parent) && members.insert(pid).second) grew = true;
+  }
+  uint64_t total = 0;
+  for (const long pid : members) {
+    uint64_t bytes = 0;
+    if (detail::parse_kb_field(file(pid, "smaps_rollup"), "Pss:", bytes) ||
+        detail::parse_kb_field(file(pid, "status"), "VmRSS:", bytes))
+      total += bytes;
+  }
+  return total;
+}
 
 std::string HostSensors::read(const std::string &path) const {
   std::ifstream file(path);

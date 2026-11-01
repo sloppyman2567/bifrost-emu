@@ -96,7 +96,9 @@
 - Window stats (`Display/WindowStats.cpp`, `HostSensors`, `StatsOverlay`) are opt-in and the default costs nothing:
   no sampling or GL queries unless `dbg().window_stats_*` is on. Sensors read only generic `/proc`, hwmon, thermal
   and DRM sysfs, take their roots as arguments so tests use fixture trees, and report `unavailable` rather than
-  guess; the GPU device comes from the process's own DRM clients, not a GL context. The overlay panel
+  guess; the GPU device comes from the process's own DRM clients, not a GL context. Session RAM
+  (`session_memory`) walks page tables, so it runs on its own signal-blocking thread every 5 seconds and the render
+  path only loads the atomic result. The overlay panel
   (`StatsOverlay`) is one ARGB image: an Android window backend shows it as a popup layer, and the X11 desktop
   HUD helper draws the same image from the figures in its `Packet` (`overlay_stats` builds both). Never draw
   statistics through guest GL or Vulkan state. Mode/title/overlay defaults live in `DebugFlags.hpp`.

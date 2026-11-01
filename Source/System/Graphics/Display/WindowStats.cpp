@@ -2,8 +2,10 @@
 #include "Bifrost/Version.hpp"
 #include "System/Graphics/Display/HostSensors.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +20,7 @@
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
+#include <system_error>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -81,7 +84,7 @@ static OverlayStats overlay_stats(const Packet &p, bool active) {
   stats.sensors.gpu_percent = p.gpu_percent; stats.sensors.gpu_temp = p.gpu_temp;
   stats.sensors.process_percent = p.process_percent;
   stats.sensors.ram_known = p.ram_known; stats.sensors.ram_used = p.used_ram; stats.sensors.ram_total = p.total_ram;
-  stats.process_rss = p.ram;
+  stats.emulator_ram = p.ram;
   stats.vram_known = p.panel_vram_known; stats.vram_used = p.panel_vram_used; stats.vram_total = p.panel_vram_total;
   return stats;
 }
@@ -203,8 +206,8 @@ static bool used_vram(const std::string &device, uint64_t &bytes) {
   return detail::sum_drm_clients(drm_clients(), device, bytes);
 }
 
-// These are host measurements, never guest /proc emulation. RSS includes the
-// emulator and guest's resident pages, not the reserved virtual address window.
+// These are host measurements, never guest /proc emulation. Resident memory includes
+// the emulator and guest's pages, not the reserved virtual address window.
 static uint64_t proc_kb(const char *path, const char *field) {
   std::ifstream file(path);
   std::string key, line;
@@ -421,6 +424,31 @@ static void record_present(State &state, const char *backend, uint64_t now) {
     ++state.vram_attempts;
 }
 
+// Whole-session memory, read away from the render path: session_memory() walks page tables, and the mmap lock it
+// holds there is one the guest's own mmap calls wait for, so it also runs rarely. A forked child starts its own.
+static std::atomic<uint64_t> session_ram{0};
+static std::atomic<pid_t> session_sampler_pid{0};
+static void start_session_sampler() {
+  const pid_t pid = getpid();
+  if (session_sampler_pid.exchange(pid) == pid) return;
+  session_ram = 0;
+  // Signals sent to the process are for the guest's threads, so this one never takes them.
+  sigset_t all, previous;
+  sigfillset(&all);
+  pthread_sigmask(SIG_SETMASK, &all, &previous);
+  try {
+    std::thread([pid] {
+      for (;;) {
+        session_ram = session_memory("/proc", pid);
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+      }
+    }).detach();
+  } catch (const std::system_error &) {
+    // No thread available: a statistic must not end the game, and the display keeps showing this process's RSS.
+  }
+  pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+}
+
 static std::string update(State &state, const WindowInfo &info, uint64_t now) {
   if (!enabled() || !state.clock.frames ||
       (state.update_ns && now - state.update_ns < 250000000ULL))
@@ -429,9 +457,14 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
   Packet packet;
   static const auto cpu = cpu_name();
   static const uint64_t total = proc_kb("/proc/meminfo", "MemTotal:");
-  static uint64_t ram = 0, ram_sample = 0;
-  if (!ram_sample || now - ram_sample >= 1000000000ULL) {
-    ram = proc_kb("/proc/self/status", "VmRSS:"); ram_sample = now;
+  start_session_sampler();
+  static uint64_t rss = 0, rss_sample = 0;
+  uint64_t ram = session_ram;
+  if (!ram) {  // until the first session sample arrives
+    if (!rss_sample || now - rss_sample >= 1000000000ULL) {
+      rss = proc_kb("/proc/self/status", "VmRSS:"); rss_sample = now;
+    }
+    ram = rss;
   }
   packet.ram = ram; packet.total_ram = total; packet.vram = state.vram;
   if (!state.vram_sample || now - state.vram_sample >= 1000000000ULL) {

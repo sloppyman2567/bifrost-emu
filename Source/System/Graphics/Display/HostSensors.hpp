@@ -39,7 +39,18 @@ struct DrmEngines {
 bool parse_drm_engines(const std::string &fdinfo, DrmEngines &engines);
 // Whole degrees plausible for a die sensor, from a hwmon/thermal value in millidegrees.
 bool plausible_temperature(long long millidegrees, double &celsius);
+// Parent pid from /proc/PID/stat.
+bool parse_parent_pid(const std::string &stat, long &parent);
+// A "Name: N kB" field of /proc/PID/smaps_rollup or /proc/PID/status, in bytes. `field` includes the colon.
+bool parse_kb_field(const std::string &text, const char *field, uint64_t &bytes);
+// The Binder realm socket named by a /proc/PID/cmdline (NUL-separated arguments); empty outside a realm.
+std::string realm_socket(const std::string &cmdline);
 }  // namespace detail
+// Memory of the emulator session `self` belongs to, in bytes: its Binder realm (broker, services, every app and
+// helper) when it has one, and each member's descendants. Each process counts its proportional share (PSS), so
+// pages they share are counted once; VmRSS stands in where smaps_rollup cannot be read. Zero when nothing can be
+// read. Walks every member's page tables (tens of ms for a large game), so never call it on a render path.
+uint64_t session_memory(const std::string &proc_root, long self);
 class HostSensors {
 public:
   // Roots exist so tests can read a fixture tree.

@@ -241,7 +241,7 @@ std::vector<OverlayLine> overlay_lines(const OverlayStats &s) {
                             r.ram_known ? gigabytes(r.ram_used) + "/" + gigabytes(r.ram_total) + " GB" : "--", kText));
   lines.push_back({{"", kRule, -1, true}});
   lines.push_back({{"Emulator " + percent(r.process_percent) + " CPU \xC2\xB7 " +
-                        (s.process_rss ? gigabytes(s.process_rss) + " GB" : std::string("--")), kDim}});
+                        (s.emulator_ram ? gigabytes(s.emulator_ram) + " GB" : std::string("--")), kDim}});
   if (!s.gpu_name.empty())
     lines.push_back({{fit(overlay_text(detail::short_gpu_name(s.gpu_name)), kColumns), kDim}});
   return lines;

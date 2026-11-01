@@ -42,6 +42,49 @@ int main() {
   uint64_t ticks = 0;
   assert(detail::parse_process_ticks("42 (a) b (c) S 1 2 3 4 5 6 7 8 9 10 111 222 0 0 20 0 1 0", ticks) && ticks == 333);
   assert(!detail::parse_process_ticks("42 (x) S 1 2", ticks));
+  {
+    // Session memory: the Binder realm plus descendants, by PSS, with VmRSS only where smaps_rollup is unreadable.
+    using std::string_literals::operator""s;
+    long parent = 0;
+    assert(detail::parse_parent_pid("42 (a) b (c) S 7 2", parent) && parent == 7);
+    assert(!detail::parse_parent_pid("42 (a", parent));
+    assert(detail::realm_socket("emu\0--x\0--android-binder-broker\0/s\0"s) == "/s");
+    assert(detail::realm_socket("emu\0--asgard-broker\0/s\0"s) == "/s");
+    assert(detail::realm_socket("python3\0--binder-broker\0/s\0"s).empty());
+    assert(detail::realm_socket("emu\0--asgard-broker"s).empty());
+    uint64_t bytes = 0;
+    assert(detail::parse_kb_field("7f0 [rollup]\nRss:  9 kB\nPss:  4 kB\nPss_Anon: 2 kB\n", "Pss:", bytes) && bytes == 4096);
+    assert(!detail::parse_kb_field("Pss_Anon: 2 kB\n", "Pss:", bytes));
+    const fs::path session = fs::temp_directory_path() / ("bifrost-session-" + std::to_string(getpid()));
+    fs::remove_all(session);
+    const auto process = [&](int pid, int ppid, const std::string &cmdline, int pss_kb, int rss_kb = 0) {
+      const fs::path dir = session / std::to_string(pid);
+      put(dir / "stat", std::to_string(pid) + " (a b) S " + std::to_string(ppid) + " 1 1\n");
+      put(dir / "cmdline", cmdline);
+      if (pss_kb) put(dir / "smaps_rollup", "0 [rollup]\nRss: 999999 kB\nPss: " + std::to_string(pss_kb) + " kB\n");
+      if (rss_kb) put(dir / "status", "Name: a\nVmRSS: " + std::to_string(rss_kb) + " kB\n");
+    };
+    const std::string realm = "--android-binder-broker\0/s\0"s;
+    process(10, 5, "emu\0"s + realm, 1000);                       // the app, started by its launcher
+    process(5, 1, "python3\0--binder-broker\0/s\0"s, 64);         // the launcher is not emulator memory
+    process(20, 1, "emu\0--asgard-broker\0/s\0"s, 200);           // broker
+    process(21, 20, "emu\0--asgard-service-parent\0" "20\0"s + realm, 30);  // realm service
+    process(30, 5, "emu\0"s + realm, 400);                        // another process of the realm
+    process(31, 30, "tool\0"s, 7);                                // a realm member's child
+    process(11, 10, "helper\0"s, 50);                             // the app's own descendants
+    process(12, 11, "helper\0"s, 5);
+    process(40, 1, "emu\0--android-binder-broker\0/other\0"s, 8000);  // another realm
+    process(41, 1, "unrelated\0"s, 16000);
+    process(32, 30, "old-kernel\0"s, 0, 90);                      // no smaps_rollup: VmRSS
+    process(33, 30, ""s, 0);                                      // a kernel thread or zombie has no figures
+    put(session / "self/cmdline", "not a pid");
+    assert(session_memory(session.string(), 10) == uint64_t(1000 + 200 + 30 + 400 + 7 + 50 + 5 + 90) * 1024);
+    assert(session_memory(session.string(), 41) == uint64_t(16000) * 1024);  // no realm: only itself and descendants
+    assert(session_memory(session.string(), 11) == uint64_t(50 + 5) * 1024);
+    assert(session_memory((session / "missing").string(), 10) == 0);
+    fs::remove_all(session);
+    assert(session_memory("/proc", getpid()) > 0);
+  }
   double celsius = 0;
   assert(detail::plausible_temperature(71250, celsius) && near(celsius, 71.25));
   assert(!detail::plausible_temperature(0, celsius) && !detail::plausible_temperature(200000, celsius));
@@ -174,7 +217,7 @@ int main() {
   stats.sensors.cpu_percent = 34.4; stats.sensors.process_percent = 12.6; stats.sensors.cpu_temp = 72;
   stats.sensors.gpu_percent = 58; stats.sensors.gpu_temp = 64;
   stats.sensors.ram_used = 12300000000ULL; stats.sensors.ram_total = 31300000000ULL; stats.sensors.ram_known = true;
-  stats.process_rss = 2100000000ULL; stats.vram_used = 1200000000ULL; stats.vram_total = 8176000000ULL;
+  stats.emulator_ram = 2100000000ULL; stats.vram_used = 1200000000ULL; stats.vram_total = 8176000000ULL;
   stats.vram_known = true;
   stats.cpu_name = "AMD Ryzen 7 5800X3D 8-Core Processor";
   stats.gpu_name = "AMD Radeon RX 7600 (radeonsi, navi33)";
@@ -200,7 +243,7 @@ int main() {
     assert(overlay_lines(named).size() == overlay_lines(stats).size() - 1);
   }
   stats.active = false; stats.sensors = SensorReading{}; stats.vram_known = false; stats.app.clear();
-  stats.process_rss = 0; stats.gpu_name = "llvmpipe (LLVM 20.1.2, 256 bits)";
+  stats.emulator_ram = 0; stats.gpu_name = "llvmpipe (LLVM 20.1.2, 256 bits)";
   const auto idle = flat(overlay_lines(stats));
   assert(idle.find("\nIDLE\tAndroid EGL\n") != std::string::npos);
   assert(idle.find(row("CPU ", " --%", "--" + deg)) != std::string::npos);

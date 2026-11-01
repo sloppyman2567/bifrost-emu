@@ -20,13 +20,27 @@ The display includes the presentation backend, FPS, window size in physical
 pixels and total presented frames. On a scaled (HiDPI) display this is the
 drawable size, not the smaller logical size the desktop reports. The original game title is retained.
 Experimental hardware fields show the full host CPU and current GL renderer names
-without CPU/GPU prefixes, emulator resident RAM / total system RAM, and emulator
+without CPU/GPU prefixes, emulator session RAM / total system RAM, and emulator
 resident VRAM / total dedicated GPU VRAM when available. Both memory fields use
 decimal MB (1,000,000 bytes), for example `RAM 400/33567 MB | ... | VRAM 300/8573 MB`.
 The driver-reported device-local heap capacity can be smaller than the physical
-memory fitted to the card. Resident RAM includes emulator and guest allocations;
-it is not the guest's reserved virtual address space. System RAM comes from
-Linux MemTotal, so it may be lower than installed capacity.
+memory fitted to the card. System RAM comes from Linux MemTotal, so it may be lower
+than installed capacity.
+
+Session RAM is the memory the whole emulator session holds, not only the windowed
+process. An Android app counts its Binder realm (the broker, its services, every app
+and helper using the same broker socket); anything else counts itself. Descendants of
+those processes are included, and the launcher script is not. Each process contributes
+its proportional share from `/proc/PID/smaps_rollup` (PSS), so pages they share count
+once, and it covers emulator and guest allocations but not the guest's reserved
+address space. Two apps in one realm therefore both show the realm's total, and
+swapped-out pages are not counted. Where `smaps_rollup` cannot be read (an old kernel, a
+process that is not dumpable, restricted `/proc`), that process counts its `VmRSS`, which
+counts shared pages in full. A background thread samples every 5 seconds, because the
+read walks page tables (about 37 ms in total for a 2.7 GB game on the development
+machine) and holds a lock the guest's `mmap` calls wait for. Until its first sample,
+and if the thread cannot start, the value is this process's `VmRSS`. CPU share remains
+this process only.
 
 VRAM usage is sampled once per second from the emulator's Linux DRM fdinfo
 resident VRAM regions. Duplicate descriptors for the same device/client are
@@ -96,7 +110,7 @@ It shows, from top to bottom:
 - aligned `CPU`, `GPU`, `VRAM` and `RAM` rows, each with a percentage, a meter and, at the right edge, a detail
   (a temperature, or used/total memory); meters and numbers turn amber from 80 percent and red from 95,
   temperatures at 80 and 90 degrees Celsius;
-- a dim footer: `Emulator`, this process's CPU share and resident memory, and the shortened GPU name (`llvmpipe`
+- a dim footer: `Emulator`, this process's CPU share, session RAM, and the shortened GPU name (`llvmpipe`
   identifies a software renderer).
 
 Text keeps its case: the font has lower case with descenders. Accented Latin letters print without the accent

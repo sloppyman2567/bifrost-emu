@@ -18,7 +18,7 @@ struct OverlayStats {
   int width = 0, height = 0;
   uint64_t frames = 0;
   SensorReading sensors;
-  uint64_t process_rss = 0;
+  uint64_t emulator_ram = 0;
   uint64_t vram_used = 0, vram_total = 0;
   bool vram_known = false;
 };
