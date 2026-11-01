@@ -20,7 +20,7 @@ passing a focused test is not a claim of complete Linux ABI compatibility.
 
 ## Android scope and v2.0 plans
 
-As of 2.0.0-alpha.3 (October 27, 2026), Asgard installs signed APK sets and runs
+As of 2.0.0-alpha.3 (November 1, 2026), Asgard installs signed APK sets and runs
 native NativeActivity and managed Activity/Service paths through the pinned
 Android 15 Bionic, ART and framework. A shared Binder realm owns graphics
 allocation and codec services independently of app lifetimes. Focused checks

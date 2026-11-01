@@ -10,6 +10,8 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased]
 
+## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
+
 ### Documentation (2026-11-01)
 
 - **Smaller guides:** dated checkpoints and per-game investigations moved, unchanged, out of `JIT.md` (3,247 to about
@@ -341,8 +343,6 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   `gles_*` group passes; `make generated-check` has no errors; the headless build has no warnings. Not checked: Roblox itself
   with the fix, whether the shaders render correctly (compile success only), other drivers, and any shader that fails for a
   different implicit conversion. `glCreateShaderProgramv` and program binaries do not take the retry.
-
-## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code (2026-10-27)
 
 **2.0.0-alpha.3** collects the changes made after 2.0.0-alpha.2 (2026-10-21): installable Asgard and rootfs,
 `bifrost-emu app.apk`, a Debian package, guest `ptrace` and pseudo terminals, fork/exec and memory fixes, less

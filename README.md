@@ -95,7 +95,7 @@ Azur Lane shot from October 14 (2.0.0-alpha.1); the Linux games are from October
 
 ## Progress
 
-**2.0.0-alpha.3** (2026-10-27) is the current pre-release. The goals for it and
+**2.0.0-alpha.3** (2026-11-01) is the current pre-release. The goals for it and
 what follows are in the [roadmap](Docs/roadmap.md), which has a
 progress table and the known blockers; everything that changed is in the
 [changelog](Docs/CHANGELOG.md). Since 2.0.0-alpha.2:
