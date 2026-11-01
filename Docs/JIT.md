@@ -24,7 +24,10 @@ addresses the CPU through RBX like everything else: the MT chain slot (`jit_stop
 budget) and the indirect-branch probe. The Tier-2 trial chain wrapper also switched to RBX; its cold tail sets
 RDI/RSI itself before it jumps to the full region entry, and its quota tail reads the PC through RBX before the
 pops restore the caller's RBX. Exits still load both in the ordinary frame layout (`BIFROST_NO_CHAIN_SKIP=1`),
-whose slots jump to `fn`, and Tier-2 region exits keep theirs (cold-entry edges target `fn`).
+whose slots jump to `fn`, and Tier-2 region exits keep theirs (cold-entry edges target `fn`). Those two pop first,
+so their MT slots read the CPU through RDI; reading RBX there took whatever the C++ caller left in it, and
+`jit_tier2_discovery` only crashed when the compiler left it null (GCC 13 and 14, a hang with clang 18, a pass
+with GCC 16).
 
 `qt_test`: 98.6 to 95.2 bytes per guest instruction. `bench_dispatch` ran in 1.90 s against 2.31 s (seven
 alternating runs), but it varied between 1.95 and 2.30 s across today's builds with layout alone, so the size of

@@ -630,7 +630,9 @@ public:
     std::unordered_map<size_t, MtHotCounter*> mt_counter_sites_;
     std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
     MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
-    size_t emit_mt_chain_slot(uint64_t target_pc, bool cold_entry = false);
+    // cpu_reg holds the CPU at the slot: RDI after an exit that restored the
+    // caller's callee-saved registers, where RBX is no longer ours.
+    size_t emit_mt_chain_slot(uint64_t target_pc, bool cold_entry = false, int cpu_reg = RBX);
     // MT preemption poll (loads only); returns the jne-to-cold patch offset.
     size_t emit_preempt_poll(int cpu_reg, int scratch);
     // Published MT code polls the epoch; ST code and timed Tier-2 sampling code

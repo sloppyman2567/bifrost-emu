@@ -1178,7 +1178,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // all 5 bytes with `jmp rel32` → target block's entry, skipping the
         // dispatcher entirely for straight-line / unconditional-branch code.
         chain_patch_off = code_buf_used_;
-        if (mt_active()) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
+        if (mt_active()) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_, false, RDI);
         emit_ret();                                  // 0xC3
         emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
     }

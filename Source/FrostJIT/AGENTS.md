@@ -110,6 +110,9 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation
   changes atomic target cells, not live instruction bytes; preserve compiler
   locking, invalidation generations and target revocation for Tier-1/Tier-2.
+- `emit_mt_chain_slot` reads the CPU through its `cpu_reg`: after an exit pops the callee-saved registers
+  (ordinary frames, Tier-2 chain-outs) RBX is the caller's, so those pass RDI. Reading RBX there compares
+  whatever the C++ caller left in it, which only crashes when the compiler happens to leave it null.
 - MT code stays bounded through `g_jit_preempt_epoch` (`Runtime/Preemption.hpp`), polled with loads only by
   backward edges and IBL probes; new native entries must call `jit_grant_lease(cpu)`. Anything that retires or
   replaces code advances the epoch (`invalidate_dispatch_cache`). Forward static edges carry no poll; ST code and timed

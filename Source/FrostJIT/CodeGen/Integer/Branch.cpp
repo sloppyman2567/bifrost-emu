@@ -253,7 +253,7 @@ void FrostJIT::emit_taken_path_epilogue() {
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
         taken_chain_patch_off_ = code_buf_used_;
         has_taken_chain_slot_ = true;
-        if (mt_active()) emit_mt_chain_slot(taken_chain_target_pc_);
+        if (mt_active()) emit_mt_chain_slot(taken_chain_target_pc_, false, RDI);
         emit_ret();                                  // 0xC3
         emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
     }

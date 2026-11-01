@@ -733,7 +733,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-        if (exitchain_ok) emit_mt_chain_slot(pc, true);
+        if (exitchain_ok) emit_mt_chain_slot(pc, true, RDI);
         emit_ret();
         return true;
     };

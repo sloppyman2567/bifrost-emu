@@ -354,7 +354,7 @@ FrostJIT::MtEdge* FrostJIT::mt_slot_edge(uint64_t source_pc, size_t slot) {
         if (edge->slot == slot) return edge;
     return nullptr;
 }
-size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
+size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry, int cpu_reg) {
     const size_t off = code_buf_used_;
     if (!target_pc || dbg().no_chain) return off;
     MtEdge* edge = create_chain_edge(target_pc, cold_entry, off);
@@ -365,16 +365,16 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry) {
     const bool backward = target_pc <= current_start_pc_;
     std::vector<size_t> cold;
     if (backward) {
-        // cmp rax,[rbx+jit_stop_pc]; je cold exit
-        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
+        // cmp rax,[cpu+jit_stop_pc]; je cold exit
+        emit_byte(0x48); emit_byte(0x3B); emit_byte(modrm(2, RAX, cpu_reg));
         emit_u32(offsetof(CPU, jit_stop_pc));
         cold.push_back(emit_jcc_rel32_placeholder(0x4));
         if (preempt_by_epoch()) {
             // Epoch moved since the dispatcher's grant: return for signals and exits.
-            cold.push_back(emit_preempt_poll(CPU_REG, R11));
+            cold.push_back(emit_preempt_poll(cpu_reg, R11));
         } else {
-            // sub dword [rbx+jit_chain_budget],1; jbe cold exit (also handles zero).
-            emit_byte(0x83); emit_byte(0xAB);
+            // sub dword [cpu+jit_chain_budget],1; jbe cold exit (also handles zero).
+            emit_byte(0x83); emit_byte(modrm(2, 5, cpu_reg));
             emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
             cold.push_back(emit_jcc_rel32_placeholder(0x6));
         }
