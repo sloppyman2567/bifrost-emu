@@ -13,7 +13,7 @@ static std::string trim_slashes(std::string path) {
     return path;
 }
 
-static std::string self_exe_dir() {
+std::string self_exe_dir() {
     char buf[4096];
     ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (n <= 0) return {};

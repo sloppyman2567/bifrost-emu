@@ -10,6 +10,12 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
+### A start page (2026-11-01)
+
+- **`bifrost-emu` with no arguments** was the same 53 lines of options as `--help`, including ones only Asgard uses, and said it runs
+  static programs. It now shows how to run something and what is installed, using the lookups a launch uses, and names the command
+  for what is missing. `--help` lists the options by group and `--help-all` adds the internal ones. All three print to stdout.
+
 ### The library says what happened, and shows real icons (2026-11-01)
 
 - **"Last run failed" now means something failed:** a card says what went wrong ("Crashed in native code", "Stopped responding",

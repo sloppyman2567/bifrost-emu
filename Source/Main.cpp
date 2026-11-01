@@ -43,6 +43,7 @@
 //   --print-config  print the resolved config and exit
 //   -V, --version   show version and exit
 //   -h, --help      show this help
+//   --help-all      also show the options Asgard uses internally
 //
 // Graphical programs log their first presentation by default.
 #include "Bifrost/Emulator.hpp"
@@ -68,63 +69,114 @@
 using arm64emu::Emulator;
 using arm64emu::Memory;
 using arm64emu::VERSION;
-// ── Banner (shown on no-args, --help) ────────────────────────────────────
-static void print_banner() {
-    fprintf(stderr,
-        "\n"
-        "  ____ _____ ______ _____   ____   _____ _______ \n"
-        " |  _ \\_   _|  ____|  __ \\ / __ \\ / ____|__   __|\n"
-        " | |_) || | | |__  | |__) | |  | | (___    | |   \n"
-        " |  _ < | | |  __| |  _  /| |  | |\\___ \\   | |   \n"
-        " | |_) || |_| |    | | \\ \\| |__| |____) |  | |   \n"
-        " |____/_____|_|    |_|  \\_\\\\____/|_____/   |_|   \n"
-        "\n"
-        "  bifrost-emu  v%s\n"
-        "  A bridge between worlds\n"
-        "  x86_64 <─────────────────> ARM64\n"
-        "\n"
-        "  Usage: bifrost-emu [options] <elf-file> [args...]\n"
-        "         bifrost-emu <app.apk|.apkm|.apks|.xapk> [-d]   install and run an Android app\n"
-        "\n"
-        "  Options:\n"
-        "    -d, --debug        trace every instruction to stderr\n"
-        "    -v, --verbose      print execution stats on exit\n"
-        "    -q, --quiet        suppress BRK warnings (even with -d)\n"
-        "    --fb-dump PATH     dump /dev/fb0 to PATH on exit (PPM)\n"
-        "    --audio-dump PATH  dump /dev/dsp to PATH on exit (WAV)\n"
-        "    --window-stats    show presentation stats (off by default; alias --window_stats)\n"
-        "    --window-stats-mode MODE  implies --window-stats: 1|minimal title stats, 2|normal title + in-window\n"
-        "                       overlay (default), 3|overlay in-window overlay only (Android windows)\n"
-        "    --[no-]window-stats-title|window|overlay  independent stats displays\n"
-        "    --no-window-stats disable all stats displays\n"
-        "    --no-render-log  disable the default first-presentation log\n"
-        "    --raw-tty          force raw TTY mode (per-char input, no echo)\n"
-        "    --no-jit           use interpreter only (JIT is on by default)\n"
-        "    --jit              enable frostJIT (default; for compatibility)\n"
-        "    --jit-threshold N  interpret for N insns then switch to JIT\n"
-        "    --jit-disk-cache[=verify]  experimental: reuse JIT translations across launches\n"
-        "    --rootfs PATH      guest root for libraries and paths (BIFROST_ROOT); default: auto-found, libraries only\n"
-        "    --setup-rootfs [OPTS]  build and install the guest rootfs, then exit (--system, --prefix DIR, --full, --uninstall)\n"
-        "    --rootfs-profile NAME  use the installed rootfs profile NAME for libraries (see --rootfs-list)\n"
-        "    --rootfs-list      list installed rootfs profiles and exit\n"
-        "    --config PATH      load config from PATH\n"
-        "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
-        "    --guest-ld         run dynamic programs under their own guest ld.so (needs a rootfs)\n"
-        "    --android-runtime  bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
-        "    --android-services provide the API-35 Binder service-manager subset\n"
-        "    --asgard-broker SOCKET  run Asgard's shared guest Binder broker\n"
-        "    --media-capabilities  probe native CPU/GPU decoders and print JSON\n"
-        "    --android-binder-broker SOCKET  join a shared guest Binder domain\n"
-        "    --android-app-id N  user-0 app UID (10000..19999) or isolated UID (99000..99999)\n"
-        "    --android-window-plugin PATH  load a host window backend before --android or the ELF\n"
-        "    --print-config     print resolved config and exit\n"
-        "    -V, --version      show version and exit\n"
-        "    -h, --help         show this message\n"
-        "\n"
-        "  Runs static AArch64 Linux ELF binaries on x86_64.\n"
-        "  Graphical programs log their first frame; --no-render-log disables this.\n"
-        "\n",
-        VERSION);
+// ── Start page (no arguments), --help and --help-all ────────────────────
+static void print_art() {
+    printf("\n"
+           "  ____ _____ ______ _____   ____   _____ _______ \n"
+           " |  _ \\_   _|  ____|  __ \\ / __ \\ / ____|__   __|\n"
+           " | |_) || | | |__  | |__) | |  | | (___    | |   \n"
+           " |  _ < | | |  __| |  _  /| |  | |\\___ \\   | |   \n"
+           " | |_) || |_| |    | | \\ \\| |__| |____) |  | |   \n"
+           " |____/_____|_|    |_|  \\_\\\\____/|_____/   |_|   \n"
+           "\n"
+           "  bifrost-emu  v%s\n"
+           "  Run ARM64 Linux programs and Android apps on x86-64\n"
+           "\n", VERSION);
+}
+// What Android needs: Asgard's script, and the toolchain that provisioning adds beside it (a fresh
+// checkout has only the script). Uses the search a real launch does, so this page cannot disagree with it.
+static std::string find_set_up_asgard(const std::string& exe_dir) {
+    for (const auto& path : arm64emu::asgard_candidates(exe_dir, getenv("BIFROST_ASGARD"), getenv("XDG_DATA_HOME"),
+                                                        getenv("HOME"))) {
+        const std::string suffix = "/Scripts/Android/asgard.py";
+        if (path.size() <= suffix.size() || access(path.c_str(), R_OK) != 0) continue;
+        const std::string root = path.substr(0, path.size() - suffix.size());
+        if (access((root + "/Tools/android-tools/aapt2").c_str(), X_OK) == 0) return path;
+    }
+    return {};
+}
+static void print_status_line(const char* what, bool ready, const std::string& fix) {
+    if (ready) printf("    %-22sinstalled\n", what);
+    else printf("    %-22s%-16s%s\n", what, "not installed", fix.c_str());
+}
+static void print_start_page() {
+    const std::string exe_dir = arm64emu::self_exe_dir();
+    const std::string asgard = find_set_up_asgard(exe_dir);
+    bool games = false;
+    for (const auto& profile : arm64emu::list_rootfs_profiles())
+        if (profile.name == "games" && !profile.path.empty()) games = true;
+    const bool from_checkout = !asgard.empty() && asgard.rfind(exe_dir + "/Scripts/", 0) == 0;
+    const std::string setup_asgard = access((exe_dir + "/asgard-setup").c_str(), X_OK) == 0 ? "asgard-setup"
+        : access((exe_dir + "/Scripts/Setup/install-asgard.py").c_str(), R_OK) == 0 ? "Scripts/Setup/install-asgard.py"
+        : "see the README";
+    print_art();
+    printf("  Run something\n"
+           "    %-38sa Linux program\n"
+           "    %-38sinstall and run an Android app\n", "bifrost-emu ./program [args]", "bifrost-emu app.apk");
+    if (!asgard.empty())
+        printf("    %-38sopen the app library\n", from_checkout ? "Scripts/Android/asgard.py launcher" : "asgard launcher");
+    printf("\n  Status\n");
+    print_status_line("Libraries (rootfs)", !arm64emu::library_root().empty(), "bifrost-emu --setup-rootfs");
+    print_status_line("Game libraries", games, "bifrost-emu --setup-rootfs --games");
+    print_status_line("Android (Asgard)", !asgard.empty(), setup_asgard);
+    printf("\n  Common options\n"
+           "    --rootfs-profile NAME   use other libraries, e.g. games\n"
+           "    --guest-ld              use the program's own ld.so (experimental)\n"
+           "    --window-stats          show FPS and load in the window\n"
+           "    --no-jit                interpreter only, for debugging\n"
+           "\n  bifrost-emu --help shows every option.\n\n");
+}
+static void print_help(bool all) {
+    print_art();
+    printf("  Usage: bifrost-emu [options] <program> [args...]\n"
+           "         bifrost-emu <app.apk|.apkm|.apks|.xapk> [-d]   install and run an Android app\n"
+           "         Options go before the program: anything after it goes to the program.\n"
+           "\n  Libraries\n"
+           "    --setup-rootfs [OPTS]   build and install the guest rootfs, then exit\n"
+           "                            (--games, --system, --prefix DIR, --full, --uninstall)\n"
+           "    --rootfs-profile NAME   use the installed rootfs profile NAME for libraries\n"
+           "    --rootfs-list           list installed rootfs profiles and exit\n"
+           "    --rootfs PATH           guest root for libraries and paths (BIFROST_ROOT)\n"
+           "    --guest-ld              run dynamic programs under their own ld.so (experimental)\n"
+           "\n  Execution\n"
+           "    --no-jit                use the interpreter only (the JIT is on by default)\n"
+           "    --jit                   use the JIT (the default)\n"
+           "    --jit-threshold N       interpret for N instructions, then switch to the JIT\n"
+           "    --jit-disk-cache[=verify]  experimental: reuse JIT translations across launches\n"
+           "    --no-jit-disk-cache     do not use that cache\n"
+           "\n  Display\n"
+           "    --window-stats          show presentation stats (off by default)\n"
+           "    --window-stats-mode M   1|minimal title, 2|normal title and overlay, 3|overlay\n"
+           "    --[no-]window-stats-title|window|overlay  choose the stats displays\n"
+           "    --no-window-stats       turn every stats display off\n"
+           "    --render-log, --no-render-log  log the first frame presented (on by default)\n"
+           "    --raw-tty               force raw terminal input (per character, no echo)\n"
+           "\n  Android\n"
+           "    --android PATH          run a NativeActivity .so (ANativeActivity_onCreate)\n"
+           "\n  Debugging\n"
+           "    -d, --debug             trace every instruction to stderr\n"
+           "    -v, --verbose           print execution stats on exit\n"
+           "    -q, --quiet             suppress BRK warnings (even with -d)\n"
+           "    --fb-dump PATH          dump /dev/fb0 to PATH on exit (PPM)\n"
+           "    --audio-dump PATH       dump /dev/dsp to PATH on exit (WAV)\n"
+           "\n  Configuration\n"
+           "    --config PATH           load config from PATH\n"
+           "    --print-config          print the resolved config and exit\n"
+           "    -V, --version           show the version and exit\n"
+           "    -h, --help              show this message\n"
+           "    --help-all              also show the options Asgard uses internally\n\n");
+    if (!all) return;
+    printf("  Internal (Asgard starts these for you)\n"
+           "    --android-runtime       bootstrap a Bionic ELF with guest linker64 (--rootfs required)\n"
+           "    --android-services      provide the API-35 Binder service-manager subset\n"
+           "    --android-window-plugin PATH  load a host window backend before --android or the ELF\n"
+           "    --android-app-id N      user-0 app UID (10000..19999) or isolated UID (99000..99999)\n"
+           "    --android-system-uid N  run as an Android system UID\n"
+           "    --android-binder-broker SOCKET  join a shared guest Binder domain\n"
+           "    --asgard-broker SOCKET  run Asgard's shared guest Binder broker\n"
+           "    --asgard-service-parent PID  end with this parent process\n"
+           "    --media-capabilities    probe native CPU/GPU decoders and print JSON\n"
+           "    --window-stats-ui ...   the stats window's own process\n\n");
 }
 // ── Hidden easter egg (--bifrost / --rainbow) ────────────────────────────
 static void print_rainbow() {
@@ -337,7 +389,8 @@ int main(int argc, char** argv) {
     arm64emu::network_offline().store(cfg.android_offline);
     while (arg_i < argc) {
         std::string a = argv[arg_i];
-        if (a == "-h" || a == "--help")     { print_banner();   return 0; }
+        if (a == "-h" || a == "--help")     { print_help(false); return 0; }
+        if (a == "--help-all")              { print_help(true);  return 0; }
         if (a == "-V" || a == "--version")  { printf("bifrost-emu %s\n", VERSION); return 0; }
         if (a == "-d" || a == "--debug")    { debug   = true;  arg_i++; continue; }
         if (a == "-v" || a == "--verbose")  { verbose = true;  arg_i++; continue; }
@@ -593,7 +646,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     // No file given → show the Banner
-    if (arg_i >= argc) { print_banner(); return 0; }
+    if (arg_i >= argc) { print_start_page(); return 0; }
     // A named profile that is not installed is an error, not a silent fall back to another rootfs
     // (an explicit --rootfs / BIFROST_ROOT takes precedence and is not checked here).
     if (!arm64emu::requested_rootfs_profile().empty() && arm64emu::library_root().empty()) {

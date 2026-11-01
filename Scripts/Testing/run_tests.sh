@@ -547,6 +547,8 @@ INTEGRATION_TESTS=(
     # SDL2 mode-query ABI, fullscreen recreation, and resize-event delivery.
     "sdl_fullscreen|Tests/Apps/test_sdl_fullscreen.elf||30|ALL PASS"
     # Host validator checks guest compression and decompression in both engines.
+    # The no-argument page reports what a launch would find; --help-all lists every option.
+    "start_page|Scripts/Testing/test_start_page.sh||30|test_start_page: ALL PASS|HOST_JIT"
     "zstd_compression|Scripts/Testing/run_zstd_regression.sh||120|ZSTD REGRESSION PASSED|HOST_JIT"
     "audio_test|Tests/Apps/audio_test.elf||10|audio_test: done"
     "div_loop|Tests/Apps/div_loop.elf||5|sum=1428574"

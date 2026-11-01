@@ -31,6 +31,9 @@ std::string requested_rootfs_profile();
 
 // Every installed profile, "default" first. `active` marks the one a run would use
 // (`path` is empty for a profile that is selected but not installed).
+// The directory holding the running executable; empty if it cannot be read.
+std::string self_exe_dir();
+
 struct RootfsProfile {
     std::string name;
     std::string path;
