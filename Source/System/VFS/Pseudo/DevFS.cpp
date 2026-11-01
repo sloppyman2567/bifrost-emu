@@ -79,12 +79,12 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
     if (path == "/dev/binder" || path == "/dev/hwbinder" || path == "/dev/vndbinder") {
         if ((flags & O_ACCMODE) != O_RDWR) { *err_out = -EINVAL; return nullptr; }
         if (!binder_broker_.empty())
-            return open_broker_binder(binder_broker_, path, flags, process_uid_, ::getpid(), err_out);
+            return open_broker_binder(binder_broker_, path, flags, binder_uid_, ::getpid(), err_out);
         std::lock_guard<std::mutex> lock(binder_mu_);
         auto& domain = binder_domains_[path];
         if (!domain) {
             domain = std::make_shared<BinderDomain>();
-            domain->sender_euid = process_uid_;
+            domain->sender_euid = binder_uid_;
             domain->service_manager = android_services_ && path == "/dev/binder";
         }
         return std::make_unique<BinderNode>(domain, flags);

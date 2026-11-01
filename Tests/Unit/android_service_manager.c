@@ -124,16 +124,13 @@ static uint32_t lookup(int fd, const char *name) {
         return ~0u;
     return release_reply(fd, &reply) ? ~0u : handle;
 }
-// Binder's sender UID is the emulator's process identity, which /proc/self/status reports. Without
-// --android-runtime, getuid() is the host account instead and says nothing about Binder.
+// Binder's sender UID is the Android identity: getuid() under --android-runtime, which also serves
+// the property area, and 0 without it, whatever the host account is.
 static uid_t binder_sender_uid(void) {
-    char line[128];
-    unsigned uid = -1;
-    FILE *status = fopen("/proc/self/status", "r");
-    while (status && fgets(line, sizeof line, status))
-        if (sscanf(line, "Uid: %u", &uid) == 1) break;
-    if (status) fclose(status);
-    return uid;
+    int properties = open("/dev/__properties__", O_RDONLY);
+    if (properties < 0) return 0;
+    close(properties);
+    return getuid();
 }
 int main(void) {
     int server = open("/dev/binder", O_RDWR | O_NONBLOCK),

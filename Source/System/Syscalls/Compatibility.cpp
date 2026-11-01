@@ -1149,39 +1149,29 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
         // CPU-slice yield for restartable-sequence critical sections.
         case 470: case 471: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
         // ── capget (90) / capset (91) ─────────────────────────────────
-        // Linux capabilities. We're a single-user guest with full perms;
-        // return a fully-capable set for capget, accept capset silently.
+        // Linux capabilities. An unprivileged guest has none and a guest running as root has all of
+        // them, as /proc/self/status says; root's capset is accepted silently.
         case 90: { // capget(hdr, data)
-            if (emu.android_runtime()) {
-                try {
-                    uint32_t version = mem_.load<uint32_t>(a0);
-                    unsigned words = version == 0x19980330 ? 3 : 6;
-                    if (version != 0x19980330 && version != 0x20071026 && version != 0x20080522) {
-                        mem_.store<uint32_t>(a0, 0x20080522);
-                        ret_err(a1 ? EINVAL : 0); return 0; // capget(NULL) probes the ABI version
-                    }
-                    if (!a1) { ret_host(0); return 0; }
-                    int32_t pid = mem_.load<int32_t>(a0 + 4);
-                    if (pid < 0) { ret_err(EINVAL); return 0; }
-                    if (pid && pid != (cpu.is_fork_process ? ::getpid() : 1)) { ret_err(ESRCH); return 0; }
-                    if (a1) for (unsigned i = 0; i < words; ++i) mem_.store<uint32_t>(a1 + 4 * i, 0);
-                } catch (...) { ret_err(EFAULT); return 0; }
-                ret_host(0); return 0;
-            }
-            // hdr: { u32 version; int pid; }
-            // data: struct __user_cap_data_struct { int effective; int permitted; int inheritable; }
-            // We report full caps (CAP_FULL_SET = 0x1ffffffff).
-            if (a1) {
-                // Write 3 x u32 = 12 bytes of 0xff... (all caps).
-                uint32_t full = 0xFFFFFFFFu;
-                mem_.store<uint32_t>(a1 + 0,  full);  // effective
-                mem_.store<uint32_t>(a1 + 4,  full);  // permitted
-                mem_.store<uint32_t>(a1 + 8,  0);      // inheritable (none)
-            }
+            try {
+                uint32_t version = mem_.load<uint32_t>(a0);
+                unsigned words = version == 0x19980330 ? 3 : 6;
+                if (version != 0x19980330 && version != 0x20071026 && version != 0x20080522) {
+                    mem_.store<uint32_t>(a0, 0x20080522);
+                    ret_err(a1 ? EINVAL : 0); return 0; // capget(NULL) probes the ABI version
+                }
+                if (!a1) { ret_host(0); return 0; }
+                int32_t pid = mem_.load<int32_t>(a0 + 4);
+                if (pid < 0) { ret_err(EINVAL); return 0; }
+                if (pid && pid != (cpu.is_fork_process ? ::getpid() : 1)) { ret_err(ESRCH); return 0; }
+                const bool root = !emu.android_runtime() && !emu.vfs().process_uid();
+                // { effective, permitted, inheritable } per 32 bits of the set: the low word, then CapEff's high bits.
+                for (unsigned i = 0; i < words; ++i)
+                    mem_.store<uint32_t>(a1 + 4 * i, !root || i % 3 == 2 ? 0 : i < 3 ? 0xFFFFFFFFu : 0x3Fu);
+            } catch (...) { ret_err(EFAULT); return 0; }
             ret_host(0); return 0;
         }
         case 91: { // capset(hdr, data)
-            if (emu.android_runtime()) {
+            if (emu.android_runtime() || emu.vfs().process_uid()) {
                 try {
                     uint32_t version = mem_.load<uint32_t>(a0);
                     unsigned words = version == 0x19980330 ? 3 : 6;

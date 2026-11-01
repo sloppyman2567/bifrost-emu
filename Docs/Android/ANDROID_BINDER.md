@@ -176,6 +176,9 @@ Without this flag, the existing guest context-manager contract is unchanged.
 `/dev/hwbinder` and `/dev/vndbinder` retain independent raw contexts. Select
 the mode before opening a Binder endpoint; an explicit guest context-manager
 registration is rejected while the host manager is selected.
+
+A transaction's sender UID is the Android identity under `--android-runtime` and 0 without it, whatever the host
+account is: host UID 1000 would otherwise be Android's privileged system UID.
 The Android property area reports `servicemanager.ready=true` in this mode and
 `false` without it, so native libbinder can contact the selected registry.
 

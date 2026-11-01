@@ -81,8 +81,9 @@ public:
     void enable_android_services();
     // Serve Bionic system properties at /dev/__properties__ (Android runtime).
     void enable_android_properties() { android_properties_ = true; }
-    // Fixed credentials for the single installed-app process. Set before load.
-    void set_process_identity(uint32_t uid, uint32_t gid) { process_uid_ = uid; process_gid_ = gid; }
+    // Credentials a guest sees: the host account's until the Android runtime sets the single installed-app
+    // process's fixed identity before load, which is also its Binder sender UID.
+    void set_process_identity(uint32_t uid, uint32_t gid) { process_uid_ = binder_uid_ = uid; process_gid_ = gid; }
     uint32_t process_uid() const { return process_uid_; }
     uint32_t process_gid() const { return process_gid_; }
     static bool binder_device_stat(const std::string& path, struct stat* st);
@@ -308,7 +309,8 @@ private:
     std::mutex binder_mu_;
     bool android_services_ = false;
     bool android_properties_ = false;
-    uint32_t process_uid_ = 0, process_gid_ = 0;
+    uint32_t process_uid_ = ::geteuid(), process_gid_ = ::getegid();
+    uint32_t binder_uid_ = 0;  // never the host account: host IDs must not select privileged Android paths
     std::once_flag property_area_once_;
     std::string property_area_;  // built from the root on first open
     std::unordered_map<std::string, std::shared_ptr<BinderDomain>> binder_domains_;

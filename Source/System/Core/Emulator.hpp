@@ -137,10 +137,11 @@ public:
         android_runtime_ = enabled;
         mem_.set_data_top_byte_ignore(enabled);
         mem_.set_low_hints_reserved(enabled);
-        if (enabled) vfs_.enable_android_properties();
+        if (!enabled) return;
+        vfs_.enable_android_properties();
         // Android FIRST_APPLICATION_UID, user 0. Host IDs (often system UID
         // 1000 on Android) must not select privileged framework code paths.
-        vfs_.set_process_identity(enabled ? 10000 : 0, enabled ? 10000 : 0);
+        vfs_.set_process_identity(10000, 10000);
     }
     bool android_runtime() const { return android_runtime_; }
     // Run dynamic glibc/musl programs under their own guest ld.so, as a

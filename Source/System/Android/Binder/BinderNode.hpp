@@ -64,7 +64,7 @@ struct BinderDomain {
     bool stopped = false;
     bool service_manager = false;
     bool manager_accepts_fds = true;
-    uint32_t sender_euid = 0; // single guest process, not the host's credentials
+    uint32_t sender_euid = 0; // the Android identity (VFS binder_uid_), never the host's credentials
     std::map<std::string, BinderService> services;
     // Registrations another owner's addService replaced, oldest first. The
     // registry keeps their strong references; when the owner of the current

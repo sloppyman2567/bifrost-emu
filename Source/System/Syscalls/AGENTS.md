@@ -26,6 +26,10 @@
   A real host-fork child's `exit_group` instead uses host `_exit`: copied host
   waiter/display resources must not be torn down. Use Emulator's fork ownership
   flag, not the CPU's host-PID identity flag (also set for Binder-realm apps).
+- Credentials have one source, `Yggdrasil::process_uid()`/`process_gid()`: the host account in a plain run, the fixed
+  Android identity under `--android-runtime`. `getuid`, `getresuid`, `AT_UID`, `/proc/self/status`, `getgroups` and
+  `capget` must agree, and an unprivileged guest has no capabilities (`test_identity` in `test_compat_syscalls`, checked
+  against the kernel through QEMU). Binder's sender UID is separate: see the Binder guide.
 - Process identity comes from `Yggdrasil::process_ids()`: the PID-1 model of
   a plain run, or the host process's identity for fork children and
   Binder-broker apps. getpid/getppid/getpgid/getsid, `kill` and

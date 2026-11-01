@@ -14,6 +14,8 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/auxv.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/timex.h>
 
@@ -143,10 +145,44 @@ static void test_unsupported(void) {
     CHECK(r == -1 && errno == ENOSYS, "quotactl -> ENOSYS");
 }
 
+// Every way of asking who the process is gives one answer, and an unprivileged process has no capabilities.
+static void test_identity(void) {
+    unsigned ruid = -1, euid = -1, suid = -1, rgid = -1, egid = -1, sgid = -1, status_uid = -1, status_gid = -1;
+    unsigned long long cap_eff = -1;
+    char line[128];
+    CHECK(syscall(SYS_getresuid, &ruid, &euid, &suid) == 0, "getresuid");
+    CHECK(syscall(SYS_getresgid, &rgid, &egid, &sgid) == 0, "getresgid");
+    CHECK(ruid == getuid() && euid == geteuid() && suid == geteuid(), "getresuid agrees with getuid");
+    CHECK(rgid == getgid() && egid == getegid() && sgid == getegid(), "getresgid agrees with getgid");
+    CHECK(getauxval(AT_UID) == getuid() && getauxval(AT_EUID) == geteuid(), "AT_UID agrees with getuid");
+    CHECK(getauxval(AT_GID) == getgid() && getauxval(AT_EGID) == getegid(), "AT_GID agrees with getgid");
+    FILE* status = fopen("/proc/self/status", "r");
+    CHECK(status != NULL, "open /proc/self/status");
+    while (status && fgets(line, sizeof line, status)) {
+        sscanf(line, "Uid: %u", &status_uid);
+        sscanf(line, "Gid: %u", &status_gid);
+        sscanf(line, "CapEff: %llx", &cap_eff);
+    }
+    if (status) fclose(status);
+    CHECK(status_uid == getuid() && status_gid == getgid(), "/proc/self/status agrees with getuid");
+    struct { uint32_t version; int pid; } header = {0x20080522, 0};
+    struct { uint32_t effective, permitted, inheritable; } caps[2];
+    memset(caps, 0xff, sizeof caps);
+    CHECK(syscall(SYS_capget, &header, caps) == 0, "capget");
+    CHECK(caps[0].effective == (uint32_t)cap_eff && caps[1].effective == (uint32_t)(cap_eff >> 32),
+          "capget agrees with /proc/self/status");
+    if (geteuid()) {
+        CHECK(cap_eff == 0, "an unprivileged process has no capabilities");
+        uint32_t raise[6] = {1};
+        CHECK(syscall(SYS_capset, &header, raise) == -1 && errno == EPERM, "capset cannot raise them");
+    }
+}
+
 int main(void) {
     test_numa();
     test_permissive();
     test_unsupported();
+    test_identity();
     if (failures == 0) {
         printf("test_compat_syscalls: ALL TESTS PASSED (%d checks)\n", checks);
         return 0;
