@@ -63,6 +63,10 @@ void FrostJIT::emit_u64(uint64_t v) {
 uint8_t FrostJIT::rex(bool w, bool r, bool x, bool b) {
     return 0x40 | (w?8:0) | (r?4:0) | (x?2:0) | (b?1:0);
 }
+void FrostJIT::emit_rex_if_needed(bool r, bool x, bool b) {
+    const uint8_t prefix = rex(false, r, x, b);
+    if (prefix != 0x40) emit_byte(prefix);
+}
 uint8_t FrostJIT::modrm(uint8_t mod, uint8_t reg, uint8_t rm) {
     return (mod<<6) | ((reg&7)<<3) | (rm&7);
 }
@@ -118,7 +122,7 @@ void FrostJIT::emit_store(int base, int32_t off, int src) {
     else { emit_byte(modrm(2,src&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
 }
 void FrostJIT::emit_load32(int dst, int base, int32_t off) {
-    emit_byte(rex(false,dst>=8,false,base>=8));
+    emit_rex_if_needed(dst>=8,false,base>=8);
     emit_byte(0x8B);
     if (base==4||base==12) {
         if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_byte(static_cast<uint8_t>(off)); }
@@ -131,7 +135,7 @@ void FrostJIT::emit_load32(int dst, int base, int32_t off) {
     else { emit_byte(modrm(2,dst&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
 }
 void FrostJIT::emit_store32(int base, int32_t off, int src) {
-    emit_byte(rex(false,src>=8,false,base>=8));
+    emit_rex_if_needed(src>=8,false,base>=8);
     emit_byte(0x89);
     if (base==4||base==12) {
         if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,4)); emit_byte(sib(0,4,base&7)); emit_byte(static_cast<uint8_t>(off)); }
@@ -159,10 +163,14 @@ void FrostJIT::emit_modrm_disp(int reg, int base, int32_t off) {
 // window fast paths (emit_load_mem / emit_store_mem). WIN_REG is an
 // extension register (R10), so the base is only expressible through a SIB;
 // the index rides in the SIB index field, which is what lets the guest
-// address register be used WITHOUT being copied or destroyed. A disp8 0
-// is kept (mod=01): mod=00 with SIB base=101 is RIP-relative.
+// address register be used WITHOUT being copied or destroyed. Offset 0 needs
+// no displacement: only SIB base=101 (RBP/R13) requires one with mod=00.
 void FrostJIT::emit_modrm_sib_win(int reg, int index, int32_t off) {
-    if (off>=-128&&off<=127) {
+    static_assert(WIN_REG != RBP && WIN_REG != R13, "mod=00 with SIB base=101 has a disp32");
+    if (off == 0) {
+        emit_byte(modrm(0,reg&7,4));
+        emit_byte(sib(0,index&7,WIN_REG&7));
+    } else if (off>=-128&&off<=127) {
         emit_byte(modrm(1,reg&7,4));
         emit_byte(sib(0,index&7,WIN_REG&7));
         emit_byte(static_cast<uint8_t>(off));
@@ -173,12 +181,12 @@ void FrostJIT::emit_modrm_sib_win(int reg, int index, int32_t off) {
     }
 }
 void FrostJIT::emit_load16(int dst, int base, int32_t off) {
-    emit_byte(rex(false,dst>=8,false,base>=8));
+    emit_rex_if_needed(dst>=8,false,base>=8);
     emit_byte(0x0F); emit_byte(0xB7);
     emit_modrm_disp(dst, base, off);
 }
 void FrostJIT::emit_load8(int dst, int base, int32_t off) {
-    emit_byte(rex(false,dst>=8,false,base>=8));
+    emit_rex_if_needed(dst>=8,false,base>=8);
     emit_byte(0x0F); emit_byte(0xB6);
     emit_modrm_disp(dst, base, off);
 }
@@ -197,18 +205,18 @@ void FrostJIT::emit_load32_sx(int dst, int base, int32_t off) {
     emit_modrm_disp(dst, base, off);
 }
 void FrostJIT::emit_load16_sx(int dst, int base, int32_t off) {
-    emit_byte(rex(false,dst>=8,false,base>=8));
+    emit_rex_if_needed(dst>=8,false,base>=8);
     emit_byte(0x0F); emit_byte(0xBF);
     emit_modrm_disp(dst, base, off);
 }
 void FrostJIT::emit_load8_sx(int dst, int base, int32_t off) {
-    emit_byte(rex(false,dst>=8,false,base>=8));
+    emit_rex_if_needed(dst>=8,false,base>=8);
     emit_byte(0x0F); emit_byte(0xBE);
     emit_modrm_disp(dst, base, off);
 }
 void FrostJIT::emit_store16(int base, int32_t off, int src) {
     emit_byte(0x66);
-    emit_byte(rex(false,src>=8,false,base>=8));
+    emit_rex_if_needed(src>=8,false,base>=8);
     emit_byte(0x89);
     emit_modrm_disp(src, base, off);
 }
@@ -454,7 +462,7 @@ void FrostJIT::emit_store_arm(int ar, int xr) {
 // This is compatible with the interpreter's pstate format (it ignores
 // bit 27).
 //
-// Scratch: clobbers RDX only. RAX is saved: epilogues with
+// Scratch: clobbers RDX, and RAX unless keep_rax saves it: epilogues with
 // rax_holds_next_pc_ commit flags after RAX already holds the next PC.
 //   lahf; seto al        eax: SF=15 ZF=14 CF=8 OF=0 (AF/PF/bit 9 masked)
 //   and  eax, 0xC101
@@ -465,8 +473,8 @@ void FrostJIT::emit_store_arm(int ar, int xr) {
 // them. SUB then inverts C and sets from_sub with one XOR.
 // LAHF/SAHF in 64-bit mode (CPUID LAHF-SAHF) exists on every x86-64 CPU
 // except the first Athlon 64 / Pentium 4 steppings; it is not gated.
-void FrostJIT::emit_materialize_flags(bool from_sub) {
-    emit_push(RAX);
+void FrostJIT::emit_materialize_flags(bool from_sub, bool keep_rax) {
+    if (keep_rax) emit_push(RAX);
     emit_byte(0x9F);                                    // lahf
     emit_byte(0x0F); emit_byte(0x90); emit_byte(0xC0);  // seto al
     emit_byte(0x25); emit_u32(0xC101);                  // and eax, SF|ZF|CF|OF
@@ -477,7 +485,7 @@ void FrostJIT::emit_materialize_flags(bool from_sub) {
         emit_byte(0x81); emit_byte(0xF2); emit_u32(0x28000000u); // xor edx, C|from_sub
     }
     emit_store32(CPU_REG, PSTATE_OFF, RDX);
-    emit_pop(RAX);
+    if (keep_rax) emit_pop(RAX);
 }
 // Load NZCV from cpu.pstate into host flags in SUB convention:
 // SF=N, ZF=Z, OF=V and x86 CF = NOT ARM C, independent of the stored

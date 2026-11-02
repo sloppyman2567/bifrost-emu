@@ -920,6 +920,16 @@ private:
     };
     bool defer_guards_ = false;
     std::vector<DeferredGuard> deferred_guards_;
+    // One copy per JIT of what each Tier-1 cold tail would otherwise repeat:
+    // the software page checks (per address register, width and direction) and
+    // the recoverable fault exit. A persistent-cache recording keeps the full
+    // tails, since a call out of the block has no meaning in another process.
+    bool cold_stubs_ready_ = false;
+    uint32_t guard_stub_[16][4][2] = {};
+    uint32_t fault_exit_stub_ = 0;
+    void emit_cold_stubs();
+    bool use_cold_stubs() const { return cold_stubs_ready_ && defer_guards_ && !recording_; }
+    static constexpr bool cold_stub_register(int r);
     struct SimdFpGuard {
         size_t site = 0;
         bool deferred = false;
@@ -1342,6 +1352,9 @@ private:
     void emit_u32(uint32_t v);
     void emit_u64(uint64_t v);
     static uint8_t rex(bool w, bool r, bool x, bool b);
+    // REX for an operation with no 64-bit or byte-register operand: omitted
+    // when bare. Byte registers keep it (0x40 selects SIL/DIL instead of DH/BH).
+    void emit_rex_if_needed(bool r, bool x, bool b);
     static uint8_t modrm(uint8_t mod, uint8_t reg, uint8_t rm);
     static uint8_t sib(uint8_t scale, uint8_t index, uint8_t base);
     void emit_mov_imm64(int dst, uint64_t imm);
@@ -1492,7 +1505,7 @@ private:
     void emit_load_arm(int xr, int ar);
     void emit_store_arm(int ar, int xr);
     // Flag materialization.
-    void emit_materialize_flags(bool from_sub = false);
+    void emit_materialize_flags(bool from_sub = false, bool keep_rax = true);
     void emit_load_flags_from_pstate();
     // After emit_load_flags_from_pstate, x86 CF = ARM C XOR from_sub.
     // This helper emits runtime code to normalize CF to SUB convention

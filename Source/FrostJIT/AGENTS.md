@@ -138,6 +138,12 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   (`emit_frame_return(true)`); block exits keep their own (a jump on the
   dispatcher-return path cost 10%). Reset `frame_return_off_` wherever a block or
   region compile starts (`rewind_codegen` drops it); never jump to another unit's.
+- Tier-1 cold tails call one copy per JIT of the page checks and jump to one fault exit
+  (`emit_cold_stubs`, `use_cold_stubs`). A page-check stub preserves every register and answers
+  in ZF, and its failing path must clear ZF. A persistent-cache recording keeps full tails: a
+  reference out of the block cannot be reused in another process. Tier-2 keeps inline guards.
+- A bare `0x40` REX selects SIL/DIL over DH/BH: `emit_rex_if_needed` is only for operations
+  with no byte register.
 - Restore the complete ST chain-skip slot through `write_unpatched_slot`;
   its unpatched form is `kSlotNop5`. MT revokes data cells, never instructions.
 - Per-block bookkeeping is the JIT's largest heap cost (~700k blocks per Android app;

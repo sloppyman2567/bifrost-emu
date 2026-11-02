@@ -43,7 +43,8 @@ void FrostJIT::clobber_flags(bool dead, bool rdx_only) {
 }
 // Materialize host flags to pstate. Preserve RFLAGS when a later instruction
 // still consumes them; BRCOND has already consumed its condition and opts out.
-// Both branch exits still commit guest NZCV. No-op if flags aren't
+// Its exits load RAX with the next PC right after, so RAX, flushed here, is not
+// saved around the pack either. Both branch exits still commit guest NZCV. No-op if flags aren't
 // currently in host. Does NOT clear flags_in_host_ — the caller manages that,
 // since BRCOND emits this on both paths before clearing flags_in_host_ at the
 // end.
@@ -54,7 +55,7 @@ void FrostJIT::materialize_flags_to_pstate(bool preserve_flags, bool dead) {
     if (!dead && preserve_flags) emit_pushfq();
     flush_dirty_host_regs(FLAGS3);
     flush_scratch_host_regs(FLAGS3);
-    if (!dead) emit_materialize_flags(flags_from_sub_);
+    if (!dead) emit_materialize_flags(flags_from_sub_, preserve_flags);
     if (!dead && preserve_flags) emit_popfq();
     invalidate_host_regs(FLAGS3);
 }

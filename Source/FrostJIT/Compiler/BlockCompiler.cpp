@@ -102,6 +102,10 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     make_writable();
     current_start_pc_ = start_pc;
     code_buf_overflow_ = false;
+    // A guarded access exists only with fault sites and the window; a fault trace
+    // needs each exit's block PC.
+    if (!cold_stubs_ready_ && fault_sites_ && guest_memory_ && window_base_ && !dbg().fault_trace)
+        emit_cold_stubs();
     call_interp_branch_patches_.clear();
     branch_target_patches_.clear();
     skip_fixups_.clear();

@@ -16,6 +16,54 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Shared cold stubs and smaller encodings (2026-11-02)
+
+A Tier-1 guarded access used to carry its own software page checks (58 bytes) and fault exit (45 to 50 bytes) after
+the block, which never run in normal execution. Each JIT now emits one copy before its first block
+(`FrostJIT::emit_cold_stubs`), and a tail is a `call`, a `je` back to the access and the state commit its own exit needs.
+
+- **Page-check stubs.** One per allocatable address register, width and direction, built by the same
+  `emit_guard_page_checks` the inline form uses. A stub preserves every register and sets ZF when the access may
+  proceed. The bound and flag rules are unchanged: only the location of the code moved.
+- **Fault exit.** The tail loads the guest PC into RAX and jumps to one stub that stores it, calls `jit_fault_step` and
+  ends the frame. Vector and pinned-register commits stay in each tail, since they depend on its state.
+- **When the full form stays.** Tier-2 keeps inline guards. A persistent-cache recording keeps full tails, because a call
+  out of the block means nothing in another process, so a session with `--jit-disk-cache` does not get the smaller code
+  in what it records. `BIFROST_FAULT_TRACE` also keeps them, because its exits pass their block's PC.
+- **The cost.** While the gate is closed (a registered, missing userfaultfd page, during an ART compaction), a guarded
+  access pays a call and two saved registers: a loop of four accesses went from 2.5 to 4.3 ns per iteration. How long
+  the gate is closed in a game has not been measured; Battle Cats and Subway Surfers showed 13 and 11 activations in a
+  60 s launch. With the gate open the hot path is unchanged.
+
+Smaller changes in the same pass:
+
+- BRCOND's flag commit no longer saves RAX around the pack: RAX is already flushed there, and its exits load the next PC
+  into it right after (`emit_materialize_flags`, `keep_rax`). Other callers keep the save.
+- CSEL no longer stores a scratch result to its stack slot on every execution; it stays dirty in its register and
+  is spilled if evicted, like other ALU results. An architectural destination still commits eagerly.
+- `emit_rex_if_needed` omits a bare `0x40` where no byte register is involved. Byte-register forms must keep it, since
+  it selects SIL/DIL rather than DH/BH. `emit_modrm_sib_win` omits a zero displacement: only SIB base 101 (RBP/R13)
+  needs one, and the window base is R10.
+
+Measured on one machine against the previous commit, with a throwaway mixed guest workload (hash table, tree, strings,
+indirect calls, `qsort`, bytecode VM): emitted code 804 to 521 KB single-threaded (-35%) and 564 to 380 KB multithreaded
+(-33%), Tier-1 compile time unchanged, and the VM kernel about 5% faster multithreaded. The other kernels moved less than
+the noise of three runs, and the hash-table kernel varied too much to compare. Battle Cats launches measured 103.5 bytes
+per guest instruction before and 70.6 after, and Subway Surfers 68.9 after, in runs of different lengths with no input,
+so these are indicative only and no frame rate was measured.
+
+`jit_guard_stubs` drives every width and direction, in and across pages, at eight levels of register pressure, with the
+gate open and closed, and checks results, fault kinds and handler state; it passes on the JIT, the previous commit and the
+interpreter, but has not been run under QEMU. Breaking the stubs on purpose showed what it covers: it caught a missing
+userfaultfd check, an inverted answer, swapped pops, a wrong fault PC, a lost RAX and a lost CSEL value. It did not catch two:
+swapped read and write checks, which host page protection then reports identically, and a missing ZF clear on the failing
+path, which matters only at the exact window bound a guest cannot observe. The address registers reached were RAX, RCX,
+RDX, R8, R9, R11 and R13, not R12, R14 or R15.
+
+Found along the way, not changed: with `BIFROST_NO_CHAIN_SKIP=1`, `jit_disk_cache`, `test_posix_timers` and `test_exec_mt`
+fail on this commit and the previous one alike. A page registered with userfaultfd without first being discarded after a
+descriptor exists is not treated as missing, so a first touch does not fault; the kernel would deliver it.
+
 ## Software page checks only while a page needs them (2026-10-26)
 
 ART calls `userfaultfd()` when libart loads (`KernelSupportsUffd` in `gUseUserfaultfd`'s static initializer,

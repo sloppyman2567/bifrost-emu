@@ -240,11 +240,72 @@ std::vector<FrostJIT::GuardJump> FrostJIT::emit_guard_page_checks(int effective,
     for (size_t p : fail) patch_jcc_rel8(p, static_cast<int8_t>(code_buf_used_ - (p + 2)));
     return passed;
 }
+constexpr bool FrostJIT::cold_stub_register(int r) {
+    for (int allocatable : ALLOC_REGS)
+        if (allocatable == r) return true;
+    return false;
+}
+// Called once before a JIT's first block. A page-check stub takes the address in
+// its register, preserves every register and returns ZF set when the access may
+// proceed. The fault exit takes the guest PC in RAX and ends the frame, whichever
+// Tier-1 block jumps to it: both frame layouts return the same way.
+void FrostJIT::emit_cold_stubs() {
+    const bool recording = recording_;
+    recording_ = false;  // not part of the block being recorded
+    const size_t start = code_buf_used_;
+    static constexpr int widths[4] = {1, 2, 4, 8};
+    for (int reg = 0; reg < 16; ++reg) {
+        if (!cold_stub_register(reg)) continue;
+        const int first = reg == RAX ? RCX : RAX;
+        const int second = reg == RDX ? RCX : RDX;
+        for (int w = 0; w < 4; ++w) {
+            for (int write = 0; write < 2; ++write) {
+                guard_stub_[reg][w][write] = static_cast<uint32_t>(code_buf_used_);
+                const uint8_t required = Memory::GUEST_PAGE_MAPPED |
+                    (write ? Memory::GUEST_PROT_WRITE : Memory::GUEST_PROT_READ);
+                emit_push(first);
+                emit_push(second);
+                const std::vector<GuardJump> passed = emit_guard_page_checks(
+                    reg, first, second, widths[w], required,
+                    required | Memory::GUEST_PAGE_UFFD_MISSING, true);
+                // test rsp,rsp: a nonzero register clears ZF for the failing path.
+                emit_byte(0x48); emit_byte(0x85); emit_byte(0xE4);
+                patch_guard_jumps(passed, code_buf_used_);
+                emit_pop(second);
+                emit_pop(first);
+                emit_ret();
+            }
+        }
+    }
+    fault_exit_stub_ = static_cast<uint32_t>(code_buf_used_);
+    emit_store(CPU_REG, PC_OFF, RAX);
+    emit_load_emu(RDI);
+    emit_mov_reg(RSI, CPU_REG);
+    emit_push(RAX);  // aligns the call; the frame return drops it
+    emit_call_abs(reinterpret_cast<void*>(&jit_fault_step));
+    emit_frame_return(false);
+    recording_ = recording;
+    if (code_buf_overflow_) {
+        code_buf_used_ = start;
+        code_buf_overflow_ = false;
+        return;
+    }
+    cold_stubs_ready_ = true;
+}
 void FrostJIT::flush_deferred_guards() {
     for (DeferredGuard& g : deferred_guards_) {
         patch_jcc_rel32(g.sw_jump, static_cast<int32_t>(code_buf_used_ - (g.sw_jump + 6)));
-        patch_guard_jumps(emit_guard_page_checks(g.effective, g.temp, g.page, g.width,
-                                                 g.required, g.mask, g.gated), g.access);
+        if (g.gated && use_cold_stubs() && cold_stub_register(g.effective)) {
+            const int width = g.width == 1 ? 0 : g.width == 2 ? 1 : g.width == 4 ? 2 : 3;
+            const uint32_t target = guard_stub_[g.effective][width][(g.required & Memory::GUEST_PROT_WRITE) ? 1 : 0];
+            emit_byte(0xE8);  // call rel32
+            emit_u32(static_cast<uint32_t>(target - (code_buf_used_ + 4)));
+            const size_t passed = emit_jcc_rel32_placeholder(4);  // JE
+            patch_jcc_rel32(passed, static_cast<int32_t>(g.access - (passed + 6)));
+        } else {
+            patch_guard_jumps(emit_guard_page_checks(g.effective, g.temp, g.page, g.width,
+                                                     g.required, g.mask, g.gated), g.access);
+        }
         const size_t stub = code_buf_used_;
         for (size_t p : g.cold)
             patch_jcc_rel32(p, static_cast<int32_t>(stub - (p + 6)));

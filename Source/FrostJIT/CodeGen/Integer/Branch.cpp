@@ -274,7 +274,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             clobber_flags(flags_in_host_ && exit_flags_dead(inst.arm_pc + 4) &&
                           exit_flags_dead(bp.target));
             int s1 = ensure_vreg(inst.src1);
-            emit_byte(rex(bp.sf, s1 >= 8, false, s1 >= 8));
+            if (const uint8_t prefix = rex(bp.sf, s1 >= 8, false, s1 >= 8); prefix != 0x40) emit_byte(prefix);
             emit_byte(0x85); emit_byte(modrm(3, s1 & 7, s1 & 7));
             // RAX will hold the next PC. Spill its occupant before the MOV;
             // spills are flag-neutral, so they preserve TEST's branch result.

@@ -166,6 +166,12 @@ void FrostJIT::emit_memory_fault_exit(const IRInst& inst, bool recoverable) {
     // Include loop-carried vector writes, preserving compile-time dirtiness
     // so the normal epilogue still emits its own writeback.
     vec_cache_writeback_all_pinned(false);
+    if (recoverable && use_cold_stubs()) {
+        emit_mov_imm_to_rax(inst.arm_pc);
+        const size_t exit = emit_jmp_rel32_placeholder();
+        patch_jmp_rel32(exit, static_cast<int32_t>(fault_exit_stub_ - (exit + 5)));
+        return;
+    }
     emit_mov_imm64(RAX, inst.arm_pc);
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_load_emu(RDI);

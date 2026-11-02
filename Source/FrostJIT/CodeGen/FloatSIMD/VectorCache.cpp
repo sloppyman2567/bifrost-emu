@@ -667,10 +667,10 @@ void FrostJIT::vec_emit_load_lo_hi(int xmm, int vreg) {
     vec_valid_[vreg] = true;
     ++vec_reloads_;
     bool r = (xmm >= 8);
-    emit_byte(rex(false, r, false, false));
+    emit_rex_if_needed(r, false, false);
     emit_byte(0x0F); emit_byte(0x10);                  // movsd
     emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + vreg * 8);
-    emit_byte(rex(false, r, false, false));
+    emit_rex_if_needed(r, false, false);
     emit_byte(0x0F); emit_byte(0x16);                  // movhpd
     emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + vreg * 8);
 }
@@ -687,7 +687,7 @@ void FrostJIT::vec_emit_prologue_loads() {
             int xmm = vec_cache_[v];
             bool r = (xmm >= 8);
             emit_byte(0xF2);
-            emit_byte(rex(false, r, false, false));
+            emit_rex_if_needed(r, false, false);
             emit_byte(0x0F); emit_byte(0x10);          // movsd
             emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
             ++vec_reloads_;
@@ -714,11 +714,11 @@ void FrostJIT::vec_cache_writeback_all(bool clear_flags) {
         // write the XMM's upper half into the NEXT register's lo slot,
         // silently corrupting v_lo[v+1] every time v is written back.
         emit_byte(0xF2);
-        emit_byte(rex(false, r, false, false));
+        emit_rex_if_needed(r, false, false);
         emit_byte(0x0F); emit_byte(0x11);              // movsd
         emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
         if (!fp_cache_active_) {
-            emit_byte(rex(false, r, false, false));
+            emit_rex_if_needed(r, false, false);
             emit_byte(0x0F); emit_byte(0x17);          // movhpd
             emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
         }
@@ -742,11 +742,11 @@ void FrostJIT::vec_cache_writeback_all_pinned(bool clear_flags) {
         bool r = (xmm >= 8);
         // MOVSD (F2 0F 11) — 64-bit store (see vec_cache_writeback_all).
         emit_byte(0xF2);
-        emit_byte(rex(false, r, false, false));
+        emit_rex_if_needed(r, false, false);
         emit_byte(0x0F); emit_byte(0x11);              // movsd
         emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
         if (!fp_cache_active_) {
-            emit_byte(rex(false, r, false, false));
+            emit_rex_if_needed(r, false, false);
             emit_byte(0x0F); emit_byte(0x17);          // movhpd
             emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
         }
@@ -822,7 +822,7 @@ void FrostJIT::fp_load_operand(int xmm, int vreg, bool is_double) {
     if (xs >= 0) {
         // movsd/movss xmm, xmm_s  (reg-reg; REX for XMM8-15 source/dest)
         emit_byte(prefix);
-        emit_byte(rex(false, xmm >= 8, false, xs >= 8));
+        emit_rex_if_needed(xmm >= 8, false, xs >= 8);
         emit_byte(0x0F); emit_byte(0x10);
         emit_byte(modrm(3, xmm & 7, xs & 7));
     } else {
@@ -859,10 +859,10 @@ void FrostJIT::fp_store_operand(int xmm, int vreg, bool is_double) {
             emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
             emit_byte(modrm(3, t & 7, t & 7));                       // pxor t,t
             emit_byte(0xF3);
-            emit_byte(rex(false, false, false, xmm >= 8));
+            emit_rex_if_needed(false, false, xmm >= 8);
             emit_byte(0x0F); emit_byte(0x10);
             emit_byte(modrm(3, t & 7, xmm & 7));                     // movss t,xmm
-            emit_byte(rex(false, xd >= 8, false, false));
+            emit_rex_if_needed(xd >= 8, false, false);
             emit_byte(0x0F); emit_byte(0x28);
             emit_byte(modrm(3, xd & 7, t & 7));                      // movaps xd,t
         } else {
@@ -871,7 +871,7 @@ void FrostJIT::fp_store_operand(int xmm, int vreg, bool is_double) {
             // so the REX.R/REX.B extension bits follow the source (xmm) /
             // dest (xd) respectively — NOT xd/xmm.
             emit_byte(prefix);
-            emit_byte(rex(false, xmm >= 8, false, xd >= 8));
+            emit_rex_if_needed(xmm >= 8, false, xd >= 8);
             emit_byte(0x0F); emit_byte(0x11);
             emit_byte(modrm(3, xmm & 7, xd & 7));
         }

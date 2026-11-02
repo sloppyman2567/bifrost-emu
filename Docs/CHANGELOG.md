@@ -10,6 +10,16 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
+### Smaller JIT code from shared cold paths (2026-11-02)
+
+- **A third less generated code on a mixed test workload.** Each Tier-1 guarded memory access carried its own page checks and
+  fault exit, which normally never run. One copy per JIT now serves them all
+  ([details and limits](JIT.md#shared-cold-stubs-and-smaller-encodings-2026-11-02)). Battle Cats launches measured 103.5 bytes per
+  guest instruction before and 70.6 after, in runs of different lengths; frame rates were not measured. Accesses are slower
+  while an ART compaction has software checks on (2.5 to 4.3 ns per four accesses in a loop).
+- **Smaller encodings and less hot work.** No bare REX prefixes or zero displacements, no RAX save around the flag commit
+  on conditional exits, and no stack store for each CSEL result. `jit_guard_stubs` is the new regression test.
+
 ### No more pops when a game restarts a sound (2026-11-01)
 
 - **Battle Cats' attack sound popped** when attacks came quickly, though one attack alone was clean. The game reuses a few OpenSL

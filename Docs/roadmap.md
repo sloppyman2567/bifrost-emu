@@ -334,7 +334,9 @@ video is not expected to play. Oddmar's gameplay, its story videos and audio syn
   (about 205-257 MiB of 8573) has not been checked against the driver.
   Since November 1 the window statistics count the whole session by PSS rather than one process's RSS, so earlier
   title-bar figures read lower. On that measure Azur Lane held about 3.2 GiB and Umamusume Global about 4.4 GB;
-  long-session memory is unmeasured.
+  long-session memory is unmeasured. Since November 2 Tier-1 cold paths are shared
+  ([JIT.md](JIT.md#shared-cold-stubs-and-smaller-encodings-2026-11-02)): Battle Cats went from 103.5 to 70.6 bytes per
+  guest instruction, in runs of different lengths.
 
 Acceptance: rendered gameplay with working audio and input survives repeated
 surface recreation and lifecycle transitions without leaks or stale handles.

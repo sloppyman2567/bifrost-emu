@@ -351,6 +351,7 @@ UNIT_TESTS=(
     "test_simd_arith|Tests/Unit/test_simd_arith.elf||10|ALL PASS"
     "tier2_smov|Tests/Unit/jit_tier2_smov.elf||10|ALL PASS|JIT"
     "memory_guard_address|Tests/Unit/jit_memory_guard_address.elf||15|ALL PASS"
+    "guard_stubs|Tests/Unit/jit_guard_stubs.elf||20|ALL PASS"
     "bitfield_regalloc|Tests/Unit/jit_bitfield_regalloc.elf||10|ALL PASS"
     "ccmp_forward|Tests/Unit/jit_ccmp_forward.elf||10|ALL PASS"
     "same_operand|Tests/Unit/jit_same_operand.elf||10|ALL PASS"

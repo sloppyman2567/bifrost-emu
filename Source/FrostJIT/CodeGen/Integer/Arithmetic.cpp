@@ -394,7 +394,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     // 6 bits silently miscompiles counts >= 32: glibc
                     // _int_malloc's binmap `lsl w8,w2,w8` with bin 107
                     // produced 0 instead of 0x800 → shredded guest heap.)
-                    emit_byte(rex(false, false, false, d >= 8));
+                    emit_rex_if_needed(false, false, d >= 8);
                     emit_byte(0xD3);
                     emit_byte(modrm(3, kind, d & 7));
                 } else {
@@ -561,7 +561,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 if (d >= 8) emit_byte(0x41);
                 emit_byte(0x0F); emit_byte(0xC8 + (d & 7));
                 // Zero-extend 32-bit result to 64 bits.
-                emit_byte(rex(false, d>=8, false, d>=8));
+                emit_rex_if_needed(d>=8, false, d>=8);
                 emit_byte(0x89); emit_byte(modrm(3, d&7, d&7));
             } else {
                 // 64-bit bswap: REX.W 0F C8+r.
@@ -674,8 +674,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             emit_byte(0x40 + cc);
             emit_byte(modrm(3, d & 7, s1 & 7));
             if (need_cmc) emit_byte(0xF5);  // restore CF for later consumers
-            // Store RDX-style tail: eager store + cache in d.
-            store_reg_to_vreg(inst.dest, d);
+            // A scratch value stays in d until it is spilled or dies; an
+            // architectural destination is committed eagerly.
+            if (inst.dest <= 31) store_reg_to_vreg(inst.dest, d);
             set_vreg_reg(inst.dest, d);
             // If we loaded flags from pstate, clear flags_in_host_ so the
             // epilogue doesn't re-materialize. The flags in pstate are

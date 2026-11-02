@@ -637,7 +637,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                             else d = alloc_reg_excluding(s1, -1);
                             if (d != s1) emit_mov_reg(d, s1);
                         }
-                        emit_byte(rex(!imm_32, false, false, d >= 8));
+                        if (const uint8_t prefix = rex(!imm_32, false, false, d >= 8); prefix != 0x40) emit_byte(prefix);
                         const int kind = (imm_sub && imm_discard) ? 7 : imm_sub ? 5 : 0;  // cmp / sub / add
                         if (imm >= -128 && imm <= 127) {
                             emit_byte(0x83); emit_byte(modrm(3, kind, d & 7)); emit_byte(static_cast<uint8_t>(imm));
@@ -681,7 +681,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             }
             // A 32-bit ADD/SUB already zeroes the upper result bits. CMP
             // leaves the full input value untouched in either width.
-            emit_byte(rex(!is_32bit, s2 >= 8, false, d >= 8));
+            if (const uint8_t prefix = rex(!is_32bit, s2 >= 8, false, d >= 8); prefix != 0x40) emit_byte(prefix);
             emit_byte(is_sub ? (discard_result ? 0x39 : 0x29) : 0x01);
             emit_byte(modrm(3, s2 & 7, d & 7));
             flags_in_host_ = true;
