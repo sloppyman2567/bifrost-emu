@@ -72,7 +72,7 @@
       "status": "playable",
       "checked": "2026-10-29",
       "evidence": "The maintainer reports it is playable; no screenshots or session details are recorded. The version is the installed package's.",
-      "notes": ["On 2026-10-21 the first ad load blocked the main thread for about 7 s waiting on the Play services Dynamite provider; not re-checked."]
+      "notes": ["On 2026-10-21 the first ad load blocked the main thread for about 7 s waiting on the Play services Dynamite provider. Six sessions on 2026-11-01 have no such stall, and still skip 1.0 to 1.6 s of frames as that load starts WebView; the maintainer reports ads load at once."]
     },
     "com.uptodown": {
       "name": "Uptodown",

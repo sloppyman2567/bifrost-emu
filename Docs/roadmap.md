@@ -18,7 +18,7 @@ as the linked section says, not that every app using it works.
 | Milestone | State | Done so far | Still open |
 |---|---|---|---|
 | 2.0.0-alpha.1 (2026-10-12) | Released | Subsystem layout and descriptive file names; Asgard Android runtime on the pinned Android 15 framework; SpongeBob playable | Goals below |
-| 2.0.0-alpha.2 (2026-10-21) | Released; its goals were partly met | Toast queue and windows (Azur Lane's sign-in failure no longer exits); `NsdManager`; all 59 `IAppOpsService` methods; Settings intents declined for every app; fixed-size apps scaled to the window; large guest mappings no longer committed up front; real Google sign-in through a window (Hungry Shark World); Uptodown, Battle Cats and Hungry Shark Evolution start to a window. | Measured frame-time baselines; the roughly 7 s main-thread wait on the first ad load; cold-load and compile stalls; sustained 30-minute play |
+| 2.0.0-alpha.2 (2026-10-21) | Released; its goals were partly met | Toast queue and windows (Azur Lane's sign-in failure no longer exits); `NsdManager`; all 59 `IAppOpsService` methods; Settings intents declined for every app; fixed-size apps scaled to the window; large guest mappings no longer committed up front; real Google sign-in through a window (Hungry Shark World); Uptodown, Battle Cats and Hungry Shark Evolution start to a window. | Measured frame-time baselines; cold-load and compile stalls; sustained 30-minute play |
 | 2.0.0-alpha.3 (2026-11-01) | Released; its WebView, media and ad scope is mostly open | Since alpha.2: `media.extractor` and POSIX timers, so video opens through Android's media stack; a fix for the Java Binder abort on native threads; session-wide window stats; lower multithreaded JIT overhead and native pixel/media NEON forms, guest `ptrace`, per-process compatibility defaults and child service routing, a redesigned desktop library with per-app compatibility profiles, `bifrost-emu app.apk`, and an installable rootfs; guest pseudo terminals and fork/exec fixes; less generated JIT code per guest instruction and an experimental persistent translation cache; a window stats overlay; a Debian package; `fcntl` owner, signal and lease commands, so Umamusume's anti-tamper helper no longer ends the app about 8 s in (the maintainer has since reached a Career story scene); a full JIT code cache is replaced and idle threads cost less memory; Subway Surfers 3.70.3 recorded playable (the maintainer's report, no capture). Partial: WebView renders; desktop text input reaches native editors; http(s) and Play Store links open in the host browser after a recent input | WebView pointer/focus/scroll, return/deep-link delivery, ads with test creatives, `media.player` and sustained video |
 | 2.0.0-beta.1 | In progress | Library cards with real icons, per-app Android settings, clear-data/uninstall, a card saying why a run ended | Guided provisioning, update/reinstall, save export/import, fresh-setup validation |
 
@@ -54,9 +54,11 @@ or successful ads, sign-in and gameplay in every app.
   with Azur Lane's delayed login UI (its toast failure is fixed; the maintainer has not said whether the delay remains). Complete
   connected common-service contracts rather than returning success from empty
   handlers.
-- Remove the first-ad-load wait: every Google Mobile Ads game blocks its main
-  thread (about 7 s in Battle Cats) in `DynamiteModule.getRemoteVersion`. Trace
-  what the Play services provider waits for before choosing a fix.
+- The first-ad-load wait looks gone: on October 21 Battle Cats blocked its main thread for about 7 s in
+  `DynamiteModule.getRemoteVersion`. Its six sessions on November 1 that reach Google Mobile Ads have no stall report
+  naming Dynamite, nor do the Subway Surfers and Plants vs. Zombies logs, and the maintainer reports ads load at once. No
+  October 21 log remains to compare and no commit is identified as the fix. Those Battle Cats sessions still skip 61 to 97
+  frames (1.0 to 1.6 s) as the first load starts `WebViewFactory`; WebView's first start is the likely cause, not confirmed.
 - Profile matching cold-load and warm gameplay scenes. Reduce compilation stalls,
   repeated translation, paired-memory guard overhead and vector spills where
   measurements justify it. Preserve fault, alias, invalidation and FP semantics.

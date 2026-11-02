@@ -112,7 +112,7 @@ progress table and the known blockers; everything that changed is in the
   fewer platform errors every game logged, and graphics-thunk fixes for pointer
   and string-array arguments.
 - **Window stats:** an in-window overlay (`--window-stats`) for Android apps.
-- **Open:** measured frame times, the first-ad-load wait, WebView interaction,
+- **Open:** measured frame times, WebView interaction,
   and sustained play. A passing build or a launch is not gameplay.
 
 Check an installed app's recorded status yourself with
