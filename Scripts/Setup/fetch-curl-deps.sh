@@ -8,18 +8,17 @@
 #
 # Usage: ./Scripts/Setup/fetch-curl-deps.sh [rootfs-dir]
 #
-# Each download is bounded by a 90-second timeout (matches the other
-# fetch scripts). The script looks up the correct pool paths by querying
-# the Debian Packages.gz index, so it's resilient to version bumps.
+# Pool paths come from the Debian Packages.gz index (debian-arm64-index.sh),
+# which also sets the download limits. Exits non-zero, with the reason, when
+# there is no usable index; a package that fails is reported and skipped.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 ROOTFS="${1:-$PROJECT_ROOT/rootfs}"
-MIRROR="http://deb.debian.org/debian"
-DIST="bookworm"
-DOWNLOAD_TIMEOUT=90
+# shellcheck source=Scripts/Setup/debian-arm64-index.sh
+source "$PROJECT_ROOT/Scripts/Setup/debian-arm64-index.sh"
 
 # Packages that curl (Debian Bookworm arm64) depends on, transitively.
 # libbrotlidec1/libbrotlicommon1 are bundled into libbrotli1 in Bookworm.
@@ -55,55 +54,23 @@ PACKAGES=(
     libkeyutils1        # libkrb5 needs it
 )
 
-echo "Looking up package paths in Debian $DIST arm64 index ..."
-PKG_INDEX=$(mktemp)
-PKG_GZ="$PKG_INDEX.gz"
-LOOKUP=$(mktemp)
-trap 'rm -f "$PKG_INDEX" "$PKG_GZ" "$LOOKUP"' EXIT
-curl -fsL --connect-timeout 15 --max-time "$DOWNLOAD_TIMEOUT" --retry 1 \
-    -o "$PKG_GZ" "$MIRROR/dists/$DIST/main/binary-arm64/Packages.gz" || {
-    echo "Error: could not download Packages.gz from $MIRROR" >&2
+LIBDIR="$(realpath -m "$ROOTFS/lib")"
+if [ ! -d "$LIBDIR" ]; then
+    echo "Error: $LIBDIR does not exist; create the rootfs first" >&2
     exit 1
-}
-gunzip -f "$PKG_GZ" 2>/dev/null || true
+fi
 
-# Build a lookup file: "package_name pool_path" per line. awk handles the
-# multi-line stanza format cleanly.
-awk '
-    /^Package: / { pkg=$2 }
-    /^Filename: / { if (pkg != "") { print pkg " " $2; pkg="" } }
-' "$PKG_INDEX" > "$LOOKUP"
+DEBIAN_LOOKUP=""
+trap 'rm -f "$DEBIAN_LOOKUP"' EXIT
+debian_index_load
 
-echo "Fetching ${#PACKAGES[@]} curl dependency libraries into $ROOTFS/lib/ ..."
+echo "Fetching ${#PACKAGES[@]} curl dependency libraries into $LIBDIR/ ..."
 SUCCESS=0
 FAILED=0
 for pkg in "${PACKAGES[@]}"; do
-    pkg_path=$(awk -v p="$pkg" '$1==p { print $2; exit }' "$LOOKUP")
-    if [ -z "$pkg_path" ]; then
-        echo "  $pkg: NOT FOUND in index (skipping)"
-        FAILED=$((FAILED + 1))
-        continue
-    fi
-    pkg_name=$(basename "$pkg_path")
-    tmp_dir=$(mktemp -d)
-    echo -n "  $pkg_name ... "
-    if curl -fsL --connect-timeout 15 --max-time "$DOWNLOAD_TIMEOUT" --retry 1 \
-            -o "$tmp_dir/pkg.deb" "$MIRROR/$pkg_path" 2>/dev/null; then
-        cd "$tmp_dir"
-        ar x pkg.deb data.tar.xz 2>/dev/null || ar x pkg.deb data.tar.gz 2>/dev/null
-        if [ -f data.tar.xz ]; then
-            tar -xJf data.tar.xz 2>/dev/null
-        elif [ -f data.tar.gz ]; then
-            tar -xzf data.tar.gz 2>/dev/null
-        fi
-        find . -name "lib*.so*" -exec cp -f {} "$ROOTFS/lib/" \; 2>/dev/null
-        cd "$PROJECT_ROOT"
-        rm -rf "$tmp_dir"
-        echo "OK"
+    if fetch_deb "$pkg" "$LIBDIR"; then
         SUCCESS=$((SUCCESS + 1))
     else
-        echo "FAILED (download error)"
-        rm -rf "$tmp_dir"
         FAILED=$((FAILED + 1))
     fi
 done
@@ -122,4 +89,4 @@ done
 echo ""
 echo "Done. $SUCCESS packages installed, $FAILED failed."
 echo "Total .so files in $ROOTFS/lib/:"
-ls -1 "$ROOTFS/lib"/lib*.so* 2>/dev/null | wc -l
+find "$LIBDIR" -maxdepth 1 -name 'lib*.so*' | wc -l

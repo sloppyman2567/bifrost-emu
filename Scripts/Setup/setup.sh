@@ -84,9 +84,7 @@ fi
 
 if [ ${#MISSING[@]} -gt 0 ]; then
     log_err "Missing required tools: ${MISSING[*]}"
-    log_err "On Debian/Ubuntu: sudo apt install build-essential curl"
-    log_err "On Fedora/RHEL:   sudo dnf install gcc-c++ make curl"
-    log_err "On Alpine:         apk add build-base curl"
+    log_err "Scripts/Setup/install-deps.sh installs them with apt, dnf, zypper or pacman."
     exit 1
 fi
 

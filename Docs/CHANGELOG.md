@@ -10,6 +10,30 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
+### Provisioning Asgard from a clone (2026-11-01)
+
+- **`make bootstrap`** is the one command from a fresh clone to a working install: host packages, the emulator, then Asgard, under
+  `~/.local` unless you give a `PREFIX`. **`make deps`** is the host packages alone, with apt, dnf, zypper or pacman
+  (`Scripts/Setup/install-deps.sh`). It installs only what is missing, so it needs `sudo` only then. That includes PyQt6 for the
+  desktop launcher, which nothing installed before; the `bifrost-emu-asgard` package now recommends it too. `make bootstrap` is not
+  yet confirmed end to end, and `make deps` failed, undiagnosed, in Arch and openSUSE containers: see the [support matrix](SUPPORT.md).
+- **`make provision-asgard`** goes from a fresh clone to a working `asgard` command: the runtime, signing tools, adapters,
+  launcher, ART and framework, microG, then the install. It can be run again, respects `PREFIX` and `DESTDIR`, and checks that
+  it can write to the prefix before downloading anything, so the default `/usr/local` without `sudo` fails at once and not after 1.5 GB.
+  `make android-provision` is the same without the install, so `sudo make install-asgard` need not download as root.
+- **`install-asgard.py` no longer installs an unusable tree.** An empty `build/microg` used to pass, and the first app launch
+  then failed with `PermissionError`. It now checks the two pinned APKs by name and size and downloads what is missing or the
+  wrong size during a real install. Missing or empty `bifrost-art.json` and `bifrost-framework.json` are rejected, so an empty
+  or unfinished ART or framework tree is refused. `--dry-run` never downloads and writes nothing, not even `__pycache__`.
+- **`android_microg.archive()`** replaces a truncated APK instead of failing on it until someone deleted the file.
+- **`install-rootfs.sh --full` survives a mirror problem.** The 12 MB package index shared the 90-second limit meant for small
+  `.deb` files, curl's error went to `/dev/null`, and the failure aborted the whole build. The index now has its own limit with
+  stall detection, curl's error is shown, a corrupt index is an error, and the optional libraries failing leaves a warning and a
+  working rootfs.
+- **`fetch-realworld-libs.sh` finds packages in the Debian index**, like `fetch-curl-deps.sh`, instead of hardcoded versions
+  (`libblkid1_2.38.1-5+deb12u1` was already gone from the mirror, and `libselinux1` was a release behind the rest). Neither script
+  now dies at its closing summary when no library arrived.
+
 ### A start page (2026-11-01)
 
 - **`bifrost-emu` with no arguments** was the same 53 lines of options as `--help`, including ones only Asgard uses, and said it runs

@@ -7,10 +7,12 @@ Usage:
   ./Scripts/Setup/install-asgard.py --system        # /usr/local (needs root)
   ./Scripts/Setup/install-asgard.py --dry-run       # list what would change, write nothing
   ./Scripts/Setup/install-asgard.py --verify        # also compare file contents, not just size and time
+  ./Scripts/Setup/install-asgard.py --check-prefix  # only check that the prefix can be installed to
   ./Scripts/Setup/install-asgard.py --uninstall     # remove it from the chosen prefix
 
-This checkout must already be provisioned for Android (see Docs/Android/ANDROID_APK.md). The
-install is a self-contained copy of what Asgard reads (about 1 GiB: scripts, signing/dex tools,
+This checkout must already be provisioned for Android: `make provision-asgard` does all of it
+(see Docs/Android/ANDROID_APK.md). The exception is the pinned microG APKs, which a real install
+downloads when they are missing or the wrong size; --dry-run only reports them. The install is a self-contained copy of what Asgard reads (about 1 GiB: scripts, signing/dex tools,
 the framework and ART images, adapters, launcher, microG) under <prefix>/share/bifrost/asgard,
 plus <prefix>/bin/asgard. Run it again after updating the checkout: only files that differ
 (size, modification time, or link target) are copied, each replaced atomically so a running
@@ -29,7 +31,11 @@ import stat
 import subprocess
 import sys
 import time
+from http.client import HTTPException
 from pathlib import Path
+from types import SimpleNamespace
+
+sys.dont_write_bytecode = True  # importing android_microg must not write into the checkout
 
 ROOT = Path(__file__).resolve().parents[2]
 MARKER = ".asgard-install"
@@ -48,20 +54,22 @@ FILES = [
     ("build/android-art/rootfs", ()),
     ("build/android-adapters", ()),
     ("build/android-managed-launcher", ()),
-    ("build/microg", ()),
+    ("build/microg", ("tmp*",)),  # tmp*: what a killed download leaves behind
 ]
+MICROG = "build/microg"
 # How to create what is missing from an unprovisioned checkout.
 PROVISIONING = {
     "Tools/android-runtime": "python3 Tools/Android/fetch-android-runtime.py",
     "Tools/android-tools": "python3 Tools/Android/fetch-aapt2.py && python3 Tools/Android/fetch-android-package-tools.py",
     "build/android-adapters": "make android-runtime-adapters",
     "build/android-managed-launcher": "make android-managed-launcher",
-    "build/android-framework/rootfs": "python3 Tools/Android/android_framework.py",
+    "build/android-framework/rootfs": "python3 Tools/Android/android_framework.py  (builds ART too)",
     "build/android-art/rootfs": "python3 Tools/Android/android_art.py",
-    "build/microg": "start any managed app once (microG downloads on first use)",
 }
+# Written last, when a tree is complete. The tools that write them refuse to touch a tree without one.
+MANIFESTS = ("build/android-art/rootfs/bifrost-art.json", "build/android-framework/rootfs/bifrost-framework.json")
 REQUIRED = ("Tools/android-tools/aapt2", "Tools/android-tools/apksigner.jar",
-            "build/android-adapters/adapters.json", "build/android-managed-launcher/classes.dex")
+            "build/android-adapters/adapters.json", "build/android-managed-launcher/classes.dex", *MANIFESTS)
 # Written by the install itself; never part of the sync or deleted by it.
 GENERATED = ("__pycache__",)
 
@@ -96,12 +104,18 @@ def scan(base, patterns):
                     yield Path(child.name) / relative, child_info
 
 
-def source_plan():
-    """{relative path: lstat} of every file, link and directory that belongs in the install."""
+def source_plan(pending=None):
+    """{relative path: lstat} of every file, link and directory that belongs in the install.
+    `pending` ({name: (size, why)}) adds the microG APKs a real run would download first."""
     plan = {}
     for name, patterns in FILES:
-        for relative, info in scan(ROOT / name, patterns):
-            plan[Path(name) / relative] = info
+        if (ROOT / name).exists():
+            for relative, info in scan(ROOT / name, patterns):
+                plan[Path(name) / relative] = info
+    if pending:
+        plan.setdefault(Path(MICROG), SimpleNamespace(st_mode=stat.S_IFDIR | 0o755))
+        for name, (size, _) in pending.items():
+            plan[Path(MICROG) / name] = SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_size=size, st_mtime_ns=-1)
     return plan
 
 
@@ -250,26 +264,109 @@ def write_marker(tree, **fields):
     os.replace(temporary, tree / MARKER)
 
 
+def provisioning_hint(name):
+    """The command that creates `name`, a tree of FILES or a file inside one."""
+    for tree, how in PROVISIONING.items():
+        if name == tree or name.startswith(tree + "/"):
+            return how
+    return ""
+
+
+def missing_provisioning():
+    """[(what, how to create it)]: trees that do not exist, then required files that are absent or empty."""
+    missing = [(name, PROVISIONING.get(name, "")) for name, _ in FILES
+               if name != MICROG and not (ROOT / name).exists()]
+    if missing:
+        return missing
+    for name in REQUIRED:
+        path = ROOT / name
+        if path.is_file() and path.stat().st_size > 0:
+            continue
+        how = provisioning_hint(name)
+        if name in MANIFESTS:
+            tree = str(Path(name).parent)
+            how = f"chmod -R u+w {tree} && rm -rf {tree}, then {how}"
+        missing.append((name, how))
+    return missing
+
+
+def microg_tool():
+    sys.path.insert(0, str(ROOT / "Tools/Android"))
+    import android_microg
+    return android_microg
+
+
+def microg_problems(microg):
+    """{name: (pinned size, why it is unusable)} for the pinned APKs, judged by name and size.
+    The content is archive()'s to check, which reads every byte."""
+    problems = {}
+    for _, name, size, _, _ in microg.PACKAGES.values():
+        path = ROOT / MICROG / name
+        try:
+            actual = path.lstat()
+        except FileNotFoundError:
+            problems[name] = (size, "missing")
+            continue
+        if not stat.S_ISREG(actual.st_mode):
+            problems[name] = (size, "not a regular file")
+        elif actual.st_size != size:
+            problems[name] = (size, f"{actual.st_size} bytes, pinned at {size}")
+    return problems
+
+
+def fetch_microg(microg):
+    """Download what is missing or the wrong size and verify all of it, before anything is copied."""
+    try:
+        for package in microg.PACKAGES:
+            microg.archive(package, ROOT / MICROG)
+    except (OSError, ValueError, HTTPException) as error:
+        sys.exit(f"error: cannot provision microG: {error}\n"
+                 f"  Nothing was installed. Check {ROOT / MICROG} and the network, then run this again.")
+
+
+def check_prefix(prefix, writing=True):
+    """Stop before anything long happens if this prefix cannot take the install."""
+    tree = prefix / "share/bifrost/asgard"
+    if tree.is_symlink() or (tree.exists() and not (tree / MARKER).is_file()):
+        sys.exit(f"refusing to update {tree}: it is not an install made by this script")
+    if not writing:
+        return
+    for wanted in (tree, prefix / "bin"):
+        existing = wanted
+        while not existing.exists():
+            existing = existing.parent
+        # A directory of ours may be read-only (see writable()); we can still change that.
+        if not os.access(existing, os.W_OK | os.X_OK) and existing.stat().st_uid != os.geteuid():
+            sys.exit(f"error: cannot write to {existing}, so nothing can be installed under {prefix}.\n"
+                     "  Choose a prefix you own, such as PREFIX=$HOME/.local, or run as the user that owns it "
+                     "(/usr/local needs sudo).")
+
+
 def install(prefix, verify, dry_run):
-    missing = [(name, PROVISIONING.get(name, "")) for name, _ in FILES if not (ROOT / name).exists()]
-    if not missing:
-        missing = [(name, "re-run the provisioning steps in Docs/Android/ANDROID_APK.md")
-                   for name in REQUIRED if not (ROOT / name).exists()]
+    missing = missing_provisioning()
     if missing:
         print("error: this checkout is not fully provisioned for Android:", file=sys.stderr)
         for name, how in missing:
             print(f"  missing {name}" + (f"  ->  {how}" if how else ""), file=sys.stderr)
+        print("  (make provision-asgard runs every step)", file=sys.stderr)
         sys.exit(1)
+    check_prefix(prefix, writing=not dry_run)
     tree = prefix / "share/bifrost/asgard"
-    if tree.is_symlink() or (tree.exists() and not (tree / MARKER).is_file()):
-        sys.exit(f"refusing to update {tree}: it is not an install made by this script")
+    microg = microg_tool()
+    pending = microg_problems(microg)
+    if dry_run:
+        for name, (size, why) in pending.items():
+            print(f"would download microG {name} ({size / 2**20:.1f} MiB): {why}")
+    else:
+        fetch_microg(microg)
+        pending = None
     marker = tree / MARKER
     if marker.is_file() and json.loads(marker.read_text() or "{}").get("complete") is False:
         print("note: the previous run did not finish; this run completes it")
     if not dry_run:
         tree.mkdir(parents=True, exist_ok=True)
         write_marker(tree, complete=False)
-    changed, removed = sync(tree, source_plan(), verify, dry_run)
+    changed, removed = sync(tree, source_plan(pending), verify, dry_run)
     if dry_run:
         return
     try:  # only a label: absent without git or outside a checkout (an installed package's setup tree)
@@ -284,6 +381,12 @@ def install(prefix, verify, dry_run):
     wrapper = write_wrapper(prefix)
     print(f"Asgard installed in {tree}\nCommand: {wrapper}\n"
           "bifrost-emu app.apk finds it automatically (see Docs/Android/ANDROID_APK.md).")
+    try:
+        import PyQt6.QtWidgets  # noqa: F401
+    except ImportError:
+        print("note: the desktop launcher (asgard launcher) needs PyQt6, which is not installed for this Python:\n"
+              "  Scripts/Setup/install-deps.sh installs it, or pip install PyQt6.\n"
+              "  Everything else, including bifrost-emu app.apk, works without it.")
 
 
 def uninstall(prefix):
@@ -309,11 +412,15 @@ def main():
     where.add_argument("--prefix", type=Path, help="install under DIR/share/bifrost and DIR/bin")
     parser.add_argument("--dry-run", action="store_true", help="list what would change and write nothing")
     parser.add_argument("--verify", action="store_true", help="compare contents as well as size and time")
+    parser.add_argument("--check-prefix", action="store_true",
+                        help="check that this prefix can be installed to, change nothing and stop")
     parser.add_argument("--uninstall", action="store_true")
     args = parser.parse_args()
     prefix = Path("/usr/local") if args.system else (args.prefix or Path.home() / ".local").expanduser()
     try:
-        if args.uninstall:
+        if args.check_prefix:
+            check_prefix(prefix)
+        elif args.uninstall:
             uninstall(prefix)
         else:
             install(prefix, args.verify, args.dry_run)

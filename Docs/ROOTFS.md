@@ -81,6 +81,9 @@ run keeps the previous install. The `make` targets never download: run the
 script once as your user before `sudo make install-rootfs`. `DESTDIR` and
 `PREFIX` work as for `make install`. The installed base rootfs is about 70 MB.
 
+The libraries `--full` adds are optional: if the Debian mirror fails, the script shows curl's error and a warning and still
+installs the rootfs without them. Run `--full` again later to add them. Package versions come from the Debian index.
+
 ### Game libraries
 
 The rootfs and its profiles are for Linux programs; Android apps use neither, because Asgard brings its own.

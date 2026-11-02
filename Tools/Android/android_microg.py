@@ -10,6 +10,7 @@ Each APK requests android.permission.FAKE_PACKAGE_SIGNATURE and declares
 "fake-signature" meta-data; FrameworkPackages reports that certificate as
 microG's framework patches do. UIDs are reserved in android_sessions.app_id.
 """
+from http.client import HTTPException
 from pathlib import Path
 import re
 import shutil
@@ -33,11 +34,11 @@ LIBRARY = re.compile(r"[A-Za-z0-9_.+-]+\.so\Z")
 
 
 def archive(package, cache=ROOT / "build/microg"):
-    """Return the verified release APK, downloading it on first use."""
+    """Return the verified release APK, downloading it when absent or the wrong size."""
     _, name, size, sha256, _ = PACKAGES[package]
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / name
-    if not path.exists():
+    if not path.is_file() or path.stat().st_size != size:
         with tempfile.NamedTemporaryFile(dir=cache, delete=False) as stream:
             temporary = Path(stream.name)
             try:
@@ -83,3 +84,11 @@ def install(root):
                     shutil.copyfileobj(stream, output, length=1024 * 1024)
         identity[package] = sha256
     return {"version": VERSION, "packages": identity}
+
+
+if __name__ == "__main__":
+    try:
+        for package in PACKAGES:
+            print(archive(package))
+    except (OSError, ValueError, HTTPException) as error:
+        raise SystemExit(f"android-microg: {error}")

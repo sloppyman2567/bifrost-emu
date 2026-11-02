@@ -446,8 +446,57 @@ deb:
 # toolchains yourself).
 # Asgard (the Android layer) goes to $(PREFIX)/share/bifrost/asgard with a `asgard`
 # command in $(PREFIX)/bin. Run it again after updating the checkout: only the files
-# that differ are copied. The checkout must already be provisioned for Android.
-.PHONY: install-asgard uninstall-asgard
+# that differ are copied. The checkout must already be provisioned for Android, apart from
+# the microG APKs, which the installer downloads when they are missing or the wrong size.
+#
+# provision-asgard does everything from a fresh clone: about 1.5 GB of pinned downloads and
+# the builds (android-provision), then the install. Each step keeps what is already verified, so
+# it can be run again. The default PREFIX, /usr/local, needs root, and that is checked first.
+# So that root does not fetch or own the build trees, prefer `make android-provision` as your
+# user followed by `sudo make install-asgard`; or install for yourself with PREFIX=$(HOME)/.local.
+# android_framework.py builds ART only with the framework tree; the [ -f ] covers a tree left without ART.
+#
+# bootstrap is the one command for a fresh clone: the host packages (deps), the emulator, then
+# provision-asgard, all for your user under ~/.local unless you give a PREFIX. Run it as yourself:
+# deps asks for sudo itself, and only if a package is missing.
+ASGARD_TOOLS := python3 java javac keytool clang ld.lld debugfs readelf curl
+BOOTSTRAP_PREFIX = $(if $(filter file undefined,$(origin PREFIX)),$(HOME)/.local,$(PREFIX))
+.PHONY: install-asgard uninstall-asgard provision-asgard android-provision deps bootstrap
+deps:
+	Scripts/Setup/install-deps.sh
+
+bootstrap:
+	@if [ "$$(id -u)" = 0 ] && [ "$(origin PREFIX)" = file ]; then \
+		echo "error: run make bootstrap as your own user, or give a PREFIX" >&2; exit 1; \
+	fi
+	Scripts/Setup/install-asgard.py --prefix "$(DESTDIR)$(BOOTSTRAP_PREFIX)" --check-prefix
+	Scripts/Setup/install-deps.sh
+	$(MAKE) -j$$(nproc) install PREFIX="$(BOOTSTRAP_PREFIX)"
+	$(MAKE) provision-asgard PREFIX="$(BOOTSTRAP_PREFIX)"
+	@case ":$$PATH:" in *":$(BOOTSTRAP_PREFIX)/bin:"*) ;; \
+		*) echo "Add $(BOOTSTRAP_PREFIX)/bin to PATH to run bifrost-emu and asgard by name." ;; esac
+
+provision-asgard:
+	Scripts/Setup/install-asgard.py --prefix "$(DESTDIR)$(PREFIX)" --check-prefix
+	$(MAKE) android-provision
+	Scripts/Setup/install-asgard.py --prefix "$(DESTDIR)$(PREFIX)"
+
+android-provision:
+	@missing=""; for tool in $(ASGARD_TOOLS); do command -v "$$tool" >/dev/null 2>&1 || missing="$$missing $$tool"; done; \
+	if [ -n "$$missing" ]; then \
+		echo "error: missing tools:$$missing" >&2; \
+		echo "  make deps installs them" >&2; \
+		exit 1; \
+	fi
+	python3 Tools/Android/fetch-android-runtime.py
+	python3 Tools/Android/fetch-aapt2.py
+	python3 Tools/Android/fetch-android-package-tools.py
+	python3 Tools/Android/build-android-adapters.py
+	python3 Scripts/Android/android_managed.py build
+	python3 Tools/Android/android_framework.py
+	[ -f build/android-art/rootfs/bifrost-art.json ] || python3 Tools/Android/android_art.py
+	python3 Tools/Android/android_microg.py
+
 install-asgard:
 	Scripts/Setup/install-asgard.py --prefix "$(DESTDIR)$(PREFIX)"
 

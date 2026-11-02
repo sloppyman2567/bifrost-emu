@@ -24,13 +24,43 @@ require guest ART and Android framework startup.
 On Debian and Ubuntu the `bifrost-emu-asgard` package does all of the provisioning below: install it and run `asgard-setup`
 (see the README). It prints a numbered heading for each of its nine steps, and every download shows its progress:
 on a terminal one line updates in place (`Android 15 system image  [=====>   ]  33%  8.0 MiB/24.0 MiB  6.4 MiB/s  ETA 0:02`),
-and piped into a log it prints a line per ten percent. The rest of this section is the manual route from a source
+and piped into a log it prints a line per ten percent. The rest of this section is the route from a source
 checkout.
 
 Provision Python 3.12 or newer, Clang/LLD, `debugfs` from e2fsprogs and a JDK containing
 `java` and `keytool`. Building the managed launcher also needs `javac`, found through `JAVAC`, `PATH`,
 `JAVA_HOME`, then the newest JDK under `/usr/lib/jvm`, `/usr/lib64/jvm` or `/usr/java`. The signing and manifest tools are checksum-pinned AOSP
-downloads; no full Android SDK installation is required.
+downloads; no full Android SDK installation is required. `make deps` (`Scripts/Setup/install-deps.sh`) installs all of
+these with apt, dnf, zypper or pacman, and asks for `sudo` only if something is missing. It keeps a JDK you already have. Python
+comes from the distribution and `make deps` does not check its version: Debian 12's 3.11, for one, is too old. Not every
+distribution has been shown to work; see the [support matrix](../SUPPORT.md).
+
+From a fresh clone, one target does all of the provisioning and the install, with about 1.5 GB of pinned downloads:
+
+```bash
+make provision-asgard PREFIX=$HOME/.local       # for your user, no root needed
+asgard --help                                   # with ~/.local/bin on PATH
+
+make android-provision                          # or system-wide: provision as your user...
+sudo make install-asgard                        # ...then install under $(PREFIX), default /usr/local
+```
+
+`PREFIX` and `DESTDIR` work as for `make install`. The default `PREFIX`, `/usr/local`, needs root: `make
+provision-asgard` checks first that it can write to the prefix, so it fails before downloading anything rather than
+at the end. `sudo make provision-asgard` also works, but then root downloads everything and owns the checkout's build
+trees, which is why the two steps above are better. Run the target again at any time: each step keeps what it has
+already verified, and the install copies only what differs. It does not build `bifrost-emu` itself (`make`, `make install`).
+It does not install host packages either: `make deps` does (see above), including PyQt6, which only the desktop launcher
+(`asgard launcher`) needs. The install says so when PyQt6 is missing. Running apps from the command line works without it.
+`make bootstrap` runs `make deps`, builds and installs the emulator and then runs this target, under `~/.local` unless you give a `PREFIX`.
+It has not yet been confirmed end to end.
+
+A new prefix means a second install, because the installers do not look for other copies. With both `/usr/local` and `~/.local`,
+whichever `bin` comes first on `PATH` runs, and `bifrost-emu` uses the Asgard beside it. App state is separate from both, so they
+share it. To update an install that already exists, use its own prefix: for `/usr/local`, `make android-provision` and then
+`sudo make install-asgard`.
+
+It runs these steps, which can also be run by hand:
 
 ```bash
 make -j6 USE_SDL2=1 USE_SDL3=1 USE_THUNK_GL=1
@@ -66,7 +96,7 @@ from the environment first, because it would confine every Android process.
 ### Installing Asgard
 
 `Scripts/Setup/install-asgard.py` installs a self-contained Asgard so the emulator works without
-the source tree. Provision the checkout first (the commands above), then:
+the source tree. `make provision-asgard` runs it for you. To run it yourself, provision the checkout first (the commands above), then:
 
 ```bash
 ./Scripts/Setup/install-asgard.py              # for your user: ~/.local/share/bifrost/asgard, ~/.local/bin/asgard
@@ -75,6 +105,18 @@ sudo make install install-asgard               # or system-wide, under $(PREFIX)
 ./Scripts/Setup/install-asgard.py              # copy only the files that differ
 ./Scripts/Setup/install-asgard.py --uninstall  # or: sudo make uninstall-asgard
 ```
+
+Before it copies anything, it checks the checkout. The Android trees must exist, and `aapt2`, `apksigner.jar`,
+`adapters.json`, the launcher's `classes.dex` and the manifests that end a complete ART and framework build
+(`bifrost-art.json`, `bifrost-framework.json`) must be present and not empty. If not, it names each one and the command that
+creates it, and installs nothing. These checks look for the files; they do not compare a tree with its manifest. The ART and
+framework tools refuse a tree without a manifest, so the message says to remove it first.
+
+The two microG APKs pinned in `Tools/Android/android_microg.py` are checked by name and size. An install downloads any that
+are missing or the wrong size into `build/microg` and checks the SHA-256 of both, because an installed Asgard may be unable
+to write into its own tree when an app first needs them. A same-size file with the wrong hash stops the install. `--dry-run` never downloads
+and writes nothing, not even to the checkout: it lists the APKs a real run would fetch and counts them in what it would copy.
+The target directory is checked before any download too (`--check-prefix` does only that).
 
 It copies what Asgard reads at run time, about 1 GiB at the same relative paths: the scripts and
 `Tools/Android` modules, `Tools/android-tools` and `Tools/android-runtime`, `Guest/Android`

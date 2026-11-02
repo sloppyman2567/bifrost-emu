@@ -48,7 +48,7 @@ Depends: ${misc:Depends},
          lld,
          python3,
          xz-utils
-Recommends: libsdl3-0 (>= 3.2.0)
+Recommends: libsdl3-0 (>= 3.2.0), python3-pyqt6
 Description: Asgard, the Android layer of bifrost-emu: setup tooling
  Asgard runs Android apps (.apk, .apkm, .apks, .xapk) on bifrost-emu with a real
  Bionic, ART and the Android 15 framework. This package holds the tooling and

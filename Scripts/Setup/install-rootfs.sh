@@ -108,8 +108,13 @@ else
     BIFROST_ROOTFS_INSTALLER=1 ./Scripts/Setup/setup-rootfs.sh "$STAGE"
 fi
 if [ "$FULL" = 1 ]; then
-    ./Scripts/Setup/fetch-realworld-libs.sh "$STAGE"
-    ./Scripts/Setup/fetch-curl-deps.sh "$STAGE"
+    # Optional extras: a mirror problem must not cost the rootfs that was just built.
+    for fetcher in fetch-realworld-libs.sh fetch-curl-deps.sh; do
+        if ! ./Scripts/Setup/"$fetcher" "$STAGE"; then
+            echo "warning: $fetcher failed (reason above); continuing without those optional libraries." >&2
+            echo "  Run install-rootfs.sh --full again later to add them." >&2
+        fi
+    done
     python3 -I Scripts/Setup/make-ld-cache.py "$STAGE"
 fi
 if [ "$GAMES" = 1 ]; then

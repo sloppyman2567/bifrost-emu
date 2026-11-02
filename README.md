@@ -120,22 +120,36 @@ Check an installed app's recorded status yourself with
 
 ## Quick start
 
+From a fresh clone, one command does everything: it installs the host packages (apt, dnf, zypper or pacman; it asks for
+`sudo` only if some are missing), builds the emulator, then downloads and installs Asgard, all under `~/.local`:
+
 ```bash
-make                                   # build (SDL2/GL thunks auto-detected)
+git clone https://github.com/sloppyman2567/bifrost-emu && cd bifrost-emu
+make bootstrap                         # about 1.5 GB of pinned downloads; PREFIX=DIR to install elsewhere
+```
+
+This is new and not yet confirmed end to end, and `make deps` has only been shown to work on some distributions: see the
+[support matrix](Docs/SUPPORT.md). If Bifrost is already installed elsewhere, such as `/usr/local`, this makes a second copy of
+about 1.1 GB, which takes over if `~/.local/bin` comes first on your `PATH`. To update an existing install instead, see
+[the APK guide](Docs/Android/ANDROID_APK.md).
+
+To build only the emulator:
+
+```bash
+make deps                              # once: the host packages
+make -j$(nproc)                        # build (SDL2/GL thunks auto-detected)
 ./bifrost-emu hello.elf                # run a static ARM64 binary
 ./bifrost-emu -v Tests/Apps/fib.elf    # print execution stats on exit
 ./bifrost-emu Tests/Apps/toybox seq 1 10   # arguments pass through
 ```
 
-On Fedora, install the build dependencies and use the source build. On an immutable Fedora such as Bazzite, do it inside a
-[Distrobox](https://distrobox.it) container, and run the emulator there too, since it links the container's libraries:
+On an immutable Fedora such as Bazzite, do it inside a [Distrobox](https://distrobox.it) container, and run the emulator
+there too, since it links the container's libraries:
 
 ```bash
 distrobox create --name bifrost --image registry.fedoraproject.org/fedora-toolbox:44 && distrobox enter bifrost   # Bazzite only
-sudo dnf install gcc-c++ make pkgconf-pkg-config git python3 curl xz diffutils SDL3-devel sdl2-compat-devel \
-     mesa-libGL-devel mesa-libEGL-devel libffi-devel wayland-devel libX11-devel \
-     libavcodec-free-devel libavutil-free-devel libswscale-free-devel
-make -j$(nproc) USE_SDL2=1 USE_THUNK_GL=1
+make deps
+make -j$(nproc)
 ./bifrost-emu --setup-rootfs                  # once: the libraries Linux programs need
 ./bifrost-emu --setup-rootfs --games          # for Linux games; --rootfs-default games then uses them by default
 ```
@@ -186,10 +200,17 @@ Android apps install from a signed APK, APKM or APKS bundle:
 python3 Scripts/Android/android_package.py run org.example.game   # an installed package id
 ```
 
-This needs Asgard: run it from a checkout with the Android tooling provisioned
-([APK guide](Docs/Android/ANDROID_APK.md)), or install it once with
-`./Scripts/Setup/install-asgard.py` (or `sudo make install-asgard`) so it works from any
-directory. Re-running the installer after an update copies only the files that changed.
+This needs Asgard. From a fresh clone, one command downloads and builds what it needs (about 1.5 GB of pinned
+downloads) and installs it so it works from any directory:
+
+```bash
+make provision-asgard PREFIX=$HOME/.local      # for your user; add ~/.local/bin to PATH for the asgard command
+make android-provision && sudo make install-asgard   # or system-wide: /usr/local needs sudo
+```
+
+The desktop launcher (`asgard launcher`) also needs PyQt6, which `make deps` and `make bootstrap` install;
+`bifrost-emu app.apk` works without it. Run the command again after an update: only the files that changed are copied. `./Scripts/Setup/install-asgard.py` is the
+install step alone, for a checkout that is already provisioned; the [APK guide](Docs/Android/ANDROID_APK.md) has the details.
 
 `--guest-ld` (experimental, not the default) runs dynamic programs under the rootfs's own `ld.so`, as a kernel exec
 would, instead of the built-in linker. It needs the `ld.so.cache` that the rootfs setup writes. Thunked libraries (GL,
@@ -308,8 +329,12 @@ deeper. Host forwarding and input are described in
 | FFmpeg libavcodec/libavutil/libswscale development files | Android host media decoding (`USE_MEDIA=1`, default) |
 | AArch64 cross toolchain (`./Tools/Fetch/fetch-musl-toolchain.sh`) | Building guest test programs |
 
+`make deps` installs all of these except the cross toolchain, using apt, dnf, zypper or pacman
+([what has been checked](Docs/SUPPORT.md)).
+
 | Command | Builds |
 |---|---|
+| `make bootstrap` | Host packages, the emulator and Asgard, installed under `~/.local` or `PREFIX` |
 | `make` | Default; auto-detects SDL2 and enables host GL/EGL thunking |
 | `make USE_SDL2=1 USE_SDL3=1 USE_THUNK_GL=1` | Android SDL3 windows plus guest SDL2/GL thunks |
 | `make USE_SDL2=0 USE_SDL3=0` | Headless build |

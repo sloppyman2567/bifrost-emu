@@ -19,7 +19,7 @@
 #   ./Scripts/Setup/setup-rootfs-all.sh --help
 #
 # The script is idempotent: re-running it refreshes everything.
-# Each download is bounded by a 90-second timeout (fail-fast).
+# A library download is bounded by a 90-second timeout (fail-fast); see debian-arm64-index.sh.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
