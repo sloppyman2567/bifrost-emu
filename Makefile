@@ -694,6 +694,12 @@ test-rootfs-discovery:
 	$(CXX) $(CXXFLAGS) Tests/Host/rootfs_discovery.cpp Source/System/Loader/RootfsDiscovery.cpp -o $(OBJDIR)/rootfs_discovery $(LDFLAGS)
 	./$(OBJDIR)/rootfs_discovery
 
+.PHONY: test-audio-declick
+test-audio-declick:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Host/audio_declick.cpp -o $(OBJDIR)/audio_declick $(LDFLAGS)
+	./$(OBJDIR)/audio_declick
+
 .PHONY: test-audio-frame-counters
 test-audio-frame-counters:
 	@mkdir -p $(OBJDIR)

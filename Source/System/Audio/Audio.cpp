@@ -447,20 +447,20 @@ void Audio::mixer_callback_(void* userdata, uint8_t* stream, int len) {
     std::lock_guard<std::mutex> lock(self->mu_);
     self->mix_.assign(frames_needed * dch, 0.0f);
     std::vector<float>& mix = self->mix_;
+    const size_t fade = std::max<size_t>(1, self->sample_rate_ * kDeclickMillis / 1000);
     for (auto& [id, s] : self->streams_) {
         (void)id;
-        if (s.paused) continue;
         // Stream rings hold DEVICE-channel interleaved float frames
         // (convert_to_f32_ expands at push time).
         const size_t avail = s.tail - s.head;
-        const size_t n = std::min(avail, frames_needed);
+        const size_t n = s.paused ? 0 : std::min(avail, frames_needed);
         const size_t mask = s.cap_frames * dch - 1;
         const float* rp = s.ring.data();
-        for (size_t f = 0; f < n; f++) {
-            const size_t rb = ((s.head + f) * dch) & mask;
-            for (uint8_t c = 0; c < dch; c++)
-                mix[f * dch + c] += rp[rb + c];
-        }
+        const size_t head = s.head;
+        s.declick.mix(mix.data(), frames_needed, n, dch, fade, [&](size_t f, size_t c) {
+            return rp[(((head + f) * dch) & mask) + c];
+        });
+        if (s.paused) continue;
         if (stats && n < avail) { /* partial consume */ }
         if (stats && stat_tick % 46 == 0)
             fprintf(stderr, "[mixer] st=%d paused=%d queued=%llums fed=%llums cap=%llums\n",

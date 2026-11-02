@@ -155,6 +155,9 @@ arbitrary APK compatibility.
   logging and a defined permissions model.
 - Add the required Binder/service contracts, properties, lifecycle and
   resource access incrementally. Report unsupported services explicitly.
+- Low priority, not a blocker: apps see UTC, not the host's timezone, because nothing sets `persist.sys.timezone` or `TZ` in the
+  guest. Local times inside an app are off by the host's UTC offset. This is not treated as a problem today. A fix would pass the
+  host's zone as that property on each launch, since app roots are cached, and keep UTC if the zone is not in the guest's tzdata.
 
 Acceptance: a Bionic-linked native test, a packaged NativeActivity sample
 and a selected Android game launch through the supported Android profile,
@@ -625,13 +628,16 @@ Status on November 1, 2026:
 
 Open:
 
-- Run the strict suite and `make verify` on an AVX-512 host. The first will be a Zen 5 CPU with an RDNA 4 GPU on CachyOS. Neither
-  has been run. CachyOS may install packages built for that CPU, so host libraries could use AVX-512 themselves.
-- Check Android games on RDNA 4: GPU work so far has been on one RDNA 3 card.
+- Run the strict suite and `make verify` on an AVX-512 host. The first is a Ryzen 5 9600X (Zen 5) on CachyOS. Neither has been run.
+  CachyOS may install packages built for that CPU, so host libraries could use AVX-512 themselves.
+- Check more Android games on RDNA 4. GPU work before this was on one RDNA 3 card (Navi 33). On November 1, on the 9600X with an
+  RX 9060 XT (Navi 44, 16 GB; radeonsi, Linux 7.2.10), Subway Surfers finished a run at a steady 60 FPS and the desktop library
+  opened (user's report, with a screenshot). That is one game on one machine, with no long session yet.
 - Find out how often the fork hang reached real apps (an SDK calling `Runtime.exec` from a busy game). It was only forced by a
   stress test.
 - Re-test the Ubuntu VM's Hungry Shark World black screen: the libGL and thread ctype fixes may bear on it, unconfirmed.
-- Fedora is built and unit-tested in a chroot only: run a game on real Bazzite in Distrobox. Debian, Alpine and openSUSE stay untested.
+- Fedora is built and unit-tested in a chroot only: run a game on real Bazzite in Distrobox. Debian has had `make deps` and a compile in containers only, and `make deps` failed in an openSUSE container
+  ([details](SUPPORT.md)). Alpine stays untested.
 - A dynamic Linux game on the default rootfs can crash at address 0 instead of explaining itself. With no guest libopenal the host's is
   thunked, but only 29 symbols: dhewm3 imports eight more (such as `alcGetProcAddress`, `alGetSourcei`), which resolve to null. The `games` profile
   works, and users choose it with `--rootfs-default games`; the rootfs is not picked automatically. Stop naming what is missing rather than

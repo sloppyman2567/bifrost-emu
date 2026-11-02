@@ -2523,8 +2523,10 @@ on a stereo stream so it can be panned. Destroy from a player's own callback is
 deferred until the callback returns. Not implemented: decoding sources
 (URI, fd, Android buffer queue), audio recording, LED/vibra/MIDI/3D/metadata
 objects, environmental reverb and other effects, routing proxies, and
-`BufferQueue::Clear`/Stop flushing audio already queued in the host stream
-(up to about three callbacks). `test_android_bionic.sh` runs
+`BufferQueue::Clear` flushing audio already queued in the host stream
+(up to about three callbacks). Stop does not play that audio out as Android does:
+it freezes in the paused stream and is dropped if the player restarts, so a
+restart never replays it. `test_android_bionic.sh` runs
 `Tests/Unit/android_opensles_player.c` in all three engine modes.
 
 SpongeBob's FMOD now opens its AAudio stream and the callback thread feeds

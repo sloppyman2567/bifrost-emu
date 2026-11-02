@@ -16,6 +16,7 @@
 //   3. Headless — bytes_pushed() counter + optional WAV dump; used by
 //      automated tests.
 #pragma once
+#include "System/Audio/StreamDeclick.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -115,7 +116,10 @@ private:
         uint64_t frames_written = 0, frames_read = 0;
         struct FrameBatch { uint64_t input, output, consumed = 0, credited = 0; };
         std::deque<FrameBatch> frame_batches;
+        StreamDeclick declick;          // mixer only, under mu_
     };
+    // Long enough that a stream dropping out is not heard as a pop, too short to hear as a fade.
+    static constexpr uint32_t kDeclickMillis = 3;
     // Removes n frames the output has taken from a stream, crediting them to its read counter.
     void consume_frames_locked_(Stream& s, size_t n);
     // With no host device nothing pulls the streams: drain them at the device rate, as a silent device would.

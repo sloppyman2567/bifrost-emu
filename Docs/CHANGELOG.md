@@ -10,6 +10,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
+### No more pops when a game restarts a sound (2026-11-01)
+
+- **Battle Cats' attack sound popped** when attacks came quickly, though one attack alone was clean. The game reuses a few OpenSL
+  players with stop and start, and a recording showed jumps on the mixer's 1024-frame chunks, with hit sounds breaking off partway.
+  A stream now fades over 3 ms when it leaves or rejoins the mix (`StreamDeclick.hpp`), whether it was paused, cleared or starved,
+  and an AAudio callback stream restarted after a stop drops the old audio it had queued. The user reports that the pop is gone in
+  the game. The fade is in the shared mixer, so every host audio stream gets it.
+
 ### Provisioning Asgard from a clone (2026-11-01)
 
 - **`make bootstrap`** is the one command from a fresh clone to a working install: host packages, the emulator, then Asgard, under

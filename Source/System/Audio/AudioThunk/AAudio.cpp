@@ -278,6 +278,11 @@ std::optional<int64_t> AudioDispatch::aaudio() {
             tr(-895); return -895;  // released: CLOSING
         }
         if (it != I.aa_streams_.end()) {
+            // Stop means what was buffered is finished, so a data-callback stream
+            // restarted after a stop must not play the old audio before its new audio.
+            // (A pause keeps it; a stream using write may prefill while stopped.)
+            if (it->second.aa_state == 10 && it->second.cb_fn && it->second.engine_stream && I.engine)
+                I.engine->stream_clear(it->second.engine_stream);
             it->second.paused = false;
             it->second.aa_state = 4;
             if (it->second.engine_stream && I.engine)
