@@ -128,6 +128,9 @@ git clone https://github.com/sloppyman2567/bifrost-emu && cd bifrost-emu
 make bootstrap                         # about 1.5 GB of pinned downloads; PREFIX=DIR to install elsewhere
 ```
 
+`make bootstrap` and `make deps` need `make`, and bootstrap also needs Python. On a minimal system without them, run
+`Scripts/Setup/install-deps.sh` first: it needs only bash and installs both.
+
 This is new and not yet confirmed end to end, and `make deps` has only been shown to work on some distributions: see the
 [support matrix](Docs/SUPPORT.md). If Bifrost is already installed elsewhere, such as `/usr/local`, this makes a second copy of
 about 1.1 GB, which takes over if `~/.local/bin` comes first on your `PATH`. To update an existing install instead, see
