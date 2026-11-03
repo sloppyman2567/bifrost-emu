@@ -522,6 +522,16 @@ inline IRInst IRInst::make_aes(uint16_t dest, uint16_t src1, uint16_t src2,
 inline AesParams IRInst::aes_params() const {
     return AesParams{static_cast<uint8_t>(imm)};
 }
+inline IRInst IRInst::make_memory_barrier(const BarrierParams& p, uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = IROp::MEMORY_BARRIER;
+    inst.imm = static_cast<uint64_t>(p.kind);
+    inst.arm_pc = arm_pc;
+    return inst;
+}
+inline BarrierParams IRInst::barrier_params() const {
+    return BarrierParams{static_cast<BarrierKind>(imm)};
+}
 inline IRInst IRInst::make_crc32(uint16_t dest, uint16_t seed, uint16_t data,
                                 const Crc32Params& p, uint64_t arm_pc) {
     IRInst inst{};

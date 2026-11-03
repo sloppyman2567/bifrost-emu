@@ -386,6 +386,11 @@ public:
     // from here rather than from a frame slot: the 32 KiB chain-skip frame put that
     // slot a page away from the rest of each native call's stack.
     void* jit_emu = nullptr;
+    // Host-only: the word a full guest barrier (DMB) locks. A locked
+    // read-modify-write orders every earlier load and store before every
+    // later one, as MFENCE does for write-back memory, and costs much less.
+    // Its value means nothing; only this thread touches it.
+    uint64_t jit_fence_word = 0;
     // Host-only Tier-2 observations. Generated hot completions deposit one
     // credit using a flag-neutral store; cold exits consume it in C++.
     // Slots are CPU-local. Collisions can only delay retirement, not create

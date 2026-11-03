@@ -280,9 +280,20 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             emit_byte(0xC6); emit_modrm_disp(0, CPU_REG, offsetof(CPU, excl_tag_valid)); emit_byte(0);
             return false;
         case IROp::MEMORY_BARRIER:
-            // x86 TSO still permits a younger load to bypass an older store.
-            // MFENCE orders both without touching live GPRs, vectors or NZCV.
-            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0);
+            // x86 TSO never reorders load/load, load/store or store/store, so
+            // DMB LD and DMB ST need no host instruction; the IR op still keeps
+            // the optimizer from moving guest accesses across it. Only a younger
+            // load passing an older store needs a fence. A locked read-modify-write
+            // orders all loads and stores (Intel SDM: reads and writes are not
+            // reordered with locked instructions) like MFENCE does for the
+            // write-back memory guests see, at a quarter of the cost here; NOT
+            // changes no flags, so lazy NZCV in RFLAGS survives. Linux's smp_mb()
+            // is the same idea (lock addl $0,-4(%rsp)).
+            if (inst.barrier_params().kind != BarrierKind::All) return false;
+            emit_byte(0xF0);                                            // lock not qword [cpu.jit_fence_word]
+            emit_byte(rex(true, false, false, CPU_REG >= 8));
+            emit_byte(0xF7);
+            emit_modrm_disp(2, CPU_REG, offsetof(CPU, jit_fence_word));
             return false;
         case IROp::ATOMIC: {
             // Native LSE atomics via x86 lock-prefixed instructions.

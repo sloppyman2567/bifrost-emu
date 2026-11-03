@@ -27,6 +27,13 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                     ok = false;
                 }
                 break;
+            case IROp::MEMORY_BARRIER:
+                if (inst.imm < 1 || inst.imm > 3) {
+                    std::fprintf(out, "[ir-validate] invalid MEMORY_BARRIER kind %lu\n",
+                                 (unsigned long)inst.imm);
+                    ok = false;
+                }
+                break;
             case IROp::SIMD_NATIVE_STRUCT: {
                 auto p=inst.native_structure_params();
                 if ((p.size!=1 && p.size!=2 && p.size!=4 && p.size!=8) ||

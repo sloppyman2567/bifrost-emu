@@ -125,6 +125,43 @@ static int test_barrier(const char* name, void* (*worker)(void*)) {
     return forbidden == 0;
 }
 
+// Message passing with the load-only/store-only barriers: the writer stores
+// data, DMB ISHST, then the flag; a reader that sees the flag after DMB ISHLD
+// must see data at least as new. The JIT emits no host fence for these (x86
+// keeps load/load and store/store order), so this checks that translation
+// still never moves a guest access across the barrier.
+#define MP_ITERS 2000000u
+static volatile unsigned mp_data __attribute__((aligned(64)));
+static volatile unsigned mp_flag __attribute__((aligned(64)));
+
+static void* mp_writer(void* arg) {
+    (void)arg;
+    for (unsigned i = 1; i <= MP_ITERS; i++)
+        __asm__ volatile("str %w[i], [%[data]]\n\tdmb ishst\n\tstr %w[i], [%[flag]]"
+            : : [i] "r"(i), [data] "r"(&mp_data), [flag] "r"(&mp_flag) : "memory");
+    return NULL;
+}
+
+static int test_message_passing(void) {
+    mp_data = mp_flag = 0;
+    pthread_t writer;
+    if (pthread_create(&writer, NULL, mp_writer, NULL) != 0) {
+        fprintf(stderr, "message passing: pthread_create failed\n");
+        return 0;
+    }
+    unsigned forbidden = 0, flag, data;
+    do {
+        __asm__ volatile("ldr %w[flag], [%[f]]\n\tdmb ishld\n\tldr %w[data], [%[d]]"
+            : [flag] "=&r"(flag), [data] "=&r"(data)
+            : [f] "r"(&mp_flag), [d] "r"(&mp_data) : "memory");
+        if (data < flag) forbidden++;
+    } while (flag != MP_ITERS);
+    pthread_join(writer, NULL);
+    printf("DMB ISHST/ISHLD message passing: %u forbidden outcomes  %s\n",
+           forbidden, forbidden == 0 ? "OK" : "FAIL");
+    return forbidden == 0;
+}
+
 static int test_barrier_state(void) {
     uint64_t flags, value = UINT64_C(0x123456789abcdef0);
     // Also cover the load-only/store-only options and outer/non-shareable
@@ -268,6 +305,7 @@ int main(void) {
     all_ok &= test_barrier("DMB SY", dmb_sy_worker);
     all_ok &= test_barrier("DSB ISH", dsb_ish_worker);
     all_ok &= test_barrier("DSB SY", dsb_sy_worker);
+    all_ok &= test_message_passing();
     all_ok &= test_barrier_state();
     all_ok &= test_mixed_exclusive();
     all_ok &= test_acquire_loads();

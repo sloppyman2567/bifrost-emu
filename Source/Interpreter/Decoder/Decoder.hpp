@@ -162,6 +162,14 @@ constexpr bool is_data_memory_barrier(uint32_t raw) {
     return (raw & 0xFFFFF0FFu) == 0xD50330BFu ||
            (raw & 0xFFFFF0FFu) == 0xD503309Fu;
 }
+// The access types a DMB orders, from CRm<1:0> as in Arm's DMB pseudocode:
+// 1 = loads (LD), 2 = stores (ST), 3 = all; 00 also means all. DSB is
+// treated as ordering all accesses whatever its option.
+constexpr unsigned data_memory_barrier_types(uint32_t raw) {
+    if ((raw & 0xFFFFF0FFu) != 0xD50330BFu) return 3;
+    const unsigned types = (raw >> 8) & 3;
+    return types == 0 ? 3 : types;
+}
 // ── Decoded instruction ─────────────────────────────────────────────────
 // All fields extracted from a 32-bit ARM64 instruction word. The decoder
 // fills these; the interpreter reads them. The interpreter NEVER does bit

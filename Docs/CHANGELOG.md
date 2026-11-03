@@ -10,6 +10,17 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
+### Cheaper guest memory barriers (2026-11-03)
+
+- **A full barrier cost an MFENCE, 16 ns on a Ryzen 5 9600X.** In a Subway Surfers profile one `dmb ish` in Unity's job queue
+  took about 8% of all translated-code time, and MFENCE about 9% overall. A full DMB (and every DSB) is now
+  `lock not` on a per-CPU word, which orders loads and stores the same way for the write-back memory guests use, without
+  touching flags: 4.05 ns in a guest store/barrier/load loop. `DMB ISHLD`/`ISHST` and other load- or store-only barriers emit
+  nothing, as x86 never reorders those accesses (0.55 ns, from 17). The barrier stays in the IR, so translation still moves
+  nothing across it ([details](JIT.md#guest-memory-barriers)).
+- `test_atomic_stress` adds an ISHST/ISHLD message-passing check; its store-buffer checks fail 16 to 29% of rounds when full
+  barriers emit nothing. A Subway Surfers profile with the change has not been taken yet, so the in-game gain is unmeasured.
+
 ### Android Keystore for apps (2026-11-02)
 
 - **PolyTrack could not save or load anything.** Its Capacitor SQLite plugin encrypts by default and asks `AndroidKeyStore` for an

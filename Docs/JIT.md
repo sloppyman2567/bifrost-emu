@@ -439,22 +439,48 @@ return one complete value.
 
 DMB and DSB decode through `HINT`, but must retain their memory effects.
 `is_data_memory_barrier()` recognizes their encodings including the domain/type
-option. Translation emits the side-effecting `MEMORY_BARRIER` IR operation;
-the JIT emits MFENCE without disturbing live GPRs, vectors or NZCV. The
-interpreter executes a sequentially consistent host fence. x86 TSO alone is
-insufficient: it permits a younger load to bypass an older store.
+option, and `data_memory_barrier_types()` reads the type from CRm<1:0> as Arm's
+DMB pseudocode does (01 loads, 10 stores, 11 and 00 all). Translation emits the
+side-effecting `MEMORY_BARRIER` IR operation with that kind
+(`BarrierParams`); it stays in the IR for every kind, so no pass moves a guest
+access across it. The interpreter executes a sequentially consistent host fence
+for every barrier.
 
-All supported DMB/DSB options conservatively use this full fence. This covers
-ordering of ordinary guest memory; it does not establish device-memory or
-privileged cache/TLB semantics. ISB and the remaining hints retain their existing
+What the JIT emits (2026-11-03):
+
+- **DMB LD and DMB ST** (`ishld`, `ishst`, any domain): nothing. x86 TSO never
+  reorders load/load, load/store or store/store for write-back memory, which is
+  all guest memory is (GL buffer maps are bounce copies, gralloc buffers memfd,
+  and generated code issues no non-temporal stores). Linux's x86 `smp_rmb()` and
+  `smp_wmb()` are compiler barriers for the same reason.
+- **Full DMB and every DSB**: `lock not qword [cpu.jit_fence_word]`. TSO still lets
+  a younger load pass an older store; a locked instruction orders both (Intel SDM:
+  reads and writes are not reordered with locked instructions), as Linux's x86
+  `smp_mb()` does with `lock addl $0,-4(%rsp)`. NOT changes no flags, so lazy NZCV
+  survives, and the word is per CPU. MFENCE, used before, additionally orders
+  non-temporal and write-combining accesses, which guests cannot make here.
+
+On a Ryzen 5 9600X a guest loop of store, barrier, load went from 16.8 ns to 4.05 ns
+per iteration for `dmb ish` and from 17 ns to 0.55 ns for `dmb ishld`/`ishst`
+(installed build against this one, one core). In a Subway Surfers menu profile
+one `dmb ish` in Unity's job queue (`libunity.so+0x57d3fc`) had cost about 8% of
+all translated-code time, and MFENCE about 9% overall; that profile has not yet been
+repeated with this change.
+
+This covers ordering of ordinary guest memory; it does not establish device-memory
+or privileged cache/TLB semantics. ISB and the remaining hints retain their existing
 behavior. References: Arm [DMB](https://www.scs.stanford.edu/~zyedidia/arm64/dmb.html)
-and [DSB](https://www.scs.stanford.edu/~zyedidia/arm64/dsb.html).
+and [DSB](https://www.scs.stanford.edu/~zyedidia/arm64/dsb.html), Linux
+[arch/x86/include/asm/barrier.h](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/barrier.h).
 
 `test_atomic_stress` includes two-worker store-buffer tests for DMB/DSB ISH/SY,
-100,000 rounds each, plus GPR/NZCV preservation across additional options.
-An otherwise identical binary with the fences disabled observed forbidden
-both-zero results in all four cases. The repaired JIT, interpreter and QEMU
-observed zero; these bounded tests do not prove every multithreaded workload.
+100,000 rounds each, a DMB ISHST/ISHLD message-passing test (2,000,000 values),
+and GPR/NZCV preservation across additional options. With full barriers emitting
+nothing the store-buffer tests saw 16 to 29% forbidden outcomes; with `lock not`, and
+in the interpreter, zero. On x86 the message-passing test can only fail if
+translation reorders guest accesses, so it guards the JIT rather than the host.
+QEMU was not available for the 2026-11-03 change. These bounded tests do not prove
+every multithreaded workload.
 
 ### Indexed memory accesses and fault retry
 

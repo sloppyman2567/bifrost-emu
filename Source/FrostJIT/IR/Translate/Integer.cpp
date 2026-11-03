@@ -70,8 +70,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
         case InstClass::HINT:
-            block.insts.push_back(IRInst::make(is_data_memory_barrier(d.raw)
-                    ? IROp::MEMORY_BARRIER : IROp::NOP));
+            if (is_data_memory_barrier(d.raw))
+                block.insts.push_back(IRInst::make_memory_barrier(BarrierParams{
+                        static_cast<BarrierKind>(data_memory_barrier_types(d.raw))}, cur_pc));
+            else
+                block.insts.push_back(IRInst::make(IROp::NOP));
             return false;
         // ── MOVZ / MOVN / MOVK ───────────────────────────────────────
         case InstClass::MOVZ: {

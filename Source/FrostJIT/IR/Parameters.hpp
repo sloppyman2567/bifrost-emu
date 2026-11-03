@@ -158,6 +158,13 @@ struct ClzParams {
 struct AesParams {
     uint8_t subop = 0;  // 0..3=AES,4/5=PMULL{2}.1q,6/7=PMULL{2}.8h (imm)
 };
+// DMB/DSB: which accesses the guest barrier orders (imm). Arm's barrier
+// types (DMB pseudocode, CRm<1:0>): LD orders earlier loads against later
+// loads and stores, ST earlier stores against later stores, ALL everything.
+enum class BarrierKind : uint8_t { Loads = 1, Stores = 2, All = 3 };
+struct BarrierParams {
+    BarrierKind kind = BarrierKind::All;
+};
 struct Crc32Params {
     uint8_t bytes = 1;  // 1/2/4/8 input bytes (width); result is always 32 bits
     bool castagnoli = false;  // CRC32C rather than IEEE CRC32 (imm)

@@ -580,6 +580,8 @@ struct IRInst {
     static IRInst make_aes(uint16_t dest, uint16_t src1, uint16_t src2,
                            const struct AesParams& p, uint64_t arm_pc);
     struct AesParams aes_params() const;
+    static IRInst make_memory_barrier(const struct BarrierParams& p, uint64_t arm_pc);
+    struct BarrierParams barrier_params() const;
     static IRInst make_crc32(uint16_t dest, uint16_t seed, uint16_t data,
                             const struct Crc32Params& p, uint64_t arm_pc);
     struct Crc32Params crc32_params() const;
