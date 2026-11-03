@@ -56,7 +56,8 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkTelephony.java", "Framework/FrameworkPackageChecksums.java",
                     "Framework/FrameworkAppWidgets.java", "Framework/FrameworkRoles.java", "Framework/FrameworkShortcuts.java", "Framework/FrameworkCursors.java",
                     "Framework/FrameworkUsageStats.java", "Framework/FrameworkNetworkStats.java", "Framework/FrameworkMediaMetrics.java",
-                    "Framework/FrameworkLocales.java", "Framework/FrameworkLegacyPermissions.java", "Framework/FrameworkAuth.java", "Framework/FrameworkSharedLibraries.java")
+                    "Framework/FrameworkLocales.java", "Framework/FrameworkLegacyPermissions.java", "Framework/FrameworkAuth.java", "Framework/FrameworkSharedLibraries.java",
+                    "Framework/FrameworkKeystore.java")
 
 
 def add_trace_arguments(parser):
@@ -943,7 +944,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         # Guest writes are live in this root, including if the host crashes.
         # Copy them into a replacement root before exchanging runtimes.
         data_source = root if root.is_dir() else installed_root
-        for relative in ("data/user", "data/user_de", "data/misc/profiles", "storage"):
+        for relative in ("data/user", "data/user_de", "data/misc/profiles", "data/misc/keystore", "storage"):
             if data_source is None: break
             source = data_source / relative
             target = fresh / relative

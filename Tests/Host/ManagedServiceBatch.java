@@ -1492,6 +1492,78 @@ public final class ManagedServiceBatch {
         } catch (SecurityException refused) { check(!permitted && refused.getMessage().contains("USE_BIOMETRIC"), "canAuthenticate: " + refused); }
         System.out.println("MANAGED_MEDIA_LOCALE_LEGACY_AUTH_OK permitted=" + permitted);
     }
+    // The framework's AndroidKeyStore provider over FrameworkKeystore (keystore2 + software KeyMint).
+    private static void keystore() throws Exception {
+        java.security.KeyStore store = java.security.KeyStore.getInstance("AndroidKeyStore");
+        store.load(null);
+        for (String alias : new String[] {"batch-aes", "batch-encrypt-only", "batch-import", "batch-hmac"})
+            store.deleteEntry(alias);
+        javax.crypto.KeyGenerator generator = javax.crypto.KeyGenerator.getInstance("AES", "AndroidKeyStore");
+        generator.init(new android.security.keystore.KeyGenParameterSpec.Builder("batch-aes",
+                android.security.keystore.KeyProperties.PURPOSE_ENCRYPT | android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes("GCM").setEncryptionPaddings("NoPadding").setKeySize(256).build());
+        javax.crypto.SecretKey key = generator.generateKey();
+        byte[] plain = "bifrost keystore".getBytes(java.nio.charset.StandardCharsets.UTF_8), aad = {1, 2, 3};
+        javax.crypto.Cipher encrypt = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+        encrypt.init(javax.crypto.Cipher.ENCRYPT_MODE, key);
+        encrypt.updateAAD(aad);
+        byte[] sealed = encrypt.doFinal(plain), iv = encrypt.getIV();
+        check(iv != null && iv.length == 12 && sealed.length == plain.length + 16, "GCM nonce or tag size");
+        javax.crypto.Cipher decrypt = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+        decrypt.init(javax.crypto.Cipher.DECRYPT_MODE, key, new javax.crypto.spec.GCMParameterSpec(128, iv));
+        decrypt.updateAAD(aad);
+        check(Arrays.equals(decrypt.doFinal(sealed), plain), "GCM round trip");
+        sealed[0] ^= 1;
+        decrypt.init(javax.crypto.Cipher.DECRYPT_MODE, key, new javax.crypto.spec.GCMParameterSpec(128, iv));
+        decrypt.updateAAD(aad);
+        try { decrypt.doFinal(sealed); check(false, "tampered GCM ciphertext accepted"); }
+        catch (javax.crypto.AEADBadTagException expected) { checks++; }
+        android.security.keystore.KeyInfo info = (android.security.keystore.KeyInfo) javax.crypto.SecretKeyFactory
+                .getInstance("AES", "AndroidKeyStore").getKeySpec(key, android.security.keystore.KeyInfo.class);
+        check(info.getKeySize() == 256 && !info.isInsideSecureHardware()
+                && info.getOrigin() == android.security.keystore.KeyProperties.ORIGIN_GENERATED, "KeyInfo");
+        // KeyMint INCOMPATIBLE_PURPOSE.
+        generator.init(new android.security.keystore.KeyGenParameterSpec.Builder("batch-encrypt-only",
+                android.security.keystore.KeyProperties.PURPOSE_ENCRYPT)
+                .setBlockModes("GCM").setEncryptionPaddings("NoPadding").build());
+        javax.crypto.SecretKey encryptOnly = generator.generateKey();
+        try {
+            decrypt.init(javax.crypto.Cipher.DECRYPT_MODE, encryptOnly, new javax.crypto.spec.GCMParameterSpec(128, iv));
+            check(false, "decryption with an encrypt-only key");
+        } catch (java.security.InvalidKeyException expected) { checks++; }
+        // Imported material gives the same results as the software implementation.
+        byte[] material = new byte[16];
+        for (int i = 0; i < material.length; i++) material[i] = (byte) i;
+        javax.crypto.spec.SecretKeySpec raw = new javax.crypto.spec.SecretKeySpec(material, "AES");
+        store.setEntry("batch-import", new java.security.KeyStore.SecretKeyEntry(raw),
+                new android.security.keystore.KeyProtection.Builder(android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+                        .setBlockModes("CBC").setEncryptionPaddings("PKCS7Padding").build());
+        byte[] cbcIv = new byte[16];
+        javax.crypto.Cipher software = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding", "AndroidOpenSSL");
+        software.init(javax.crypto.Cipher.ENCRYPT_MODE, raw, new javax.crypto.spec.IvParameterSpec(cbcIv));
+        byte[] cbc = software.doFinal(plain);
+        decrypt = javax.crypto.Cipher.getInstance("AES/CBC/PKCS7Padding");
+        decrypt.init(javax.crypto.Cipher.DECRYPT_MODE, store.getKey("batch-import", null),
+                new javax.crypto.spec.IvParameterSpec(cbcIv));
+        check(Arrays.equals(decrypt.doFinal(cbc), plain), "imported AES-CBC key");
+        javax.crypto.spec.SecretKeySpec hmacRaw = new javax.crypto.spec.SecretKeySpec(material, "HmacSHA256");
+        store.setEntry("batch-hmac", new java.security.KeyStore.SecretKeyEntry(hmacRaw),
+                new android.security.keystore.KeyProtection.Builder(android.security.keystore.KeyProperties.PURPOSE_SIGN).build());
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(store.getKey("batch-hmac", null));
+        javax.crypto.Mac reference = javax.crypto.Mac.getInstance("HmacSHA256", "AndroidOpenSSL");
+        reference.init(hmacRaw);
+        check(Arrays.equals(mac.doFinal(plain), reference.doFinal(plain)), "imported HMAC key");
+        // A fresh provider instance reads the persisted entries; deletion removes them.
+        java.security.KeyStore reloaded = java.security.KeyStore.getInstance("AndroidKeyStore");
+        reloaded.load(null);
+        List<String> aliases = java.util.Collections.list(reloaded.aliases());
+        check(aliases.equals(Arrays.asList("batch-aes", "batch-encrypt-only", "batch-hmac", "batch-import"))
+                && reloaded.size() == 4 && reloaded.getKey("batch-aes", null) != null, "persisted aliases " + aliases);
+        for (String alias : aliases) reloaded.deleteEntry(alias);
+        check(!reloaded.containsAlias("batch-aes") && reloaded.size() == 0, "keystore deletion");
+        System.out.println("MANAGED_KEYSTORE_OK");
+    }
     private static void vibratorAndKeyguard(Context context) throws Exception {
         android.os.Vibrator vibrator = context.getSystemService(android.os.Vibrator.class);
         check(vibrator != null && !vibrator.hasVibrator(), "vibrator invented");
@@ -1750,6 +1822,7 @@ public final class ManagedServiceBatch {
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context); roles(context); shortcuts(context);
         battery(context); vibratorAndKeyguard(context); usageAndNetworkStats(context); mediaLocaleLegacyAuth(context); batteryFromSupplies(context); clipboard(context, packages);
         alarmsAccountsLocation(context);
+        keystore();
         settings(context, system, packages, pkg);
         System.out.println("MANAGED_SETTINGS_OK");
         pendingIntents(context, thread, loaded, packages);

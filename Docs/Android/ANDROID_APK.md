@@ -207,7 +207,8 @@ from the library.
 - `clear-data` empties `data/user/0/PKG`, `data/user_de/0/PKG`, both ART
   profile directories and `storage/emulated/0/Android/{data,media}/PKG` in the
   install root and the managed root, then recreates the empty directories a
-  first start expects. It keeps the installed code, OBBs, other shared storage,
+  first start expects. It also deletes the app's Android Keystore keys
+  (`data/misc/keystore/bifrost-<uid>.json`). It keeps the installed code, OBBs, other shared storage,
   per-root device settings and accounts, and the `data-backup-*` folders.
   Symlinks inside the data are removed, never followed, and a symlinked parent
   directory aborts the command.

@@ -1892,7 +1892,13 @@ class AppRemovalTests(unittest.TestCase):
         return self.state / (name or self.NAME)
 
     def test_clear_data_resets_saves_but_keeps_the_install_and_shared_files(self):
+        keystore = self.app() / "managed/rootfs/data/misc/keystore"
+        keystore.mkdir(parents=True)
+        for name in ("bifrost-10000.json", "bifrost-10000.json.bak", "bifrost-10000.json.lock", "bifrost-19998.json"):
+            (keystore / name).write_text("{}")
         package.clear_data(self.state, self.NAME)
+        # pm clear deletes the app's Keystore keys; another uid's keys in the root (microG) stay.
+        self.assertEqual(sorted(x.name for x in keystore.iterdir()), ["bifrost-19998.json"])
         for rootfs in ("rootfs", "managed/rootfs"):
             root = self.app() / rootfs
             for relative in package.APP_DATA:

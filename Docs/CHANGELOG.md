@@ -10,6 +10,19 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
+### Android Keystore for apps (2026-11-02)
+
+- **PolyTrack could not save or load anything.** Its Capacitor SQLite plugin encrypts by default and asks `AndroidKeyStore` for an
+  AES master key. That provider is installed by Zygote, which does not run here, so the plugin failed to load with
+  `AndroidKeyStore not found` and every database call failed. Each managed process now installs the provider and serves keystore2
+  (`FrameworkKeystore`) with a software KeyMint for AES and HMAC keys. Its checks and errors follow the AOSP reference KeyMint
+  ([details and limits](Android/ANDROID_RUNTIME.md#android-keystore-2026-11-02)). PolyTrack now creates its key and encrypted
+  preferences, opens its database and reaches its menu, where a track starts; its second start reuses the key. Longer play and
+  saved progress were not checked.
+- Keys are kept unencrypted per uid in `/data/misc/keystore`. They survive runtime replacement and are removed by `clear-data`. RSA,
+  EC and 3DES keys, attestation and keys that need user authentication are not implemented. `ManagedServiceBatch` covers the new
+  service.
+
 ### Smaller JIT code from shared cold paths (2026-11-02)
 
 - **A third less generated code on a mixed test workload.** Each Tier-1 guarded memory access carried its own page checks and

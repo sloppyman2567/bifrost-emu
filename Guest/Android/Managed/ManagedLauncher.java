@@ -125,6 +125,7 @@ public final class ManagedLauncher {
     private static final FrameworkLegacyPermissions legacyPermissions = new FrameworkLegacyPermissions(packages, appOps);
     private static final FrameworkAuth auth = new FrameworkAuth(packages, appOps);
     private static final FrameworkKeyguard keyguard = new FrameworkKeyguard(packages);
+    private static final FrameworkKeystore keystore = new FrameworkKeystore();
     private static final FrameworkClipboard clipboard = new FrameworkClipboard(packages, () -> windowOpen);
     private static final FrameworkAppWidgets appWidgets = new FrameworkAppWidgets(packages);
     private static final FrameworkRoles roles = new FrameworkRoles(packages);
@@ -806,6 +807,7 @@ public final class ManagedLauncher {
         legacyPermissions.install(services);
         auth.install(services);
         keyguard.install(services);
+        keystore.install(services);
         clipboard.install(services);
         alarms.install(services);
         accounts.install(services);

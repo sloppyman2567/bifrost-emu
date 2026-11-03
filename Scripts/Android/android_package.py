@@ -786,10 +786,17 @@ def uninstall(state, package):
 
 def clear_data(state, package):
     """Reset an installed app's data to a first-run state, like `pm clear`; the install stays."""
+    from android_sessions import app_id
     with idle_app(state, package) as app:
+        uid = app_id(state, package)
         for root, managed in ((app / "rootfs", False), (app / "managed/rootfs", True)):
             if not root.is_dir() or root.is_symlink():
                 continue
+            # pm clear also deletes the app's Keystore keys (FrameworkKeystore keeps one file per uid).
+            keystore = root / "data/misc/keystore"
+            if keystore.is_dir() and not keystore.is_symlink():
+                for suffix in ("", ".bak", ".lock"):
+                    (keystore / f"bifrost-{uid}.json{suffix}").unlink(missing_ok=True)
             for relative in APP_DATA:
                 target = root / relative / package
                 # Data in the guest's reach can be a symlink, but its parents are runtime-owned.

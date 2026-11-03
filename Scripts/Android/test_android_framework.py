@@ -144,7 +144,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         if services and main_class == "ActivityProbe$InputMethodProbe":
             markers += ("INPUT_METHOD_PROTOCOL_OK", "INPUT_METHOD_HOST_TEXT_OK")
         if main_class == "ManagedServiceBatch":
-            markers += ("MANAGED_SERVICE_BATCH_OK",)
+            markers += ("MANAGED_KEYSTORE_OK", "MANAGED_SERVICE_BATCH_OK")
         if main_class == "ActivityProbe$NativeLooperProbe":
             markers += ("ANDROID_JAVA_NATIVE_LOOPER_OK",)
         if main_class == "ActivityProbe$NativeChoreographerProbe":

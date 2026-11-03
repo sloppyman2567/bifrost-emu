@@ -998,6 +998,68 @@ alarm checks construct a focused clipboard and wait for a real listener alarm.
 `ManagedServiceBatch` exercises these through the real managers; see
 [the test record](../archive/TESTS-history.md#common-device-services-2026-10-13).
 
+### Android Keystore (2026-11-02)
+
+Zygote installs the `AndroidKeyStore` JCA provider
+(`ZygoteInit.warmUpJcaProviders` → `AndroidKeyStoreProvider.install()`); apps
+here start through `RuntimeInit` without Zygote, so `KeyStore.getInstance("AndroidKeyStore")`
+failed with `AndroidKeyStore not found`. PolyTrack's Capacitor SQLite plugin
+encrypts by default: its `load()` builds an androidx `MasterKey`, failed, and
+left the plugin null, so every database call the game made was rejected.
+
+`FrameworkKeystore` now installs the provider in every managed process and
+registers `android.system.keystore2.IKeystoreService/default` (Android 15's
+AIDL version 4) with a software KeyMint behind it, so the framework's own
+client classes (`AndroidKeyStoreSpi`, `KeyStore2`, `KeyStoreSecurityLevel`)
+run unchanged:
+
+- Keys: AES-128/192/256 (ECB, CBC, CTR, GCM; no padding or PKCS#7) and HMAC
+  (MD5, SHA-1, SHA-2; 64–1024-bit keys), generated or imported as raw
+  material. Ciphers and MACs run in Conscrypt (`AndroidOpenSSL`).
+- Generation and `begin` checks, and their error codes, follow the reference
+  KeyMint TA
+  ([system/keymint android15-release](https://android.googlesource.com/platform/system/keymint/+/refs/heads/android15-release/common/src/tag.rs),
+  `check_*_gen_params`, `check_begin_params`, `crypto/aes.rs`): purpose,
+  block mode, padding and digest must be authorized; GCM tags are 96–128 bits
+  and not below `MIN_MAC_LENGTH`; caller nonces need `CALLER_NONCE`; GCM
+  nonces are 12 bytes. A bad GCM tag or HMAC is `VERIFICATION_FAILED`.
+  Characteristics are split as `tag/info.rs` does: KeyMint-enforced at
+  `SecurityLevel.SOFTWARE`, keystore-enforced (validity dates, creation time,
+  `USAGE_COUNT_LIMIT`) at `KEYSTORE`, application id/data hidden and required
+  to match at `begin`.
+- Keystore2 rules: the app domain only (`SELINUX`/`BLOB` are
+  `PERMISSION_DENIED`, grants are `KEY_NOT_FOUND`), a new key replaces one
+  under the same alias, operations address keys by `KEY_ID`, aliases list in
+  order, validity dates are enforced, a `USAGE_COUNT_LIMIT` key is deleted
+  after its last use, update input is limited to 32 KiB, and an operation
+  ends after any error. Only `TRUSTED_ENVIRONMENT` is served; StrongBox is
+  `HARDWARE_TYPE_UNAVAILABLE`.
+- Storage: one JSON file per uid, `/data/misc/keystore/bifrost-<uid>.json`
+  (where keystore2 keeps its database), written atomically under a
+  cross-process lock, because each guest process runs its own instance.
+  The managed root keeps the directory across runtime replacements, and
+  `clear-data` removes the app's file, as `pm clear` deletes its keys.
+
+Limits: key material sits unencrypted in the app's runtime root, and
+`KeyInfo.isInsideSecureHardware()` is false. RSA, EC and 3DES keys,
+attestation, grants, `updateSubcomponent`, wrapped-key import and keys bound
+to user authentication (no lock-screen credential or biometrics exist, so
+`begin` is `KEY_USER_NOT_AUTHENTICATED`) are not implemented. An unsupported
+algorithm is `UNSUPPORTED_ALGORITHM`, and other unsupported calls are
+`SYSTEM_ERROR`. Both are logged once as `SERVICE_CALL_UNSUPPORTED keystore2 ...`.
+`OS_VERSION`/patch-level characteristics are not added.
+
+`ManagedServiceBatch` checks the real client: AES-GCM generation and a round
+trip with associated data, a tampered tag (`AEADBadTagException`), `KeyInfo`,
+an encrypt-only key refusing decryption (`InvalidKeyException`), imported
+AES-CBC and HMAC-SHA256 keys against Conscrypt's results, aliases and size
+read back by a fresh provider instance, and deletion (`MANAGED_KEYSTORE_OK`,
+JIT and interpreter). PolyTrack 0.6.3 then created its master key and
+encrypted preferences, opened its database and reached its menu, where a
+track started (seen on screen; longer play and saved progress not checked).
+Its second start, and a start after a forced runtime replacement, reused the
+stored key.
+
 ### User and idle-policy queries (2026-10-14)
 
 `FrameworkUsers` replaces the launcher's partial `user` handler. The existing
