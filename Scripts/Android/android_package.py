@@ -41,7 +41,10 @@ RESERVED = {
     "libz.so",
     "libmediandk.so",
 }
+# The input snapshot stays at 2 GiB (asgard.MAX_PACKAGE_BYTES mirrors it); Play asset packs can
+# expand past that once their APK members are unpacked.
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
+MAX_EXPANDED_TOTAL = 4 * 1024 * 1024 * 1024
 
 
 def digest(path):
@@ -257,8 +260,8 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                 with zipfile.ZipFile(path) as archive:
                     entries = regular_archive(archive)
                     budget += sum(x.file_size for x in entries)
-                if budget > MAX_TOTAL:
-                    raise ValueError("APK set exceeds 2 GiB uncompressed")
+                if budget > MAX_EXPANDED_TOTAL:
+                    raise ValueError("APK set exceeds 4 GiB uncompressed")
                 current = signers(path, apksigner)
                 if certificates is None:
                     certificates = current

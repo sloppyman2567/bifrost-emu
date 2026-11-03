@@ -51,8 +51,12 @@ def apk_paths(path, directory):
             raise ValueError("Expected an APK or a bundle containing 1..128 APKs")
         paths = []
         for index, item in enumerate(nested):
-            if item.file_size > MAX_APK_BYTES:
-                raise ValueError("Nested APK exceeds the 1 GiB inspection limit")
+            # A bundle's members are already bounded together by check_zip.
+            # Play asset packs can exceed 1 GiB on their own (Arknights
+            # 37.7.41's Unity data pack is 1,024.1 MiB), so a nested APK is
+            # bounded by the archive limit rather than MAX_APK_BYTES.
+            if item.file_size > MAX_ARCHIVE_BYTES:
+                raise ValueError("Nested APK exceeds the 2 GiB inspection limit")
             output = directory / f"package-{index}.apk"
             with archive.open(item) as source, output.open("wb") as destination:
                 shutil.copyfileobj(source, destination)

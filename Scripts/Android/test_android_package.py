@@ -2737,6 +2737,13 @@ class PackageTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "exceeds"):
                     package.snapshot_input(source, destination)
 
+    def test_expanded_asset_total_is_separate_from_input_size(self):
+        self.assertGreater(package.MAX_EXPANDED_TOTAL, package.MAX_TOTAL)
+        state = self.work / "expanded-state"
+        with patch.object(package, "MAX_EXPANDED_TOTAL", 8):
+            with self.assertRaisesRegex(ValueError, "uncompressed"):
+                self.install(self.bundle, state)
+
     def test_archive_paths_and_special_members(self):
         for index, member in enumerate(
             ("../escape.apk", "/absolute.apk", "a/../escape.apk", "a\\escape.apk")
