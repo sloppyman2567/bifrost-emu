@@ -20,6 +20,11 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### RenderScript runs, and audio effect classes load (2026-11-04)
+
+`android.renderscript` intrinsics such as blur now run on the CPU driver. `android.media.audiofx` no longer fails to load: it reports
+no effects, as a device without an engine does, so `Equalizer` is refused rather than applied. `ScriptC` kernels remain unsupported.
+
 ### Apps use your time zone, and the library your clock (2026-11-04)
 
 Android apps ran in GMT. The host's zone now reaches them through `persist.sys.timezone`, on any distribution: `TZ`, the

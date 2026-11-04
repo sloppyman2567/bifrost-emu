@@ -152,7 +152,8 @@ final class FrameworkNativeServices {
         static final String DESCRIPTOR = "android.media.IAudioFlingerService";
         private static final int SAMPLE_RATE = 3, FRAME_COUNT = 5, LATENCY = 6;
         // Transaction codes are the method order in IAudioFlingerService.aidl.
-        private static final int NEW_AUDIO_UNIQUE_ID = 35, ACQUIRE_AUDIO_SESSION_ID = 36, RELEASE_AUDIO_SESSION_ID = 37;
+        private static final int NEW_AUDIO_UNIQUE_ID = 35, ACQUIRE_AUDIO_SESSION_ID = 36, RELEASE_AUDIO_SESSION_ID = 37,
+                QUERY_NUMBER_EFFECTS = 38;
         private final FrameworkAudioTracks tracks = new FrameworkAudioTracks();
         private IBinder client;
         @Override protected synchronized boolean onTransact(int code, Parcel data,
@@ -171,6 +172,14 @@ final class FrameworkNativeServices {
                 data.readInt(); // AudioUniqueIdUse: one counter serves every use
                 reply.writeNoException();
                 reply.writeInt(tracks.newUniqueId());
+                return true;
+            }
+            // No effect engine sits in front of the host's audio. The JNI turns a count of 0 into a null
+            // AudioEffect.queryEffects, which isEffectTypeAvailable expects, as on a device without one.
+            if (code == QUERY_NUMBER_EFFECTS) {
+                data.enforceInterface(DESCRIPTOR);
+                reply.writeNoException();
+                reply.writeInt(0);
                 return true;
             }
             if (code == ACQUIRE_AUDIO_SESSION_ID || code == RELEASE_AUDIO_SESSION_ID) {

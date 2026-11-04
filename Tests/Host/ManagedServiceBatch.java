@@ -677,6 +677,20 @@ public final class ManagedServiceBatch {
                 "group deletion did not delete its channels");
     }
 
+    // android.media.audiofx loads, reports no effects, and refuses one the way a device without the engine does.
+    private static void audioEffects() throws Exception {
+        android.media.audiofx.AudioEffect.Descriptor[] effects = android.media.audiofx.AudioEffect.queryEffects();
+        check(effects == null, "no audio effect engine to report");  // null, not empty: android_media_AudioEffect.cpp
+        try {
+            new android.media.audiofx.Equalizer(0, 0);
+            throw new AssertionError("an equalizer with no effect engine");
+        } catch (UnsupportedOperationException | IllegalArgumentException error) {
+            throw error;  // apps guard the documented RuntimeException below
+        } catch (RuntimeException expected) {
+            check(expected.getMessage().startsWith("Cannot initialize effect engine"), "equalizer failure");
+        }
+    }
+
     private static void audio(Context context) throws Exception {
         AudioManager manager = context.getSystemService(AudioManager.class);
         java.util.List<?> outputs = (java.util.List<?>) invoke(endpoint("audio", "android.media.IAudioService"),
@@ -1834,6 +1848,7 @@ public final class ManagedServiceBatch {
         audioMode(context);
         mediaSessions(context);
         audioTracks();
+        audioEffects();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context); roles(context); shortcuts(context);
         battery(context); vibratorAndKeyguard(context); usageAndNetworkStats(context); mediaLocaleLegacyAuth(context); batteryFromSupplies(context); clipboard(context, packages);

@@ -840,6 +840,17 @@ Neither these tests nor presented frames establish video-ad playback: JNI
 provisioning is covered below; decoders and the video-surface path remain
 unfinished.
 
+### RenderScript and audio effects (2026-11-04)
+
+`android.renderscript` runs on its CPU driver: `librs_jni`, `libRS_internal`, `libRSDriver`, `libRSCpuRef`, `libRSCacheDir` and
+their libraries are pinned from the image, and the launcher sets the cache directory as `ActivityThread.setupGraphicsSupport`
+does. The `Managed` fixture runs `ScriptIntrinsicBlur` and checks its pixels. Intrinsics are precompiled; a `ScriptC` kernel needs
+`bcc`, which is not provisioned, so script kernels are expected to fail.
+
+`android.media.audiofx` loads (`libaudioeffect_jni`), but nothing processes effects. `queryNumberEffects` reports 0, so
+`AudioEffect.queryEffects` is null, as the JNI makes it on any device without effects, and `createEffect` stays unanswered, so `new Equalizer` throws `RuntimeException` ("Cannot
+initialize effect engine"), which apps guard against. Implementing effects would need DSP in front of the host's audio.
+
 ### Time zone (2026-11-04)
 
 Bionic's `tzset` and libcore's default zone both read `persist.sys.timezone`, and an image leaves it to the device.

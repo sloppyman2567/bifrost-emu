@@ -150,6 +150,7 @@ public final class Managed extends Activity {
         checkPackageQueries();
         checkAppTasks();
         checkRunningTasks();
+        checkRenderScript();
         checkLoudness();
         int starts = prefs.getInt("starts", 0) + 1;
         if (Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, -1) != (starts == 3 ? 12345 : 60000))
@@ -324,6 +325,26 @@ public final class Managed extends Activity {
                 || !new android.content.ComponentName(this, Managed.class).equals(info.baseActivity))
             throw new AssertionError("app task info incorrect");
         System.out.println("MANAGED_FIXTURE_APP_TASKS_OK");
+    }
+
+    // android.renderscript through its CPU driver: an intrinsic is precompiled, so it needs no bcc. A 1-pixel
+    // white dot blurred must spread and keep its centre brightest.
+    private void checkRenderScript() {
+        android.graphics.Bitmap input = android.graphics.Bitmap.createBitmap(32, 32, android.graphics.Bitmap.Config.ARGB_8888);
+        input.eraseColor(0xff000000);
+        input.setPixel(16, 16, 0xffffffff);
+        android.graphics.Bitmap output = input.copy(android.graphics.Bitmap.Config.ARGB_8888, true);
+        android.renderscript.RenderScript rs = android.renderscript.RenderScript.create(this);
+        android.renderscript.Allocation in = android.renderscript.Allocation.createFromBitmap(rs, input);
+        android.renderscript.Allocation out = android.renderscript.Allocation.createFromBitmap(rs, output);
+        android.renderscript.ScriptIntrinsicBlur blur =
+                android.renderscript.ScriptIntrinsicBlur.create(rs, android.renderscript.Element.U8_4(rs));
+        blur.setRadius(4f); blur.setInput(in); blur.forEach(out); out.copyTo(output);
+        rs.destroy();
+        int centre = output.getPixel(16, 16) & 0xff, near = output.getPixel(18, 16) & 0xff, far = output.getPixel(28, 16) & 0xff;
+        if (centre <= 0 || centre >= 255 || near <= 0 || near > centre || far != 0)
+            throw new AssertionError("RenderScript blur: " + centre + " " + near + " " + far);
+        System.out.println("MANAGED_FIXTURE_RENDERSCRIPT_OK " + centre + " " + near);
     }
 
     // ActivityManager.getRunningTasks: the caller's own task, as Catrobat's

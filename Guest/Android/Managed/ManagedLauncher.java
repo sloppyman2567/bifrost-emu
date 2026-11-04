@@ -1406,6 +1406,9 @@ public final class ManagedLauncher {
         Application application = (Application) call(loaded, "makeApplicationInner",
                 new Class<?>[] {boolean.class, Instrumentation.class}, false, null);
         setField(thread, "mInitialApplication", application);
+        // ActivityThread.setupGraphicsSupport: RenderScript.create throws without it. Before onCreate.
+        Class.forName("android.renderscript.RenderScriptCacheDir").getMethod("setupDiskCache", java.io.File.class)
+                .invoke(null, application.createDeviceProtectedStorageContext().getCodeCacheDir());
         if (diagnostic) checkApplicationRestrictions(application);
         System.out.println("APP_APPLICATION_CREATED " + application.getClass().getName());
         if (play) {

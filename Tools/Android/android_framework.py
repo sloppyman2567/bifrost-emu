@@ -60,8 +60,8 @@ SHARED_LIBRARIES = {
 # its linker section (the codec APEX's private copies are out of its scope). The extractor plugins are already in the
 # runtime. The daemon aborts without its seccomp policy, read from the media APEX; the image's /system/etc copies are
 # byte-identical to it. Bifrost's prctl(PR_SET_SECCOMP) accepts the filter without applying it, so it never reaches the host.
-# android.media.SoundPool's static initializer loads libsoundpool.so by name, so no DT_NEEDED graph reaches it; it
-# rides here for the same pinned upgrade of an existing tree (everything it needs is already in the runtime).
+# android.media.SoundPool, audiofx.AudioEffect and android.renderscript load their JNI libraries by name, and RenderScript
+# dlopens its CPU driver, so no DT_NEEDED graph reaches them; they ride here for the same pinned upgrade of an existing tree.
 # install path -> (image path, sha256, executable).
 SECCOMP_POLICIES = "apex/com.android.media/etc/seccomp_policy/"
 MEDIA_EXTRACTOR = {
@@ -85,6 +85,22 @@ MEDIA_EXTRACTOR = {
         "99ba549ca4c05721691d1fd0adfa76c1c59e1991cd8739fa1ac0df6433375788", False),
     "system/lib64/libdrmframeworkcommon.so": ("/system/lib64/libdrmframeworkcommon.so",
         "9d977823c2c34063238ddc30de5344bf977ec01c43402cb32cac6b920bdbcec8", False),
+    "system/lib64/libaudioeffect_jni.so": ("/system/lib64/libaudioeffect_jni.so",
+        "b65b5c5aaa7298cf579b804bf5a3a0f3e348969016d41802c9d8d8d536caa73c", False),
+    "system/lib64/librs_jni.so": ("/system/lib64/librs_jni.so",
+        "cacd91627aa90c3258392f538b1de2a3bcdae8a4c0ca55c03a2a59bc56553246", False),
+    "system/lib64/libRSCacheDir.so": ("/system/lib64/libRSCacheDir.so",
+        "7f321554e760f002fc3efd9d702146336832c8e950ed740fa7a49eb6cc69793d", False),
+    "system/lib64/libRS_internal.so": ("/system/lib64/libRS_internal.so",
+        "5c21d0874b7510330f37e6e08a6cf0810fa5e0a3536ce33b3bd10e814a928f4a", False),
+    "system/lib64/libRSDriver.so": ("/system/lib64/libRSDriver.so",
+        "0be4814410caf4325684e5915402bf96d049e96cb5268defcb77f762c4a8cf3c", False),
+    "system/lib64/libRSCpuRef.so": ("/system/lib64/libRSCpuRef.so",
+        "1baeb408987e81fc262d83af0677fbe3b3176d369cffc369c45f3b2a714e6a8a", False),
+    "system/lib64/libbcinfo.so": ("/system/lib64/libbcinfo.so",
+        "acb731f6774361e93efb2cee5b2f3193a184a7fad6437172819044673eeb1b00", False),
+    "system/lib64/libblas.so": ("/system/lib64/libblas.so",
+        "6cf0d09069b5fae3a763955deef1882b4d7f432614edd7d31bac0a2f2b1b1ecd", False),
     "system/lib64/libsoundpool.so": ("/system/lib64/libsoundpool.so",
         "307a46c2a31fe98b41a8f0de0ae763baf962c5a2e487ee399070dede161fa4aa", False),
     SECCOMP_POLICIES + "mediaextractor.policy": ("/system/etc/seccomp_policy/mediaextractor.policy",

@@ -3529,6 +3529,7 @@ class PackageTests(unittest.TestCase):
             self.assertIn("MANAGED_FIXTURE_PACKAGE_QUERIES_OK", text)
             self.assertIn("MANAGED_FIXTURE_APP_TASKS_OK", text)
             self.assertIn("MANAGED_FIXTURE_RUNNING_TASKS_OK", text)
+            self.assertIn("MANAGED_FIXTURE_RENDERSCRIPT_OK", text)
             self.assertIn("MANAGED_FIXTURE_LOUDNESS_OK", text)
             self.assertIn("MANAGED_FIXTURE_SPATIALIZER_OK", text)
             self.assertIn("MANAGED_FIXTURE_BLUETOOTH_ROUTES_OK", text)
