@@ -19,6 +19,15 @@
       ],
       "page": "Docs/Apps/spongebob.md"
     },
+    "com.YoStarEN.Arknights": {
+      "name": "Arknights",
+      "tested_version": "37.7.41",
+      "status": "playable",
+      "checked": "2026-11-03",
+      "evidence": "The maintainer reports Google sign-in through microG and a battle at about 60 FPS with nothing obviously wrong, on 2.0.0-beta.1 (Docs/Apps/arknights.md).",
+      "notes": ["Installing the APKM needs nested APKs over 1 GiB and APK sets over 2 GiB uncompressed (commit 1d61c57a). No capture or frame-time log has been recorded."],
+      "page": "Docs/Apps/arknights.md"
+    },
     "com.YoStarEN.AzurLane": {
       "name": "Azur Lane",
       "tested_version": "9.3.7",
