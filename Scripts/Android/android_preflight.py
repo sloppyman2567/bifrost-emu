@@ -240,12 +240,19 @@ def adaptive_icon_layers(paths, aapt2):
     tree = run([aapt2, "dump", "xmltree", "--file", icon, base])
     if "adaptive-icon" not in tree:
         return None
-    wanted = {}
+    wanted, inset = {}, None
     for layer in ("background", "foreground"):
-        match = re.search(rf"E: {layer} \(line=\d+\)\s+A: \S*drawable\(0x01010199\)=@(0x[0-9a-f]+)", tree)
-        if not match:
+        block = re.search(rf"E: {layer} \(line=\d+\)(.*?)(?=E: (?:background|foreground|monochrome) |\Z)", tree, re.S)
+        wrapper = re.fullmatch(r"\s+E: inset \(line=\d+\)(.*)", block[1], re.S) if block else None
+        attributes = wrapper[1] if wrapper else block[1] if block else ""
+        match = re.fullmatch(r"\s+A: \S*drawable\(0x01010199\)=@(0x[0-9a-f]+)\s*"
+                             r"(?:A: \S*:inset\(0x010104b5\)=([0-9.]+)%\s*)?", attributes)
+        # A background inset, a per-side inset or any other wrapper is not composed here.
+        if not match or (match[2] and layer != "foreground"):
             return None
         wanted[layer] = match[1]
+        # aapt2 prints a fraction's stored value with a percent sign: android:inset="15%" is 0.150000%.
+        if match[2]: inset = float(match[2])
     tables = {base: run([aapt2, "dump", "resources", base])}
     def resolve(identifier, depth=0):
         best = None
@@ -271,7 +278,10 @@ def adaptive_icon_layers(paths, aapt2):
                 break
         return (best[1], best[2]) if best else None
     layers = {layer: resolve(identifier) for layer, identifier in wanted.items()}
-    return layers if all(layers.values()) else None
+    if not all(layers.values()):
+        return None
+    if inset: layers["foreground_inset"] = inset
+    return layers
 
 
 def inspect_apk(name, path, aapt2, directory):

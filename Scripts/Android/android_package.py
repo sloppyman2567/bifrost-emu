@@ -338,10 +338,11 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                             raise ValueError(f"Conflicting split member: {relative}")
                         candidate.replace(target)
                         files[relative] = checksum
-            icon = copy_icon(next(p for r, p in packages if not r["split"]), base.get("icon"), staging)
+            # What a device shows: the adaptive icon, whose bitmap fallback can be unrelated art
+            # (FNAF Mobile Port's is the Catrobat template's panda).
             base_path = next(p for r, p in packages if not r["split"])
-            adaptive = None if icon else copy_adaptive_icon(
-                [base_path, *(p for r, p in packages if r["split"])], str(aapt2), staging)
+            adaptive = copy_adaptive_icon([base_path, *(p for r, p in packages if r["split"])], str(aapt2), staging)
+            icon = None if adaptive else copy_icon(base_path, base.get("icon"), staging)
             app = state / name
             with app_lock(app):
                 metadata_path = app / "package.json"
@@ -449,6 +450,7 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                     "version_name": base["version_name"],
                     "icon": icon.name if icon else None,
                     "adaptive_icon": adaptive,
+                    "icon_version": ICON_VERSION,
                     "source_sha256": source_sha256,
                     "installed_at": int(time.time()),
                     "signers": certificates,
@@ -480,7 +482,7 @@ def copy_adaptive_icon(paths, aapt2, staging):
         return None
     result = {}
     for name, layer in layers.items():
-        if isinstance(layer, str):
+        if isinstance(layer, (str, float)):
             result[name] = layer
             continue
         copied = copy_icon(layer[0], layer[1], staging, "icon-" + name)
@@ -490,6 +492,8 @@ def copy_adaptive_icon(paths, aapt2, staging):
     return result
 
 
+# 2: an adaptive icon wins over its bitmap fallback. An older record is scanned again by refresh-icons.
+ICON_VERSION = 2
 ICON_LAYER_FILE = re.compile(r"icon-(?:background|foreground)\.(?:png|jpg|webp)")
 
 
@@ -502,6 +506,12 @@ def missing_icon_layers(app, metadata):
         for value in adaptive.values())
 
 
+def icon_unscanned(app, metadata):
+    """Whether refresh-icons has work here: a record from before ICON_VERSION, or a layer file gone missing."""
+    return not metadata.get("system") and (metadata.get("icon_version", 0) < ICON_VERSION
+                                           or missing_icon_layers(app, metadata))
+
+
 def refresh_icons(state, aapt2):
     """Give apps installed before adaptive icons were read their layers, and restore layers whose files are missing. Scanned
     once: the result is saved either way."""
@@ -511,13 +521,13 @@ def refresh_icons(state, aapt2):
             continue
         try:
             metadata = json.loads(metadata_path.read_text())
-            if metadata.get("system") or metadata.get("icon"):
-                continue
-            if "adaptive_icon" in metadata and not missing_icon_layers(app, metadata):
+            if not icon_unscanned(app, metadata):
                 continue
             with app_lock(app):
                 installed = sorted((app / "rootfs/data/app").glob(app.name + "-*/*.apk"), key=lambda p: (p.name != "base.apk", p.name))
                 metadata["adaptive_icon"] = copy_adaptive_icon(installed, aapt2, app) if installed else None
+                if metadata["adaptive_icon"]: metadata["icon"] = None
+                metadata["icon_version"] = ICON_VERSION
                 temporary = metadata_path.with_suffix(".json.tmp")
                 temporary.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
                 temporary.replace(metadata_path)
@@ -754,7 +764,8 @@ def installed_apps(state):
             adaptive = metadata.get("adaptive_icon")
             layers = {name: value if re.fullmatch(r"#[0-9a-f]{8}", value) else str(app / value)
                       for name, value in adaptive.items()
-                      if re.fullmatch(r"#[0-9a-f]{8}|icon-(?:background|foreground)\.(?:png|jpg|webp)", value)
+                      if isinstance(value, str)
+                      and re.fullmatch(r"#[0-9a-f]{8}|icon-(?:background|foreground)\.(?:png|jpg|webp)", value)
                       } if isinstance(adaptive, dict) else {}
             result.append({"package": app.name, "label": metadata.get("label") or base.get("label") or app.name,
                            "version": metadata["version_code"],
@@ -762,9 +773,8 @@ def installed_apps(state):
                            "icon": str(app / icon) if isinstance(icon, str) and re.fullmatch(r"icon\.(?:png|jpg|webp)", icon)
                                    and (app / icon).is_file() else None,
                            "icon_layers": layers if len(layers) == 2 else None,
-                           # Installed before adaptive icons were read: `refresh-icons` has not looked at it yet.
-                           "icon_unscanned": not icon and not metadata.get("system")
-                                             and ("adaptive_icon" not in metadata or missing_icon_layers(app, metadata)),
+                           "icon_inset": adaptive.get("foreground_inset", 0) if isinstance(adaptive, dict) else 0,
+                           "icon_unscanned": icon_unscanned(app, metadata),
                            "installed_at": metadata.get("installed_at"), "system": bool(metadata.get("system")),
                            "requester": metadata.get("requester"),
                            "launcher": metadata["launcher"]["kind"], "session": session})
@@ -1107,6 +1117,9 @@ def main():
             return show(args.state_root.resolve())
         if args.command == "refresh-icons":
             refresh_icons(args.state_root, ROOT / "Tools/android-tools/aapt2")
+            # A menu entry written before names the bitmap this may have replaced.
+            import android_desktop
+            android_desktop.sync(args.state_root, installed_apps(args.state_root))
             update_desktop(args.state_root)
             return 0
         if args.command == "desktop":

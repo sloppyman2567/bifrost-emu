@@ -20,6 +20,11 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### The library shows the icon a phone shows (2026-11-04)
+
+An adaptive icon now wins over its bitmap fallback, which can be unrelated art: FNAF Mobile Port's library card showed the Catrobat
+template's panda instead of Freddy. A foreground `<inset>` is honoured, and installed apps are rescanned without a reinstall.
+
 ### Five more Android calls (2026-11-04)
 
 `getTasks` (`ActivityManager.getRunningTasks`, which ended FNAF Mobile Port and reached Battle Cats), `moveActivityTaskToBack`,

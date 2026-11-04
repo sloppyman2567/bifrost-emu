@@ -340,11 +340,13 @@ covers that debugging use.)
 
 Install records now retain the base APK's label/version and a bounded launcher
 bitmap; older records recover labels and versions from their saved base report.
-Icon selection prefers a dense daytime bitmap from the declared launcher
-resource, then that resource's bitmap fallback. An adaptive icon without one keeps its two layers (a colour, or the densest
-bitmap across the base APK and its splits; `adaptive_icon` in `package.json`) and the card composes them as Android does:
-each layer is 108 dp and the inner 72 dp show. A layer that is a vector leaves the placeholder. The library runs
-`asgard.py refresh-icons` once for apps installed before this, without a reinstall.
+An adaptive icon wins, because that is what a device shows; its bitmap fallback can be unrelated art (FNAF Mobile Port's is
+the Catrobat template's panda). It keeps its two layers (a colour, or the densest bitmap across the base APK and its splits;
+`adaptive_icon` in `package.json`) and the card composes them as Android does: each layer is 108 dp and the inner 72 dp show.
+A foreground wrapped in `<inset android:inset>` is shrunk by that fraction (`foreground_inset`). A layer that is a vector, a
+per-side inset or another wrapper is not composed, and the app falls back to a dense daytime bitmap from the declared launcher
+resource, then that resource's bitmap fallback. The library runs `asgard.py refresh-icons` for a record older than
+`ICON_VERSION`, without a reinstall; it also rewrites the menu entries, which may name the replaced bitmap.
 
 A red line means a run really went wrong, and clicking it opens the drawer. `explain_ending` decides from the session and its
 log: a known crash signature names the crash, a session lost by the supervisor is "Ended unexpectedly", and an outside

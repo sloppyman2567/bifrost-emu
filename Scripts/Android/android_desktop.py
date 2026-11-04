@@ -93,7 +93,7 @@ def exec_line(package, state):
                     (sys.executable, str(asgard), "--state-root", str(Path(state).resolve()), "start", package))
 
 
-def compose_adaptive(layers, side):
+def compose_adaptive(layers, side, inset=0):
     """Android's composition of an adaptive icon: both layers are 108 dp, of which the inner 72 dp show. A Qt image, null if a
     layer will not load. The library draws its cards with this, and the entries save it."""
     from PyQt6.QtCore import QRectF, Qt
@@ -112,7 +112,9 @@ def compose_adaptive(layers, side):
         if layer.isNull():
             painter.end()
             return QImage()
-        painter.drawImage(target, layer, QRectF(layer.width() / 6, layer.height() / 6, layer.width() * 2 / 3, layer.height() * 2 / 3))
+        # The whole 108 dp layer spans 1.5 sides, centred; the foreground's <inset> shrinks it within that.
+        margin = -side / 4 + (inset * side * 1.5 if name == "foreground" else 0)
+        painter.drawImage(QRectF(margin, margin, side - 2 * margin, side - 2 * margin), layer)
     painter.end()
     return image
 
@@ -136,7 +138,7 @@ def icon_file(app, state):
         return str(target)
     try:
         from PyQt6.QtGui import QImage
-        image = QImage(source) if source else compose_adaptive(layers, ICON_SIZE)
+        image = QImage(source) if source else compose_adaptive(layers, ICON_SIZE, app.get("icon_inset", 0))
     except ImportError:  # no PyQt6: the entry is made without an icon, and the library has none either
         return None
     if image.isNull():

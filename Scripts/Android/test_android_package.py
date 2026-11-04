@@ -841,6 +841,11 @@ class LauncherLibraryTests(unittest.TestCase):
         centre, edge = image.pixelColor(side // 2, side // 2), image.pixelColor(max(1, side // 40), side // 2)
         self.assertEqual((centre.red(), centre.blue()), (255, 0))     # foreground over background
         self.assertEqual(edge.green(), 0)                             # the outer ring of the layer is cropped
+        # android:inset="25%": the 108 dp layer shrinks to half, so its inner red no longer reaches the edge.
+        import android_desktop
+        inset = android_desktop.compose_adaptive({"background": "#ff0000ff", "foreground": str(path)}, 90, .25)
+        self.assertEqual(inset.pixelColor(45, 45).red(), 255)
+        self.assertEqual((inset.pixelColor(3, 45).red(), inset.pixelColor(3, 45).blue()), (0, 255))
         broken = dict(self.app(2, "Broken"), icon_layers={"background": "#ff0000ff", "foreground": str(self.root / "missing.png")})
         self.window.apps = [broken]; self.window.render()             # falls back to the lettered tile, no crash
         self.assertFalse(self.window.cards[broken["package"]].icon.pixmap().isNull())
@@ -1070,6 +1075,8 @@ class LauncherLibraryTests(unittest.TestCase):
 class IconRepairTests(unittest.TestCase):
     """refresh-icons restores an adaptive icon whose layer file is missing (Battle Cats: installed with the record only)."""
 
+    CURRENT = package.ICON_VERSION
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="bifrost-icons-")
         self.addCleanup(self.temporary.cleanup)
@@ -1077,13 +1084,34 @@ class IconRepairTests(unittest.TestCase):
 
     def app(self, package, files=(), **fields):
         directory = self.state / package; directory.mkdir()
-        metadata = dict({"package": package, "label": package, "version_code": 1, "launcher": {"kind": "managed_activity"},
+        metadata = dict({"package": package, "label": package, "version_code": 1, "icon_version": self.CURRENT, "launcher": {"kind": "managed_activity"},
                          "adaptive_icon": {"background": "#ffffffff", "foreground": "icon-foreground.png"}}, **fields)
         (directory / "package.json").write_text(json.dumps(metadata))
         for name in files: (directory / name).write_bytes(b"png")
         (directory / "rootfs/data/app" / (package + "-1")).mkdir(parents=True)
         (directory / "rootfs/data/app" / (package + "-1") / "base.apk").write_bytes(b"apk")
         return directory
+
+    def test_an_older_record_trades_its_bitmap_for_the_adaptive_icon_a_device_shows(self):
+        # FNAF Mobile Port: an adaptive Freddy, and a Catrobat template panda as the bitmap fallback.
+        panda = self.app("org.example.panda", icon="icon.png", adaptive_icon=None, icon_version=0)
+        plain = self.app("org.example.plain", icon="icon.png", adaptive_icon=None, icon_version=0)
+
+        def extract(paths, aapt2, staging):
+            if staging.name == "org.example.plain": return None
+            return {"background": "#ff000000", "foreground": "icon-foreground.png", "foreground_inset": 0.15}
+        with patch.object(package, "copy_adaptive_icon", extract):
+            package.refresh_icons(self.state, Path("/nonexistent/aapt2"))
+        record = json.loads((panda / "package.json").read_text())
+        self.assertIsNone(record["icon"])
+        self.assertEqual(record["icon_version"], package.ICON_VERSION)
+        kept = json.loads((plain / "package.json").read_text())
+        self.assertEqual((kept["icon"], kept["icon_version"]), ("icon.png", package.ICON_VERSION))
+        (panda / "icon-foreground.png").write_bytes(b"png")
+        listed = {item["package"]: item for item in package.installed_apps(self.state)}
+        self.assertEqual(listed["org.example.panda"]["icon_inset"], 0.15)
+        self.assertEqual(len(listed["org.example.panda"]["icon_layers"]), 2)
+        self.assertFalse(listed["org.example.plain"]["icon_unscanned"])
 
     def test_a_missing_layer_file_is_restored_and_an_intact_one_is_left_alone(self):
         broken = self.app("org.example.broken")
@@ -1440,6 +1468,22 @@ class AdaptiveIconTests(unittest.TestCase):
             base, low, high, pack = (str(Path(directory) / x) for x in ("base.apk", "low.apk", "high.apk", "pack.apk"))
             found = self.layers(directory, {base: self.BASE, low: self.LOW, high: self.HIGH}, assets=[pack])
             self.assertEqual(found, {"background": "#ffffffff", "foreground": (high, "res/x/fg.png")})
+
+    def test_a_foreground_inset_is_read_and_other_wrappers_are_refused(self):
+        attr = "http://schemas.android.com/apk/res/android"
+        head = (f"N: android={attr}\n  E: adaptive-icon (line=1)\n      E: background (line=2)\n"
+                f"        A: {attr}:drawable(0x01010199)=@0x7f060098\n      E: foreground (line=3)\n")
+        inset = (head + "        E: inset (line=4)\n"
+                 f"          A: {attr}:drawable(0x01010199)=@0x7f0800c0\n"
+                 f"          A: {attr}:inset(0x010104b5)=0.150000%\n")
+        other = head + f"        E: layer-list (line=4)\n          A: {attr}:drawable(0x01010199)=@0x7f0800c0\n"
+        with tempfile.TemporaryDirectory() as directory:
+            base = str(Path(directory) / "base.apk")
+            with patch.object(self, "TREE", inset):
+                self.assertEqual(self.layers(directory, {base: self.BASE + self.LOW}),
+                                 {"background": "#ffffffff", "foreground": (base, "res/m/fg.png"), "foreground_inset": 0.15})
+            with patch.object(self, "TREE", other):
+                self.assertIsNone(self.layers(directory, {base: self.BASE + self.LOW}))
 
     def test_a_vector_layer_means_no_adaptive_icon(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3440,6 +3484,7 @@ class PackageTests(unittest.TestCase):
             self.assertIn("MANAGED_FIXTURE_NETWORK_INTERFACES_OK", text)
             self.assertIn("MANAGED_FIXTURE_PACKAGE_QUERIES_OK", text)
             self.assertIn("MANAGED_FIXTURE_APP_TASKS_OK", text)
+            self.assertIn("MANAGED_FIXTURE_RUNNING_TASKS_OK", text)
             self.assertIn("MANAGED_FIXTURE_LOUDNESS_OK", text)
             self.assertIn("MANAGED_FIXTURE_SPATIALIZER_OK", text)
             self.assertIn("MANAGED_FIXTURE_BLUETOOTH_ROUTES_OK", text)
@@ -3484,7 +3529,6 @@ class PackageTests(unittest.TestCase):
             except Exception as error: errors.append(error)
         with patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}):
             with (self.work / "home-launcher.log").open("w") as launcher_log:
-            self.assertIn("MANAGED_FIXTURE_RUNNING_TASKS_OK", text)
                 launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
                     "--state-root", str(state), "launcher"], stdout=launcher_log, stderr=subprocess.STDOUT,
                     start_new_session=True)

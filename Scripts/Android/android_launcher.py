@@ -653,11 +653,11 @@ def build(state, application, settings=None):
             if self.on_click and event.button() == Qt.MouseButton.LeftButton: self.on_click()
             else: super().mouseReleaseEvent(event)
 
-    def adaptive_image(layers, side):
+    def adaptive_image(layers, side, inset=0):
         """Android's composition of an adaptive icon (shared with the menu entries). Null if a layer will not load, so the
         card falls back to its placeholder."""
         import android_desktop
-        return android_desktop.compose_adaptive(layers, side)
+        return android_desktop.compose_adaptive(layers, side, inset)
 
     def artwork(app, size, ratio, palette):
         """Rounded launcher tile at device pixels: the icon filling it (a padded icon is cropped to its
@@ -668,7 +668,7 @@ def build(state, application, settings=None):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing); painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         path = QPainterPath(); path.addRoundedRect(QRectF(0, 0, size, size), size * .22, size * .22)
         layers = app.get("icon_layers")
-        image = adaptive_image(layers, round(size * ratio)) if layers else QImage(app["icon"]) if app.get("icon") else QImage()
+        image = adaptive_image(layers, round(size * ratio), app.get("icon_inset", 0)) if layers else QImage(app["icon"]) if app.get("icon") else QImage()
         if not image.isNull():
             box = None if layers else opaque_bounds(image)
             if box and box[2] * box[3] < .97 * image.width() * image.height():
