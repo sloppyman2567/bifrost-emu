@@ -20,6 +20,14 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### A silent exit gets a reason when Google Play's licence check failed (2026-11-04)
+
+- **Flying Gorilla installed, opened a window and then returned to the prompt with no message.** Its pairip app protection asks the Play
+  Store's licensing service to confirm the install, fails (Bifrost has no Play Store), retries three times and calls `System.exit(0)`, so
+  there was no failure status to report. The library card and drawer now say "Closed itself: Google Play licence check", and the terminal
+  prints the same with the log path. Checked on the real session log and on a live run of the XAPK; ordinary exits stay quiet. The
+  check is not answered: Bifrost does not fake a licence response, so the game still cannot run.
+
 ### Apps linked against OpenGL ES 1.x load (2026-11-04)
 
 - **DevilutionX's APK installed and then exited with status 1:** its native library imports OpenGL ES 1.x names (SDL2's GLES1

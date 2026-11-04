@@ -1072,6 +1072,10 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                 if trace_directory is not None: shutil.rmtree(trace_directory)
         if status:
             print(f"Managed app exited with status {status}; see {log_path}", file=sys.stderr)
+        else:
+            from android_launcher import quit_reason  # an exit with status 0 is silent unless the log says why it quit
+            if reason := quit_reason(log_path):
+                print(f"Managed app: {reason} See {log_path}", file=sys.stderr)
         return status if status >= 0 else 128 - status
 
 

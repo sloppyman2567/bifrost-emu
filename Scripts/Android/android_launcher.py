@@ -66,6 +66,8 @@ SIGNATURES = (
     ("java", "Java crash (FATAL EXCEPTION)", re.compile(r"FATAL EXCEPTION")),
     ("anr", "App not responding (ANR)", re.compile(r"\bANR in ")),
     ("play", "Google Play services unavailable", re.compile(r"GooglePlayServicesNotAvailableException")),
+    # Play's app protection (pairip) asks the Play Store app to confirm the install, then quits when it cannot.
+    ("license", "Google Play licence check failed", re.compile(r"\sE LicenseClient\s*: Error while checking license")),
     ("ads", "Ad SDK errors", re.compile(
         r"\sE (AppLovinSdk|LevelPlaySDK|IronSource\w*|UnityAds|\[ChartboostMonetization\]|Vungle\w*"
         r"|Ads|AdMob\w*|Mintegral\w*|InMobi\w*|Pangle\w*|Fyber\w*|Liftoff\w*)\s*:")),
@@ -142,7 +144,7 @@ def activity_line(app, now=None):
     session = app["session"]; state = session.get("state", "stopped"); started = session.get("started_at")
     if state == "running" and started: return "Running for " + span(now - started), ""
     if state in ACTIVE: return STATES.get(state, state), ""
-    if state in FAILED and (ending := session_ending(session)): return ending[0], "problem"
+    if state in FAILED + ("exited",) and (ending := session_ending(session)): return ending[0], "problem"
     if started: return "Played " + clock(started, now), ""
     return "Not played yet", ""
 
@@ -200,7 +202,7 @@ def describe_session(session, now=None):
     now = time.time() if now is None else now
     state = session.get("state", "stopped")
     outcome = STATES.get(state, state.replace("_", " ").capitalize())
-    ending = session_ending(session) if state in FAILED else None
+    ending = session_ending(session) if state in FAILED + ("exited",) else None
     advice = ending[1] if ending else None
     if ending: outcome = ending[0]
     elif state == "failed": outcome = "The app closed itself"
@@ -250,6 +252,9 @@ CAUSES = (
     ("signal", "Crashed in native code", "The app's native code hit a fault. Try again; if it keeps happening, the log shows where."),
     ("java", "Crashed in Java code", "The app hit an unhandled error. Try again; if it keeps happening, the log shows where."),
     ("anr", "Stopped responding", "The app stopped responding and was ended. Try again; slow first launches can do this."),
+    ("license", "Closed itself: Google Play licence check",
+     "This app asks the Google Play Store to confirm it was installed from Play. Bifrost has no Play Store, so the check "
+     "fails and the app quits. Bifrost does not fake the answer, so this app cannot run here."),
 )
 # Android apps often quit this way (Process.killProcess on themselves), and so does the crash handler, so causes come first.
 SELF_KILL = re.compile(r"\s(\d+)\s+\d+\s+I Process\s*: Sending signal\. PID: \1 SIG: 9")
@@ -259,15 +264,24 @@ def explain_ending(session, findings=(), self_killed=False):
     """Why a run ended, for a person: (card line, what to try), or None when nothing went wrong."""
     state, code = session.get("state"), session.get("exit_code")
     if state == "timed_out": return None
+    found = {item.get("key") for item in findings}
+    if state == "exited":  # exit code 0: quitting is normal, so only a known deliberate quit gets a line
+        return next(((line, advice) for key, line, advice in CAUSES if key == "license" and key in found), None)
     if state == "interrupted":
         return "Ended unexpectedly", "Asgard lost track of this session, for example after a restart or if it was killed. Try again."
-    found = {item.get("key") for item in findings}
     for key, line, advice in CAUSES:
         if key in found: return line, advice
     if session.get("error"): return "Couldn't start", "The app did not get as far as opening. Try again; the log shows why."
     if self_killed: return None
     if code == 137: return "Ended from outside", "Something outside the app ended it, such as low memory or another program. Try again."
     return "Last run failed", "The log shows no known cause. Try again, or open the log for details."
+
+
+def quit_reason(log_path):
+    """Why an app that exited with status 0 quit by itself, as one sentence, or None when it was an ordinary exit."""
+    try: ending = explain_ending({"state": "exited", "exit_code": 0}, read_findings(log_path))
+    except OSError: return None
+    return f"{ending[0]}. {ending[1]}" if ending else None
 
 
 ENDINGS = {}  # (session, state, log size) -> explain_ending's result: a log is scanned once per ended run.

@@ -674,6 +674,22 @@ class LauncherLibraryTests(unittest.TestCase):
         self.assertEqual(explain({"state": "failed", "exit_code": 139}, crash)[0], "Crashed in native code")
         self.assertEqual(explain({"state": "failed", "exit_code": 1}, [{"key": "java"}])[0], "Crashed in Java code")
         self.assertEqual(explain({"state": "interrupted"})[0], "Ended unexpectedly")
+        # An app that exits with status 0 is quiet unless it quit on a failed Google Play licence check (Flying Gorilla).
+        licence = [{"key": "license"}]
+        self.assertEqual(explain({"state": "exited", "exit_code": 0}, licence)[0], "Closed itself: Google Play licence check")
+        self.assertIsNone(explain({"state": "exited", "exit_code": 0}))
+        self.assertIsNone(explain({"state": "exited", "exit_code": 0}, ads))
+        self.assertEqual(explain({"state": "failed", "exit_code": 1}, licence)[0], "Closed itself: Google Play licence check")
+        failed_check = ("11-04 11:08:44.061 669522 669522 E LicenseClient: Error while checking license: "
+                        "com.pairip.licensecheck.LicenseCheckException: Not allowed to bind with the licensing service")
+        retry = "11-04 11:08:38.044 669522 669522 D LicenseClient: Retry #1. License check failed with error 'Not allowed'"
+        self.assertEqual([item["key"] for item in self.launcher.log_findings([retry, failed_check])], ["license"])
+        self.assertEqual(self.launcher.log_findings([retry]), [])
+        quit_log = self.root / "quit.log"; quit_log.write_text(retry + "\n" + failed_check + "\n")
+        self.assertIn("Google Play licence check", self.launcher.quit_reason(quit_log))
+        quit_log.write_text("I app_process64: System.exit called, status: 0\n")
+        self.assertIsNone(self.launcher.quit_reason(quit_log))
+        self.assertIsNone(self.launcher.quit_reason(self.root / "missing.log"))
         self.assertEqual(explain({"state": "failed", "exit_code": 137})[0], "Ended from outside")
         self.assertEqual(explain({"state": "failed", "exit_code": 1}, ads)[0], "Last run failed")
         # A time limit is not a failure, nor is an app quitting by killing itself, unless it crashed first.
@@ -691,6 +707,14 @@ class LauncherLibraryTests(unittest.TestCase):
         self.window.apps = [failed]; self.window.render()
         card = self.window.cards[failed["package"]]
         self.assertEqual(card.line.text(), "Crashed in Java code")
+        # The same for a run that ended with status 0 after a failed licence check, and not for an ordinary exit.
+        log.write_text(failed_check + "\n")
+        quit_session = dict(session, state="exited", exit_code=0, session_id="q")
+        self.assertEqual(self.launcher.activity_line(dict(failed, session=quit_session))[1], "problem")
+        self.assertEqual(self.launcher.describe_session(quit_session)["outcome"], "Closed itself: Google Play licence check")
+        log.write_text("I app_process64: System.exit called, status: 0\n")
+        quiet = dict(session, state="exited", exit_code=0, session_id="q2")
+        self.assertEqual(self.launcher.describe_session(quiet)["outcome"], "Exited normally")
         opened = []
         self.window.open_drawer = opened.append
         from PyQt6.QtCore import Qt

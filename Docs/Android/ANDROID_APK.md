@@ -349,6 +349,11 @@ log: a known crash signature names the crash, a session lost by the supervisor i
 SIGKILL is "Ended from outside". A session's time limit and an app killing its own process with no crash in the log (Android
 apps often quit this way) are not failures, so the card just says when it was played. With no known cause it says "Last run
 failed". Ad and Play services errors never count as the cause.
+An app that exits with status 0 is quiet too, except when its log shows Google Play's licence check failing
+(`LicenseClient: Error while checking license`, from the pairip app protection some games ship with, which asks
+the Play Store app to confirm the install and quits when it cannot). The card then says "Closed itself: Google Play
+licence check", the terminal prints the same, and Flying Gorilla 5.2.13 is an example. Bifrost has no Play Store and does not
+fake the answer, so such an app cannot run here; the line only says why it stopped.
 
 Per-app settings are described under [Per-app settings](#per-app-settings).
 The last-session drawer shows saved outcome/timing and
