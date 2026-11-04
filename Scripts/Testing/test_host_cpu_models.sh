@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# JIT regressions on older x86-64 CPUs, emulated by qemu-x86_64. The fallback
-# paths for missing host features never run on a modern machine.
+# The JIT's minimum host CPU (SSE4.1 and FMA3), emulated by qemu-x86_64: fixtures
+# pass on the oldest supported model, and older models get a clear refusal.
 #
 #   Scripts/Testing/test_host_cpu_models.sh [EMULATOR]
 #
@@ -17,14 +17,8 @@ ulimit -c 0  # A CPU model that cannot run a host library would leave a core per
 
 EMU="${1:-${BIFROST_EMU:-./bifrost-emu}}"
 FIXTURES=(jit_cls jit_bfext jit_block_split jit_fp_scalar jit_selfloop_writeback jit_round_away)
-# name|what it lacks
-MODELS=(
-    "SandyBridge|LZCNT, BMI, AVX2, FMA"
-    "Nehalem|AVX as well"
-    "Penryn|SSE4.2 and POPCNT as well"
-    "Conroe|SSE4.1 as well"
-    "qemu64|SSSE3 as well"
-)
+MODELS=(Haswell)
+REFUSED=(SandyBridge Nehalem Conroe qemu64)  # no FMA3; Conroe and qemu64 no SSE4.1 either
 
 if ! command -v qemu-x86_64 >/dev/null; then
     echo "test_host_cpu_models: skipped, qemu-x86_64 is not installed"
@@ -33,8 +27,16 @@ fi
 
 ran=0
 failed=0
-for entry in "${MODELS[@]}"; do
-    model="${entry%%|*}"
+for model in "${REFUSED[@]}"; do
+    qemu-x86_64 -cpu "$model" "$EMU" --version >/dev/null 2>&1 || continue
+    if timeout 60 qemu-x86_64 -cpu "$model" "$EMU" Tests/Unit/jit_cls.elf 2>&1 | grep -q 'the JIT needs a CPU'; then
+        echo "PASS $model refused"
+    else
+        echo "FAIL $model: no refusal"
+        failed=$((failed + 1))
+    fi
+done
+for model in "${MODELS[@]}"; do
     if ! qemu-x86_64 -cpu "$model" "$EMU" --version >/dev/null 2>&1; then
         echo "SKIP $model: the emulator or a host library needs a newer CPU"
         continue

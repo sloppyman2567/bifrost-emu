@@ -1,3 +1,4 @@
+#include "FrostJIT/Backend/CpuFeatures.hpp"
 #include "System/Android/Binder/Broker.hpp"
 #include "System/Android/Media/HostDecoder.hpp"
 // Source/Main.cpp — bifrost-emu: fast ARM64 Linux user-mode emulator
@@ -343,6 +344,16 @@ static bool bind_asgard_parent(const char* argument) {
         !::prctl(PR_SET_PDEATHSIG, SIGKILL) && ::getppid() == parent;
 }
 
+// The JIT's minimum host CPU. Checked on the real CPU: BIFROST_NO_FMA3 is a test switch.
+static bool jit_host_supported() {
+    const arm64emu::CpuFeatures cpu = arm64emu::detect_cpu_features();
+    if (cpu.has_sse41() && cpu.has_fma3()) return true;
+    fprintf(stderr, "bifrost-emu: the JIT needs a CPU with SSE4.1 and FMA3; this one lacks %s%s%s. "
+            "--no-jit runs on any x86-64 CPU, much more slowly.\n", cpu.has_sse41() ? "" : "SSE4.1",
+            !cpu.has_sse41() && !cpu.has_fma3() ? " and " : "", cpu.has_fma3() ? "" : "FMA3");
+    return false;
+}
+
 int main(int argc, char** argv) {
     // First registration runs last: after the emulator's destructors and
     // every later handler (terminal restore, profile dumps).
@@ -651,7 +662,10 @@ int main(int argc, char** argv) {
             // use_jit only ever DISABLES against the config value (--jit
             // cannot re-enable a config-disabled JIT), matching the
             // normal path's `if (!use_jit) cfg.jit_enabled = false`.
-            if (use_jit && cfg.jit_enabled) emu.enable_jit();
+            if (use_jit && cfg.jit_enabled) {
+                if (!jit_host_supported()) { restore_terminal(); return 1; }
+                emu.enable_jit();
+            }
             emu.set_jit_threshold(jit_threshold ? jit_threshold
                                                 : cfg.jit_threshold);
             if (cfg.forward_host_signals) emu.install_host_signal_handlers();
@@ -757,7 +771,10 @@ int main(int argc, char** argv) {
     emu.set_verbose(cfg.log_verbose);
     emu.set_trace(cfg.log_trace);
     emu.set_brk_verbose(cfg.log_brk_verbose);
-    if (cfg.jit_enabled) emu.enable_jit();
+    if (cfg.jit_enabled) {
+        if (!jit_host_supported()) { restore_terminal(); return 1; }
+        emu.enable_jit();
+    }
     emu.set_jit_threshold(cfg.jit_threshold);
     if (cfg.forward_host_signals) {
         emu.install_host_signal_handlers();  // forward host signals to guest
