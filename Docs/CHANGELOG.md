@@ -55,7 +55,7 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 - **Flying Gorilla installed, opened a window and then returned to the prompt with no message.** Its pairip app protection asks the Play
   Store's licensing service to confirm the install, fails (Bifrost has no Play Store), retries three times and calls `System.exit(0)`, so
-  there was no failure status to report. The library card and drawer now say "Closed itself: Google Play licence check", and the terminal
+  there was no failure status to report. The library card and drawer now say "Play licence check failed" (the first wording, "Closed itself: Google Play licence check", was clipped at both ends of the card: 208 px of room for 220 px of text), and the terminal
   prints the same with the log path. Checked on the real session log and on a live run of the XAPK; ordinary exits stay quiet. The
   check is not answered: Bifrost does not fake a licence response, so the game still cannot run.
 

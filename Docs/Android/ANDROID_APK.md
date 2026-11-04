@@ -352,8 +352,8 @@ apps often quit this way) are not failures, so the card just says when it was pl
 failed". Ad and Play services errors never count as the cause.
 An app that exits with status 0 is quiet too, except when its log shows Google Play's licence check failing
 (`LicenseClient: Error while checking license`, from the pairip app protection some games ship with, which asks
-the Play Store app to confirm the install and quits when it cannot). The card then says "Closed itself: Google Play
-licence check", the terminal prints the same, and Flying Gorilla 5.2.13 is an example. Bifrost has no Play Store and does not
+the Play Store app to confirm the install and quits when it cannot). The card then says "Play licence check failed" (the drawer explains
+the rest), the terminal prints the same, and Flying Gorilla 5.2.13 is an example. Bifrost has no Play Store and does not
 fake the answer, so such an app cannot run here; the line only says why it stopped.
 
 ### Menu entries (2026-11-04)

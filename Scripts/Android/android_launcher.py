@@ -252,7 +252,7 @@ CAUSES = (
     ("signal", "Crashed in native code", "The app's native code hit a fault. Try again; if it keeps happening, the log shows where."),
     ("java", "Crashed in Java code", "The app hit an unhandled error. Try again; if it keeps happening, the log shows where."),
     ("anr", "Stopped responding", "The app stopped responding and was ended. Try again; slow first launches can do this."),
-    ("license", "Closed itself: Google Play licence check",
+    ("license", "Play licence check failed",
      "This app asks the Google Play Store to confirm it was installed from Play. Bifrost has no Play Store, so the check "
      "fails and the app quits. Bifrost does not fake the answer, so this app cannot run here."),
 )

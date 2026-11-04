@@ -691,6 +691,18 @@ class LauncherLibraryTests(unittest.TestCase):
         self.assertEqual((card.line.text(), card.line.property("tone")), ("Last run failed", "problem"))
         self.assertTrue(card.meta.text().startswith("1.7 · Installed"), card.meta.text())
 
+    def test_every_red_line_fits_on_a_card(self):
+        # "Closed itself: Google Play licence check" was cut off at both ends of the card (208 px for 220 px of text).
+        card = next(iter(self.window.cards.values())) if self.window.cards else None
+        self.window.apps = [self.app(7, "Fits")]; self.window.render()
+        card = self.window.cards[self.window.apps[0]["package"]]
+        self.window.resize(1100, 700); self.window.show(); self.settle(lambda: card.line.width() > 100)
+        texts = {line for _, line, _ in self.launcher.CAUSES} | {"Ended unexpectedly", "Couldn't start", "Ended from outside",
+                                                                   "Last run failed", "Not played yet"}
+        for text in sorted(texts):
+            card.line.setText(text)
+            self.assertLessEqual(card.line.sizeHint().width(), card.line.width(), text)
+
     def test_a_red_line_says_what_went_wrong_and_only_when_something_did(self):
         explain = self.launcher.explain_ending
         crash = [{"key": "signal"}]; ads = [{"key": "ads"}, {"key": "play"}]
@@ -699,17 +711,17 @@ class LauncherLibraryTests(unittest.TestCase):
         self.assertEqual(explain({"state": "interrupted"})[0], "Ended unexpectedly")
         # An app that exits with status 0 is quiet unless it quit on a failed Google Play licence check (Flying Gorilla).
         licence = [{"key": "license"}]
-        self.assertEqual(explain({"state": "exited", "exit_code": 0}, licence)[0], "Closed itself: Google Play licence check")
+        self.assertEqual(explain({"state": "exited", "exit_code": 0}, licence)[0], "Play licence check failed")
         self.assertIsNone(explain({"state": "exited", "exit_code": 0}))
         self.assertIsNone(explain({"state": "exited", "exit_code": 0}, ads))
-        self.assertEqual(explain({"state": "failed", "exit_code": 1}, licence)[0], "Closed itself: Google Play licence check")
+        self.assertEqual(explain({"state": "failed", "exit_code": 1}, licence)[0], "Play licence check failed")
         failed_check = ("11-04 11:08:44.061 669522 669522 E LicenseClient: Error while checking license: "
                         "com.pairip.licensecheck.LicenseCheckException: Not allowed to bind with the licensing service")
         retry = "11-04 11:08:38.044 669522 669522 D LicenseClient: Retry #1. License check failed with error 'Not allowed'"
         self.assertEqual([item["key"] for item in self.launcher.log_findings([retry, failed_check])], ["license"])
         self.assertEqual(self.launcher.log_findings([retry]), [])
         quit_log = self.root / "quit.log"; quit_log.write_text(retry + "\n" + failed_check + "\n")
-        self.assertIn("Google Play licence check", self.launcher.quit_reason(quit_log))
+        self.assertIn("Play licence check failed", self.launcher.quit_reason(quit_log))
         quit_log.write_text("I app_process64: System.exit called, status: 0\n")
         self.assertIsNone(self.launcher.quit_reason(quit_log))
         self.assertIsNone(self.launcher.quit_reason(self.root / "missing.log"))
@@ -734,7 +746,7 @@ class LauncherLibraryTests(unittest.TestCase):
         log.write_text(failed_check + "\n")
         quit_session = dict(session, state="exited", exit_code=0, session_id="q")
         self.assertEqual(self.launcher.activity_line(dict(failed, session=quit_session))[1], "problem")
-        self.assertEqual(self.launcher.describe_session(quit_session)["outcome"], "Closed itself: Google Play licence check")
+        self.assertEqual(self.launcher.describe_session(quit_session)["outcome"], "Play licence check failed")
         log.write_text("I app_process64: System.exit called, status: 0\n")
         quiet = dict(session, state="exited", exit_code=0, session_id="q2")
         self.assertEqual(self.launcher.describe_session(quiet)["outcome"], "Exited normally")
