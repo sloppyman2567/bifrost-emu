@@ -25,14 +25,13 @@ void FrostJIT::emit_tier2_edge_profile(bool taken) {
     // Two instructions and no branch: this code runs on every execution of
     // every profiled branch for the life of the block. A 64-bit counter
     // cannot wrap; a profile of a replaced translation just goes unread.
-    if (mt_active()) emit_byte(0xF0);
+    // Not locked in MT: these counts only feed a bias heuristic, so an update
+    // lost to a race changes nothing, and a locked RMW on every branch does.
     emit_byte(0x49); emit_byte(0xFF); emit_byte(0x43); emit_byte(offset); // inc qword [r11+off]
 }
 void FrostJIT::invalidate_tier2_profiles(uint64_t lo, uint64_t hi) {
-    for (auto it = tier2_profiles_by_pc_.begin(); it != tier2_profiles_by_pc_.end();) {
-        if (it->first >= lo && it->first < hi) it = tier2_profiles_by_pc_.erase(it);
-        else ++it;
-    }
+    tier2_profiles_by_pc_.erase(tier2_profiles_by_pc_.lower_bound(lo),
+                                tier2_profiles_by_pc_.lower_bound(hi));
 }
 void FrostJIT::clear_tier2_profiles() {
     tier2_profiles_by_pc_.clear();

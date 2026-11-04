@@ -276,16 +276,15 @@ void FrostJIT::dump_code_cache_stats() {
                 blocks_.size(), (unsigned long long)instrs, (unsigned long long)bytes,
                 instrs ? double(bytes) / double(instrs) : 0.0, blocks_.empty() ? 0.0 : double(instrs) / double(blocks_.size()),
                 (unsigned long long)interp_only, (unsigned long long)selfloop, (unsigned long long)taken_slots);
-        // Entries per block that carries a multithreaded Tier-2 hot counter (BIFROST_TIER2=1 with a
-        // second vCPU; heads ending in a conditional branch or cut by the size limit, without a call,
+        // Entries per block that carries a Tier-2 hot counter (BIFROST_TIER2=1; heads ending in a conditional branch or cut by the size limit, without a call,
         // SVC or BR), to judge how many compiled blocks are one-shot or rarely run. A counter stops at
         // BIFROST_TIER2_HITS (1000) and restarts from 0 on a profile retry; counters of invalidated
         // blocks stay until the cache is replaced, so the total can exceed the live blocks.
         // try_lock: the compiler takes this mutex before the blocks lock held here, so waiting would deadlock.
         std::unique_lock<std::mutex> compile_guard(compile_mutex_, std::try_to_lock);
-        if (compile_guard.owns_lock() && !mt_hot_counters_.empty()) {
+        if (compile_guard.owns_lock() && !hot_counters_.empty()) {
             uint64_t bucket[8] = {};  // 0, 1, 2, 3-4, 5-9, 10-99, 100+, total
-            for (const auto& counter : mt_hot_counters_) {
+            for (const auto& counter : hot_counters_) {
                 const uint32_t hits = counter->hits.load(std::memory_order_relaxed);
                 const int b = hits == 0 ? 0 : hits == 1 ? 1 : hits == 2 ? 2 : hits <= 4 ? 3 : hits <= 9 ? 4 : hits <= 99 ? 5 : 6;
                 bucket[b]++; bucket[7]++;
@@ -972,7 +971,7 @@ void FrostJIT::invalidate_all() {
     for (const auto& kv : blocks_)
         if (!kv.second.is_region) retired_pcs_.insert(kv.first);
     if (mt_active()) {
-        for (auto& counter : mt_hot_counters_) counter->enabled.store(0, std::memory_order_release);
+        for (auto& counter : hot_counters_) counter->enabled.store(0, std::memory_order_release);
         blocks_.clear(); back_refs_.clear();
         tls_last_block_ = LastBlockCache{};
         clear_inline_cache();

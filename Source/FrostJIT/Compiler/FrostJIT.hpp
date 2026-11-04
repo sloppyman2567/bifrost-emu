@@ -618,7 +618,7 @@ public:
     static_assert(offsetof(Tier2BranchProfile, taken) < 128 &&
                   offsetof(Tier2BranchProfile, fallthrough) < 128);
     std::vector<std::unique_ptr<Tier2BranchProfile>> tier2_branch_profiles_;
-    std::unordered_map<uint64_t, Tier2BranchProfile*> tier2_profiles_by_pc_;
+    std::map<uint64_t, Tier2BranchProfile*> tier2_profiles_by_pc_;  // ordered: retirement erases a range
     Tier2BranchProfile* tier2_branch_profile_ = nullptr; // current Tier-1 codegen
     void emit_tier2_edge_profile(bool taken);
     void invalidate_tier2_profiles(uint64_t lo, uint64_t hi);
@@ -636,18 +636,22 @@ public:
     // A measured loss retries a strictly smaller prefix, at most 8 -> 4 -> 2.
     // Kept until code invalidation or a selected region changes phase.
     std::unordered_map<uint64_t, unsigned> tier2_block_limits_; // compiler lock
-    struct MtHotCounter {
+    // Entry counts live outside the code buffer. A store to the cache line
+    // being executed is self-modifying code to the CPU: 62 cycles of pipeline
+    // resync per block entry when the counters sat in front of each block.
+    struct HotCounter {
         std::atomic<uint32_t> enabled{1}, hits{0};
+        bool patchable = false;  // single-thread prologue: disabled by a jump over it
     };
     static_assert(std::atomic<uint64_t>::is_always_lock_free);
     static_assert(std::atomic<uint32_t>::is_always_lock_free);
-    static_assert(offsetof(MtHotCounter, hits) == 4);
+    static_assert(offsetof(HotCounter, hits) == 4);
     std::vector<std::unique_ptr<MtEdge>> mt_edges_;
     std::unordered_map<uint64_t, std::vector<MtEdge*>> mt_edge_refs_, mt_source_refs_;
     // The edge source_pc emitted at code offset `slot`; its 1-3 edges are scanned.
     MtEdge* mt_slot_edge(uint64_t source_pc, size_t slot);
-    std::vector<std::unique_ptr<MtHotCounter>> mt_hot_counters_;
-    std::unordered_map<size_t, MtHotCounter*> mt_counter_sites_;
+    std::vector<std::unique_ptr<HotCounter>> hot_counters_;
+    std::unordered_map<size_t, HotCounter*> hot_counter_sites_;
     std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
     MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
     // cpu_reg holds the CPU at the slot: RDI after an exit that restored the
@@ -856,7 +860,7 @@ public:
     // compiles a region for it and re-patches the loop back-edge chain slot(s)
     // so the next iteration jumps into the region. Executes from INSIDE a
     // running block: must not throw (wrapped in try/catch), must not touch the
-    // W^X machinery (bails when wex_enabled_ — an in-code counter writes the
+    // W^X machinery (bails when wex_enabled_ — disabling a counter patches the
     // code page, which only exists in non-W^X shared-JIT mode), and takes the
     // exclusive lock only around the map mutations. Implemented in
     // Tier2/Promotion.cpp.
@@ -870,8 +874,8 @@ private:
     void redirect_tier2_head_locked(uint64_t pc);
     void revoke_tier2_samples_locked(Tier2Trial& trial);
 public:
-    // Neutralize a block's tier-2 in-code counter after it fires: overwrites
-    // the prologue `inc dword[rip]` (6 bytes) with `jmp rel32` past the whole
+    // Neutralize a block's tier-2 counter after it fires: overwrites the start
+    // of a single-thread prologue with `jmp rel32` past the whole
     // counter+fire sequence so the block stops paying ~6 cycles/entry. No-op
     // when no counter was emitted (off==0). Writes the code page directly —
     // callers hold the exclusive blocks_mutex_ (and tier-2 only runs in
@@ -1079,16 +1083,16 @@ private:
         uint32_t taken_chain_patch_off = 0;   // offset of the taken-path slot
         uint32_t selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
         uint32_t emitted_bytes = 0;    // actual host code size for region admission
-        // Offset of the tier-2 in-code hot-head counter (8 bytes of counter
-        // state just before the fn entry; the prologue `inc`/`cmp`/`jne` fire
-        // path against it). 0 = no counter emitted (block ineligible, or tier-2
-        // off). The fire path overwrites the `inc` with a `jmp rel32` over the
+        // Offset of the tier-2 hot-head counter sequence in the prologue (the
+        // count is a HotCounter, found through hot_counter_sites_). 0 = no
+        // counter emitted (block ineligible, or tier-2 off). Single-thread
+        // firing overwrites the sequence's start with a `jmp rel32` over the
         // whole counter+fire sequence once the block fires, so a hot block
         // stops paying the per-entry counter cost for the rest of the run.
         uint32_t tier2_counter_off = 0;
         // Total length of the tier-2 counter+fire sequence at
-        // tier2_counter_off (inc+cmp+jne+fire path). tier2_counter_disable
-        // overwrites the leading `inc` (6 bytes) with `jmp rel32` of
+        // tier2_counter_off (mov+inc+cmp+jne+fire path). tier2_counter_disable
+        // overwrites its first five bytes with `jmp rel32` of
         // (tier2_counter_len - 5) to skip the whole sequence. 0 = none.
         uint32_t tier2_counter_len = 0;
         int     instr_count = 0;      // number of ARM64 instructions in this block

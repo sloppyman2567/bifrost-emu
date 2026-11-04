@@ -56,17 +56,25 @@ void FrostJIT::retire_tier2_region_locked(uint64_t pc) {
     if (head == blocks_.end()) return;
     // Select the region and its Tier-1 constituents precisely. Instruction
     // bytes did not change, so neighboring regions need not be discarded.
-    std::vector<uint64_t> victims;
+    // The code index locates candidates: a rejected trial retires here, and a
+    // walk of every block per retirement took 43% of an Android game's CPU.
+    std::vector<uint64_t> victims{pc};
     const auto& ranges = head->second.inlined_ranges_;
-    for (const auto& kv : blocks_) {
-        if (kv.first == pc) { victims.push_back(kv.first); continue; }
-        if (kv.second.is_region) continue;
-        const uint64_t end = kv.first + kv.second.instr_count * 4ull;
-        for (const auto& range : ranges)
-            if (kv.first < range.first + range.second * 4ull && end > range.first) {
-                victims.push_back(kv.first); break;
+    for (const auto& range : ranges) {
+        const uint64_t range_end = range.first + range.second * 4ull;
+        auto granule = code_index_.lower_bound(range.first & ~(CODE_INDEX_GRANULE - 1));
+        for (; granule != code_index_.end() && granule->first < range_end; ++granule) {
+            for (uint64_t candidate : granule->second) {
+                const auto block = blocks_.find(candidate);
+                if (block == blocks_.end() || block->second.is_region) continue;
+                const uint64_t end = candidate + block->second.instr_count * 4ull;
+                if (candidate < range_end && end > range.first) victims.push_back(candidate);
             }
+        }
     }
+    // A block listed on several granules or ranges is retired once.
+    std::sort(victims.begin(), victims.end());
+    victims.erase(std::unique(victims.begin(), victims.end()), victims.end());
     for (const auto& range : ranges)
         invalidate_tier2_profiles(range.first, range.first + range.second * 4ull);
     retire_blocks_locked(victims);

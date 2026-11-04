@@ -160,22 +160,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
     dirty_host_regs_ = 0;  // reset dirty-bitmask
-    // Tier-2 in-code hot-head counter (opt-in; BIFROST_TIER2=1 enables):
-    // 8 bytes of counter state immediately BEFORE the fn entry (unreachable
-    // data — the fn starts at block_start below, so the entry point stays the
-    // prologue). The prologue emits the RIP-relative increment against this
-    // slot; the counter counts EVERY entry into the block (cold dispatch AND
-    // chain edges — both run the prologue) so CHAINED hot loops fire, which
-    // the dispatch-side counters (run_block slow path / lookup_call_target)
-    // can never see. Gated on !wex_enabled_ only (the counter writes the code
-    // page — a W^X buffer would fault on the `inc`). Chain-skip COMPOSES with
-    // tier-2: the reservation MUST stay active there or the
-    // counter's RIP-relative inc would read/write the PREVIOUS block's last
-    // 8 code bytes (layout-dependent corruption → SIGSEGV). Self-loops are
-    // naturally excluded: their loop-back jumps to block_body_start_off_
-    // (past the prologue), so only cold entries count (~1).
-    if (tier2_enabled() && !wex_enabled_ && !mt_active_)
-        emit_u64(0);  // uint32 counter + 4 bytes padding (RIP-relative inc)
     size_t block_start = code_buf_used_;
     // ── Translate ARM64 → IR ─────────────────────────────────────
     IRBlock ir_block;
@@ -670,16 +654,15 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         emit_mov_imm64(RDX, ir_block.fwd_enabled ? 1 : 0);
         emit_call_aligned(&jit_trace_block_entry, 0);
     }
-    // ── Tier-2 in-code hot-head counter (opt-in; BIFROST_TIER2=1 enables) ──
+    // ── Tier-2 hot-head counter (opt-in; BIFROST_TIER2=1 enables) ──
     // Emitted here (after chain_entry_off_, before the R10 window load and
     // vec prologue loads) so BOTH cold entries (falling through the prologue)
     // and chain-skip entries (jumping to chain_entry_off_) hit it — every
     // execution of the block is counted. At this point RBX=cpu/RBP=frame are
     // set and RDI/RSI are still the entry args (already stashed), so the fire
     // path can clobber the caller-saved regs freely (the window load and vec
-    // loads that follow use no GPR scratch). The counter data lives 8 bytes
-    // before block_start (see above); the RIP-relative disp32 is known here
-    // because that data was emitted first.
+    // loads that follow use no GPR scratch). The count itself is a HotCounter,
+    // outside the code buffer.
     //
     // Native conditional/direct-branch and capped straight-line heads can
     // participate in a bounded loop region. Calls and fault boundaries are
@@ -719,12 +702,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
         size_t mt_counter_disabled_patch = 0;
         tier2_counter_off_ = code_buf_used_;
+        // The prologue counts EVERY entry into the block (cold dispatch and
+        // chain edges both run it), so chained hot loops fire, which dispatch-
+        // side counters never see. Self-loops jump past it to
+        // block_body_start_off_, so only cold entries count. Disabling a
+        // single-thread counter patches this code, hence !wex_enabled_ above.
+        auto counter = std::make_unique<HotCounter>();
+        HotCounter* state = counter.get();
+        hot_counters_.push_back(std::move(counter));
+        hot_counter_sites_[tier2_counter_off_] = state;
+        emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(state));
         if (mt_active()) {
-            auto counter = std::make_unique<MtHotCounter>();
-            MtHotCounter* state = counter.get();
-            mt_hot_counters_.push_back(std::move(counter));
-            mt_counter_sites_[tier2_counter_off_] = state;
-            emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(state));
             // cmp dword [rax],0; je past counter/fire (patched below)
             emit_byte(0x83); emit_byte(0x38); emit_byte(0);
             size_t disabled = emit_jcc_rel32_placeholder(0x4);
@@ -738,17 +726,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             // Keep the disabled-counter fixup local to this prologue.
             mt_counter_disabled_patch = disabled;
         } else {
-            const size_t data_off = block_start - 8;
-            const uint32_t threshold = tier2_hits_threshold();
-            // inc dword [rip+disp]         (FF 05 disp32)
-            size_t inc_off = code_buf_used_;
-            emit_byte(0xFF); emit_byte(0x05);
-            emit_u32(static_cast<uint32_t>(static_cast<int32_t>(data_off - (inc_off + 6))));
-            // cmp dword [rip+disp], imm32  (81 3D disp32 imm32)
-            size_t cmp_off = code_buf_used_;
-            emit_byte(0x81); emit_byte(0x3D);
-            emit_u32(static_cast<uint32_t>(static_cast<int32_t>(data_off - (cmp_off + 10))));
-            emit_u32(threshold);
+            state->patchable = true;
+            // One vCPU: no lock. inc dword [rax+4]; cmp dword [rax+4], imm32
+            emit_byte(0xFF); emit_byte(0x40); emit_byte(4);
+            emit_byte(0x81); emit_byte(0x78); emit_byte(4);
+            emit_u32(tier2_hits_threshold());
         }
         // jne short skip                (75 rel8 — patched after the call)
         size_t jne_off = code_buf_used_;

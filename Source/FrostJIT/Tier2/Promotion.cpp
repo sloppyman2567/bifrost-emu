@@ -37,11 +37,10 @@ void tier2_fire_stub(Emulator* emu, uint64_t pc, size_t site) {
 
 void FrostJIT::tier2_counter_disable(size_t counter_off, size_t counter_len, bool legacy_transition) {
     if (!counter_off || counter_len < 6) return;
-    auto mt = mt_counter_sites_.find(counter_off);
-    if (mt != mt_counter_sites_.end()) {
-        mt->second->enabled.store(0, std::memory_order_release);
-        return;
-    }
+    auto counter = hot_counter_sites_.find(counter_off);
+    if (counter == hot_counter_sites_.end()) return;
+    counter->second->enabled.store(0, std::memory_order_release);
+    if (!counter->second->patchable) return;
     if (mt_active() && !legacy_transition) return;
     // Only the single running vCPU may replace this legacy instruction
     // sequence. The MT transition disables it before a worker is launched.
@@ -57,7 +56,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
     // Runs from INSIDE a generated block (prologue fire path). Never let an
     // exception cross the JIT frame boundary (std::terminate).
     try {
-        // W^X bail: the in-code counter writes the code page (a non-W^X RWX
+        // W^X bail: disabling a counter patches the code page (a non-W^X RWX
         // buffer), and the compile here would mprotect the page we're
         // currently executing from. Regions only exist in shared-JIT mode.
         if (wex_enabled_ || !tier2_enabled()) return;
@@ -75,13 +74,9 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
         // Samples lag the entry counter by one iteration. If a constituent
         // is still cold, retry at most three hotness windows before declining.
         if (!trace.fully_profiled && ++it->second.tier2_attempts < 3) {
-            auto mt = mt_counter_sites_.find(site);
-            if (mt != mt_counter_sites_.end())
-                mt->second->hits.store(0, std::memory_order_relaxed);
-            else if (site && old_entry.fn) {
-                const uint32_t zero = 0;
-                std::memcpy(reinterpret_cast<uint8_t*>(old_entry.fn) - 8, &zero, sizeof(zero));
-            }
+            auto counter = hot_counter_sites_.find(site);
+            if (counter != hot_counter_sites_.end())
+                counter->second->hits.store(0, std::memory_order_relaxed);
             tier2_profile_retries.fetch_add(1, std::memory_order_relaxed);
             return;
         }

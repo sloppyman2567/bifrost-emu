@@ -64,10 +64,10 @@ void FrostJIT::dump_memory_stats() {
     const size_t edges = vector_bytes(mt_edges_) + mt_edges_.size() * chunk(sizeof(MtEdge));
     const size_t edge_maps = hash_bytes(mt_edge_refs_) + vector_values_bytes(mt_edge_refs_) +
                              hash_bytes(mt_source_refs_) + vector_values_bytes(mt_source_refs_);
-    const size_t tier2 = vector_bytes(mt_hot_counters_) + mt_hot_counters_.size() * chunk(sizeof(MtHotCounter)) +
-                         hash_bytes(mt_counter_sites_) + vector_bytes(tier2_branch_profiles_) +
+    const size_t tier2 = vector_bytes(hot_counters_) + hot_counters_.size() * chunk(sizeof(HotCounter)) +
+                         hash_bytes(hot_counter_sites_) + vector_bytes(tier2_branch_profiles_) +
                          tier2_branch_profiles_.size() * chunk(sizeof(Tier2BranchProfile)) +
-                         hash_bytes(tier2_profiles_by_pc_);
+                         tree_bytes(tier2_profiles_by_pc_);
     const size_t words = vector_bytes(code_words_) + vector_bytes(flag_dep_table_);
     const size_t retired = hash_bytes(retired_pcs_);
     const size_t total = blocks + index + back_refs + calls + edges + edge_maps + tier2 + words + retired;

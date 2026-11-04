@@ -1254,9 +1254,9 @@ shared compiles, retries and contended table/compiler lock wait) and
 `[JIT] invalidate (calls/retired/kept):` per reason. Recompiles include the
 one-time purge when a second CPU starts.
 
-With `BIFROST_TIER2=1` and a second vCPU, `[JIT] block-runs (counted blocks=N) 0:.. 1:.. 2:..
+With `BIFROST_TIER2=1`, `[JIT] block-runs (counted blocks=N) 0:.. 1:.. 2:..
 3-4:.. 5-9:.. 10-99:.. 100+:..` buckets the entries of every block that carries a
-multithreaded hot counter (conditional-branch or size-limited heads without a call, SVC
+hot counter (conditional-branch or size-limited heads without a call, SVC
 or BR). It shows how many compiled blocks run once or twice, for judging a compile
 threshold. A counter stops at `BIFROST_TIER2_HITS` (default 1000), restarts from 0 on a
 profile retry, and outlives its invalidated block until the cache is replaced; the line
@@ -1567,8 +1567,14 @@ counter makes at most three attempts per translation while samples warm up. All 
 incoming chains. The former dispatch/call-lookup promotion paths did not
 retain those ranges and have been removed. Self-loop iterations that bypass
 the generated entry still do not contribute hotness. Conditional exits count
-taken/fall-through outcomes with one `inc qword [profile+off]` (64-bit, no check,
-`lock`ed in MT) behind a `mov r11, imm64`.
+taken/fall-through outcomes with one `inc qword [profile+off]` (64-bit, no check)
+behind a `mov r11, imm64`. It stays in the block for life, promoted or not, and is not `lock`ed in MT: the counts only feed the bias
+heuristic, so an update lost to a race does no harm.
+
+Entry counts are `HotCounter`s outside the code buffer, in both modes. They used to sit in the 8 bytes before each
+single-thread block, and an `inc` on the line being executed is self-modifying code to the CPU: `bench_memcpy` with counters
+that never fire took 17.3 billion cycles and 272 M pipeline resyncs (`bp_redirects.resync`), against 0.76 billion and 18 thousand
+now. At the default threshold the move changed little, because a counter stops at 1000 hits.
 With at least 16 samples, a taken successor with 75% bias is linearized by
 inverting the typed branch and retaining the original fall-through as a cold
 exit. Head back-edges remain loop terminators. Promotion requires all branches
@@ -1589,7 +1595,9 @@ colliding regions can delay detection by depositing extra credits or changing
 the slot's owner, but cannot add pressure to another region.
 
 Retirement holds one compiler-lock critical section for version validation,
-exact victim selection and revocation. It retires the head and overlapping
+exact victim selection and revocation. Victims come from `code_index_` and profiles from an ordered map, so a
+retirement costs the size of its ranges. Each used to walk every block and every profile: with Arknights' thousands of rejected
+trials that was 43% of its user-mode CPU. It retires the head and overlapping
 Tier-1 constituents and resets their profiles, preserving unrelated regions
 on the same page. Mapping changes still use page-granular invalidation. At
 most two phase retirements or terminal trial rejections per head are allowed

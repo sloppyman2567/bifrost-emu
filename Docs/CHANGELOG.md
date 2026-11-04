@@ -20,6 +20,13 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Tier-2 stops scanning every block (2026-11-04)
+
+Retiring a region walked every block and every branch profile. With Arknights' thousands of rejected trials that was 43% of its
+user-mode CPU; retirement now finds its victims through the code index. Single-thread hot counters moved out of the code buffer,
+where each entry was a self-modifying-code store, and branch counters are no longer `lock`ed in MT. Tier-2 stays opt-in: it is
+still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regions it tries.
+
 ### `asgard` explains itself and takes short names (2026-11-04)
 
 - **`asgard --help` listed 19 command names and nothing else, `asgard run -h` showed that same list instead of the options of `run`, and a

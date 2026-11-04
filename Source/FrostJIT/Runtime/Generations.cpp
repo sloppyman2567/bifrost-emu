@@ -223,8 +223,8 @@ void FrostJIT::release_resources() {
     clear(mt_edge_refs_);
     clear(mt_source_refs_);
     clear(mt_edges_);
-    clear(mt_counter_sites_);
-    clear(mt_hot_counters_);
+    clear(hot_counter_sites_);
+    clear(hot_counters_);
     clear(tier2_trials_);
     clear(tier2_region_monitors_);
     clear(tier2_profiles_by_pc_);
