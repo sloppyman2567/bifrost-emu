@@ -125,7 +125,8 @@ public final class Managed extends Activity {
             for (int i = 0; i < 2; i++) android.app.ActivityManager.getMyMemoryState(
                     new android.app.ActivityManager.RunningAppProcessInfo());
             try {
-                ((android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE)).getAppTasks();
+                // An Activity API the runtime does not implement (getAppTasks is, since aa1272b3).
+                ((android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE)).getRecentTasks(1, 0);
                 throw new AssertionError("Missing Activity API silently succeeded");
             } catch (UnsupportedOperationException expected) {
                 System.out.println("MANAGED_FIXTURE_ACTIVITY_TRACE_FAILURE_OK");

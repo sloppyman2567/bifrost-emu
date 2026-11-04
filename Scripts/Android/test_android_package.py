@@ -2366,6 +2366,18 @@ class PackageTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temporary.cleanup()
 
+    def setUp(self):
+        # Each test installs into its own `*-state` directory, which holds a copy of the Android framework (gigabytes).
+        # Freed when the test ends, the suite needs the space of one test and not of all of them: together they filled a
+        # 16 GB /tmp and failed ten later tests with "No space left on device".
+        existing = {entry.name for entry in self.work.iterdir()}
+
+        def free_state():
+            for entry in self.work.iterdir():
+                if entry.name not in existing and entry.name.endswith("-state"):
+                    shutil.rmtree(entry, ignore_errors=True)
+        self.addCleanup(free_state)
+
     @classmethod
     def apk(cls, name, split="", native=False, version=1, managed=False, key=None):
         manifest = cls.work / (name + ".xml")
@@ -2874,8 +2886,10 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(event["tid"], ends[key]["tid"])
                 self.assertEqual(event["operation"], ends[key]["operation"])
                 self.assertGreaterEqual(ends[key]["duration_ns"], 0)
-            self.assertTrue(any(event["event"] == "throw" and event["operation"] == "activity.startService"
-                                for event in records), "unsupported calls not traced")
+            # The fixture's rejected foreground-service type: a call that throws is traced as a pair (startService is
+            # implemented now; the unsupported-call case is in test_managed_activity_api_report).
+            self.assertTrue(any(event["event"] == "throw" and event["operation"] == "activity.setServiceForeground"
+                                for event in records), "thrown calls not traced")
             native = text + (app / "managed/last-logd.log").read_text()
             self.assertTrue("nativeloader" in native and "libbifrost-activity.so" in native,
                             "native library-load log missing")
@@ -2920,7 +2934,8 @@ class PackageTests(unittest.TestCase):
         memory, = [item for item in report["methods"] if item["method"] == "getMyMemoryState"]
         self.assertGreaterEqual(memory["returns"], 2)
         self.assertEqual(memory["calls"], memory["returns"])
-        failure, = [item for item in report["methods"] if item["method"] == "getAppTasks"]
+        failure, = [item for item in report["methods"]
+                    if item["service"] == "activity_task" and item["method"] == "getRecentTasks"]
         self.assertEqual(failure["throws"], 1)
         self.assertIn("UnsupportedOperationException", failure["last_failure"]["exception"])
         self.assertTrue(failure["first_caller"])
@@ -3200,9 +3215,13 @@ class PackageTests(unittest.TestCase):
         self.assertIsNotNone(report, text[-3000:])
         sizes = list(map(int, report.group(1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)))
         self.assertEqual(sizes, [width, height] * 7)
-        page = re.search(r"GEOMETRY page inner=(\d+)x(\d+) dpr=(\d+)", text)
+        page = re.search(r"GEOMETRY page inner=(\d+)x(\d+) dpr=([\d.]+)", text)
         if page:  # the page reports after the WebView loads, which can outlast a short run
-            self.assertEqual((int(page.group(1)) * int(page.group(3)), int(page.group(3))), (width, density // 160))
+            # The density follows the host display, so the ratio is fractional on most desktops (200 dpi is 1.25).
+            ratio = float(page.group(3))
+            self.assertAlmostEqual(ratio, density / 160, places=2)
+            self.assertLessEqual(abs(int(page.group(1)) * ratio - width), 1)
+            self.assertLessEqual(abs(int(page.group(2)) * ratio - height), 1)
 
     def test_managed_text_input(self):
         # Text from the host's input method (committed text, composition) reaches
