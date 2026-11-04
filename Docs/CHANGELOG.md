@@ -20,6 +20,19 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Menu entries with icons for installed apps (2026-11-04)
+
+- **Installed apps had no presence on the desktop: not in the application menu, and a game window had no application id for the
+  taskbar to match.** `android_desktop.py` writes `asgard-PACKAGE.desktop` with the app's icon after an install, removes it after an
+  uninstall, and `asgard desktop [--remove]` does it on request (details in [APK tooling](Android/ANDROID_APK.md#menu-entries-2026-11-04)).
+  Game processes now get `SDL_APP_ID=asgard-PACKAGE`; on KDE Plasma (Wayland) a 2048 window reported that desktop file name. Entries
+  pass `desktop-file-validate`, `Exec` quoting is round-tripped through a specification-style parser in a test, and entries are
+  made only for the default state root.
+- **The Battle Cats had no icon in the library either:** its record named `icon-foreground.png`, which was never in the app's
+  directory. `refresh-icons` (which the library runs once) now also restores adaptive icons whose layer files are missing; the
+  Battle Cats icon is back (the cat with the "13 Years" banner).
+- Not checked: GNOME, X11, native-activity apps, or the entries on a desktop other than the one here.
+
 ### A silent exit gets a reason when Google Play's licence check failed (2026-11-04)
 
 - **Flying Gorilla installed, opened a window and then returned to the prompt with no message.** Its pairip app protection asks the Play

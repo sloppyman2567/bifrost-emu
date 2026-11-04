@@ -651,21 +651,10 @@ def build(state, application, settings=None):
             else: super().mouseReleaseEvent(event)
 
     def adaptive_image(layers, side):
-        """Android's composition of an adaptive icon: both layers are 108 dp, of which the inner 72 dp show. Null if a layer
-        will not load, so the card falls back to its placeholder."""
-        image = QImage(side, side, QImage.Format.Format_ARGB32_Premultiplied); image.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(image); painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        target = QRectF(0, 0, side, side)
-        for name in ("background", "foreground"):
-            value = layers[name]
-            if value.startswith("#"):
-                painter.fillRect(target, QColor(value)); continue
-            layer = QImage(value)
-            if layer.isNull():
-                painter.end(); return QImage()
-            painter.drawImage(target, layer, QRectF(layer.width() / 6, layer.height() / 6, layer.width() * 2 / 3, layer.height() * 2 / 3))
-        painter.end()
-        return image
+        """Android's composition of an adaptive icon (shared with the menu entries). Null if a layer will not load, so the
+        card falls back to its placeholder."""
+        import android_desktop
+        return android_desktop.compose_adaptive(layers, side)
 
     def artwork(app, size, ratio, palette):
         """Rounded launcher tile at device pixels: the icon filling it (a padded icon is cropped to its

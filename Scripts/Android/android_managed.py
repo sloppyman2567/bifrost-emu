@@ -1037,6 +1037,9 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         # The persistent JIT cache (BIFROST_JIT_DISK_CACHE) keeps one directory and
         # budget per app, shared by the session's helper processes.
         environment.setdefault("BIFROST_JIT_CACHE_APP", metadata["package"])
+        if not metadata.get("system"):  # the window's application id: the entry of the same name gives its taskbar button the icon
+            import android_desktop
+            for name, value in android_desktop.window_environment(metadata["package"]).items(): environment.setdefault(name, value)
         if trace_apk and trace_apk != "activity":
             for flag in ("BIFROST_BINDER_TRACE", "BIFROST_FAULT_TRACE", "BIFROST_FRAME_TRACE"):
                 environment[flag] = "1"

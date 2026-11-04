@@ -355,6 +355,24 @@ the Play Store app to confirm the install and quits when it cannot). The card th
 licence check", the terminal prints the same, and Flying Gorilla 5.2.13 is an example. Bifrost has no Play Store and does not
 fake the answer, so such an app cannot run here; the line only says why it stopped.
 
+### Menu entries (2026-11-04)
+
+Each installed app gets a launcher in the desktop's own menu: `asgard-PACKAGE.desktop` in `$XDG_DATA_HOME/applications`
+(default `~/.local/share/applications`), with the app's icon. Its `Exec` line runs `start PACKAGE` through the Asgard that wrote it.
+An app's own PNG is used as it is; a JPEG or WebP bitmap, or an adaptive icon, is saved as `desktop-icon.png` beside the app
+(composed the way the library does, 256 px, and only when PyQt6 is present; without it the entry has no icon). Apps with no icon, or
+whose layer files are missing, get the desktop's generic one. The entry is written after an install, removed after an uninstall, and
+refreshed by `refresh-icons`. `asgard desktop` writes entries for every installed app and `asgard desktop --remove` removes
+them. Entries are made only for the default state root, so a test's or a scratch state root never reaches the menu, and
+`ASGARD_DESKTOP_ENTRIES=0` turns them off. A hand-written file, or one made for another state root, is never removed.
+
+The app's window is named after its entry: Asgard sets `SDL_APP_ID=asgard-PACKAGE` for the game process (unless you set it),
+which SDL3 uses as the Wayland application id and the X11 class, so the taskbar button gets the entry's icon. Checked on KDE
+Plasma (Wayland): the window of 2048 reported `desktopFileName=asgard-com.tpcstld.twozerogame`. Not checked on GNOME, on X11, or with
+a native-activity app (its launch path sets the variable too, untried). `refresh-icons`, which the library also runs once per state
+root, restores an adaptive icon whose layer files are missing from the app's directory (The Battle Cats had its record without the
+file).
+
 Per-app settings are described under [Per-app settings](#per-app-settings).
 The last-session drawer shows saved outcome/timing and
 recognized error signatures from at most the final 16 MiB of its log; those

@@ -6,6 +6,7 @@ import concurrent.futures
 import hashlib
 import hmac
 import importlib.util
+import json
 import os
 import re
 from pathlib import Path
@@ -960,6 +961,210 @@ class LauncherLibraryTests(unittest.TestCase):
                 for pid in processes():
                     try: os.kill(pid, signal.SIGKILL)
                     except ProcessLookupError: pass
+
+
+class IconRepairTests(unittest.TestCase):
+    """refresh-icons restores an adaptive icon whose layer file is missing (Battle Cats: installed with the record only)."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="bifrost-icons-")
+        self.addCleanup(self.temporary.cleanup)
+        self.state = Path(self.temporary.name)
+
+    def app(self, package, files=(), **fields):
+        directory = self.state / package; directory.mkdir()
+        metadata = dict({"package": package, "label": package, "version_code": 1, "launcher": {"kind": "managed_activity"},
+                         "adaptive_icon": {"background": "#ffffffff", "foreground": "icon-foreground.png"}}, **fields)
+        (directory / "package.json").write_text(json.dumps(metadata))
+        for name in files: (directory / name).write_bytes(b"png")
+        (directory / "rootfs/data/app" / (package + "-1")).mkdir(parents=True)
+        (directory / "rootfs/data/app" / (package + "-1") / "base.apk").write_bytes(b"apk")
+        return directory
+
+    def test_a_missing_layer_file_is_restored_and_an_intact_one_is_left_alone(self):
+        broken = self.app("org.example.broken")
+        intact = self.app("org.example.intact", files=["icon-foreground.png"])
+        bitmap = self.app("org.example.bitmap", icon="icon.png", adaptive_icon=None)
+        scanned = []
+
+        def extract(paths, aapt2, staging):
+            scanned.append(staging.name)
+            (staging / "icon-foreground.png").write_bytes(b"restored")
+            return {"background": "#ffffffff", "foreground": "icon-foreground.png"}
+        with patch.object(package, "copy_adaptive_icon", extract):
+            package.refresh_icons(self.state, Path("/nonexistent/aapt2"))
+        self.assertEqual(scanned, ["org.example.broken"])
+        self.assertEqual((broken / "icon-foreground.png").read_bytes(), b"restored")
+        self.assertEqual((intact / "icon-foreground.png").read_bytes(), b"png")
+        # The library lists the broken one as unscanned until it is repaired, and the intact one never.
+        flags = {item["package"]: item["icon_unscanned"] for item in package.installed_apps(self.state)}
+        self.assertEqual(flags, {"org.example.broken": False, "org.example.intact": False, "org.example.bitmap": False})
+        (broken / "icon-foreground.png").unlink()
+        flags = {item["package"]: item["icon_unscanned"] for item in package.installed_apps(self.state)}
+        self.assertTrue(flags["org.example.broken"])
+        self.assertFalse(flags["org.example.intact"])
+
+
+class DesktopEntryTests(unittest.TestCase):
+    """Menu entries for installed apps (android_desktop): a launcher with the app's icon, kept in step with the library."""
+
+    def setUp(self):
+        import android_desktop
+        self.desktop = android_desktop
+        self.temporary = tempfile.TemporaryDirectory(prefix="bifrost-desktop-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.state = self.root / "state"; self.state.mkdir()
+        patcher = patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root / "data")})
+        patcher.start(); self.addCleanup(patcher.stop)
+        os.environ.pop("ASGARD_DESKTOP_ENTRIES", None); os.environ.pop("SDL_APP_ID", None)
+        self.icon = self.root / "icon.png"
+        self.icon.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def app(self, package="org.example.game", **fields):
+        return dict({"package": package, "label": "Example Game", "icon": str(self.icon), "icon_layers": None,
+                     "launcher": "managed_activity", "system": False}, **fields)
+
+    def entries(self):
+        return sorted(path.name for path in self.desktop.applications_dir().glob("*.desktop"))
+
+    @staticmethod
+    def split_exec(value):
+        """The Desktop Entry specification's reading of an Exec value: the string escapes, then double quotes."""
+        value = re.sub(r"\\(.)", r"\1", value)  # string value escapes: \\ is one backslash
+        arguments, current, quoted, started, i = [], "", False, False, 0
+        while i < len(value):
+            c = value[i]
+            if quoted and c == "\\": current += value[i + 1]; i += 1
+            elif c == '"': quoted = not quoted; started = True
+            elif c == " " and not quoted:
+                if started or current: arguments.append(current)
+                current, started = "", False
+            else: current += c
+            i += 1
+        if started or current: arguments.append(current)
+        return arguments
+
+    def test_an_entry_is_valid_and_starts_the_app_through_this_asgard(self):
+        path = self.desktop.write_entry(self.app(), self.state)
+        self.assertEqual(path, self.desktop.applications_dir() / "asgard-org.example.game.desktop")
+        fields = dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
+        self.assertEqual((fields["Type"], fields["Name"], fields["Terminal"]), ("Application", "Example Game", "false"))
+        self.assertEqual(fields["Icon"], str(self.icon))
+        # The window's application id (SDL_APP_ID) is the entry's name, and StartupWMClass says so for X11.
+        self.assertEqual(fields["StartupWMClass"], "asgard-org.example.game")
+        arguments = self.split_exec(fields["Exec"])
+        self.assertEqual(arguments, [sys.executable, str(Path(self.desktop.__file__).resolve().with_name("asgard.py")),
+                                     "start", "org.example.game"])
+        self.assertEqual(path.stat().st_mode & 0o022, 0)
+        if shutil.which("desktop-file-validate"):
+            result = subprocess.run(["desktop-file-validate", str(path)], capture_output=True, text=True)
+            self.assertEqual((result.returncode, result.stdout + result.stderr), (0, ""))
+
+    def test_awkward_names_and_paths_survive_the_entry_format(self):
+        label = 'Line one\nTwo \\ back "quoted" 100% $HOME'
+        with patch.object(sys, "executable", '/tmp/py thon/a "b" $c`d`\\e%f'):
+            text = self.desktop.entry_text(self.app(label=label), self.state, None)
+        self.assertEqual(len([line for line in text.splitlines() if line.startswith("Name=")]), 1)
+        name = next(line for line in text.splitlines() if line.startswith("Name="))
+        self.assertNotIn("\n", name[5:])
+        self.assertEqual(re.sub(r"\\\\", r"\\", name[5:]), 'Line one Two \\ back "quoted" 100% $HOME')
+        exec_value = next(line for line in text.splitlines() if line.startswith("Exec="))[5:]
+        self.assertEqual(self.split_exec(exec_value)[0], '/tmp/py thon/a "b" $c`d`\\e%%f'.replace("%%", "%%"))
+        self.assertNotIn("Icon=", text)
+
+    def test_an_adaptive_icon_is_composed_once_and_reused(self):
+        try:
+            from PyQt6.QtGui import QImage
+        except ImportError:
+            self.skipTest("needs PyQt6")
+        app_dir = self.state / "org.example.game"; app_dir.mkdir()
+        foreground = app_dir / "icon-foreground.png"
+        image = QImage(108, 108, QImage.Format.Format_ARGB32); image.fill(0xffff0000); image.save(str(foreground))
+        app = self.app(icon=None, icon_layers={"background": "#ff00ff00", "foreground": str(foreground)})
+        icon = self.desktop.icon_file(app, self.state)
+        self.assertEqual(icon, str(app_dir / "desktop-icon.png"))
+        composed = QImage(icon)
+        self.assertEqual((composed.width(), composed.height()), (256, 256))
+        self.assertEqual(composed.pixelColor(128, 128).red(), 255)  # the foreground covers the middle
+        before = Path(icon).stat().st_mtime_ns
+        self.assertEqual(self.desktop.icon_file(app, self.state), icon)
+        self.assertEqual(Path(icon).stat().st_mtime_ns, before)
+        broken = self.app(icon=None, icon_layers={"background": "#ff00ff00", "foreground": str(app_dir / "missing.png")})
+        Path(icon).unlink()
+        self.assertIsNone(self.desktop.icon_file(broken, self.state))
+
+    def test_a_webp_or_jpeg_icon_becomes_a_png_beside_the_app(self):
+        try:
+            from PyQt6.QtGui import QImage
+        except ImportError:
+            self.skipTest("needs PyQt6")
+        app_dir = self.state / "org.example.game"; app_dir.mkdir()
+        image = QImage(48, 48, QImage.Format.Format_RGB32); image.fill(0xff3366cc)
+        for suffix, kind in ((".jpg", "JPG"), (".webp", "WEBP")):
+            source = app_dir / ("icon" + suffix)
+            if not image.save(str(source), kind):
+                continue  # this Qt has no writer for the format
+            converted = self.desktop.icon_file(self.app(icon=str(source)), self.state)
+            self.assertEqual(converted, str(app_dir / "desktop-icon.png"))
+            self.assertEqual(Path(converted).read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+            Path(converted).unlink()
+        self.assertEqual(self.desktop.icon_file(self.app(), self.state), str(self.icon))  # a PNG is used as it is
+
+    def test_entries_follow_the_installed_apps_and_leave_other_files_alone(self):
+        apps = [self.app("org.example.one"), self.app("org.example.two"),
+                self.app("com.google.android.gms", system=True), self.app("org.example.broken", error="damaged"),
+                self.app("org.example.noactivity", launcher="service")]
+        written, removed = self.desktop.sync(self.state, apps)
+        self.assertEqual((sorted(written), removed), (["org.example.one", "org.example.two"], []))
+        self.assertEqual(self.entries(), ["asgard-org.example.one.desktop", "asgard-org.example.two.desktop"])
+        directory = self.desktop.applications_dir()
+        # Not ours: a hand-written file with the same prefix, and an entry made for another state root.
+        (directory / "asgard-org.example.mine.desktop").write_text("[Desktop Entry]\nName=Mine\n")
+        other = self.root / "other-state"; other.mkdir()
+        self.desktop.write_entry(self.app("org.example.elsewhere"), other)
+        # App one is uninstalled: only its entry goes.
+        written, removed = self.desktop.sync(self.state, [self.app("org.example.two")])
+        self.assertEqual((written, removed), (["org.example.two"], ["org.example.one"]))
+        self.assertEqual(self.entries(), ["asgard-org.example.elsewhere.desktop", "asgard-org.example.mine.desktop",
+                                          "asgard-org.example.two.desktop"])
+        # One app's change touches only its own entry.
+        self.assertEqual(self.desktop.sync(self.state, [], only="org.example.two"), ([], ["org.example.two"]))
+        self.assertEqual(len(self.entries()), 2)
+        self.assertEqual(self.desktop.remove_all(self.state), [])
+        self.assertEqual(self.desktop.remove_all(other), ["org.example.elsewhere"])
+        self.assertEqual(self.entries(), ["asgard-org.example.mine.desktop"])
+
+    def test_only_the_default_state_root_gets_entries(self):
+        with patch.object(self.desktop.android_paths, "state_root", return_value=self.state):
+            self.assertTrue(self.desktop.enabled(self.state))
+            self.assertFalse(self.desktop.enabled(self.root / "scratch"))
+            with patch.dict(os.environ, {"ASGARD_DESKTOP_ENTRIES": "0"}):
+                self.assertFalse(self.desktop.enabled(self.state))
+        # A test's or a scratch state root must not reach the menu: the CLI hook does nothing for it.
+        with patch.object(package, "installed_apps", return_value=[self.app()]):
+            package.update_desktop(self.root / "scratch", "org.example.game")
+        self.assertEqual(self.entries(), [])
+        with patch.object(self.desktop.android_paths, "state_root", return_value=self.state), \
+                patch.object(package, "installed_apps", return_value=[self.app()]):
+            package.update_desktop(self.state, "org.example.game")
+            self.assertEqual(self.entries(), ["asgard-org.example.game.desktop"])
+            with patch.object(package, "installed_apps", return_value=[]):
+                package.update_desktop(self.state, "org.example.game")  # uninstalled
+            self.assertEqual(self.entries(), [])
+
+    def test_an_unwritable_menu_never_fails_the_install(self):
+        blocked = self.root / "data"; blocked.write_text("a file where the directory should be")
+        with patch.object(self.desktop.android_paths, "state_root", return_value=self.state), \
+                patch.object(package, "installed_apps", return_value=[self.app()]), \
+                patch("sys.stderr") as stderr:
+            package.update_desktop(self.state, "org.example.game")  # must not raise
+        self.assertTrue(any("Menu entry not updated" in "".join(call.args) for call in stderr.write.call_args_list))
+
+    def test_the_window_is_named_after_its_entry_unless_the_user_chose_a_name(self):
+        self.assertEqual(self.desktop.window_environment("org.example.game"), {"SDL_APP_ID": "asgard-org.example.game"})
+        with patch.dict(os.environ, {"SDL_APP_ID": "mine"}):
+            self.assertEqual(self.desktop.window_environment("org.example.game"), {})
 
 
 class SessionResultTests(unittest.TestCase):

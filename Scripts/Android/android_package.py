@@ -488,15 +488,30 @@ def copy_adaptive_icon(paths, aapt2, staging):
     return result
 
 
+ICON_LAYER_FILE = re.compile(r"icon-(?:background|foreground)\.(?:png|jpg|webp)")
+
+
+def missing_icon_layers(app, metadata):
+    """Whether the metadata names an adaptive-icon layer file that is not in the app's directory (an install that wrote the
+    record but not the file); the library could not draw such an icon."""
+    adaptive = metadata.get("adaptive_icon")
+    return isinstance(adaptive, dict) and any(
+        isinstance(value, str) and ICON_LAYER_FILE.fullmatch(value) and not (app / value).is_file()
+        for value in adaptive.values())
+
+
 def refresh_icons(state, aapt2):
-    """Give apps installed before adaptive icons were read their layers. Scanned once: the result is saved either way."""
+    """Give apps installed before adaptive icons were read their layers, and restore layers whose files are missing. Scanned
+    once: the result is saved either way."""
     for app in sorted(state.iterdir()):
         metadata_path = app / "package.json"
         if not PACKAGE.fullmatch(app.name) or not metadata_path.is_file():
             continue
         try:
             metadata = json.loads(metadata_path.read_text())
-            if metadata.get("system") or metadata.get("icon") or "adaptive_icon" in metadata:
+            if metadata.get("system") or metadata.get("icon"):
+                continue
+            if "adaptive_icon" in metadata and not missing_icon_layers(app, metadata):
                 continue
             with app_lock(app):
                 installed = sorted((app / "rootfs/data/app").glob(app.name + "-*/*.apk"), key=lambda p: (p.name != "base.apk", p.name))
@@ -633,8 +648,10 @@ def launch_session(package, app, metadata, emu, no_jit, window_plugin, frames,
     ]
     log_path, _ = session.logs()
     print(f"Launching {package} (log: {log_path})", flush=True)
+    import android_desktop
     with log_path.open("wb") as log:
-        return session.run(command, stdout=log, timeout=timeout)
+        return session.run(command, stdout=log, env=dict(os.environ, **android_desktop.window_environment(package)),
+                           timeout=timeout)
 
 
 def probe(package, state, emu, libraries=None, no_jit=False, timeout=45, preloads=None):
@@ -707,6 +724,18 @@ def probe(package, state, emu, libraries=None, no_jit=False, timeout=45, preload
     return 1 if failures else 0
 
 
+def update_desktop(state, package=None):
+    """Keep the menu entries in step with the installed apps (see android_desktop). An entry is a convenience: failing to
+    write one never fails an install or an uninstall."""
+    import android_desktop
+    if not android_desktop.enabled(state):
+        return
+    try:
+        android_desktop.sync(state, installed_apps(state), only=package)
+    except OSError as error:
+        print(f"Menu entry not updated: {error}", file=sys.stderr)
+
+
 def installed_apps(state):
     from android_sessions import control
     result = []
@@ -732,7 +761,8 @@ def installed_apps(state):
                                    and (app / icon).is_file() else None,
                            "icon_layers": layers if len(layers) == 2 else None,
                            # Installed before adaptive icons were read: `refresh-icons` has not looked at it yet.
-                           "icon_unscanned": not icon and "adaptive_icon" not in metadata and not metadata.get("system"),
+                           "icon_unscanned": not icon and not metadata.get("system")
+                                             and ("adaptive_icon" not in metadata or missing_icon_layers(app, metadata)),
                            "installed_at": metadata.get("installed_at"), "system": bool(metadata.get("system")),
                            "requester": metadata.get("requester"),
                            "launcher": metadata["launcher"]["kind"], "session": session})
@@ -988,6 +1018,8 @@ def main():
         command.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     commands.add_parser("launcher", help="open the desktop app library")
     commands.add_parser("refresh-icons", help="read the adaptive icons of apps installed before they were supported")
+    desktop = commands.add_parser("desktop", help="make menu entries for the installed apps, or remove them")
+    desktop.add_argument("--remove", action="store_true", help="remove every entry this state root made")
     google = commands.add_parser("google", help="sign in to Google (microG) and manage the device's Google accounts")
     actions = google.add_subparsers(dest="action", required=True)
     for name, text in (("sign-in", "add a Google account in microG's sign-in window"),
@@ -1014,6 +1046,17 @@ def main():
             return show(args.state_root.resolve())
         if args.command == "refresh-icons":
             refresh_icons(args.state_root, ROOT / "Tools/android-tools/aapt2")
+            update_desktop(args.state_root)
+            return 0
+        if args.command == "desktop":
+            import android_desktop
+            if args.remove:
+                removed = android_desktop.remove_all(args.state_root)
+                print(f"Removed {len(removed)} menu entries from {android_desktop.applications_dir()}")
+            else:
+                written, removed = android_desktop.sync(args.state_root, installed_apps(args.state_root))
+                print(f"Wrote {len(written)} menu entries in {android_desktop.applications_dir()}"
+                      + (f", removed {len(removed)} for apps that are gone" if removed else ""))
             return 0
         if args.command in ("list", "apps"):
             apps = installed_apps(args.state_root)
@@ -1052,6 +1095,7 @@ def main():
             removing = args.command == "uninstall"
             confirm(f"{'Uninstall' if removing else 'Clear all data of'} {args.package}?", args.yes)
             (uninstall if removing else clear_data)(args.state_root, args.package)
+            if removing: update_desktop(args.state_root, args.package)
             print(f"{'Uninstalled' if removing else 'Cleared the data of'} {args.package}")
             return 0
         if args.command == "install":
@@ -1068,6 +1112,7 @@ def main():
             print(
                 f"Installed {value['package']} version {value['version_code']}: {value['apk_count']} signed APKs, {value['arm64_library_count']} ARM64 libraries"
             )
+            update_desktop(args.state_root, value["package"])
             return 0
         if args.command == "probe":
             return probe(args.package, args.state_root, args.emu.resolve(), args.library,
