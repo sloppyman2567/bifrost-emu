@@ -20,6 +20,15 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Asgard no longer leaves its command running (2026-11-04)
+
+- **`asgard` ran `android_package.py` as a child and waited, so signalling or killing only the `asgard` process orphaned the real
+  command** (a library window closing, `kill`, a test's `terminate()`): a library launcher kept running with its socket under `/tmp`,
+  and each test run left more of them, some for hours. `asgard` now replaces itself with the command (`exec`), so signals and exit
+  codes reach it directly. Exit codes and output were compared with the old behavior for `list`, `status`, `stop` and a bad
+  `--debug`; `test_asgard_launcher_command_is_one_process` fails on the old code. Not checked: the library's own app start and
+  stop in a live desktop session.
+
 ### Larger Play asset packs install (2026-11-03)
 
 - **Play asset packs whose expanded APK contents exceed 2 GiB now install.** The input package keeps its 2 GiB limit;

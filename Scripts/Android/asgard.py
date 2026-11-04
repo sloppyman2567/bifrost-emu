@@ -446,7 +446,10 @@ def main():
             command += ["--binder-broker", broker["socket"]]
         if session or args.command == "probe":
             command += ["--emu", str(args.emu.resolve())]
-        return subprocess.call(command)
+        # Replace this process: a wrapper that stayed as the parent would leave the real command running when it
+        # alone was signalled or killed (a library window closing, `kill`, a test's terminate()).
+        sys.stdout.flush(); sys.stderr.flush()
+        os.execv(sys.executable, command)
     except (OSError, ValueError) as error:
         print(f"Asgard: {error}", file=sys.stderr)
         return 1

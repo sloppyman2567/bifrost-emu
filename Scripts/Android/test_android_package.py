@@ -903,6 +903,41 @@ class LauncherLibraryTests(unittest.TestCase):
                 stop_launcher(launcher)
 
 
+    def test_asgard_launcher_command_is_one_process(self):
+        """asgard.py replaces itself with the command it runs: signalling the pid that was started must stop the launcher."""
+        from android_launcher import activate_existing
+        state = self.root / "single-process-state"; state.mkdir()
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen", HOME=str(self.root))
+
+        def processes():  # every process whose command line names this state root
+            found = []
+            for entry in os.listdir("/proc"):
+                try:
+                    with open(f"/proc/{entry}/cmdline", "rb") as handle:
+                        if str(state).encode() in handle.read(): found.append(int(entry))
+                except (OSError, ValueError): pass
+            return found
+
+        with (self.root / "single-process.log").open("w") as log:
+            launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
+                                         "--state-root", str(state), "launcher"], stdout=log, stderr=subprocess.STDOUT, env=env)
+            try:
+                deadline = time.monotonic() + 20
+                while not activate_existing(state):
+                    if launcher.poll() is not None or time.monotonic() >= deadline:
+                        self.fail("Offscreen Asgard launcher did not start")
+                    time.sleep(0.1)
+                launcher.terminate()   # only the process that was started, as a library window or `kill` does
+                launcher.wait(timeout=10)
+                deadline = time.monotonic() + 5
+                while processes() and time.monotonic() < deadline: time.sleep(0.1)
+                self.assertEqual(processes(), [], "the launcher outlived the process that was signalled")
+            finally:
+                for pid in processes():
+                    try: os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+
+
 class SessionResultTests(unittest.TestCase):
     def test_preparation_log_and_elapsed_time_remain_visible_without_guest_output(self):
         from android_sessions import Session, session_log
