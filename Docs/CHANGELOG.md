@@ -8,7 +8,69 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
+## [2.0.0-beta.1] — app keystore, WebView fences and a faster JIT (2026-11-03)
+
+**2.0.0-beta.1** collects the changes made after 2.0.0-alpha.3 (2026-11-01): an Android Keystore so apps such as PolyTrack
+can save, real GPU fences for WebView, cheaper guest memory barriers, and a series of Tier-1 JIT changes (shared cold paths,
+tighter exits and flags, native scalar and vector FP by element and LD1R, loop bodies kept in one block, lighter Q-register
+accesses). It is the first beta label, not a completed beta scope: the [v2.0 goals](roadmap.md) and the beta.1 items still open
+there (guided provisioning, update/reinstall) remain in progress.
+
+- The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
+  the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
+  pages, CoreMark tables, screenshots) keep that label.
+
+### Larger Play asset packs install (2026-11-03)
+
+- **Play asset packs whose expanded APK contents exceed 2 GiB now install.** The input package keeps its 2 GiB limit;
+  expanded contents are bounded separately at 4 GiB.
+
+### Vector by-element FMA, LD1R, longer loop blocks and cheaper Q loads/stores (2026-11-03)
+
+- **Four JIT changes found by comparing engine-shaped test kernels with a native AVX2 build.** Vector `fmla`/`fmls` by element
+  and single-register `ld1r` no longer call out of translated code; loop bodies of 33 to 64 instructions stay one block instead of
+  splitting every iteration; and Q-register loads and stores use the same light bounds check as scalar ones. Skinning went from
+  2.72 to 0.71 ms per frame and particles from 0.40 to 0.26; the nine kernels average 4.2 times native, from 5.8 at the start of
+  the day ([details](JIT.md#vector-fmla-by-element-ld1r-loop-bodies-and-q-accesses-2026-11-03)).
+- New `jit_ld1r` test; `jit_simd_fp_indexed` and `jit_guard_stubs` cover the new paths, including 16-byte accesses crossing into
+  a missing page. Not checked against QEMU, and no game or CoreMark measurement yet.
+
+### Scalar FP multiplies by element run natively (2026-11-03)
+
+- **`fmul`, `fmulx`, `fmla` and `fmls` on a scalar and a vector element no longer run in the interpreter.** clang emits them for
+  matrix-times-vector code, and Unity's engine library holds about 2,000 to 3,000 of them. A test kernel doing 4-bone skinning
+  got 3 times faster (8.25 to 2.72 ms per frame); the vector forms that then dominated it are in the entry above
+  ([details](JIT.md#scalar-fp-by-element-2026-11-03)).
+- `jit_fp_pw_elem` now sweeps every form and element over special values, register aliasing and both register caches. It was
+  checked against C references and the interpreter, not QEMU.
+
+### Tighter JIT code around exits, flags and CSET (2026-11-03)
+
+- **Fixes from a review of the hottest translated blocks of a mixed test workload.** Returns and indirect branches no longer store
+  their target to a dead stack slot. A conditional branch that finds its flags only in memory tests HI/LS/GE/LT/GT/LE there, as it
+  already did for one-flag conditions, instead of rebuilding them in 14 instructions. `cset` is `setcc` + `movzx`, from five
+  instructions. Flag commits skip a needless RAX save, small negative constants take 7 bytes instead of 10, and fault exits drop
+  dead stores ([details](JIT.md#exit-spills-cset-and-two-flag-branches-2026-11-03)).
+- On that workload code is 6.6% smaller and a run about 3% faster, on one desktop. CoreMark and games were not measured.
+  `jit_csel` and `jit_imm_flags_zext` gain exact checks for the new forms.
+
+### Indirect-branch tables that grow, shared exits and a minimum CPU (2026-11-03)
+
+- **A 4,096-entry indirect-branch table missed constantly in Unity.** Every miss cost a trip through `run_block`, 11.9% of cycles in a
+  Subway Surfers profile. Each thread's table now starts at 1,024 entries and quadruples up to 65,536 as targets replace each other. In
+  its lobby dispatches fell 47% (64.6M to 34.1M per minute), `run_block` to 2.5% of cycles and cycles about 4.7% (one run against two
+  baselines, which repeated within 1.3%). Dispatch tables took up to about 56 MB more ([details](JIT.md#growing-indirect-branch-tables-and-shared-block-exits-2026-11-03)).
+- **Generated code is about 5% smaller.** Frame exits are a shared stub and the indirect-branch probe uses short jumps: 64.5 to 61.0 bytes per
+  guest instruction in that lobby, with no measurable change in its CPU time. Pinned benchmarks moved under 1%, except `bench_dispatch`,
+  2.6% slower. A shared probe reached 57.8 bytes but made `bench_dispatch` 44% slower, so it was dropped.
+- **The JIT needs SSE4.1 and FMA3** and now refuses to start without them; `--no-jit` still runs on any x86-64 CPU. The refusal has not been
+  exercised on such a CPU. Fallback code for older CPUs remains in the tree.
+- **New per-app settings:** `enter_key` (Enter as `KEYCODE_DPAD_CENTER` or `KEYCODE_BUTTON_A` outside text fields, for games that draw their
+  own cursor), `jit_disk_cache` and `jit_disk_cache_mb`. The library's Save now applies only what the dialog changed, so it no longer
+  erases a value `asgard config` saved while it was open. No game has been confirmed to respond to `enter_key` yet.
+- **Window stats no longer change the disk cache's fingerprint.** Turning them on discarded an app's recording. The disk cache's format
+  version is now 3. Reuse in an Android app has not been confirmed.
+- ART's zero-page scan during `mremap` tests a cache line at a time, and `BIFROST_BINDER_TRACE` names the limits a failed transaction hit.
 
 ### Cheaper guest memory barriers (2026-11-03)
 
@@ -34,6 +96,20 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   EC and 3DES keys, attestation and keys that need user authentication are not implemented. `ManagedServiceBatch` covers the new
   service.
 
+### WebView gets real GPU fences (2026-11-02)
+
+- **A WebView showing video logged two errors for every failed fence, about 40 failures a second in a Battle Cats ad.** Chromium
+  calls `eglDupNativeFenceFDANDROID` without checking the extension string, and the EGL adapter always failed the call. The host's
+  `sync_file` now reaches the guest as a guest descriptor (`AndroidNativeFences`). A throwaway WebView page drawing a looping H.264
+  video to a canvas and WebGL went from 4,672 failures in 35 s with the old stub to none in 90 s, with about 20 fences open at a time
+  and 30 fps either way. The extension stays unadvertised, so HWUI's choice of sync path does not change.
+- **Fences work across the descriptor boundary in both directions.** `SYNC_IOC_MERGE` and `SYNC_IOC_FILE_INFO` returned `ENOTTY`; they
+  now translate their descriptors and pointers. Importing a fence through `eglCreateSync[KHR]` passed the guest's fd number to the
+  driver as if it were a host descriptor; the driver now gets a host duplicate and the guest fd is consumed, as the extension
+  requires. `gles_native_fence` covers export, both ioctls, import at both attribute widths and 2,000 exports for leaks.
+- This did not make the stuck TikTok ad closable, and was not shown to be related. No ad was shown through the fix; a driver without
+  the extension was not tested and would still fail these calls.
+
 ### Smaller JIT code from shared cold paths (2026-11-02)
 
 - **A third less generated code on a mixed test workload.** Each Tier-1 guarded memory access carried its own page checks and
@@ -43,6 +119,8 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   while an ART compaction has software checks on (2.5 to 4.3 ns per four accesses in a loop).
 - **Smaller encodings and less hot work.** No bare REX prefixes or zero displacements, no RAX save around the flag commit
   on conditional exits, and no stack store for each CSEL result. `jit_guard_stubs` is the new regression test.
+
+## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
 ### No more pops when a game restarts a sound (2026-11-01)
 

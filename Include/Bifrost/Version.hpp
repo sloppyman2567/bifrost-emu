@@ -236,6 +236,10 @@ namespace arm64emu {
 //   a less code-heavy Tier-1 JIT, the window stats overlay, a persistent
 //   (experimental) JIT cache, media.extractor and POSIX timers; see CHANGELOG.md. The v2.0 goals in
 //   Docs/roadmap.md are still not complete.
-constexpr const char* VERSION  = "2.0.0-alpha.3";
+// 2.0.0-beta.1 (2026-11-03): an Android Keystore for apps, WebView GPU
+//   fences, cheaper guest barriers and a faster Tier-1 JIT (shared cold
+//   paths, native by-element FP and LD1R, loop blocks, lighter Q accesses);
+//   see CHANGELOG.md. The v2.0 goals in Docs/roadmap.md are still not complete.
+constexpr const char* VERSION  = "2.0.0-beta.1";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

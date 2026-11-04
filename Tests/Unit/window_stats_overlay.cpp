@@ -212,7 +212,7 @@ int main() {
          "A - \"b\" \xC2\xB7 \xE2\x80\xA6 ?");
   assert(detail::glyph_columns('g')[0] & 0x100 && !(detail::glyph_columns('G')[0] & 0x180));  // descenders
   OverlayStats stats;
-  stats.version = "2.0.0-alpha.3"; stats.app = "Subway Surfers"; stats.backend = "Android EGL";
+  stats.version = "2.0.0-beta.1"; stats.app = "Subway Surfers"; stats.backend = "Android EGL";
   stats.fps = 60; stats.active = true; stats.width = 1440; stats.height = 1384; stats.frames = 123456;
   stats.sensors.cpu_percent = 34.4; stats.sensors.process_percent = 12.6; stats.sensors.cpu_temp = 72;
   stats.sensors.gpu_percent = 58; stats.sensors.gpu_temp = 64;
@@ -227,7 +227,7 @@ int main() {
   };
   const std::string deg = "\xC2\xB0" "C";
   const auto text = flat(overlay_lines(stats));
-  assert(text.find("BIFROST-EMU\t2.0.0-alpha.3\nSubway Surfers\n60 FPS  16.7 ms\tAndroid EGL\n\n") == 0);
+  assert(text.find("BIFROST-EMU\t2.0.0-beta.1\nSubway Surfers\n60 FPS  16.7 ms\tAndroid EGL\n\n") == 0);
   assert(overlay_lines(stats)[2][0].size == 2);  // the frame rate is the big figure
   assert(text.find(row("CPU ", " 34%", "72" + deg)) != std::string::npos);
   assert(text.find(row("GPU ", " 58%", "64" + deg)) != std::string::npos);

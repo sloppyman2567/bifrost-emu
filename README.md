@@ -8,7 +8,7 @@
  | |_) || |_| |    | | \ \| |__| |____) |  | |
  |____/_____|_|    |_|  \_\\____/|_____/   |_|
 
-  bifrost-emu  v2.0.0-alpha.3
+  bifrost-emu  v2.0.0-beta.1
   x86_64 ◄─────────────────► ARM64
 ```
 
@@ -20,7 +20,8 @@ Existing binaries need no cross-compiler and no QEMU.
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](Docs/SUPPORT.md)
-[![Version: 2.0.0-alpha.3](https://img.shields.io/badge/version-2.0.0--alpha.3-orange.svg)](Docs/CHANGELOG.md)
+[![Version: 2.0.0-beta.1](https://img.shields.io/badge/version-2.0.0--beta.1-orange.svg)](Docs/CHANGELOG.md)
+[![Games: 11 playable of 17](https://img.shields.io/badge/games-11%20playable%20of%2017-brightgreen.svg)](#what-runs)
 
 ---
 
@@ -47,6 +48,10 @@ Existing binaries need no cross-compiler and no QEMU.
 
 ## What runs
 
+**17 games recorded (2026-11-03): 11 playable** (7 Android, 4 Linux), **4 start** without confirmed gameplay (Oddmar,
+both Hungry Shark games, Teeworlds) and **2 are blocked** (Roblox, TrickCal). Umamusume counts as playable through its
+Global client; its JP client is blocked. Apps such as YouTube and Firefox are not counted.
+
 Statuses come from the linked pages and `Scripts/Android/compatibility.json`;
 "user-confirmed" and "user-reported" mean the user played it on Bifrost, not
 that every feature has an automated test or a recorded capture.
@@ -55,6 +60,7 @@ that every feature has an automated test or a recorded capture.
 |---|---|---|
 | [SpongeBob – Krusty Cook-Off 5.12.0](Docs/Apps/spongebob.md) | Android, Unity/IL2CPP | User-confirmed cooking levels, reaching level 16 at about 60 FPS (2026-11-01), outfits and menus at native resolution. Child-age path; the adult path waits on Google Play services. |
 | [Azur Lane 9.3.7](Docs/Apps/azur-lane.md) | Android, Unity/IL2CPP | User-reported playable online through a finished battle, with audio and pause/resume (2026-11-01). Home screen captured at 60 FPS. |
+| [Arknights 37.7.41](Docs/Apps/arknights.md) | Android, Unity/IL2CPP | User-reported playable: microG sign-in and a battle at about 60 FPS (2026-11-03). |
 | The Battle Cats 15.6.1 | Android | User-reported playable (2026-10-29). |
 | [Umamusume: Pretty Derby](Docs/Apps/umamusume.md) | Android, Unity | Global 1.35.2: user-reported playable, title, home and Career story captured at 30 FPS (2026-11-01). JP 2.32.0: blocked by the game's device integrity check when it connects. |
 | Subway Surfers 3.70.3 | Android, Unity/IL2CPP | User-reported playable, ads work (2026-10-29). |
@@ -95,7 +101,7 @@ Azur Lane shot from October 14 (2.0.0-alpha.1); the Linux games are from October
 
 ## Progress
 
-**2.0.0-alpha.3** (2026-11-01) is the current pre-release. The goals for it and
+**2.0.0-beta.1** (2026-11-03) is the current pre-release. The goals for it and
 what follows are in the [roadmap](Docs/roadmap.md), which has a
 progress table and the known blockers; everything that changed is in the
 [changelog](Docs/CHANGELOG.md). Since 2.0.0-alpha.2:
@@ -164,7 +170,7 @@ On Debian and Ubuntu (25.10 or newer for Android windows) the quickest install i
 ```bash
 sudo apt install build-essential debhelper pkg-config libavcodec-dev libavutil-dev libswscale-dev \
      libegl-dev libffi-dev libgl-dev libsdl3-dev libsdl2-dev libwayland-dev libx11-dev
-make deb                                  # writes ../bifrost-emu_2.0.0~alpha.3_amd64.deb
+make deb                                  # writes ../bifrost-emu_2.0.0~beta.1_amd64.deb
 sudo apt install ../bifrost-emu_*.deb
 bifrost-emu --setup-rootfs                # once: downloads the toolchains and builds the guest rootfs
 ```
@@ -327,6 +333,7 @@ deeper. Host forwarding and input are described in
 | Requirement | Needed for |
 |---|---|
 | g++ 9+ (C++17), make, Linux x86_64 | Everything (required) |
+| x86-64 CPU with SSE4.1 and FMA3 | The JIT (`--no-jit` runs on any x86-64 CPU, much more slowly) |
 | SDL2 development headers (`./Tools/Fetch/fetch-sdl2-headers.sh`) | Framebuffer, guest SDL2 and GL thunks |
 | SDL3 ≥ 3.2 headers and runtime | Android host windows |
 | FFmpeg libavcodec/libavutil/libswscale development files | Android host media decoding (`USE_MEDIA=1`, default) |
@@ -455,12 +462,12 @@ adapter.
 
 ## Documentation
 
-The current version is **2.0.0-alpha.3**, the third pre-release toward the
+The current version is **2.0.0-beta.1**, the first beta pre-release toward the
 [v2.0 roadmap](Docs/roadmap.md); its goals are not complete yet.
 
 | Topic | Document |
 |---|---|
-| App status | [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Umamusume](Docs/Apps/umamusume.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
+| App status | [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Arknights](Docs/Apps/arknights.md), [Umamusume](Docs/Apps/umamusume.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
 | JIT internals | [JIT guide](Docs/JIT.md) |
 | Source layout | [Architecture](Docs/ARCHITECTURE.md) |
 | Android | [Runtime](Docs/Android/ANDROID_RUNTIME.md), [APKs](Docs/Android/ANDROID_APK.md), [Binder](Docs/Android/ANDROID_BINDER.md), [window plugins](Docs/Android/ANDROID_WINDOW_PLUGINS.md) |

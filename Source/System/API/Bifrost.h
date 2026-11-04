@@ -268,7 +268,7 @@ int bifrost_remove_breakpoint(bifrost_emu_t* emu, uint64_t addr);
 // error has occurred.
 const char* bifrost_get_error(const bifrost_emu_t* emu);
 // ── Version ─────────────────────────────────────────────────────────────
-// Get the library version string (e.g., "2.0.0-alpha.3").
+// Get the library version string (e.g., "2.0.0-beta.1").
 const char* bifrost_version(void);
 #ifdef __cplusplus
 } // extern "C"
