@@ -31,7 +31,7 @@ struct CodecServices::Impl {
         Clock::time_point started{}, retry{};
     };
     std::array<Service, 4> services{{
-        {"resource", "media.resource_manager", "1013", "/system/bin/bifrost-media-resource"},
+        {"resource", "media.resource_manager", "1013", "/system/bin/mediaserver"},
         {"extractor", "media.extractor", "1040", "/system/bin/mediaextractor"},
         {"host", "android.hardware.media.c2.IComponentStore/default", "1046", "/apex/com.android.media.swcodec/bin/mediaswcodec"},
         {"software", "android.hardware.media.c2.IComponentStore/software", "1046", "/apex/com.android.media.swcodec/bin/mediaswcodec"}}};

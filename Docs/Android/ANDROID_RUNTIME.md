@@ -840,11 +840,21 @@ Neither these tests nor presented frames establish video-ad playback: JNI
 provisioning is covered below; decoders and the video-surface path remain
 unfinished.
 
+### MediaPlayer and SoundPool (2026-11-04)
+
+The broker runs the image's real `/system/bin/mediaserver` as UID 1013 in the slot that ran `bifrost-media-resource`
+(`CodecServices`), so it provides `media.player` as well as `media.resource_manager`. `MediaMetadataRetriever` and
+`MediaPlayer` reach the real `MediaPlayerService`, NuPlayer and the Codec2 stack. Its binary and four libraries are pinned in
+`MEDIA_EXTRACTOR` (`android_framework.py`) and added in place, as is `libsoundpool.so`, which `android.media.SoundPool` loads by
+name. Checked: FNAF Mobile Port (libGDX, Catrobat) runs with picture and sound, by eye. `make test-android-goldfish-media` and
+the service batch pass. Not established: other apps' `MediaPlayer` playback, or that an Arknights hang in Unity start-up,
+seen once on 2026-11-04 (1 of 34 sessions, the first after this change) and not seen again, is unrelated.
+
 ### Host media decoding (2026-10-14)
 
 Apps use Android's real MediaCodec/Codec2 stack. Compressed packets are
 decoded on the host; there are no Java or JNI codec substitutes.
-`media.player` is still not supplied; `media.extractor` is the image's real daemon.
+`media.player` comes from the image's real `mediaserver` (see below); `media.extractor` is the image's real daemon.
 
 - **Provisioning.** Framework schema 8 (`Tools/Android/android_codecs.py`)
   extracts the SDK image's real media.swcodec APEX, Goldfish Codec2 vendor

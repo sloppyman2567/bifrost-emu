@@ -20,6 +20,11 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### MediaPlayer, MediaMetadataRetriever and SoundPool work (2026-11-04)
+
+The broker runs the image's real `mediaserver`, so `media.player` exists, and `libsoundpool.so` is provisioned. Any libGDX game
+needed the second: `android.media.SoundPool` could not load at all. FNAF Mobile Port now runs with picture and sound.
+
 ### Vector reciprocal and pairwise FP leave the interpreter (2026-11-04)
 
 `FADDP`, `FRECPE`/`FRSQRTE`, `FRECPS`/`FRSQRTS` and the vector `FCVTN/P/M/A` forms are native SIMD helpers instead of an

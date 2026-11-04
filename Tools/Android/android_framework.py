@@ -60,6 +60,8 @@ SHARED_LIBRARIES = {
 # its linker section (the codec APEX's private copies are out of its scope). The extractor plugins are already in the
 # runtime. The daemon aborts without its seccomp policy, read from the media APEX; the image's /system/etc copies are
 # byte-identical to it. Bifrost's prctl(PR_SET_SECCOMP) accepts the filter without applying it, so it never reaches the host.
+# android.media.SoundPool's static initializer loads libsoundpool.so by name, so no DT_NEEDED graph reaches it; it
+# rides here for the same pinned upgrade of an existing tree (everything it needs is already in the runtime).
 # install path -> (image path, sha256, executable).
 SECCOMP_POLICIES = "apex/com.android.media/etc/seccomp_policy/"
 MEDIA_EXTRACTOR = {
@@ -73,6 +75,18 @@ MEDIA_EXTRACTOR = {
         "1ea86c7fd2fa8e7da2c73f947b56f273e61a913dc4588dee94024ef23caa69da", False),
     "system/lib64/libcap.so": ("/system/lib64/libcap.so",
         "7373f3c9a3e6f1abeca35847939ff77743f0969737c7a343dacf5ba74422397a", False),
+    "system/bin/mediaserver": ("/system/bin/mediaserver",
+        "5150e224e893e4b922d7287d7fb0b97e0f61b11ba4381b3b7549c62e2308fa1c", True),
+    "system/lib64/libmediaplayerservice.so": ("/system/lib64/libmediaplayerservice.so",
+        "3f2d5a40446e9e66a717d2f40db6fcc790bc9b97026dc00d8030a4eb53938997", False),
+    "system/lib64/libstagefright_httplive.so": ("/system/lib64/libstagefright_httplive.so",
+        "0157b015b572cdcffb0f26b4425394caf3af7349b422ecec4e9f245c8b2f8a7b", False),
+    "system/lib64/libdrmframework.so": ("/system/lib64/libdrmframework.so",
+        "99ba549ca4c05721691d1fd0adfa76c1c59e1991cd8739fa1ac0df6433375788", False),
+    "system/lib64/libdrmframeworkcommon.so": ("/system/lib64/libdrmframeworkcommon.so",
+        "9d977823c2c34063238ddc30de5344bf977ec01c43402cb32cac6b920bdbcec8", False),
+    "system/lib64/libsoundpool.so": ("/system/lib64/libsoundpool.so",
+        "307a46c2a31fe98b41a8f0de0ae763baf962c5a2e487ee399070dede161fa4aa", False),
     SECCOMP_POLICIES + "mediaextractor.policy": ("/system/etc/seccomp_policy/mediaextractor.policy",
         "6cbaa21237b8664cdec18cb7a13e7103abfbf5094e9ad10c877f31a2ce8b0398", False),
     SECCOMP_POLICIES + "crash_dump.arm64.policy": ("/system/etc/seccomp_policy/crash_dump.arm64.policy",

@@ -132,6 +132,7 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `make test-android-goldfish-media`. Keep `--media-capabilities` limited to
   what it decodes. Do not report codec, Surface or playback readiness from
   64x64 probes.
+- `media.player` and `media.resource_manager` are the image's real `mediaserver`, run by the broker as UID 1013 (`CodecServices`).
 - `media.extractor` is the image's real `mediaextractor`, run by the broker as UID 1040 (`CodecServices`), its files
   pinned in `MEDIA_EXTRACTOR` (`android_framework.py`) and added in place. It aborts without its seccomp policy, which is
   installed; `prctl(PR_SET_SECCOMP)` accepts and ignores the filter, so it never reaches the host. It is not `required`:
