@@ -110,9 +110,14 @@ int Memory::madvise_remove(uint64_t addr, uint64_t len) {
 // ── userfaultfd ────────────────────────────────────────────────────────
 namespace {
 bool page_is_zero(const uint8_t* page) {
+    // One test per cache line: the OR vectorizes, where testing each word does not.
+    // ART's CMC GC scans whole pools here on every collection.
     const auto* words = reinterpret_cast<const uint64_t*>(page);
-    for (size_t i = 0; i < Memory::PAGE_SIZE / sizeof(uint64_t); ++i)
-        if (words[i]) return false;
+    for (size_t i = 0; i < Memory::PAGE_SIZE / sizeof(uint64_t); i += 8) {
+        uint64_t any = 0;
+        for (size_t j = 0; j < 8; ++j) any |= words[i + j];
+        if (any) return false;
+    }
     return true;
 }
 }  // namespace

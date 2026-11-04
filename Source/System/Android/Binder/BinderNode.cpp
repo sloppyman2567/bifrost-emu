@@ -324,15 +324,25 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
     }
     auto& queue = cmd == BF_BC_REPLY ? target->replies_[reply_tid]
         : target_tid ? target->replies_[target_tid] : target->incoming_;
-    if (!target->mapping_ || target->disconnected_ || queue.size() >= MAX_EVENTS ||
-        replies_[tid].size() >= MAX_EVENTS || calls_[tid].size() >= 64) {
-        fail(tid, BF_BR_FAILED_REPLY, ENOMEM); return 0;
-    }
     uint64_t free_bytes = 0;
     for (const auto& range : target->free_) free_bytes += range.second;
+    // All of these fail with ENOMEM: the trace names the limit that was reached.
+    auto trace_limits = [&]() {
+        if (!dbg().binder_trace) return;
+        fprintf(stderr, "[binder] limits: sender pid=%d owned=%zu handles=%zu replies=%zu calls=%zu; "
+                "target pid=%d owned=%zu handles=%zu deaths=%zu queue=%zu queued=%llu free=%llu mapped=%d closed=%d\n",
+                sender_pid_, owned_objects_.size(), handles_.size(), replies_[tid].size(), calls_[tid].size(),
+                target->sender_pid_, target->owned_objects_.size(), target->handles_.size(), target->deaths_.size(),
+                queue.size(), static_cast<unsigned long long>(target->queued_bytes_),
+                static_cast<unsigned long long>(free_bytes), target->mapping_ != 0, target->disconnected_ ? 1 : 0);
+    };
+    if (!target->mapping_ || target->disconnected_ || queue.size() >= MAX_EVENTS ||
+        replies_[tid].size() >= MAX_EVENTS || calls_[tid].size() >= 64) {
+        trace_limits(); fail(tid, BF_BR_FAILED_REPLY, ENOMEM); return 0;
+    }
     uint64_t required = std::max<uint64_t>(8, ((tx.data_size + 7) & ~uint64_t(7)) + tx.offsets_size + buffers_size);
     if (target->queued_bytes_ > free_bytes || required > free_bytes - target->queued_bytes_) {
-        fail(tid, BF_BR_FAILED_REPLY, ENOMEM); return 0;
+        trace_limits(); fail(tid, BF_BR_FAILED_REPLY, ENOMEM); return 0;
     }
     Event event{};
     event.command = cmd == BF_BC_REPLY ? BF_BR_REPLY : BF_BR_TRANSACTION;
@@ -351,7 +361,7 @@ int BinderNode::command(uint32_t cmd, const uint8_t* bytes, Memory& mem, int tid
         if (tx.data_size) mem.read(tx.buffer, event.payload.data(), tx.data_size);
     }
     int object_error = translate_objects(*target, event, mem, tx, tid, fds, accepts_fds, buffers_size, input);
-    if (object_error) { fail(tid, BF_BR_FAILED_REPLY, -object_error); return 0; }
+    if (object_error) { trace_limits(); fail(tid, BF_BR_FAILED_REPLY, -object_error); return 0; }
     event.caller = weak_from_this(); event.caller_tid = tid; event.senders = std::move(senders);
     if (cmd == BF_BC_TRANSACTION && (tx.flags & BF_TF_ONE_WAY)) {
         if (!destination) {
