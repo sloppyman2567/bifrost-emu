@@ -222,6 +222,28 @@ class HomeCommandTests(unittest.TestCase):
         self.assertEqual(card_state(app)['action'], 'resume')
 
 
+class UnsupportedAbiTests(unittest.TestCase):
+    def app(self, state, name, abis):
+        (state / name).mkdir()
+        (state / name / "package.json").write_text(json.dumps({"package": name, "packages": [{"abis": abis}]}))
+
+    def test_an_installed_app_without_arm64_is_refused_at_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            self.app(state, "org.example.arm32", ["armeabi-v7a"])
+            with self.assertRaisesRegex(package.preflight.UnsupportedAbi, "ARM 32-bit only"):
+                package.launch("org.example.arm32", state, Path("/nonexistent/emu"))
+
+    def test_the_refusal_exits_with_its_own_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            self.app(state, "org.example.x86", ["x86"])
+            result = subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"), "--state-root", directory,
+                                     "run", "org.example.x86"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, package.preflight.EXIT_UNSUPPORTED_ABI, result.stderr)
+            self.assertIn("this app is x86 only", result.stderr)
+
+
 class ClockStyleTests(unittest.TestCase):
     """The library's times follow the user's clock: the desktop's own setting, then the locale."""
     MORNING, NOON, EVENING = (time.struct_time((2026, 11, 4, hour, 5, 0, 2, 308, 0)) for hour in (0, 12, 16))

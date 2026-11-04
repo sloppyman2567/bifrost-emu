@@ -284,6 +284,28 @@ def adaptive_icon_layers(paths, aapt2):
     return layers
 
 
+# Exit status for an app that has native code, none of it ARM64 (asgard install and run). A 64-bit-only device refuses
+# the same APK at install, with INSTALL_FAILED_NO_MATCHING_ABIS.
+EXIT_UNSUPPORTED_ABI = 3
+ABI_FAMILIES = (("ARM 32-bit", {"armeabi", "armeabi-v7a"}), ("x86", {"x86", "x86_64"}))
+
+
+class UnsupportedAbi(ValueError):
+    pass
+
+
+def require_arm64(abis):
+    """Refuse native code with no ARM64 build; an app with no native code at all runs anywhere."""
+    abis = set(abis)
+    if not abis or "arm64-v8a" in abis:
+        return
+    families = [name for name, members in ABI_FAMILIES if abis & members]
+    if abis - set().union(*(members for _, members in ABI_FAMILIES)):
+        families.append("another architecture")
+    raise UnsupportedAbi(f"No ARM64 code: this app is {' and '.join(families)} only "
+                         f"({', '.join(sorted(abis))}). Bifrost runs ARM64 Android apps.")
+
+
 def inspect_apk(name, path, aapt2, directory):
     fields = badging_fields(run([aapt2, "dump", "badging", str(path)]))
     manifest = xmltree_nodes(run([aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml", str(path)]))

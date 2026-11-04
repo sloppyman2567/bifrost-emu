@@ -18,6 +18,7 @@ import time
 import tempfile
 import xml.etree.ElementTree as ET
 
+from android_preflight import EXIT_UNSUPPORTED_ABI
 import android_paths
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -394,6 +395,8 @@ def install_for_run(script, state, arguments):
                                 *(["--allow-downgrade"] if downgrade else []), arguments[index]],
                                stdout=subprocess.PIPE, text=True)
     print(installed.stdout, end="", flush=True)
+    if installed.returncode == EXIT_UNSUPPORTED_ABI:
+        raise SystemExit(installed.returncode)  # the installer has said why
     if installed.returncode:
         raise ValueError(f"Could not install {arguments[index]}")
     match = re.search(r"^Installed (\S+) ", installed.stdout, re.M)

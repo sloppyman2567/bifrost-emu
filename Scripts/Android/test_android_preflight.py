@@ -22,6 +22,20 @@ def elf(align, address=0):
 
 
 class PreflightTests(unittest.TestCase):
+    def test_native_code_without_arm64_is_refused_with_its_architecture(self):
+        import android_preflight as preflight
+        for abis in ([], ["arm64-v8a"], ["armeabi-v7a", "arm64-v8a", "x86_64"]):
+            preflight.require_arm64(abis)  # no native code, or an ARM64 build among others
+        for abis, family in ((["armeabi-v7a"], "ARM 32-bit only"), (["armeabi", "armeabi-v7a"], "ARM 32-bit only"),
+                             (["x86"], "x86 only"), (["x86", "x86_64"], "x86 only"),
+                             (["armeabi-v7a", "x86"], "ARM 32-bit and x86 only"),
+                             (["mips"], "another architecture only")):
+            with self.assertRaises(preflight.UnsupportedAbi) as refused:
+                preflight.require_arm64(abis)
+            self.assertIn("No ARM64 code", str(refused.exception))
+            self.assertIn(family, str(refused.exception))
+            self.assertIn(abis[0], str(refused.exception))
+
     def test_launcher_icon_density_and_adaptive_bitmap_fallback(self):
         fields = preflight.badging_fields("package: name='org.bifrost.fixture' versionCode='1'\n"
                                           "application: label='Fixture' icon='res/mipmap-anydpi-v26/icon.xml'\n"

@@ -20,6 +20,11 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### An app with no ARM64 code says so (2026-11-04)
+
+An APK with only 32-bit ARM or x86 native code used to install and then fail inside the app ("Your hardware does not support this
+application"). Install and launch now refuse it, name its architecture and exit with status 3.
+
 ### New threads get clean TLS and a full-size SDL stack (2026-11-04)
 
 vkQuake 1.33.1, cross-built for SDL2 with mimalloc's debug checks on, aborted while loading textures and then corrupted memory. Two

@@ -37,7 +37,7 @@ otherwise.
   sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
 - **Architecture:** Bifrost runs AArch64 only; an APK with only `armeabi-v7a` or `x86` libraries (Angry Birds Space)
   cannot start.
-- **Platform gaps:** no Settings screens, no host mDNS, no Android Vulkan HAL, no `media.player`, no toast animations.
+- **Platform gaps:** no Settings screens, no host mDNS, no Android Vulkan HAL, no toast animations.
 - **Undiagnosed:** Firefox 159 reaches onboarding and a GeckoView surface but loads no pages; not re-tested since the
   November 1 Binder fix.
 
@@ -104,7 +104,6 @@ Open:
   ([namespaces](https://source.android.com/docs/core/architecture/vndk/linker-namespace),
   [Bionic linker changes](https://android.git.googlesource.com/platform/bionic/+/HEAD/android-changes-for-ndk-developers.md)).
 - A defined permissions model; services added incrementally, with unsupported ones reported explicitly.
-- Low priority: apps see UTC instead of the host's timezone (nothing sets `persist.sys.timezone`).
 
 Acceptance: a Bionic native test, a packaged NativeActivity sample and a selected game launch through the Android profile
 with working storage, lifecycle and native library loading.
@@ -130,7 +129,9 @@ lifecycle checks in both engines; concurrent-client claims need distinct UIDs, p
 
 ### Android graphics, audio, media and lifecycle
 
-Done: OpenSL ES and AAudio playback; Media JNI and Codec2 with realm-owned Gralloc; `media.extractor` (Oddmar gets past its
+Done: OpenSL ES and AAudio playback; `SoundPool`, and `media.player` from the image's real `mediaserver` (`MediaPlayer` and
+`MediaMetadataRetriever`; FNAF Mobile Port plays with sound); RenderScript intrinsics on the CPU driver; Media JNI and Codec2 with
+realm-owned Gralloc; `media.extractor` (Oddmar gets past its
 opening video); scaled fixed-size windows; WebView GPU fences; Play services activities in a relay window; a GLES thunk guard for
 pointer-to-pointer parameters and a retry for mobile GLSL index conversions.
 
@@ -138,7 +139,9 @@ Open:
 
 - An Android Vulkan HAL over the host Vulkan thunk (apps see zero devices today), with `VK_ANDROID_native_buffer`
   swapchains on gralloc buffers.
-- A `media.player` service; decoder validation beyond small fixtures (flush/reconfigure, B-frames, sustained playback).
+- `MediaPlayer` beyond FNAF Mobile Port (video to a Surface, streaming, seeking, long sessions); decoder validation beyond small
+  fixtures (flush/reconfigure, B-frames, sustained playback).
+- Audio effects: `android.media.audiofx` loads and reports no effects; `Equalizer` and the like need DSP in front of the host's audio.
 - Activities from other processes beyond Play services; a real Play Games sign-in has not been observed.
 - Orientation, resize, focus, surface loss/recreation and background/foreground tests.
 - Graphics ABI coverage from dependency audits; confirm the GLSL retry in Roblox and explain its low-resolution textures.

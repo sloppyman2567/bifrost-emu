@@ -342,6 +342,11 @@ Times on the cards follow the user's clock: GNOME, Unity, Budgie and Cinnamon ke
 otherwise the time locale decides, through Qt's locale data, since `nl_langinfo` needs a generated locale on glibc and always
 says 24-hour on musl. The choice is read once, when the library starts.
 
+An app with native code and no `arm64-v8a` build, across all its splits, is refused: Bifrost runs ARM64 only. Install, and a
+launch of one installed before this check, print `No ARM64 code: this app is ARM 32-bit only (armeabi-v7a)` or the same with x86, and
+exit with status 3 (`EXIT_UNSUPPORTED_ABI`), as a 64-bit-only device answers `INSTALL_FAILED_NO_MATCHING_ABIS`. An app with no
+native code at all is not affected.
+
 Install records now retain the base APK's label/version and a bounded launcher
 bitmap; older records recover labels and versions from their saved base report.
 An adaptive icon wins, because that is what a device shows; its bitmap fallback can be unrelated art (FNAF Mobile Port's is

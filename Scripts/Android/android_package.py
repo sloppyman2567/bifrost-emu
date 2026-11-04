@@ -277,6 +277,7 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
             reports = [x[0] for x in packages]
             # Reuse manifest/version/provider validation from the read-only inventory.
             summary = preflight.summarize(reports)
+            preflight.require_arm64(abi for report in reports for abi in report["abis"])
             # Stable split filenames also make reordered APK containers idempotent.
             packages.sort(key=lambda item: item[0]["split"] or "")
             name = summary["package"]
@@ -602,6 +603,8 @@ def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0,
     from android_sessions import Session, app_id
     with app_lock(app, blocking=False):
         metadata = json.loads((app / "package.json").read_text())
+        # Installed before installs were refused for this.
+        preflight.require_arm64(abi for report in metadata.get("packages", []) for abi in report.get("abis", []))
         uid = app_id(state, package)
         with Session(app, package, uid, session_id) as session:
             return launch_session(package, app, metadata, emu, no_jit, window_plugin, frames,
@@ -1278,6 +1281,9 @@ def main():
             args.trace_duration,
             args.session_id,
         )
+    except preflight.UnsupportedAbi as error:
+        print(f"Asgard: {error}", file=sys.stderr)
+        return preflight.EXIT_UNSUPPORTED_ABI
     except (
         OSError,
         ValueError,
