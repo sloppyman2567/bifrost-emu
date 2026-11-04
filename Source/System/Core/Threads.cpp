@@ -1264,10 +1264,14 @@ uint64_t Emulator::allocate_thread_block_() {
     return call_on_scratch_cpu_(allocate_tls, scratch_tls, &null_mem, 1);
 }
 uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
-    // Allocate a guest stack. 256 KiB is plenty for the game's worker
-    // threads (they use only a few stack frames + call chains).
-    constexpr uint64_t STACK_SIZE = 256 * 1024;
-    uint64_t stack = mem_.mmap_alloc(STACK_SIZE);
+    // SDL asks for no size, so a real thread gets the pthread default, which
+    // glibc takes from RLIMIT_STACK: 8 MiB on a default Linux. Games rely on it
+    // (vkQuake's workers alloca whole textures). The pages are only committed
+    // when touched, and the guards make an overflow fault at once instead of
+    // writing into whatever is mapped next to the stack.
+    constexpr uint64_t STACK_SIZE = 8 * 1024 * 1024;
+    constexpr uint64_t STACK_MAPPING = STACK_SIZE + 2 * Memory::PAGE_SIZE;
+    uint64_t stack = mem_.mmap_alloc_callback_stack(STACK_SIZE);
     if (stack == 0) return 0;
     // Per-thread glibc TLS (TPIDR_EL0). Mirrors the clone path's TLS.
     uint64_t tls = 0;
@@ -1278,7 +1282,7 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     constexpr uint64_t HANDLE_SIZE = 32;
     uint64_t handle = mem_.mmap_alloc(HANDLE_SIZE);
     if (handle == 0) {
-        mem_.untrack_allocation(stack, STACK_SIZE);
+        mem_.untrack_allocation(stack - Memory::PAGE_SIZE, STACK_MAPPING);
         return 0;
     }
     {
@@ -1296,8 +1300,9 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     if (st->cpu.tid == main_cpu_.tid) st->cpu.tid = next_tid_.fetch_add(1);
     st->tid = static_cast<uint64_t>(st->cpu.tid);
     inherit_task_comm(vfs_.self_pid(), st->cpu.tid);
-    st->stack_top = stack + STACK_SIZE;
-    st->stack_size = STACK_SIZE;
+    // The whole mapping, guards included: this is what gets unmapped.
+    st->stack_top = stack - Memory::PAGE_SIZE + STACK_MAPPING;
+    st->stack_size = STACK_MAPPING;
     st->tls = tls;
     st->handle_addr = handle;
     if (tls) {

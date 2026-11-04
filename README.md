@@ -72,7 +72,7 @@ that every feature has an automated test or a recorded capture.
 | Roblox, TrickCal | Android | Blocked: Roblox is disconnected after joining (needs real Google attestation); TrickCal's anti-cheat ends it. |
 | [Neverball 1.6.0](Docs/Apps/neverball.md) | Linux, SDL2/GL | User-confirmed stable gameplay, replays, menus and fonts. |
 | [Minecraft Weekend](Docs/Apps/minecraft-weekend.md) | Linux, SDL2/GL voxel game | User-confirmed stable gameplay; chunk rendering can lag. |
-| [vkQuake 1.33.1](Docs/Apps/vkquake.md) | Linux, Vulkan | User-confirmed gameplay and menus; texture corruption remains. |
+| [vkQuake 1.33.1](Docs/Apps/vkquake.md) | Linux, Vulkan | User-confirmed gameplay and menus. No texture corruption seen on LibreQuake data (2026-11-04); Quake's own data not retested. |
 | [Doom 3 (dhewm3)](Docs/Apps/doom3.md) | Linux, SDL2/GL | User-reported extended gameplay with audio and animation; mostly sustained 60 FPS in the demo, even in heavy scenes (2026-11-01, not instrumented); the full game is not covered by that report. |
 | Teeworlds | Linux, SDL2/GL | Reaches its rendering menu with sound initialized. |
 | BusyBox, ToyBox | Linux CLI | Covered by the regression suite. |

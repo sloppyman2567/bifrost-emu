@@ -175,13 +175,12 @@ uint64_t DynamicLinker::resolve_tls_address(Memory& mem, CPU& cpu,
                 std::vector<uint8_t> zeros(static_cast<size_t>(module->tls.memsz), 0);
                 mem.write(tls_addr, zeros.data(), zeros.size());
                 if (module->tls.filesz > 0) {
-                    if (module->tls.filesz > module->tls.memsz ||
-                        module->tls_template_addr == 0) {
+                    if (module->tls.filesz > module->tls.memsz) {
                         mem.untrack_allocation(allocation, alloc_size);
                         return 0;
                     }
                     std::vector<uint8_t> image(static_cast<size_t>(module->tls.filesz));
-                    mem.read(module->tls_template_addr, image.data(), image.size());
+                    mem.read(module->tls_image_addr(), image.data(), image.size());
                     mem.write(tls_addr, image.data(), image.size());
                 }
                 track_tls_allocation_(tcb, allocation, alloc_size,
@@ -191,13 +190,15 @@ uint64_t DynamicLinker::resolve_tls_address(Memory& mem, CPU& cpu,
                 return 0;
             }
         } else {
-            if (module->tls_template_addr == 0) return 0;
+            if (module->tls.filesz > module->tls.memsz) return 0;
             tls_addr = static_cast<uint64_t>(static_cast<int64_t>(tcb) +
                                              module->tls_tp_offset);
             if (!mem.is_mapped(tls_addr, module->tls.memsz)) return 0;
             try {
-                std::vector<uint8_t> image(static_cast<size_t>(module->tls.memsz));
-                mem.read(module->tls_template_addr, image.data(), image.size());
+                std::vector<uint8_t> image(static_cast<size_t>(module->tls.memsz), 0);
+                if (module->tls.filesz != 0)
+                    mem.read(module->tls_image_addr(), image.data(),
+                             static_cast<size_t>(module->tls.filesz));
                 mem.write(tls_addr, image.data(), image.size());
             } catch (...) {
                 return 0;
@@ -571,7 +572,7 @@ uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
         int64_t tp_off = obj.tls_tp_offset;
         uint64_t dst = static_cast<uint64_t>(
             static_cast<int64_t>(tcb) + tp_off);
-        uint64_t src = obj.tls_template_addr;
+        uint64_t src = obj.tls_image_addr();
         uint64_t filesz = obj.tls.filesz;
         if (filesz > 0 && filesz <= obj.tls.memsz) {
             try {

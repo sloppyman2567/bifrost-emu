@@ -144,10 +144,14 @@ struct LoadedObject {
     // were applied to the original .tdata location but NOT the TLS
     // block copy, so the TLS block had pre-relocation (wrong) values.
     uint64_t   tls_block_offset = 0;
-    // Initialized TLS image used for per-thread copies. It can point into
-    // the static template or to a separate template for late modules that
-    // use dynamically allocated per-thread blocks.
+    // The module's slot in the static TLS block, or its mapped image for late
+    // modules that use dynamically allocated per-thread blocks. The static
+    // block is the main thread's live TLS: new threads start from
+    // tls_image_addr(), never from here.
     uint64_t   tls_template_addr = 0;
+    // The mapped PT_TLS image. Relocations are applied to it and the guest never
+    // stores to it, so it stays the initial value of .tdata for every new thread.
+    uint64_t   tls_image_addr() const { return base_addr + tls.vaddr; }
     // Set for libraries loaded via dlopen AFTER startup: their TLS is
     // never part of the frozen startup lib area, so thread allocation must
     // exclude them when recomputing the startup lib_size.

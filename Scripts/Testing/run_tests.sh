@@ -907,6 +907,8 @@ DYNAMIC_TESTS=(
     # Main and SDL threads malloc at once: the emulator must clear __libc_single_threaded for threads it
     # creates, in the guest ld.so's libc too (--guest-ld). Needs the SDL thunk build; exit 77 = skip.
     "test_dyn_sdl_thread_malloc|Tests/Apps/test_dyn_sdl_thread_malloc.elf||60|test_dyn_sdl_thread_malloc: ALL PASS"
+    # A new thread's TLS comes from the PT_TLS image, not main's live block (pthread and SDL threads).
+    "test_dyn_tls_template|Tests/Apps/test_dyn_tls_template.elf||10|test_dyn_tls_template: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

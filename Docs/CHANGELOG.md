@@ -20,6 +20,17 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### New threads get clean TLS and a full-size SDL stack (2026-11-04)
+
+vkQuake 1.33.1, cross-built for SDL2 with mimalloc's debug checks on, aborted while loading textures and then corrupted memory. Two
+emulator bugs caused it. Under the built-in linker, new threads copied `.tdata` from the main thread's live TLS block, so they
+inherited whatever main had stored there (its mimalloc heap); they now start from the mapped PT_TLS image, as glibc does. SDL threads
+had a 256 KiB unguarded stack where SDL's default is the pthread one, 8 MiB on a default Linux, and vkQuake's workers `alloca` whole
+textures, overrunning neighbouring memory; they now get 8 MiB with guard pages. `test_dyn_tls_template` and a 4 MiB stack check in
+`test_dyn_sdl_thread_malloc` cover these. Five 15 s runs after the fix did not crash (four of six before), and the user reached a map on
+LibreQuake data with no texture corruption seen. Original Quake data was not retested. A guest abort can still leave the process
+hanging at exit, and vkQuake under `--guest-ld` crashed in `Task_Worker` before the stack fix (not retested with it).
+
 ### RenderScript runs, and audio effect classes load (2026-11-04)
 
 `android.renderscript` intrinsics such as blur now run on the CPU driver. `android.media.audiofx` no longer fails to load: it reports

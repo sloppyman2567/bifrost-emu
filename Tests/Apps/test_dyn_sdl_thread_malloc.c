@@ -9,10 +9,14 @@
  * layout, which lacks the guest libc's TLS images, so locale-dependent calls (strtod, ctype, printf)
  * died with "strtod_l.c: assertion failed: decimal_len > 0".
  *
+ * SDL asks for no stack size, so a thread gets the system default like a pthread: vkQuake keeps whole
+ * textures on its workers' stacks with alloca, which ran past the 256 KiB stack Bifrost used to give them.
+ *
  * Build: aarch64-linux-gnu-gcc -O2 -o test_dyn_sdl_thread_malloc.elf test_dyn_sdl_thread_malloc.c -ldl -pthread
  * Run:   ./bifrost-emu [--guest-ld] test_dyn_sdl_thread_malloc.elf
  * Pass:  prints "test_dyn_sdl_thread_malloc: ALL PASS". Exit 77 = skip when the SDL thunk is unavailable.
  */
+#include <alloca.h>
 #include <ctype.h>
 #include <dlfcn.h>
 #include <locale.h>
@@ -42,8 +46,22 @@ static void churn(const char *who) {
     }
 }
 
+/* Noinline so the buffer is gone when churn runs. Filling it from the top touches the deepest page last. */
+static __attribute__((noinline)) int deep_stack(size_t size) {
+    volatile unsigned char *buffer = alloca(size);
+    for (size_t i = size; i > 0; i -= 4096) buffer[i - 1] = (unsigned char)(i >> 12);
+    for (size_t i = size; i > 0; i -= 4096)
+        if (buffer[i - 1] != (unsigned char)(i >> 12)) return 1;
+    return 0;
+}
+
 static int sdl_thread(void *arg) {
     (void)arg;
+    if (deep_stack(4u << 20)) {
+        bad = 1;
+        printf("the SDL thread's stack does not hold 4 MiB\n");
+        return 1;
+    }
     volatile int letter = 'q';
     char text[64];
     /* The thread runs glibc's __ctype_init: it follows setlocale even where a new TLS block defaults to "C". */

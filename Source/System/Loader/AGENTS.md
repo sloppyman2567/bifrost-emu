@@ -20,6 +20,9 @@
   `allocate_thread_tls`, the syscall `_dl_allocate_tls` handler and patched
   `dl_tls_static_size` consistent. Do not add the descriptor size twice or
   apply this layout to musl's separate convention.
+- A new thread's TLS comes from the mapped PT_TLS image (`tls_image_addr()`), like glibc's `l_tls_initimage`.
+  `tls_template_addr` for startup and static-slot modules is the main thread's live block: never copy threads from it.
+  `test_dyn_tls_template` covers this.
 - Native dynlink must establish the existing main-thread pthread descriptor
   fields, not only module TLS. glibc hook offsets are detected from the actual
   loader implementation rather than pinned to one distro's struct layout.

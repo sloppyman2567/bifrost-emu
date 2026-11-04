@@ -163,7 +163,7 @@ int64_t syscall_linker_services(Emulator& emu, CPU& cpu, uint64_t num) {
                     int64_t tp_off = obj.tls_tp_offset;
                     uint64_t dst = static_cast<uint64_t>(
                         static_cast<int64_t>(tcb) + tp_off);
-                    uint64_t src = obj.tls_template_addr;
+                    uint64_t src = obj.tls_image_addr();
                     uint64_t filesz = obj.tls.filesz;
                     try {
                         std::vector<uint8_t> tls_image(
