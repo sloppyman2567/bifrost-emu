@@ -874,6 +874,14 @@ public final class ManagedLauncher {
                                 Class.forName("android.app.IRequestFinishCallback")
                                         .getMethod("requestFinish").invoke(a[1]);
                             return null;
+                        // ActivityClientController.moveActivityTaskToBack(token, nonRoot):
+                        // a non-root Activity moves the task only with nonRoot. The
+                        // task then goes where a HOME start sends it.
+                        case "moveActivityTaskToBack":
+                            if (!orientations.containsKey((IBinder) a[0])
+                                    || (!(Boolean) a[1] && !activities.isRoot((IBinder) a[0]))) return false;
+                            activities.moveTaskToBack();
+                            return true;
                         // getTaskForActivity(token, onlyRoot): every Activity here
                         // belongs to the one launcher task; -1 is INVALID_TASK_ID.
                         case "getTaskForActivity":
@@ -909,6 +917,9 @@ public final class ManagedLauncher {
             if (method.equals("startActivity") || method.equals("startActivityAsUser"))
                 return activities.start(a);
             if (method.equals("getAppTasks")) return activities.appTasks((String) a[0], services);
+            // (maxNum, filterOnlyVisibleRecents, keepIntentExtra, displayId)
+            if (method.equals("getTasks"))
+                return activities.runningTasks((Integer) a[0], (Boolean) a[2], (Integer) a[3]);
             // (caller, target, allowlistToken, fillInIntent, resolvedType,
             // resultTo, resultWho, requestCode, flagsMask, flagsValues, options)
             if (method.equals("startActivityIntentSender")) {
@@ -1084,6 +1095,20 @@ public final class ManagedLauncher {
                 memoryInfo((ActivityManager.MemoryInfo) a[0]);
                 return null;
             }
+            // ActivityManagerService.getProcessMemoryInfo: one entry per pid, left
+            // empty for a process the caller may not inspect. Only this one is local.
+            if (method.equals("getProcessMemoryInfo")) {
+                int[] pids = (int[]) a[0];
+                android.os.Debug.MemoryInfo[] infos = new android.os.Debug.MemoryInfo[pids.length];
+                for (int i = 0; i < pids.length; i++) {
+                    infos[i] = new android.os.Debug.MemoryInfo();
+                    if (pids[i] == Process.myPid()) android.os.Debug.getMemoryInfo(infos[i]);
+                }
+                return infos;
+            }
+            // No crash or ANR dialogs exist here, so no process is ever in an error
+            // state; ActivityManager documents null for that.
+            if (method.equals("getProcessesInErrorState")) return null;
             // ACTION_BATTERY_CHANGED is the only sticky broadcast published here.
             if (method.equals("registerReceiverWithFeature")) return broadcasts.register(a);
             if (method.equals("unregisterReceiver")) { broadcasts.unregister(a[0]); return null; }

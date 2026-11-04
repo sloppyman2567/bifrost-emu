@@ -20,6 +20,12 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Five more Android calls (2026-11-04)
+
+`getTasks` (`ActivityManager.getRunningTasks`, which ended FNAF Mobile Port and reached Battle Cats), `moveActivityTaskToBack`,
+`getProcessMemoryInfo`, `getProcessesInErrorState` and `getDevicesForAttributesUnprotected`, ranked from the
+`SERVICE_CALL_UNSUPPORTED` lines of every saved session.
+
 ### MediaPlayer, MediaMetadataRetriever and SoundPool work (2026-11-04)
 
 The broker runs the image's real `mediaserver`, so `media.player` exists, and `libsoundpool.so` is provisioned. Any libGDX game

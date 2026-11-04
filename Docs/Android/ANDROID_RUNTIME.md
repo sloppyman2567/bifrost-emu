@@ -2510,6 +2510,11 @@ which posts `finishAfterTransition`. On the launcher root Android moves the
 task to the back; with no home screen here the root stays in front, so only
 the app's own key handling (Unity's view, for example) acts on it.
 `getTaskForActivity` reports the single launcher task.
+`getTasks` (`ActivityManager.getRunningTasks`) follows `RunningTasks`: an app sees only its own task, here the launcher task while
+it has a non-finishing Activity, with the base intent's extras stripped unless `keepIntentExtra`, and nothing for `maxNum <= 0` or
+another display. `moveActivityTaskToBack` takes the route of a HOME start. Answering `getProcessMemoryInfo` fills only the
+caller's own pid; `getProcessesInErrorState` is null, since no crash or ANR dialog exists here. Audio routing is the host's, so
+`getDevicesForAttributesUnprotected` names the one built-in speaker for any attributes.
 `PackageTests.test_managed_activity_stack` (`ManagedActivities`) checks the
 ordering above, the unresolved implicit Intent, a provider intent-filter query
 against the installed split cluster, a permission request returning a granted

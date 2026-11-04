@@ -679,6 +679,16 @@ public final class ManagedServiceBatch {
 
     private static void audio(Context context) throws Exception {
         AudioManager manager = context.getSystemService(AudioManager.class);
+        java.util.List<?> outputs = (java.util.List<?>) invoke(endpoint("audio", "android.media.IAudioService"),
+                "getDevicesForAttributesUnprotected", new android.media.AudioAttributes.Builder().build());
+        check(outputs.size() == 1 && (Integer) outputs.get(0).getClass().getMethod("getType").invoke(outputs.get(0))
+                == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, "audio output for attributes");
+        Object activity = endpoint("activity", "android.app.IActivityManager");
+        check(invoke(activity, "getProcessesInErrorState") == null, "a process reported in error");
+        android.os.Debug.MemoryInfo[] memory = (android.os.Debug.MemoryInfo[]) invoke(activity,
+                "getProcessMemoryInfo", (Object) new int[] {android.os.Process.myPid(), 1});
+        check(memory.length == 2 && memory[0].getTotalPss() > 0 && memory[1].getTotalPss() == 0,
+                "process memory info: own pid filled, foreign pid empty");
         int stereo = android.media.AudioTrack.getMinBufferSize(48000,
                 android.media.AudioFormat.CHANNEL_OUT_STEREO, android.media.AudioFormat.ENCODING_PCM_16BIT);
         int mono = android.media.AudioTrack.getMinBufferSize(48000,

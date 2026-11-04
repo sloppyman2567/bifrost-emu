@@ -57,6 +57,7 @@ final class FrameworkAudio implements FrameworkServices.Call {
         registerSpatializerCallback,
         unregisterSpatializerCallback,
         trackPlayer,
+        getDevicesForAttributesUnprotected,
         playerAttributes,
         playerEvent,
         playerSessionId,
@@ -322,6 +323,17 @@ final class FrameworkAudio implements FrameworkServices.Call {
         catch (IllegalArgumentException unknown) { throw new UnsupportedOperationException("audio." + method); }
         switch (contract) {
             case requestAudioFocus: return request(a);
+            // AudioService.getDevicesForAttributesUnprotected: audio routing is
+            // the host's, so every attribute set plays on the one built-in output.
+            case getDevicesForAttributesUnprotected: {
+                Objects.requireNonNull(a[0], "attributes");
+                Class<?> device = Class.forName("android.media.AudioDeviceAttributes");
+                List<Object> devices = new ArrayList<>();
+                devices.add(device.getConstructor(int.class, int.class, String.class).newInstance(
+                        device.getField("ROLE_OUTPUT").getInt(null),
+                        android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, ""));
+                return devices;
+            }
             case abandonAudioFocus:
                 owner((String) a[3]); abandon((String) a[1], (String) a[3]);
                 return AudioManager.AUDIOFOCUS_REQUEST_GRANTED;

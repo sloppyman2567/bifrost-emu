@@ -94,6 +94,10 @@ final class FrameworkActivities {
         return true;
     }
 
+    void moveTaskToBack() throws Exception {
+        FrameworkProcessRuntime.host(new org.json.JSONObject().put("operation", "home"));
+    }
+
     private void taskVisible(boolean visible) throws Exception {
         if (background == !visible) return;
         int error = ManagedLauncher.setTaskVisible(visible);
@@ -654,27 +658,55 @@ final class FrameworkActivities {
         return tasks;
     }
 
-    // RecentTasks.createRecentTaskInfo / Task.fillTaskInfo for the launcher
-    // task: base and top Activities from the stack, one display, visible and
-    // focused. The task description is the default (no setTaskDescription
-    // tracking); window-organizer, PiP and cutout fields keep their defaults.
+    // ActivityTaskManagerService.getTasks and RunningTasks: an app sees only its
+    // own UID's tasks, here the launcher task while it has a live Activity. The
+    // visible-recents filter drops home, recents, dream, pinned and lock-task
+    // tasks (RecentTasks.isVisibleRecentTask), which this task never is.
+    List<android.app.ActivityManager.RunningTaskInfo> runningTasks(int maxNum, boolean keepIntentExtra,
+            int displayId) throws Exception {
+        List<android.app.ActivityManager.RunningTaskInfo> tasks = new ArrayList<>();
+        List<Record> records = liveRecords();
+        if (maxNum <= 0 || records.isEmpty() || (displayId != -1 && displayId != 0)) return tasks; // -1: INVALID_DISPLAY
+        android.app.ActivityManager.RunningTaskInfo info = new android.app.ActivityManager.RunningTaskInfo();
+        fillTaskInfo(info, records, !keepIntentExtra);
+        info.id = TASK_ID;
+        tasks.add(info);
+        return tasks;
+    }
+
+    // RecentTasks.createRecentTaskInfo for the launcher task.
     private android.app.ActivityManager.RecentTaskInfo taskInfo() throws Exception {
+        List<Record> records = liveRecords();
+        if (records.isEmpty()) throw new IllegalArgumentException("Unable to find task ID " + TASK_ID);
+        android.app.ActivityManager.RecentTaskInfo info = new android.app.ActivityManager.RecentTaskInfo();
+        fillTaskInfo(info, records, false);
+        info.id = TASK_ID;
+        info.persistentId = TASK_ID;
+        return info;
+    }
+
+    // The stack without finishing Activities (Task.getTopNonFinishingActivity).
+    private List<Record> liveRecords() {
         List<Record> records;
         synchronized (this) { records = new ArrayList<>(stack); }
-        if (records.isEmpty()) throw new IllegalArgumentException("Unable to find task ID " + TASK_ID);
+        records.removeIf(record -> record.activity.isFinishing());
+        return records;
+    }
+
+    // Task.fillTaskInfo: base and top Activities from the stack, one display,
+    // visible and focused. stripExtras is Intent.cloneFilter, as there. The task
+    // description is the default (no setTaskDescription tracking);
+    // window-organizer, PiP and cutout fields keep their defaults.
+    private void fillTaskInfo(android.app.TaskInfo info, List<Record> records, boolean stripExtras) throws Exception {
         Activity root = records.get(0).activity, top = records.get(records.size() - 1).activity;
-        android.app.ActivityManager.RecentTaskInfo info = new android.app.ActivityManager.RecentTaskInfo();
-        Intent base = new Intent(root.getIntent());
         info.taskId = TASK_ID;
-        info.baseIntent = base;
+        info.baseIntent = stripExtras ? root.getIntent().cloneFilter() : new Intent(root.getIntent());
         info.isRunning = true;
         info.baseActivity = root.getComponentName();
         info.topActivity = top.getComponentName();
         info.origActivity = null;
         info.numActivities = records.size();
         info.taskDescription = new android.app.ActivityManager.TaskDescription();
-        info.id = TASK_ID;
-        info.persistentId = TASK_ID;
         setHidden(info, "realActivity", root.getComponentName());
         setHidden(info, "userId", android.os.Process.myUid() / 100000);
         setHidden(info, "displayId", 0);
@@ -684,7 +716,6 @@ final class FrameworkActivities {
         setHidden(info, "topActivityInfo", application.getPackageManager().getActivityInfo(top.getComponentName(), 0));
         ((android.content.res.Configuration) hiddenField(info, "configuration"))
                 .setTo(top.getResources().getConfiguration());
-        return info;
     }
 
     private static Field taskInfoField(Object target, String name) throws Exception {

@@ -149,6 +149,7 @@ public final class Managed extends Activity {
         checkNetworkInterfaces();
         checkPackageQueries();
         checkAppTasks();
+        checkRunningTasks();
         checkLoudness();
         int starts = prefs.getInt("starts", 0) + 1;
         if (Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, -1) != (starts == 3 ? 12345 : 60000))
@@ -323,6 +324,22 @@ public final class Managed extends Activity {
                 || !new android.content.ComponentName(this, Managed.class).equals(info.baseActivity))
             throw new AssertionError("app task info incorrect");
         System.out.println("MANAGED_FIXTURE_APP_TASKS_OK");
+    }
+
+    // ActivityManager.getRunningTasks: the caller's own task, as Catrobat's
+    // onPause reads it. A task that disappears from it means "sent to background".
+    private void checkRunningTasks() {
+        android.app.ActivityManager manager = (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        java.util.List<android.app.ActivityManager.RunningTaskInfo> tasks = manager.getRunningTasks(1);
+        if (tasks.size() != 1) throw new AssertionError("running tasks: " + tasks.size());
+        android.app.ActivityManager.RunningTaskInfo info = tasks.get(0);
+        android.content.ComponentName self = new android.content.ComponentName(this, Managed.class);
+        if (info.taskId != getTaskId() || info.id != info.taskId || !info.isRunning || info.numActivities < 1
+                || !self.equals(info.topActivity) || !self.equals(info.baseActivity))
+            throw new AssertionError("running task info incorrect");
+        if (info.baseIntent.getExtras() != null) throw new AssertionError("running task kept intent extras");
+        if (!manager.getRunningTasks(0).isEmpty()) throw new AssertionError("zero tasks requested");
+        System.out.println("MANAGED_FIXTURE_RUNNING_TASKS_OK");
     }
 
     // LoudnessCodecController (ExoPlayer on Android 15): an AAC-LC decoder on

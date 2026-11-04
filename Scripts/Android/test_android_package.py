@@ -3484,6 +3484,7 @@ class PackageTests(unittest.TestCase):
             except Exception as error: errors.append(error)
         with patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}):
             with (self.work / "home-launcher.log").open("w") as launcher_log:
+            self.assertIn("MANAGED_FIXTURE_RUNNING_TASKS_OK", text)
                 launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
                     "--state-root", str(state), "launcher"], stdout=launcher_log, stderr=subprocess.STDOUT,
                     start_new_session=True)
