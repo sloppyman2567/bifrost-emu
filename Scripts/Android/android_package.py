@@ -1062,7 +1062,10 @@ def main():
             else:
                 written, removed = android_desktop.sync(args.state_root, installed_apps(args.state_root))
                 print(f"Wrote {len(written)} menu entries in {android_desktop.applications_dir()}"
-                      + (f", removed {len(removed)} for apps that are gone" if removed else ""))
+                      + (f", removed {len(removed)} for apps that are off or gone" if removed else ""))
+                if not written and not android_desktop.default_on(args.state_root):
+                    print("No app is set to show in the menu. Turn one on with `asgard config PACKAGE menu_entry on` "
+                          "(or in its settings in the library), or all of them with `asgard desktop --default on`.")
             return 0
         if args.command in ("list", "apps"):
             apps = installed_apps(args.state_root)

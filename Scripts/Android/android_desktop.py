@@ -9,7 +9,7 @@ Entries are made only for the default state root: a scratch state root, such as 
 `asgard desktop --remove` removes all of them.
 
 Which apps get one: the per-app setting `menu_entry` (on or off) decides, and an app without it follows the state root's default
-(`asgard desktop --default on|off`, on at first). To have entries for only some apps, set the default off and turn those apps on.
+(`asgard desktop --default on|off`), which is OFF: nothing is added to the menu until it is asked for, app by app.
 """
 import json
 import os
@@ -46,12 +46,12 @@ def enabled(state):
 
 
 def default_on(state):
-    """Whether an app with no `menu_entry` setting gets an entry: the state root's saved default, on if there is none."""
+    """Whether an app with no `menu_entry` setting gets an entry: the state root's saved default, off if there is none."""
     try:
         value = json.loads((Path(state) / DEFAULT_FILE).read_text()).get("default")
     except (OSError, ValueError, AttributeError):
-        return True
-    return value if isinstance(value, bool) else True
+        return False
+    return value if isinstance(value, bool) else False
 
 
 def set_default(state, value):

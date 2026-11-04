@@ -44,9 +44,10 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Menu entries for only the apps you choose (2026-11-04)
 
-- **Every installed app got a menu entry.** The per-app setting `menu_entry` (on or off; `asgard config`, and "Application menu" in
-  the library's app settings) now decides, and an app without it follows a state-wide default, `asgard desktop --default on|off`
-  (on at first). With the default off, only apps set to on have an entry. Changes apply at once and remove or write just that app's
+- **Menu entries are chosen per app, and off until chosen.** The per-app setting `menu_entry` (on or off; `asgard config`, and "Application
+  menu" in the library's app settings) decides, and an app without it follows a state-wide default, `asgard desktop --default on|off`
+  (off at first). The first version defaulted to on, so the library showed the box checked for every app while no entry existed;
+  that was wrong and is fixed. Changes apply at once and remove or write just that app's
   entry; hand-written entries and ones for another state root are still never touched. Tested for the setting, the default, the
   dialog's checkbox and `asgard config`. Not checked in a live desktop session beyond the entries themselves.
 

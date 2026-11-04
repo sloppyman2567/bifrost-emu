@@ -513,24 +513,24 @@ class LauncherProfileTests(unittest.TestCase):
     def test_the_menu_entry_checkbox_follows_the_state_default_and_saves_only_a_change(self):
         import android_desktop
         directory = self.window.state; directory.mkdir(parents=True, exist_ok=True)
-        # Unset: it shows the state's default, and leaving it alone saves nothing.
-        dialog = self.edit({})
-        self.assertTrue(dialog.menu.isChecked())
-        self.assertNotIn("menu_entry", dialog.result_settings())
-        dialog.menu.setChecked(False)
-        self.assertIs(dialog.result_settings()["menu_entry"], False)
-        # With the default off the box starts unchecked, and checking it is a saved choice for this app.
-        android_desktop.set_default(directory, False)
+        # Unset: the box is unchecked (nothing is added to the menu by default), and leaving it alone saves nothing.
         dialog = self.edit({})
         self.assertFalse(dialog.menu.isChecked())
         self.assertNotIn("menu_entry", dialog.result_settings())
         dialog.menu.setChecked(True)
         self.assertIs(dialog.result_settings()["menu_entry"], True)
-        # A saved choice shows as saved, and Reset returns the box to the default.
-        dialog = self.edit({"menu_entry": True})
+        # With the default on the box starts checked, and unchecking it is a saved choice for this app.
+        android_desktop.set_default(directory, True)
+        dialog = self.edit({})
         self.assertTrue(dialog.menu.isChecked())
-        dialog.reset_profile()
+        self.assertNotIn("menu_entry", dialog.result_settings())
+        dialog.menu.setChecked(False)
+        self.assertIs(dialog.result_settings()["menu_entry"], False)
+        # A saved choice shows as saved, and Reset returns the box to the default.
+        dialog = self.edit({"menu_entry": False})
         self.assertFalse(dialog.menu.isChecked())
+        dialog.reset_profile()
+        self.assertTrue(dialog.menu.isChecked())  # back to the state's default (on, just above)
 
     def test_profile_round_trip_uses_the_cli_format_and_cancel_does_not_save(self):
         from android_settings import save, load, properties
@@ -1135,6 +1135,7 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertEqual(self.desktop.icon_file(self.app(), self.state), str(self.icon))  # a PNG is used as it is
 
     def test_entries_follow_the_installed_apps_and_leave_other_files_alone(self):
+        self.desktop.set_default(self.state, True)  # these tests are about syncing, not about what the default is
         apps = [self.app("org.example.one"), self.app("org.example.two"),
                 self.app("com.google.android.gms", system=True), self.app("org.example.broken", error="damaged"),
                 self.app("org.example.noactivity", launcher="service")]
@@ -1163,26 +1164,29 @@ class DesktopEntryTests(unittest.TestCase):
         names = ("one", "two", "three")
         for name in names: (self.state / f"org.example.{name}").mkdir()
         apps = [self.app(f"org.example.{name}") for name in names]
-        self.assertEqual(len(self.desktop.sync(self.state, apps)[0]), 3)  # on unless told otherwise
-        # One app turned off: its entry goes, the others stay.
+        # Nothing is added to the menu until it is asked for.
+        self.assertFalse(self.desktop.default_on(self.state))
+        self.assertEqual(self.desktop.sync(self.state, apps), ([], []))
+        self.assertEqual(self.entries(), [])
+        # One app turned on: only its entry.
+        android_settings.save(self.state / "org.example.two", {"menu_entry": True})
+        self.assertEqual(self.desktop.sync(self.state, apps), (["org.example.two"], []))
+        self.assertEqual(self.entries(), ["asgard-org.example.two.desktop"])
+        # The default on: apps with no setting follow it, and one that said off stays off.
+        self.desktop.set_default(self.state, True)
         android_settings.save(self.state / "org.example.one", {"menu_entry": False})
         written, removed = self.desktop.sync(self.state, apps)
-        self.assertEqual((sorted(written), removed), (["org.example.three", "org.example.two"], ["org.example.one"]))
-        # The default off: only an app that says on keeps its entry.
+        self.assertEqual((sorted(written), removed), (["org.example.three", "org.example.two"], []))
+        self.assertEqual(self.entries(), ["asgard-org.example.three.desktop", "asgard-org.example.two.desktop"])
+        # The default back off: only the app that says on keeps its entry.
         self.desktop.set_default(self.state, False)
-        self.assertFalse(self.desktop.default_on(self.state))
-        android_settings.save(self.state / "org.example.two", {"menu_entry": True})
         self.desktop.sync(self.state, apps)
         self.assertEqual(self.entries(), ["asgard-org.example.two.desktop"])
-        # The default back on: apps with no setting return, the one that said off stays off.
-        self.desktop.set_default(self.state, True)
-        self.desktop.sync(self.state, apps)
-        self.assertEqual(self.entries(), ["asgard-org.example.three.desktop", "asgard-org.example.two.desktop"])
-        # A damaged default file means on.
+        # A damaged default file means off.
         (self.state / self.desktop.DEFAULT_FILE).write_text("not json")
-        self.assertTrue(self.desktop.default_on(self.state))
-        (self.state / self.desktop.DEFAULT_FILE).write_text(json.dumps({"default": "no"}))
-        self.assertTrue(self.desktop.default_on(self.state))
+        self.assertFalse(self.desktop.default_on(self.state))
+        (self.state / self.desktop.DEFAULT_FILE).write_text(json.dumps({"default": "yes"}))
+        self.assertFalse(self.desktop.default_on(self.state))
 
     def test_the_menu_entry_setting_is_validated_like_the_other_switches(self):
         import android_settings
@@ -1202,17 +1206,18 @@ class DesktopEntryTests(unittest.TestCase):
         with patch.object(self.desktop.android_paths, "state_root", return_value=self.state), \
                 patch.object(package, "installed_apps", return_value=[self.app()]), patch("builtins.print"):
             package.update_desktop(self.state)
+            self.assertEqual(self.entries(), [])  # off by default: installing or syncing adds nothing
+            args.value = "on"; package.configure(args)
             self.assertEqual(self.entries(), ["asgard-org.example.game.desktop"])
             args.value = "off"; package.configure(args)
             self.assertEqual(self.entries(), [])
             args.value = "on"; package.configure(args)
-            self.assertEqual(self.entries(), ["asgard-org.example.game.desktop"])
-            args.value = "off"; package.configure(args)
-            args.value = None; args.reset = True; package.configure(args)  # reset: back to the default, which is on
-            self.assertEqual(self.entries(), ["asgard-org.example.game.desktop"])
+            args.value = None; args.reset = True; package.configure(args)  # reset: back to the default, which is off
+            self.assertEqual(self.entries(), [])
             # Another setting does not touch the menu.
+            args.value = "on"; args.reset = False; package.configure(args)
             (self.desktop.applications_dir() / "asgard-org.example.game.desktop").unlink()
-            args.reset = False; args.key = "network"; args.value = "offline"; package.configure(args)
+            args.key = "network"; args.value = "offline"; package.configure(args)
             self.assertEqual(self.entries(), [])
 
     def test_only_the_default_state_root_gets_entries(self):
@@ -1225,6 +1230,7 @@ class DesktopEntryTests(unittest.TestCase):
         with patch.object(package, "installed_apps", return_value=[self.app()]):
             package.update_desktop(self.root / "scratch", "org.example.game")
         self.assertEqual(self.entries(), [])
+        self.desktop.set_default(self.state, True)  # the default is off; this test is about where entries may be made
         with patch.object(self.desktop.android_paths, "state_root", return_value=self.state), \
                 patch.object(package, "installed_apps", return_value=[self.app()]):
             package.update_desktop(self.state, "org.example.game")
@@ -1234,6 +1240,7 @@ class DesktopEntryTests(unittest.TestCase):
             self.assertEqual(self.entries(), [])
 
     def test_an_unwritable_menu_never_fails_the_install(self):
+        self.desktop.set_default(self.state, True)
         blocked = self.root / "data"; blocked.write_text("a file where the directory should be")
         with patch.object(self.desktop.android_paths, "state_root", return_value=self.state), \
                 patch.object(package, "installed_apps", return_value=[self.app()]), \
