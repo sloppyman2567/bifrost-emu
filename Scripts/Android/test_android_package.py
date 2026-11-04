@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -31,6 +32,19 @@ ARGS = None
 BASEMENT = ("https://dl.google.com/android/maven2/com/google/android/gms/play-services-basement/"
             "18.12.0/play-services-basement-18.12.0.aar", 451993,
             "30e9df7012c15ef31a4b288b3d77eb4550b195a0581675cad121b0b4bbc47b76")
+
+
+def stop_launcher(launcher):
+    """Stop an `asgard.py launcher` and the android_package.py it runs as a child: terminating only the wrapper orphans it."""
+    try:
+        os.killpg(launcher.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        launcher.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(launcher.pid, signal.SIGKILL)
+        launcher.wait(timeout=10)
 
 
 def play_services_basement(work):
@@ -877,7 +891,8 @@ class LauncherLibraryTests(unittest.TestCase):
         env = dict(os.environ, QT_QPA_PLATFORM="offscreen", HOME=str(self.root))
         with (self.root / "launcher.log").open("w") as log:
             launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
-                                         "--state-root", str(state), "launcher"], stdout=log, stderr=subprocess.STDOUT, env=env)
+                                         "--state-root", str(state), "launcher"], stdout=log, stderr=subprocess.STDOUT, env=env,
+                                         start_new_session=True)
             try:
                 deadline = time.monotonic() + 20
                 while not activate_existing(state):
@@ -885,7 +900,7 @@ class LauncherLibraryTests(unittest.TestCase):
                         self.fail("Offscreen Asgard launcher did not start: " + (self.root / "launcher.log").read_text()[-2000:])
                     time.sleep(0.1)
             finally:
-                launcher.terminate(); launcher.wait(timeout=10)
+                stop_launcher(launcher)
 
 
 class SessionResultTests(unittest.TestCase):
@@ -2990,7 +3005,8 @@ class PackageTests(unittest.TestCase):
         with patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}):
             with (self.work / "home-launcher.log").open("w") as launcher_log:
                 launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
-                    "--state-root", str(state), "launcher"], stdout=launcher_log, stderr=subprocess.STDOUT)
+                    "--state-root", str(state), "launcher"], stdout=launcher_log, stderr=subprocess.STDOUT,
+                    start_new_session=True)
                 worker = None
                 try:
                     deadline = time.monotonic() + 20
@@ -3005,8 +3021,7 @@ class PackageTests(unittest.TestCase):
                 finally:
                     done.set()
                     if worker: worker.join(3)
-                    launcher.terminate()
-                    launcher.wait(timeout=10)
+                    stop_launcher(launcher)
         text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
         self.assertFalse(errors, str(errors) + text[-12000:])
         self.assertEqual(status, 0, text[-12000:])
