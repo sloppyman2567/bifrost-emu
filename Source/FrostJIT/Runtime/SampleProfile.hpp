@@ -19,6 +19,18 @@ struct ProfBlock {
     uint64_t guest_pc;
 };
 
+// What an IR operation's emitted code does, for splitting the body's time. A memory operation includes its guest-address
+// guard, and any operation includes the spill and reload code the allocator put in it (`spill` marks those).
+enum ProfOp : uint8_t { PROF_STATE, PROF_MEMORY, PROF_ALU, PROF_FLAGS, PROF_BRANCH, PROF_CALL, PROF_FPSIMD, PROF_OTHER,
+                        PROF_OP_KINDS };
+
+// The code of one IR operation inside a block's body.
+struct ProfRange {
+    uint64_t begin, end;
+    uint8_t op;
+    bool spill;
+};
+
 struct ProfSectionCounts {
     uint64_t entry = 0, body = 0, exit = 0, cold = 0;
     uint64_t shared = 0;  // inside a code buffer, outside any registered block
@@ -43,12 +55,16 @@ struct ProfBlockReport {
 struct ProfReport {
     ProfSectionCounts total;
     uint64_t lost = 0;  // samples that never reached a ring (no free slot) or were overwritten before they were read
+    uint64_t body_op[PROF_OP_KINDS] = {};  // the body samples by what the operation under them does (PROF_OTHER: no range)
+    uint64_t body_spill = 0;                // body samples inside an operation whose code contains spills or reloads
+    uint64_t ranges_dropped = 0;            // operation ranges not kept because the table was full
     std::vector<ProfThreadReport> threads;
     std::vector<ProfBlockReport> hottest;  // most samples first
 };
 
-// Called while translating, only when BIFROST_PROF is set.
+// Called while translating, only when BIFROST_PROF is set: the block, then the operations in its body.
 void prof_note_block(const ProfBlock& block);
+void prof_note_ranges(const ProfRange* ranges, size_t count);
 // A code buffer is about to be unmapped: resolve what was sampled in it, then forget its blocks.
 void prof_release_code(const uint8_t* base, size_t size);
 // Gives the calling thread a ring for its samples (once per thread).

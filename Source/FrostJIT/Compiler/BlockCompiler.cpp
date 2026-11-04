@@ -145,6 +145,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     allocation_profile_active_ = !dbg().regalloc_profile.empty();
     profile_sections_active_ = dbg().cpu_profile;
     profile_body_begin_ = SIZE_MAX;
+    profile_ranges_.clear();
     // Only clear the vreg arrays up to the previous block's max_vreg_+1,
     // not all 4096 entries. This saves ~12KB of writes per block
     // translation when blocks are small (typical: max_vreg_ ≈ 33-100).

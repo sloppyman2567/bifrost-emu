@@ -108,6 +108,21 @@ int main() {
             CPU cpu; cpu.pc = head; cpu.regs[30] = stop;
             check(fn(&cpu, emu.get()) == stop && cpu.regs[0] == 8);
         }
+        // With BIFROST_PROF the translator registers the block and its operations: sampling every byte of it puts the body's
+        // samples into operation kinds that account for all of them (mov and add are ALU, the result is a guest-state
+        // move; the indirect branch of ret is in the exit section, not in the body).
+        {
+            const auto before = prof_collect(0);
+            const auto start = reinterpret_cast<uint64_t>(reinterpret_cast<const void*>(fn));
+            for (uint64_t offset = 0; offset < 1024; ++offset) prof_record_sample(start + offset);
+            const auto after = prof_collect(0);
+            uint64_t kinds = 0, body = after.total.body - before.total.body;
+            for (int i = 0; i < PROF_OP_KINDS; ++i) kinds += after.body_op[i] - before.body_op[i];
+            check(body > 0 && kinds == body);
+            check(after.body_op[PROF_ALU] > before.body_op[PROF_ALU]);
+            check(after.body_op[PROF_STATE] > before.body_op[PROF_STATE]);
+            check(after.body_op[PROF_MEMORY] == before.body_op[PROF_MEMORY]);
+        }
         std::ifstream profile(path);
         std::string line; std::getline(profile, line);
         check(line.find("block_pc\tguest_pc\thost_begin\thost_end") == 0);

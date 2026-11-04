@@ -864,6 +864,14 @@ into the parts of a translated block. **Entry** loads the canonical register lay
 stubs, and blocks loaded from the persistent cache, which are not registered. Below it come the busiest eight threads, and with
 `BIFROST_PC_HIST=1` the twenty hottest guest blocks (`pc=` values map to functions with `aarch64 objdump`).
 
+Under the report a second line splits the **body** samples by what the operation under them does: guest state moves
+(`LOAD_REG`/`STORE_REG`), memory (a load or store with its guest-address guard, and atomics), integer ALU, flag setting, branches,
+helper calls, FP and SIMD, and "between operations" (code in the body that belongs to no single operation). The same line gives
+the share of body time that fell inside an operation whose code contains allocator spills or reloads. That share is an upper bound
+on spill cost: the operation's own work is in the same range, and I cannot separate the two. The code that ends a block (the
+indirect branch of `ret`, flag and register commits) is in the exit section, not the body. The operation table costs 16 bytes per
+IR operation translated while `BIFROST_PROF` is set (capped at 16 Mi operations; a note says when it is full).
+
 Samples go to a per-thread ring of 16,384 and are resolved into running totals whenever a report is printed, when a thread ends
 and when a code buffer is released. A thread that outlives 164 s of samples between two reports overwrites its oldest ones; those
 are counted as *lost*, not folded into a bucket, so `BIFROST_STATS_PERIOD` keeps a long run complete. The numbers are time, not

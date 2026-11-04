@@ -246,19 +246,24 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         return ends;
     };
     if (profile_sections_active_ && profile_body_begin_ == SIZE_MAX) profile_body_begin_ = code_buf_used_;
-    if (!allocation_profile_active_) return compile();
+    if (!allocation_profile_active_ && !profile_sections_active_) return compile();
     const size_t begin = code_buf_used_;
     const auto before = regalloc_stats_;
     const uint64_t spills = vec_spills_, reloads = vec_reloads_, evictions = vec_evictions_;
     const bool ends = compile();
+    regalloc_stats_t delta = regalloc_stats_;
+    delta.spill_arm -= before.spill_arm; delta.spill_stack -= before.spill_stack;
+    delta.reload_arm -= before.reload_arm; delta.reload_stack -= before.reload_stack;
+    delta.evicts -= before.evicts; delta.rematerialized -= before.rematerialized;
+    delta.rematerializable_spills_avoided -= before.rematerializable_spills_avoided;
+    if (profile_sections_active_) {
+        const bool spilled = delta.spill_arm + delta.spill_stack + delta.reload_arm + delta.reload_stack + delta.evicts +
+                             (vec_spills_ - spills) + (vec_reloads_ - reloads) + (vec_evictions_ - evictions) != 0;
+        profile_ranges_.push_back({begin, code_buf_used_, profile_op_kind(inst.op), spilled});
+    }
     if (allocation_profile_active_) {
         VectorEffects effects;
         const bool boundary = !vec_inst_effects(inst, effects) || effects.memory_operands;
-        regalloc_stats_t delta = regalloc_stats_;
-        delta.spill_arm -= before.spill_arm; delta.spill_stack -= before.spill_stack;
-        delta.reload_arm -= before.reload_arm; delta.reload_stack -= before.reload_stack;
-        delta.evicts -= before.evicts; delta.rematerialized -= before.rematerialized;
-        delta.rematerializable_spills_avoided -= before.rematerializable_spills_avoided;
         allocation_events_.push_back({inst.arm_pc, begin, code_buf_used_, unsigned(inst.op), delta,
             vec_spills_ - spills, vec_reloads_ - reloads, vec_evictions_ - evictions, boundary});
     }

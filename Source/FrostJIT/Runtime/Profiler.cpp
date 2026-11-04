@@ -148,11 +148,50 @@ void FrostJIT::make_executable() {
         // If mprotect fails, leave the buffer writable (better than crashing).
     }
 }
+uint8_t FrostJIT::profile_op_kind(IROp op) {
+    switch (op) {
+    case IROp::LOAD_REG: case IROp::STORE_REG:
+        return PROF_STATE;
+    case IROp::LOAD_MEM: case IROp::STORE_MEM: case IROp::SIMD_LDST: case IROp::SIMD_LD16: case IROp::SIMD_ST16:
+    case IROp::MEMORY_BARRIER: case IROp::CLEAR_EXCLUSIVE: case IROp::ATOMIC: case IROp::LDXR_FAST: case IROp::STXR_FAST:
+    case IROp::STLR_FAST:
+        return PROF_MEMORY;
+    case IROp::ADDS: case IROp::SUBS: case IROp::ADCS: case IROp::SBCS: case IROp::TST: case IROp::TST_ZERO: case IROp::CCMP:
+        return PROF_FLAGS;
+    case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU: case IROp::BRCOND_SKIP: case IROp::BRCOND_ZERO:
+    case IROp::BRCOND_BIT:
+        return PROF_BRANCH;
+    case IROp::BL_CALL: case IROp::BLR_CALL: case IROp::CALL_INTERP: case IROp::SVC:
+        return PROF_CALL;
+    case IROp::FMOV_G2F: case IROp::FMOV_F2G: case IROp::FMOV_G2FHI: case IROp::FMOV_FHI2G: case IROp::FP_BINOP:
+    case IROp::FP_UNOP: case IROp::FP_MOV: case IROp::SIMD_LOGICAL: case IROp::SIMD_NATIVE_STRUCT: case IROp::SIMD_NATIVE_EXTRA:
+    case IROp::SIMD_SCALAR_DUP: case IROp::SIMD_DUP: case IROp::SIMD_UMOV: case IROp::SIMD_SMOV: case IROp::SIMD_SATADDSUB:
+    case IROp::SIMD_MOVI: case IROp::SIMD_ORRIMM: case IROp::SIMD_ARITH: case IROp::SIMD_CMP: case IROp::SIMD_SHL:
+    case IROp::SIMD_USHR: case IROp::SIMD_SSHR: case IROp::SIMD_USRA: case IROp::SIMD_SSRA: case IROp::SIMD_URSRA:
+    case IROp::SIMD_SRSRA: case IROp::SIMD_SLI: case IROp::SIMD_SRI: case IROp::SIMD_FP_ARITH: case IROp::SIMD_FP_UNARY:
+    case IROp::SIMD_FP_FMA: case IROp::SIMD_2REG: case IROp::SIMD_CVTF: case IROp::SIMD_ADDP: case IROp::SIMD_XTN:
+    case IROp::SIMD_TBL: case IROp::SIMD_INS: case IROp::SIMD_PERMUTE: case IROp::SIMD_PAIRMIN: case IROp::SIMD_ABDL:
+    case IROp::SIMD_ABD: case IROp::SIMD_ADDW: case IROp::SIMD_ADDHN: case IROp::SIMD_SHRN_SAT: case IROp::SIMD_MUL_ELEM:
+    case IROp::FP_F2I: case IROp::FP_I2F: case IROp::FP_F2I_FIXED: case IROp::FP_I2F_FIXED: case IROp::FP_CMP:
+    case IROp::FP_MOVI: case IROp::FCVT_S2D: case IROp::FCVT_D2S: case IROp::FRINT: case IROp::FMADD: case IROp::FMSUB:
+    case IROp::FNMADD: case IROp::FNMSUB: case IROp::AES_CRYPTO: case IROp::FP_CSEL:
+        return PROF_FPSIMD;
+    case IROp::NOP: case IROp::MRS: case IROp::MSR:
+        return PROF_OTHER;
+    default:
+        return PROF_ALU;  // integer arithmetic, logic, shifts, moves, constants, conditional selects, division
+    }
+}
+
 void FrostJIT::note_profile_sections(size_t begin, size_t hot_end, size_t cold_begin) {
     if (!profile_sections_active_ || code_buf_overflow_) return;
     const size_t body = std::min(profile_body_begin_ == SIZE_MAX ? hot_end : profile_body_begin_, hot_end);
     const uint64_t base = reinterpret_cast<uint64_t>(code_buf_);
     prof_note_block({base + begin, base + body, base + hot_end, base + cold_begin, base + code_buf_used_, current_start_pc_});
+    std::vector<ProfRange> ranges;
+    ranges.reserve(profile_ranges_.size());
+    for (const ProfileRange& r : profile_ranges_) ranges.push_back({base + r.begin, base + r.end, r.op, r.spill});
+    prof_note_ranges(ranges.data(), ranges.size());
 }
 
 void FrostJIT::flush_cache() {

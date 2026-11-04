@@ -1617,6 +1617,9 @@ private:
     // The body starts at the first IR instruction; everything before it is the entry that loads the register layout.
     bool profile_sections_active_ = false;
     size_t profile_body_begin_ = SIZE_MAX;
+    struct ProfileRange { size_t begin, end; uint8_t op; bool spill; };
+    std::vector<ProfileRange> profile_ranges_;  // the IR operations of the block being emitted
+    static uint8_t profile_op_kind(IROp op);
     void note_profile_sections(size_t begin, size_t hot_end, size_t cold_begin);
     // Returns true if `r` is caller-saved (clobbered by C calls).
     // R12/R13/R14/R15 are callee-saved → preserved across calls.

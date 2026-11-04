@@ -110,6 +110,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     allocation_profile_active_ = !dbg().regalloc_profile.empty();
     profile_sections_active_ = dbg().cpu_profile;
     profile_body_begin_ = SIZE_MAX;
+    profile_ranges_.clear();
     // Regions keep guarded-access cold paths inline (Tier-1 only defers).
     defer_guards_ = false;
     deferred_guards_.clear();
