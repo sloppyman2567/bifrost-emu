@@ -51,10 +51,12 @@ run writer1 & run writer2 & wait
 run merged
 run other_switch BIFROST_NO_FMA3=1
 run third_switch BIFROST_NO_AVX2=1
-# A fourth build with room for about two of the three directories already
-# there: opening prunes the older builds first, so nothing it records is dropped.
-one_dir=$(file_bytes "$(ls -d "$work"/cache/*/* | head -1)")
-prune_mb=$(( one_dir * 26 / 10 / 1048576 + 1 ))
+# A fourth build: opening prunes the older fingerprints, oldest first, until the application is at three quarters of its
+# budget, and what the build records must fit in the rest. A budget just above what the three older builds use prunes one
+# of them and leaves room for the new one. (The directories differ in size by about 10%, and which one sorts first changes
+# with every build, so the budget comes from their total and not from any one of them.)
+old_bytes=$(file_bytes "$work/cache")
+prune_mb=$(( (old_bytes + 1048575) / 1048576 ))
 run pruned BIFROST_NO_SELFLOOP=1 BIFROST_JIT_DISK_CACHE_MB=$prune_mb
 fingerprints_after_prune=$(ls -d "$work"/cache/*/* | wc -l)
 pruned_bytes=$(file_bytes "$work/cache")
