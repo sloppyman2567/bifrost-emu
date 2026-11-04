@@ -252,7 +252,8 @@ uint64_t eglGetSystemTimeNV(void) {
 }
 // These optional native contracts require an Android buffer allocator,
 // SurfaceFlinger, or an EGLStream driver. Fail explicitly and do not advertise
-// their extensions. In particular never treat a guest FD as a host FD.
+// their extensions. In particular never treat a guest FD as a host FD (native
+// fences cross that boundary in the host's AndroidNativeFences).
 unsigned eglCopyBuffers(Display d, Surface s, void *p) {
     (void)d; (void)s; (void)p; fail(BAD_NATIVE_PIXMAP); return 0;
 }
@@ -276,7 +277,6 @@ void *eglGetNativeClientBufferANDROID(const void *buffer) {
     if (!result) fail(BAD_PARAMETER);
     return result;
 }
-int eglDupNativeFenceFDANDROID(Display d, void *s) { (void)d; (void)s; fail(BAD_PARAMETER); return -1; }
 unsigned eglPresentationTimeANDROID(Display d, Surface s, int64_t t) {
     (void)t;
     int width;
@@ -332,7 +332,6 @@ Proc eglGetProcAddress(const char *name) {
     EGL_WRAPPER(eglDestroyImageKHR)
     EGL_WRAPPER(eglCreateNativeClientBufferANDROID)
     EGL_WRAPPER(eglGetNativeClientBufferANDROID)
-    EGL_WRAPPER(eglDupNativeFenceFDANDROID)
     EGL_WRAPPER(eglPresentationTimeANDROID)
     EGL_WRAPPER(eglGetSystemTimeFrequencyNV)
     EGL_WRAPPER(eglGetSystemTimeNV)

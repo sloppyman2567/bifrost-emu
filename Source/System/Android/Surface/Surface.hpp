@@ -84,6 +84,9 @@ public:
     // Guest fd → host fd resolver (installed by the Emulator). Returns
     // -1 when the fd is not open or is not backed by a host descriptor.
     using FdResolver = std::function<int(int guest_fd)>;
+    // Takes ownership of a host fd; returns its new close-on-exec guest fd, or -1.
+    using FdPublisher = std::function<int(int host_fd)>;
+    using FdCloser = std::function<void(int guest_fd)>;
 
     static AndroidSurfaceManager& instance();
     // Independent host adapter context, useful to embedders and plugins.
@@ -97,6 +100,9 @@ public:
     void set_fd_resolver(FdResolver r);
     // The host descriptor behind a guest fd, or -1 (see FdResolver).
     int host_fd(int guest_fd);
+    void set_fd_publisher(FdPublisher publisher, FdCloser closer);
+    int publish_fd(int host_fd);
+    void close_fd(int guest_fd);
 
     // Backend owns its host window; no SDL pointer crosses this interface.
     bool open_host_window();
@@ -394,6 +400,8 @@ public:
     arm64emu::Memory* mem_ = nullptr;
     GuestRunner runner_;
     FdResolver fd_resolver_;
+    FdPublisher fd_publisher_;
+    FdCloser fd_closer_;
     void translate_window_event_(const AndroidWindowEvent& event);
     // Applies one host pointer to the current gesture and fills ev with
     // every active pointer, as InputReader does. Requires mu_; false drops it.

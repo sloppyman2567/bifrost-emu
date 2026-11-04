@@ -36,6 +36,8 @@
   `Android/Surface/Yuv420.cpp` (shared with SurfaceView, SIMD where the host has it). A texture can only be deleted
   in its own context, so one left by an image destroyed elsewhere waits in
   `stale_textures_` for that context's next bind.
+- A native fence is a host `sync_file`: `AndroidNativeFences` publishes it as a guest descriptor and translates a guest
+  fd before the driver takes ownership. Never pass a guest fd number to the driver. `gles_native_fence` covers this.
 - Graphics symbol ids use two banks (`0x0000` and `0x3000`, 8192 entries);
   every soname registration takes one.
 - Preserve stack/FP argument ABI, nested pointer arrays and string returns.

@@ -529,6 +529,7 @@ eglDestroySyncKHR         EGL    ii            -     -              -
 eglClientWaitSyncKHR      EGL    iiii          -     -              -
 eglGetSyncAttribKHR       EGL    iiip          -     -              -
 eglSignalSyncKHR          EGL    iii           -     -              -
+eglDupNativeFenceFDANDROID EGL   ii            -     -              -
 eglWaitSyncKHR            EGL    iii           -     -              -
 eglSwapBuffersWithDamageKHR EGL  iipi          -     -              -
 eglSetDamageRegionKHR     EGL    iipi          -     -              -

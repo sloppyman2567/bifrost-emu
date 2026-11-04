@@ -14,6 +14,7 @@
 #include "Generated/ThunkTable.hpp"          // symbol signature table
 #include "System/Graphics/Display/SDLSurfaceBridge.hpp"
 #include "System/Graphics/Thunks/GraphicThunk/AndroidBufferImages.hpp"
+#include "System/Graphics/Thunks/GraphicThunk/AndroidNativeFences.hpp"
 #include "System/Graphics/Thunks/ThunkCommon.hpp"         // shared SymbolEntry + trampoline encodings
 #include "System/Core/DebugFlags.hpp"            // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "System/Core/CPU.hpp"
@@ -310,6 +311,7 @@ struct GraphicThunkImpl {
     std::unordered_map<uint32_t, BufferMapping> gl_buffer_mappings_;
     // EGL_NATIVE_BUFFER_ANDROID images over gralloc buffers.
     AndroidBufferImages android_buffer_images;
+    AndroidNativeFences android_native_fences;
     // Find or create the LibTable for `lib`. Returns pointer into libs_.
     LibTable* find_or_create_lib_(const std::string& lib) {
         for (auto& l : libs_) {

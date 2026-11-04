@@ -165,8 +165,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 #endif
     if (auto handled = dispatch_special_policies_(cpu, entry)) return *handled;
-    if (impl_->mem)
+    if (impl_->mem) {
         if (auto handled = impl_->android_buffer_images.dispatch(cpu, entry, *impl_->mem)) return *handled;
+        if (auto handled = impl_->android_native_fences.dispatch(cpu, entry, *impl_->mem)) return *handled;
+    }
 
     // ── Android surface interception (eglGetDisplay) ─────────────────
     // On a Wayland host, EGL_DEFAULT_DISPLAY must wrap SDL's wl_display —

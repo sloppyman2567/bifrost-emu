@@ -27,6 +27,7 @@
 #include <unistd.h>
 #ifdef __linux__
 #include <linux/openat2.h>
+#include <linux/sync_file.h>
 #endif
 namespace arm64emu::yggdrasil {
 // File-local helpers defined below (order matters for single-pass use).
@@ -678,10 +679,53 @@ int HostNode::fstat(struct stat* st) {
     int r = ::fstat(fd_, st);
     return r < 0 ? -errno : 0;
 }
+// A sync_file ioctl names guest memory and guest descriptors, so the host only
+// sees translated copies. Layouts and request numbers match on AArch64 and
+// x86-64. A descriptor that is not a sync_file gets the kernel's own ENOTTY.
+static int sync_file_merge(int fd, uint64_t argp, Memory& mem, FdTable& fds) {
+    sync_merge_data data;
+    try { mem.read(argp, &data, sizeof(data)); } catch (const EmuError&) { return -EFAULT; }
+    const int guest_other = data.fd2;
+    auto other = fds.get(guest_other);
+    data.fd2 = other ? other->host_fd() : -1;
+    if (data.fd2 < 0) return -ENOENT;  // as sync_file_fdget() finding no file
+    if (::ioctl(fd, SYNC_IOC_MERGE, &data) < 0) return -errno;
+    auto node = std::make_shared<HostNode>(data.fence, O_RDWR);
+    const int gfd = fds.allocate(node);
+    if (gfd < 0) return gfd;
+    fds.set_cloexec(gfd, true);  // the kernel installs merged fences O_CLOEXEC
+    data.fd2 = guest_other;
+    data.fence = gfd;
+    try { mem.write(argp, &data, sizeof(data)); }
+    catch (const EmuError&) { fds.close(gfd); return -EFAULT; }
+    return 0;
+}
+static int sync_file_info_ioctl(int fd, uint64_t argp, Memory& mem) {
+    sync_file_info info;
+    try { mem.read(argp, &info, sizeof(info)); } catch (const EmuError&) { return -EFAULT; }
+    const uint64_t guest_fences = info.sync_fence_info;
+    const uint32_t guest_count = info.num_fences;
+    info.num_fences = 0;  // first ask for the count; a sync_file's fences do not change
+    info.sync_fence_info = 0;
+    if (::ioctl(fd, SYNC_IOC_FILE_INFO, &info) < 0) return -errno;
+    if (guest_count) {
+        if (guest_count < info.num_fences) return -EINVAL;
+        std::vector<sync_fence_info> fences(info.num_fences);
+        info.sync_fence_info = reinterpret_cast<uint64_t>(fences.data());
+        if (::ioctl(fd, SYNC_IOC_FILE_INFO, &info) < 0) return -errno;
+        try { mem.write(guest_fences, fences.data(), fences.size() * sizeof(fences[0])); }
+        catch (const EmuError&) { return -EFAULT; }
+    }
+    info.sync_fence_info = guest_fences;
+    try { mem.write(argp, &info, sizeof(info)); } catch (const EmuError&) { return -EFAULT; }
+    return 0;
+}
 // TIOCGPTPEER opens the slave of a pty master and returns a new descriptor, so it
 // needs the fd table. The flags are the open flags (O_RDWR, O_NOCTTY, O_CLOEXEC),
 // whose values are the same on AArch64 and x86-64.
 int HostNode::ioctl_thread(uint32_t request, uint64_t argp, Memory& mem, CPU& cpu, FdTable& fds) {
+    if (request == SYNC_IOC_MERGE) return sync_file_merge(fd_, argp, mem, fds);
+    if (request == SYNC_IOC_FILE_INFO) return sync_file_info_ioctl(fd_, argp, mem);
     if (request != ioctl_num::REQ_TIOCGPTPEER) return ioctl(request, argp, mem);
     const int flags = static_cast<int>(argp) & (O_ACCMODE | O_NOCTTY | O_CLOEXEC);
     const int peer = ::ioctl(fd_, request, flags);

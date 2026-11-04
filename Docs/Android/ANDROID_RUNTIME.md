@@ -219,6 +219,13 @@ dialog itself); `APP_WINDOW_GPU` carries `dim=alpha` for such a window. Whether 
 takes its GPU (draw functor) path in the game is not yet observed.
 AHardwareBuffer import for TextureView/video is described under the EGL adapter.
 
+Native fences: `eglDupNativeFenceFDANDROID` returns the driver's `sync_file` as a guest descriptor, and importing one through
+`eglCreateSync[KHR]` gives the driver a host duplicate and consumes the guest fd (`AndroidNativeFences`, per
+[EGL_ANDROID_native_fence_sync](https://registry.khronos.org/EGL/extensions/ANDROID/EGL_ANDROID_native_fence_sync.txt)). WebView calls
+this without checking extensions, and its fences reach the buffer queue (`SYNC_IOC_MERGE`, `SYNC_IOC_FILE_INFO`, handled by `HostNode`).
+The adapter does not advertise the extension. Buffers do not depend on these fences for correctness here, because a native-buffer image
+is a host copy of the gralloc memory. With a driver lacking the extension the calls still fail and WebView logs it; that case is untested.
+
 ### microG processes, remote providers and service resolution (2026-10-17)
 
 SpongeBob's `GoogleApiHandler` crashed on `activity.getContentProvider`:

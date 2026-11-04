@@ -544,6 +544,7 @@ inline constexpr Spec specs[] = {
     {LibFamily::EGL, "eglClientWaitSyncKHR", "iiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::EGL, "eglGetSyncAttribKHR", "iiip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::EGL, "eglSignalSyncKHR", "iii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
+    {LibFamily::EGL, "eglDupNativeFenceFDANDROID", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::EGL, "eglWaitSyncKHR", "iii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::EGL, "eglSwapBuffersWithDamageKHR", "iipi", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::EGL, "eglSetDamageRegionKHR", "iipi", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},

@@ -649,6 +649,10 @@ INTEGRATION_TESTS=(
     # context after another thread's context unbinds its unpack buffer.
     # Needs host EGL + GLES 3; exit 77 = skip.
     "gles_contexts|Tests/Apps/test_gles_contexts.elf||30|ALL PASS"
+    # EGL_ANDROID_native_fence_sync across the guest/host fd boundary: export, sync_file
+    # ioctls and import (WebView's video path). Needs a driver with native fences (llvmpipe
+    # has none); exit 77 = skip.
+    "gles_native_fence|Tests/Apps/test_gles_native_fence.elf||60|ALL PASS"
     # Calls that take an array of C strings (glGetUniformIndices, glTransformFeedbackVaryings,
     # glCreateShaderProgramv) reach the driver with host string pointers; an untranslated entry
     # killed the process in strlen (a WebView ad in Geometry Dash Lite). Needs host EGL + GLES 3;

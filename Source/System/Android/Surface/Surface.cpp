@@ -62,6 +62,32 @@ void AndroidSurfaceManager::set_fd_resolver(FdResolver r) {
     fd_resolver_ = std::move(r);
 }
 
+void AndroidSurfaceManager::set_fd_publisher(FdPublisher publisher, FdCloser closer) {
+    std::lock_guard<std::mutex> lk(mu_);
+    fd_publisher_ = std::move(publisher);
+    fd_closer_ = std::move(closer);
+}
+
+int AndroidSurfaceManager::publish_fd(int host_fd) {
+    FdPublisher publisher;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        publisher = fd_publisher_;
+    }
+    if (publisher) return publisher(host_fd);
+    ::close(host_fd);
+    return -1;
+}
+
+void AndroidSurfaceManager::close_fd(int guest_fd) {
+    FdCloser closer;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        closer = fd_closer_;
+    }
+    if (closer) closer(guest_fd);
+}
+
 bool AndroidSurfaceManager::open_host_window() {
     if (ready()) return true;
     int error = window_backend_->open("Bifrost Android", width_, height_);

@@ -194,6 +194,13 @@ void Emulator::wire_thunk_android_runner_() {
         if (!n) return -1;
         return n->host_fd();
     });
+    mgr.set_fd_publisher(
+        [this](int host_fd) -> int {
+            const int gfd = fds_.allocate(std::make_shared<yggdrasil::HostNode>(host_fd, O_RDWR));
+            if (gfd >= 0) fds_.set_cloexec(gfd, true);
+            return gfd < 0 ? -1 : gfd;
+        },
+        [this](int gfd) { fds_.close(gfd); });
     mgr.set_runner([this](CPU& cpu, uint64_t fn, const int64_t* iargs,
                           size_t n) -> uint64_t {
         return call_guest_function(cpu, fn, iargs, n, nullptr, 0);
