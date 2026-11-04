@@ -200,8 +200,24 @@ HWUI needed three runtime fixes, each checked against Android 15 sources:
 libhwui lists libGLESv1_CM before libGLESv2, so `glGetString` reached the
 real GLES1 wrapper with no guest hooks (a null read at 0xdd0); a
 libGLESv1_CM adapter now thunks the 58 GLES 1.0 commands shared with the
-GLES table (from the Khronos registry), while fixed-function-only commands
-keep the real library. HWUI's `DeviceInfo` aborts without
+GLES table (from the Khronos registry). The other ES 1.x names are exported by
+`Guest/Android/Adapters/gles1_oes.c`, because the real library's slot is empty and
+Android binds all of an app's imports when its library loads (DevilutionX needed
+`glBlendEquationOES` and then `glColor4f`). The framebuffer-object and blend
+extensions (`GL_OES_framebuffer_object`, `GL_OES_blend_subtract`,
+`GL_OES_blend_equation_separate`, `GL_OES_blend_func_separate`) forward to the ES 2
+core functions, whose arguments and token values are identical (42 enums compared
+in `gl.xml`). `GL_OES_draw_texture` and the 85 fixed-function commands of ES 1.x
+(`glColor4f`, `glMatrixMode`, `glVertexPointer`, ...; stubs generated from the
+registry at build time) have no ES 2 equivalent: they are exported so the library
+loads, and the first call says so on stderr. Bifrost provides no ES 1 context, so an
+app that draws through them gets nothing. With the adapter DevilutionX loads and
+reaches its data-file prompt; its native game was not started (it needs the
+original `DIABDAT.MPQ`), so no game has run these calls. `ManagedGeometry` does, through
+`GLES11Ext` and `GLES10` against its ES 3 context: a framebuffer built and drawn into
+through the OES names, a renderbuffer's size, the blend state they set, and
+`glDrawTexfOES`/`glColor4f` returning with the message. A NativeActivity (non-managed) app
+gets no `libGLESv1_CM.so` at all. HWUI's `DeviceInfo` aborts without
 `ISurfaceComposer.getPhysicalDisplayIds`, `getStaticDisplayInfo`,
 `getDynamicDisplayInfoFromId` and `getCompositionPreference`, now answered
 from `FrameworkDisplay` (display id 1, one 60 Hz mode, sRGB). EglManager calls

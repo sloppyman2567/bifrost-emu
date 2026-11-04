@@ -20,6 +20,21 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Apps linked against OpenGL ES 1.x load (2026-11-04)
+
+- **DevilutionX's APK installed and then exited with status 1:** its native library imports OpenGL ES 1.x names (SDL2's GLES1
+  renderer), `dlopen` failed on `glBlendEquationOES`, and the Java side ended on a null `SurfaceView`. The `libGLESv1_CM` adapter now
+  exports the missing names: `GL_OES_framebuffer_object` and the OES blend extensions forward to the ES 2 functions of the same
+  arguments, and `GL_OES_draw_texture` and the 85 fixed-function commands of ES 1.x are stubs that report themselves on the first
+  call, since Bifrost has no ES 1 context. Rebuilt, DevilutionX loads and reaches its "Game Data" prompt for `DIABDAT.MPQ`.
+  `test_gles1_adapter_provides_every_name_an_es1_app_imports` checks every command of the registry's `gles1` feature and the five
+  OES extensions against the exports, and fails on the old adapter.
+  The managed geometry fixture also runs the OES calls against a live context (framebuffer drawing, renderbuffer size, blend
+  state) and fails on the old adapter with a fatal exception.
+- **Not checked:** the game itself. It was not started past that prompt (no `DIABDAT.MPQ`), so no game has called an ES 1
+  function. NativeActivity apps still get no `libGLESv1_CM.so`. Real fixed-function rendering would need an ES 1 context on the
+  host.
+
 ### Asgard no longer leaves its command running (2026-11-04)
 
 - **`asgard` ran `android_package.py` as a child and waited, so signalling or killing only the `asgard` process orphaned the real

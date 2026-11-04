@@ -2906,6 +2906,38 @@ class PackageTests(unittest.TestCase):
             self.assertFalse(method_summary["partial_record"])
             self.assertFalse(method_summary["overflow"])
 
+    def test_gles1_adapter_provides_every_name_an_es1_app_imports(self):
+        # Android binds all of a library's imports when it loads: DevilutionX (SDL2's GLES1 renderer) needed
+        # glBlendEquationOES and then glColor4f, and without them it never started. Whatever the OpenGL ES 1.x registry
+        # defines must resolve from libGLESv1_CM.so and libGLESv2.so, the two libraries such an app links.
+        import xml.etree.ElementTree as ElementTree
+        if not shutil.which("readelf"):
+            self.skipTest("needs readelf")
+        registry = ElementTree.parse(ROOT / "ThirdParty/GLRegistry/gl.xml").getroot()
+        wanted = {command.get("name")
+                  for feature in registry.iter("feature") if feature.get("api") == "gles1"
+                  for require in feature.iter("require") if require.get("profile") in (None, "common")
+                  for command in require.iter("command")}
+        extensions = {"GL_OES_framebuffer_object", "GL_OES_blend_subtract", "GL_OES_blend_equation_separate",
+                      "GL_OES_blend_func_separate", "GL_OES_draw_texture"}
+        wanted |= {command.get("name") for extension in registry.iter("extension") if extension.get("name") in extensions
+                   for command in extension.iter("command")}
+        self.assertGreater(len(wanted), 140)
+
+        def exports(name):
+            library = self.adapters / "managed" / name
+            listing = subprocess.run(["readelf", "--dyn-syms", "-W", str(library)], check=True,
+                                     capture_output=True, text=True).stdout
+            return {fields[7] for fields in map(str.split, listing.splitlines())
+                    if len(fields) >= 8 and fields[6] != "UND"}, listing
+        gles1, _ = exports("libGLESv1_CM.so")
+        gles2, _ = exports("libGLESv2.so")
+        self.assertEqual(sorted(wanted - gles1 - gles2), [])
+        # The OES names forward to libGLESv2's functions, so the library must depend on it.
+        needed = subprocess.run(["readelf", "-d", str(self.adapters / "managed/libGLESv1_CM.so")], check=True,
+                                capture_output=True, text=True).stdout
+        self.assertIn("libGLESv2.so", needed)
+
     def test_managed_activity_api_report(self):
         import json
         state = self.work / "activity-trace-state"
@@ -3209,6 +3241,9 @@ class PackageTests(unittest.TestCase):
         text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
         self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
         self.assertIn("APP_DESTROYED", text)
+        # The OpenGL ES 1.x OES names an ES 1 app imports run against this view's context (ManagedGeometry.gles1Oes).
+        self.assertIn("GEOMETRY gles1-oes ok", text)
+        self.assertIn("glDrawTexfOES is OpenGL ES 1.x fixed-function API, which is not supported", text)
         width, height, density = map(int, re.search(r"APP_WINDOW_OPEN (\d+)x(\d+) density=(\d+)", text).groups())
         report = re.search(r"GEOMETRY periodic activity=(\d+)x(\d+) density=([\d.]+) .*? application=(\d+)x(\d+) .*? real=\d+x\d+ "
                            r"displayMetrics=(\d+)x(\d+) window=Rect\(0, 0 - (\d+), (\d+)\).*? decor=(\d+)x(\d+) root=(\d+)x(\d+) web=(\d+)x(\d+)@0,0", text)
