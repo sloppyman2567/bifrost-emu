@@ -8,6 +8,8 @@ EMU=${BIFROST_EMU:-"$REPO_ROOT/bifrost-emu"}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/bifrost-start-page.XXXXXX")
 trap 'rm -rf -- "$WORK"' EXIT
 mkdir -p "$WORK/inst" "$WORK/xdg/bifrost" "$WORK/home"
+# A host that sets XDG_CONFIG_HOME must not have its real config edited by --rootfs-default: it stays empty (checked at the end).
+export XDG_CONFIG_HOME="$WORK/real-config"
 cp "$EMU" "$WORK/inst/bifrost-emu"   # away from the checkout, so its rootfs and Asgard are not found by accident
 cd "$WORK"
 run() { env -u BIFROST_ROOT -u BIFROST_ROOTFS_PROFILE -u BIFROST_ASGARD -u BIFROST_CONFIG -u XDG_CONFIG_HOME HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" "$WORK/inst/bifrost-emu" "$@" 2>&1; }
@@ -73,7 +75,7 @@ run --rootfs-default games > /dev/null
 run --rootfs-default default > /dev/null
 mkdir -p "$WORK/other"; printf '[paths]\n' > "$WORK/other/bifrost.toml"
 expect "a config that shadows it is named" 'bifrost.toml is read instead' "$(cd "$WORK/other" && run --rootfs-default games)"
-expect "the environment is named" 'BIFROST_ROOTFS_PROFILE=x overrides' "$(env BIFROST_ROOTFS_PROFILE=x HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" "$WORK/inst/bifrost-emu" --rootfs-default games 2>&1)"
+expect "the environment is named" 'BIFROST_ROOTFS_PROFILE=x overrides' "$(env -u BIFROST_CONFIG -u XDG_CONFIG_HOME BIFROST_ROOTFS_PROFILE=x HOME="$WORK/home" XDG_DATA_HOME="$WORK/xdg" "$WORK/inst/bifrost-emu" --rootfs-default games 2>&1)"
 run --rootfs-default default > /dev/null
 
 help=$(run --help); all=$(run --help-all)
@@ -87,5 +89,6 @@ if [[ -r "$REPO_ROOT/Source/Main.cpp" ]]; then
         grep -qF -- "$option" <<<"$all" || { echo "FAIL --help-all omits $option"; fail=1; }
     done < <(grep -oE '"--?[a-zA-Z][a-zA-Z_-]*=?"' "$REPO_ROOT/Source/Main.cpp" | tr -d '"' | sort -u)
 fi
+[[ ! -e "$XDG_CONFIG_HOME" ]] && echo "PASS the real config directory was not touched" || { echo "FAIL --rootfs-default wrote to XDG_CONFIG_HOME:"; find "$XDG_CONFIG_HOME" -type f; fail=1; }
 [[ $fail == 0 ]] && echo "test_start_page: ALL PASS"
 exit "$fail"
