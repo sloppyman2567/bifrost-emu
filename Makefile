@@ -688,6 +688,12 @@ test-native-simd-helpers:
 	$(CXX) $(CXXFLAGS) Tests/Host/native_simd_helpers.cpp Source/FrostJIT/CodeGen/Native/NativeSIMD.cpp Source/System/Core/DecodeCache.cpp -o $(OBJDIR)/native_simd_helpers $(LDFLAGS)
 	./$(OBJDIR)/native_simd_helpers Tools/CodeGen/native_simd_expected.txt
 
+.PHONY: test-host-timezone
+test-host-timezone:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Host/host_timezone.cpp Source/System/Android/Properties/HostTimeZone.cpp Source/System/Android/Properties/Properties.cpp -o $(OBJDIR)/host_timezone $(LDFLAGS)
+	./$(OBJDIR)/host_timezone
+
 .PHONY: test-rootfs-discovery
 test-rootfs-discovery:
 	@mkdir -p $(OBJDIR)

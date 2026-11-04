@@ -314,6 +314,12 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
             if (v && v[0] != '\0') guest_env_.push_back(std::string("LD_LIBRARY_PATH=") + v);
         }
     }
+    // No Android device sets TZ, and Bionic reads a host form such as ":Asia/Tokyo" as UTC. The zone
+    // reaches Android guests through persist.sys.timezone, normalized (load_android_properties).
+    if (android_runtime_)
+        guest_env_.erase(std::remove_if(guest_env_.begin(), guest_env_.end(), [](const std::string& entry) {
+            return entry.rfind("TZ=", 0) == 0;
+        }), guest_env_.end());
     std::vector<uint64_t> argv_addrs, envp_addrs;
     uint64_t sp = place_argument_strings(stack_top, argv, guest_env_, argv_addrs, envp_addrs);
     // AT_RANDOM — 16 random bytes used by glibc for stack canary init and

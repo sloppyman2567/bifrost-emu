@@ -683,6 +683,12 @@ public final class ManagedServiceBatch {
                 "getDevicesForAttributesUnprotected", new android.media.AudioAttributes.Builder().build());
         check(outputs.size() == 1 && (Integer) outputs.get(0).getClass().getMethod("getType").invoke(outputs.get(0))
                 == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, "audio output for attributes");
+        // Bionic and libcore share persist.sys.timezone; a zone the image's tzdata lacks would read as GMT.
+        String zone = (String) Class.forName("android.os.SystemProperties").getMethod("get", String.class)
+                .invoke(null, "persist.sys.timezone");
+        check(zone.isEmpty() || java.util.TimeZone.getDefault().getID().equals(zone), "default time zone is the host's");
+        System.out.println("MANAGED_TIMEZONE property=" + zone + " java=" + java.util.TimeZone.getDefault().getID()
+                + " now=" + new java.util.Date());
         Object activity = endpoint("activity", "android.app.IActivityManager");
         check(invoke(activity, "getProcessesInErrorState") == null, "a process reported in error");
         android.os.Debug.MemoryInfo[] memory = (android.os.Debug.MemoryInfo[]) invoke(activity,

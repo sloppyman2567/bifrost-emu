@@ -318,7 +318,7 @@ the file's structure and page links.
 library using the same install and session supervisor as the CLI.
 
 Each card shows a rounded icon tile, the label, version and install date, and one line about
-the latest session ("Played Today 13:08", "Running for 25 min", or in red what went wrong, such as "Crashed in native
+the latest session ("Played Today 1:08 PM", "Running for 25 min", or in red what went wrong, such as "Crashed in native
 code"), with Play/Stop, per-app settings and last-session buttons. Colors come from the desktop
 palette and the icons are drawn by the launcher, so the look does not depend on an icon
 theme. A padded launcher bitmap is cropped to its visible pixels so every tile fills; an app
@@ -337,6 +337,10 @@ while the window is focused or an app is running, every 10 s otherwise, and not 
 it is minimized; it refreshes at once when the window is activated. Package IDs, library
 paths and Java call tracing are grouped under Developer. (There is no interpreter checkbox: `asgard run --no-jit`
 covers that debugging use.)
+
+Times on the cards follow the user's clock: GNOME, Unity, Budgie and Cinnamon keep a setting of their own (`gsettings`), and
+otherwise the time locale decides, through Qt's locale data, since `nl_langinfo` needs a generated locale on glibc and always
+says 24-hour on musl. The choice is read once, when the library starts.
 
 Install records now retain the base APK's label/version and a bounded launcher
 bitmap; older records recover labels and versions from their saved base report.

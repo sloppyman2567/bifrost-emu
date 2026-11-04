@@ -20,6 +20,13 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Apps use your time zone, and the library your clock (2026-11-04)
+
+Android apps ran in GMT. The host's zone now reaches them through `persist.sys.timezone`, on any distribution: `TZ`, the
+`/etc/localtime` link, `/etc/timezone`, `/etc/sysconfig/clock`, or the zone matching a copied `/etc/localtime`. Native code needed a
+second fix: Bionic's cached properties read empty because the property area's serial was 0. The Asgard library shows 4:26 PM or
+16:26, as your desktop or locale does, instead of always 24-hour.
+
 ### The library shows the icon a phone shows (2026-11-04)
 
 An adaptive icon now wins over its bitmap fallback, which can be unrelated art: FNAF Mobile Port's library card showed the Catrobat

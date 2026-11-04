@@ -181,12 +181,77 @@ def short_error(output, fallback="The command failed"):
     return text if len(text) <= 300 else text[:299] + "…"
 
 
+# Desktops that keep the clock format apart from the locale: (schema, key, value meaning 12-hour).
+DESKTOP_CLOCKS = {"gnome": ("org.gnome.desktop.interface", "clock-format", "'12h'"),
+                  "unity": ("org.gnome.desktop.interface", "clock-format", "'12h'"),
+                  "budgie": ("org.gnome.desktop.interface", "clock-format", "'12h'"),
+                  "cinnamon": ("org.cinnamon.desktop.interface", "clock-use-24h", "false")}
+
+
+def desktop_clock():
+    """True or False from the desktop's own clock setting, None where it has none or will not say."""
+    names = os.environ.get("XDG_CURRENT_DESKTOP", "").lower().split(":")
+    for name in names:
+        name = name.removeprefix("x-")
+        if name in DESKTOP_CLOCKS:
+            schema, key, twelve = DESKTOP_CLOCKS[name]
+            try:
+                result = subprocess.run(["gsettings", "get", schema, key], capture_output=True, text=True, timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            return result.stdout.strip() == twelve if result.returncode == 0 and result.stdout.strip() else None
+    return None
+
+
+def locale_clock():
+    """(12-hour?, AM text, PM text) for the user's time locale. Qt's own locale data comes first: nl_langinfo needs the
+    locale generated on glibc, and musl reports 24-hour for every locale."""
+    try:
+        from PyQt6.QtCore import QLocale
+        system = QLocale.system()
+        # Quoted text is literal: "H:mm 'Uhr'" is not a day period.
+        pattern = re.sub(r"'[^']*'", "", system.timeFormat(QLocale.FormatType.ShortFormat))
+        return "a" in pattern.lower(), system.amText(), system.pmText()
+    except ImportError:
+        pass
+    import locale
+    saved = locale.setlocale(locale.LC_TIME)
+    try:
+        locale.setlocale(locale.LC_TIME, "")
+        return (bool(re.search(r"%[Irl]", locale.nl_langinfo(locale.T_FMT))),
+                locale.nl_langinfo(locale.AM_STR), locale.nl_langinfo(locale.PM_STR))
+    except (locale.Error, AttributeError):
+        return False, "", ""
+    finally:
+        locale.setlocale(locale.LC_TIME, saved)
+
+
+CLOCK_STYLE = None
+
+
+def clock_style():
+    global CLOCK_STYLE
+    if CLOCK_STYLE is None:
+        twelve, am, pm = locale_clock()
+        chosen = desktop_clock()
+        CLOCK_STYLE = (twelve if chosen is None else chosen, am or "AM", pm or "PM")
+    return CLOCK_STYLE
+
+
+def time_of_day(moment):
+    """The time as the user reads it: 4:26 PM or 16:26."""
+    twelve, am, pm = clock_style()
+    if not twelve:
+        return time.strftime("%H:%M", moment)
+    return f"{moment.tm_hour % 12 or 12}:{moment.tm_min:02d} {am if moment.tm_hour < 12 else pm}"
+
+
 def clock(stamp, now):
     moment, today = time.localtime(stamp), time.localtime(now)
     day = (time.strftime("Today", moment) if moment[:3] == today[:3] else
            "Yesterday" if time.localtime(now - 86400)[:3] == moment[:3] else
            time.strftime("%b %d" if moment.tm_year == today.tm_year else "%b %d, %Y", moment))
-    return day + time.strftime(" %H:%M", moment)
+    return day + " " + time_of_day(moment)
 
 
 def span(seconds):

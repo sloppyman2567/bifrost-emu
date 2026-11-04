@@ -840,6 +840,20 @@ Neither these tests nor presented frames establish video-ad playback: JNI
 provisioning is covered below; decoders and the video-surface path remain
 unfinished.
 
+### Time zone (2026-11-04)
+
+Bionic's `tzset` and libcore's default zone both read `persist.sys.timezone`, and an image leaves it to the device.
+`load_android_properties` fills it on each start from the host (`Properties/HostTimeZone.cpp`), so a host that changes zone is
+followed without a reinstall, and a saved `property.persist.sys.timezone` wins. It takes the first of: a `TZ` naming a zone (with
+`:` or as a zoneinfo path; a POSIX rule is skipped, and an empty `TZ` means UTC, as to libc), the `/etc/localtime` link, including
+through NixOS's store, `/etc/timezone`, `/etc/sysconfig/clock` (`ZONE=` or `TIMEZONE=`), and for a copied `/etc/localtime`
+(Alpine, containers) the identical file under `/usr/share/zoneinfo`. With none of these, Android's GMT stands. `TZ` itself is not
+forwarded: no device sets it, and Bionic reads `:Asia/Tokyo` as UTC.
+
+The property area's serial must not be 0: `CachedProperty` starts there and only looks a name up once it differs, so at 0 every
+cached property in Bionic read as empty. `make test-host-timezone` covers each layout and the serial. A zone missing from the
+image's tzdata reads as GMT; this is not checked at start.
+
 ### MediaPlayer and SoundPool (2026-11-04)
 
 The broker runs the image's real `/system/bin/mediaserver` as UID 1013 in the slot that ran `bifrost-media-resource`

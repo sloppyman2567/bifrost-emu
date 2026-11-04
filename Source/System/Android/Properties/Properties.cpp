@@ -1,7 +1,9 @@
 // Properties.cpp — Bionic prop_area serializer.
 #include "System/Android/Properties/Properties.hpp"
+#include "System/Android/Properties/HostTimeZone.hpp"
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
@@ -55,6 +57,9 @@ public:
 
     std::string finish() {
         set_raw(0, static_cast<uint32_t>(used_));
+        // Bionic's CachedProperty starts at area serial 0 and only looks a name up once the serial differs:
+        // at 0 every one reads as empty, persist.sys.timezone in tzset among them.
+        set_raw(4, 1);
         set_raw(8, kMagic);
         set_raw(12, kVersion);
         return std::string(reinterpret_cast<const char*>(image_.data()), image_.size());
@@ -222,6 +227,10 @@ std::map<std::string, std::string> load_android_properties(const std::string& ro
         {"ro.opengles.version", "196608"},
     };
     for (const auto& [key, value] : kDefaults) props.emplace(key, value);
+    // Bionic's tzset and libcore's default zone both read it, and take GMT without it. Read here, not
+    // at install, so a host that changes zone is followed. A saved property.persist.sys.timezone wins.
+    if (std::string zone = host_timezone(std::getenv("TZ")); !zone.empty())
+        props.emplace("persist.sys.timezone", std::move(zone));
     return props;
 }
 

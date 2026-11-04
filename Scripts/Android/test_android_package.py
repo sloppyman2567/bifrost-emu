@@ -222,6 +222,50 @@ class HomeCommandTests(unittest.TestCase):
         self.assertEqual(card_state(app)['action'], 'resume')
 
 
+class ClockStyleTests(unittest.TestCase):
+    """The library's times follow the user's clock: the desktop's own setting, then the locale."""
+    MORNING, NOON, EVENING = (time.struct_time((2026, 11, 4, hour, 5, 0, 2, 308, 0)) for hour in (0, 12, 16))
+
+    def style(self, twelve, desktop=None):
+        import android_launcher
+        with patch.object(android_launcher, "CLOCK_STYLE", None), \
+                patch.object(android_launcher, "locale_clock", return_value=(twelve, "AM", "PM")), \
+                patch.object(android_launcher, "desktop_clock", return_value=desktop):
+            return [android_launcher.time_of_day(moment) for moment in (self.MORNING, self.NOON, self.EVENING)]
+
+    def test_twelve_hour_locale(self):
+        self.assertEqual(self.style(True), ["12:05 AM", "12:05 PM", "4:05 PM"])
+
+    def test_twenty_four_hour_locale(self):
+        self.assertEqual(self.style(False), ["00:05", "12:05", "16:05"])
+
+    def test_the_desktop_setting_beats_the_locale(self):
+        self.assertEqual(self.style(True, desktop=False)[2], "16:05")
+        self.assertEqual(self.style(False, desktop=True)[2], "4:05 PM")
+
+    def test_a_desktop_without_a_clock_setting_is_not_asked(self):
+        import android_launcher
+        with patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}), patch("subprocess.run") as run:
+            self.assertIsNone(android_launcher.desktop_clock())
+        run.assert_not_called()
+
+    def test_gnome_is_read_and_a_missing_gsettings_falls_back(self):
+        import android_launcher
+        answer = subprocess.CompletedProcess([], 0, stdout="'24h'\n", stderr="")
+        with patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}):
+            with patch("subprocess.run", return_value=answer):
+                self.assertIs(android_launcher.desktop_clock(), False)
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                self.assertIsNone(android_launcher.desktop_clock())
+
+    def test_quoted_text_in_a_locale_format_is_not_a_day_period(self):
+        import android_launcher
+        from PyQt6.QtCore import QLocale
+        for name, twelve in (("en_US", True), ("de_DE", False), ("fr_FR", False), ("ko_KR", True)):
+            with patch.object(QLocale, "system", return_value=QLocale(name)):
+                self.assertEqual(android_launcher.locale_clock()[0], twelve, name)
+
+
 class LauncherArgumentTests(unittest.TestCase):
     def test_property_settings_cli_round_trip_and_validation(self):
         import json
