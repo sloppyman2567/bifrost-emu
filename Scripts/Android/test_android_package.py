@@ -510,6 +510,28 @@ class LauncherProfileTests(unittest.TestCase):
             self.assertGreaterEqual(label.height(), needed, label.text())
             if not label.wordWrap(): self.assertGreaterEqual(label.width(), label.sizeHint().width(), label.text())
 
+    def test_the_menu_entry_checkbox_follows_the_state_default_and_saves_only_a_change(self):
+        import android_desktop
+        directory = self.window.state; directory.mkdir(parents=True, exist_ok=True)
+        # Unset: it shows the state's default, and leaving it alone saves nothing.
+        dialog = self.edit({})
+        self.assertTrue(dialog.menu.isChecked())
+        self.assertNotIn("menu_entry", dialog.result_settings())
+        dialog.menu.setChecked(False)
+        self.assertIs(dialog.result_settings()["menu_entry"], False)
+        # With the default off the box starts unchecked, and checking it is a saved choice for this app.
+        android_desktop.set_default(directory, False)
+        dialog = self.edit({})
+        self.assertFalse(dialog.menu.isChecked())
+        self.assertNotIn("menu_entry", dialog.result_settings())
+        dialog.menu.setChecked(True)
+        self.assertIs(dialog.result_settings()["menu_entry"], True)
+        # A saved choice shows as saved, and Reset returns the box to the default.
+        dialog = self.edit({"menu_entry": True})
+        self.assertTrue(dialog.menu.isChecked())
+        dialog.reset_profile()
+        self.assertFalse(dialog.menu.isChecked())
+
     def test_profile_round_trip_uses_the_cli_format_and_cancel_does_not_save(self):
         from android_settings import save, load, properties
         saved = {"property.ro.kernel.qemu": "0", "property.debug.fixture": "", "network": "offline"}
@@ -1134,6 +1156,63 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertEqual(self.desktop.remove_all(self.state), [])
         self.assertEqual(self.desktop.remove_all(other), ["org.example.elsewhere"])
         self.assertEqual(self.entries(), ["asgard-org.example.mine.desktop"])
+
+    def test_a_per_app_setting_and_the_state_default_decide_which_apps_get_an_entry(self):
+        import android_settings
+        names = ("one", "two", "three")
+        for name in names: (self.state / f"org.example.{name}").mkdir()
+        apps = [self.app(f"org.example.{name}") for name in names]
+        self.assertEqual(len(self.desktop.sync(self.state, apps)[0]), 3)  # on unless told otherwise
+        # One app turned off: its entry goes, the others stay.
+        android_settings.save(self.state / "org.example.one", {"menu_entry": False})
+        written, removed = self.desktop.sync(self.state, apps)
+        self.assertEqual((sorted(written), removed), (["org.example.three", "org.example.two"], ["org.example.one"]))
+        # The default off: only an app that says on keeps its entry.
+        self.desktop.set_default(self.state, False)
+        self.assertFalse(self.desktop.default_on(self.state))
+        android_settings.save(self.state / "org.example.two", {"menu_entry": True})
+        self.desktop.sync(self.state, apps)
+        self.assertEqual(self.entries(), ["asgard-org.example.two.desktop"])
+        # The default back on: apps with no setting return, the one that said off stays off.
+        self.desktop.set_default(self.state, True)
+        self.desktop.sync(self.state, apps)
+        self.assertEqual(self.entries(), ["asgard-org.example.three.desktop", "asgard-org.example.two.desktop"])
+        # A damaged default file means on.
+        (self.state / self.desktop.DEFAULT_FILE).write_text("not json")
+        self.assertTrue(self.desktop.default_on(self.state))
+        (self.state / self.desktop.DEFAULT_FILE).write_text(json.dumps({"default": "no"}))
+        self.assertTrue(self.desktop.default_on(self.state))
+
+    def test_the_menu_entry_setting_is_validated_like_the_other_switches(self):
+        import android_settings
+        self.assertIn("menu_entry", android_settings.KEYS)
+        self.assertIs(android_settings.parse("menu_entry", "off"), False)
+        self.assertIs(android_settings.parse("menu_entry", "On"), True)
+        with self.assertRaisesRegex(ValueError, "menu_entry must be on or off"):
+            android_settings.parse("menu_entry", "maybe")
+        self.assertTrue(android_settings.valid("menu_entry", False))
+        self.assertFalse(android_settings.valid("menu_entry", "off"))
+        self.assertEqual(android_settings.launch_changes({"menu_entry": False}), ([], {}))  # no effect on how an app runs
+
+    def test_asgard_config_changes_the_entry_at_once(self):
+        directory = self.state / "org.example.game"; directory.mkdir(); (directory / "package.json").write_text("{}")
+        args = SimpleNamespace(state_root=self.state, package="org.example.game", key="menu_entry", value=None, reset=False,
+                               json=False)
+        with patch.object(self.desktop.android_paths, "state_root", return_value=self.state), \
+                patch.object(package, "installed_apps", return_value=[self.app()]), patch("builtins.print"):
+            package.update_desktop(self.state)
+            self.assertEqual(self.entries(), ["asgard-org.example.game.desktop"])
+            args.value = "off"; package.configure(args)
+            self.assertEqual(self.entries(), [])
+            args.value = "on"; package.configure(args)
+            self.assertEqual(self.entries(), ["asgard-org.example.game.desktop"])
+            args.value = "off"; package.configure(args)
+            args.value = None; args.reset = True; package.configure(args)  # reset: back to the default, which is on
+            self.assertEqual(self.entries(), ["asgard-org.example.game.desktop"])
+            # Another setting does not touch the menu.
+            (self.desktop.applications_dir() / "asgard-org.example.game.desktop").unlink()
+            args.reset = False; args.key = "network"; args.value = "offline"; package.configure(args)
+            self.assertEqual(self.entries(), [])
 
     def test_only_the_default_state_root_gets_entries(self):
         with patch.object(self.desktop.android_paths, "state_root", return_value=self.state):

@@ -896,6 +896,8 @@ def configure(args):
         value = settings.get(args.key)
         print("default" if value is None else str(value).lower() if isinstance(value, bool) else value)
         return 0
+    if (args.reset or args.value is not None) and args.key in (None, "menu_entry"):
+        update_desktop(args.state_root, args.package)
     if args.json:
         print(json.dumps(settings))
     elif args.reset or args.value is not None:
@@ -1007,7 +1009,7 @@ def main():
     configuration = commands.add_parser("config", help="show, set or reset an app's saved settings (applied at each start)")
     configuration.add_argument("package")
     configuration.add_argument("key", nargs="?", type=android_settings.setting_key,
-                               help="window_stats, window_stats_mode, back_key, enter_key, jit_disk_cache, jit_disk_cache_mb, network or property.NAME")
+                               help="window_stats, window_stats_mode, back_key, enter_key, jit_disk_cache, jit_disk_cache_mb, network, menu_entry or property.NAME")
     configuration.add_argument("value", nargs="?")
     configuration.add_argument("--reset", action="store_true", help="restore the default of KEY, or of every setting")
     configuration.add_argument("--json", action="store_true")
@@ -1020,6 +1022,8 @@ def main():
     commands.add_parser("refresh-icons", help="read the adaptive icons of apps installed before they were supported")
     desktop = commands.add_parser("desktop", help="make menu entries for the installed apps, or remove them")
     desktop.add_argument("--remove", action="store_true", help="remove every entry this state root made")
+    desktop.add_argument("--default", choices=("on", "off"),
+                         help="whether apps without a menu_entry setting get an entry (saved); then write the entries")
     google = commands.add_parser("google", help="sign in to Google (microG) and manage the device's Google accounts")
     actions = google.add_subparsers(dest="action", required=True)
     for name, text in (("sign-in", "add a Google account in microG's sign-in window"),
@@ -1050,6 +1054,8 @@ def main():
             return 0
         if args.command == "desktop":
             import android_desktop
+            if args.default:
+                android_desktop.set_default(args.state_root, args.default == "on")
             if args.remove:
                 removed = android_desktop.remove_all(args.state_root)
                 print(f"Removed {len(removed)} menu entries from {android_desktop.applications_dir()}")

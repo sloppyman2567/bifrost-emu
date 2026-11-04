@@ -262,6 +262,7 @@ mean the game process has already launched.
 | `enter_key` | `enter`, `dpad_center`, `button_a` | what Enter sends outside a text field, for games with their own cursor (`BIFROST_ANDROID_ENTER_KEY`); `button_a` reports a gamepad source |
 | `jit_disk_cache` | `default`, `on`, `off`, `verify` | experimental reuse of JIT translations across launches (`BIFROST_JIT_DISK_CACHE`); `default` follows `[jit] disk_cache` |
 | `jit_disk_cache_mb` | `default`, `128`, `256`, `512`, `1024`, `2048`, `4096` | on-disk budget of that cache for this app (`BIFROST_JIT_DISK_CACHE_MB`); `default` follows `[jit] disk_cache_mb`, normally 512 |
+| `menu_entry` | `on`, `off` | whether the app gets a launcher in the desktop's application menu (see [Menu entries](#menu-entries-2026-11-04)); unset follows `asgard desktop --default` (on at first) |
 | `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_OFFLINE=1`: the app's sockets cannot reach anything beyond loopback (`ENETUNREACH`), names do not resolve, and Android reports no network |
 
 Managed apps also accept `property.NAME` settings. These override Android
@@ -365,6 +366,11 @@ whose layer files are missing, get the desktop's generic one. The entry is writt
 refreshed by `refresh-icons`. `asgard desktop` writes entries for every installed app and `asgard desktop --remove` removes
 them. Entries are made only for the default state root, so a test's or a scratch state root never reaches the menu, and
 `ASGARD_DESKTOP_ENTRIES=0` turns them off. A hand-written file, or one made for another state root, is never removed.
+
+To have entries for only some apps, use the per-app setting `menu_entry` (`asgard config PACKAGE menu_entry off`, or
+"Application menu" in the app's settings in the library). An app without it follows the state root's default, which starts
+as on; `asgard desktop --default off` makes it off (and removes the entries of apps that have not said on), after which
+`asgard config PACKAGE menu_entry on` adds one app. Either takes effect at once.
 
 The app's window is named after its entry: Asgard sets `SDL_APP_ID=asgard-PACKAGE` for the game process (unless you set it),
 which SDL3 uses as the Wayland application id and the X11 class, so the taskbar button gets the entry's icon. Checked on KDE

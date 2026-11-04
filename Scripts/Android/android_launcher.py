@@ -361,6 +361,10 @@ def settings_dialog(window, app, settings):
             for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)
             self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
             form.addRow("Network", self.network)
+            import android_desktop
+            self.menu_default = android_desktop.default_on(window.state)
+            self.menu = QCheckBox("Show a launcher for this app in the desktop's application menu")
+            self.menu.setChecked(settings.get("menu_entry", self.menu_default)); form.addRow("Application menu", self.menu)
             form.addRow("Runtime", dim(QLabel(f"Android API {API} · bundled runtime")))
             directory = window.state / app["package"]
             folder = QPushButton("Open app folder")
@@ -433,7 +437,7 @@ def settings_dialog(window, app, settings):
             buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                             self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
-                            self.network.currentData())
+                            self.network.currentData(), self.menu.isChecked())
 
         def add_property(self, name="", value=""):
             row = self.properties.rowCount(); self.properties.insertRow(row)
@@ -449,17 +453,17 @@ def settings_dialog(window, app, settings):
             self.settings = {}
             self.stats.setChecked(False); self.stats_mode.setCurrentIndex(self.stats_mode.findData("normal"))
             self.back.setCurrentIndex(0); self.enter.setCurrentIndex(0); self.disk_cache.setCurrentIndex(0)
-            self.disk_cache_mb.setCurrentIndex(0); self.network.setCurrentIndex(0)
-            self.initial = (False, "normal", "escape", "enter", "default", "default", "auto")
+            self.disk_cache_mb.setCurrentIndex(0); self.network.setCurrentIndex(0); self.menu.setChecked(self.menu_default)
+            self.initial = (False, "normal", "escape", "enter", "default", "default", "auto", self.menu_default)
             self.emulator.setCurrentIndex(0); self.properties.setRowCount(0); self.error.hide()
 
         def result_settings(self):
             result = {k: v for k, v in self.settings.items() if not android_settings.property_name(k)}
             for key, value, initial in zip(("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb",
-                     "network"),
+                     "network", "menu_entry"),
                     (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                      self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
-                     self.network.currentData()), self.initial):
+                     self.network.currentData(), self.menu.isChecked()), self.initial):
                 if value != initial or key in result: result[key] = value
             value = self.emulator.currentData()
             if value is not None: result["property.ro.kernel.qemu"] = value
@@ -1302,6 +1306,9 @@ def build(state, application, settings=None):
                         if key not in edited: current.pop(key, None)
                         elif edited[key] != opened.get(key): current[key] = edited[key]
                     save_settings(directory, current)
+                    if current.get("menu_entry") != opened.get("menu_entry"):
+                        import android_package
+                        android_package.update_desktop(self.state, app["package"])
                     if app["session"].get("state") in ACTIVE:
                         self.show_notice(f"Settings saved. They apply the next time {app['label']} starts.", timeout=6000)
                 except OSError as error:

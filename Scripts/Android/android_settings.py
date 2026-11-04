@@ -29,7 +29,8 @@ CHOICES = {"window_stats_mode": tuple(name for name, _ in STATS_MODES),
            "enter_key": tuple(name for name, _ in ENTER_KEYS),
            "jit_disk_cache": tuple(name for name, _ in JIT_DISK_CACHES),
            "jit_disk_cache_mb": tuple(name for name, _ in JIT_DISK_CACHE_SIZES), "network": NETWORKS}
-KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "network")
+KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "network",
+        "menu_entry")
 BOOLEANS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False}
 PROPERTY_PREFIX = "property."
 
@@ -55,7 +56,7 @@ def valid(key, value):
     if property_name(key):
         return (isinstance(value, str) and len(value.encode("utf-8", errors="replace")) <= 91
                 and value == value.strip() and all(c.isprintable() for c in value))
-    if key == "window_stats":
+    if key in ("window_stats", "menu_entry"):
         return type(value) is bool
     return key in CHOICES and isinstance(value, str) and value in CHOICES[key]
 
@@ -83,9 +84,9 @@ def parse(key, text):
         if not valid(key, text):
             raise ValueError("Property values must be trimmed text without control characters, at most 91 UTF-8 bytes")
         return text
-    if key == "window_stats":
+    if key in ("window_stats", "menu_entry"):
         if text.lower() not in BOOLEANS:
-            raise ValueError("window_stats must be on or off")
+            raise ValueError(f"{key} must be on or off")
         return BOOLEANS[text.lower()]
     if key == "window_stats_mode":
         text = STATS_MODE_NUMBERS.get(text, text)

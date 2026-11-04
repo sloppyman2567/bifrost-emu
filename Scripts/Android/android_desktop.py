@@ -7,15 +7,21 @@ that matches windows to entries by application id shows the app's icon on its bu
 Entries are made only for the default state root: a scratch state root, such as a test's, must not fill the user's menu.
 `ASGARD_DESKTOP_ENTRIES=0` turns them off; `asgard desktop` writes them for every installed app on request and
 `asgard desktop --remove` removes all of them.
+
+Which apps get one: the per-app setting `menu_entry` (on or off) decides, and an app without it follows the state root's default
+(`asgard desktop --default on|off`, on at first). To have entries for only some apps, set the default off and turn those apps on.
 """
+import json
 import os
 from pathlib import Path
 import re
 import sys
 
 import android_paths
+import android_settings
 
 PREFIX = "asgard-"
+DEFAULT_FILE = "desktop-entries.json"
 PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+")
 LAUNCHABLE = ("managed_activity", "native_activity")
 ICON_SIZE = 256
@@ -37,6 +43,27 @@ def entry_path(package):
 def enabled(state):
     """Entries follow the user's own state root; the opt-out is checked here, `asgard desktop` ignores it."""
     return os.environ.get("ASGARD_DESKTOP_ENTRIES") != "0" and Path(state).resolve() == Path(android_paths.state_root()).resolve()
+
+
+def default_on(state):
+    """Whether an app with no `menu_entry` setting gets an entry: the state root's saved default, on if there is none."""
+    try:
+        value = json.loads((Path(state) / DEFAULT_FILE).read_text()).get("default")
+    except (OSError, ValueError, AttributeError):
+        return True
+    return value if isinstance(value, bool) else True
+
+
+def set_default(state, value):
+    path = Path(state) / DEFAULT_FILE
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps({"default": bool(value)}) + "\n")
+    temporary.replace(path)
+
+
+def wanted(app, state):
+    setting = android_settings.load(Path(state) / app["package"]).get("menu_entry")
+    return default_on(state) if setting is None else setting
 
 
 def window_environment(package):
@@ -155,17 +182,17 @@ def made_here(path, state):
 def sync(state, apps, only=None):
     """Make the entries match the installed apps (or just `only`): write those that can be launched and remove the ones
     this state root made for apps that are gone. Returns (written, removed) package lists."""
-    present = {app["package"]: app for app in apps}
+    keep = {app["package"]: app for app in apps if launchable(app) and wanted(app, state)}
     written, removed = [], []
-    for package, app in present.items():
-        if only not in (None, package) or not launchable(app):
+    for package, app in keep.items():
+        if only not in (None, package):
             continue
         write_entry(app, state)
         written.append(package)
     directory = applications_dir()
     for path in sorted(directory.glob(PREFIX + "*.desktop")) if directory.is_dir() else ():
         package = path.name[len(PREFIX):-len(".desktop")]
-        if only not in (None, package) or (package in present and launchable(present[package])):
+        if only not in (None, package) or package in keep:
             continue
         if made_here(path, state):
             path.unlink(missing_ok=True)

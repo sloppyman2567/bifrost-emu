@@ -33,6 +33,14 @@ there (guided provisioning, update/reinstall) remain in progress.
   Battle Cats icon is back (the cat with the "13 Years" banner).
 - Not checked: GNOME, X11, native-activity apps, or the entries on a desktop other than the one here.
 
+### Menu entries for only the apps you choose (2026-11-04)
+
+- **Every installed app got a menu entry.** The per-app setting `menu_entry` (on or off; `asgard config`, and "Application menu" in
+  the library's app settings) now decides, and an app without it follows a state-wide default, `asgard desktop --default on|off`
+  (on at first). With the default off, only apps set to on have an entry. Changes apply at once and remove or write just that app's
+  entry; hand-written entries and ones for another state root are still never touched. Tested for the setting, the default, the
+  dialog's checkbox and `asgard config`. Not checked in a live desktop session beyond the entries themselves.
+
 ### A silent exit gets a reason when Google Play's licence check failed (2026-11-04)
 
 - **Flying Gorilla installed, opened a window and then returned to the prompt with no message.** Its pairip app protection asks the Play
