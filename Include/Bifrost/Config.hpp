@@ -114,6 +114,7 @@ struct Config {
     // Host key sent to Android apps as KEYCODE_BACK ("none" disables);
     // names are those of frost::android_keycode_for_name.
     std::string android_back_key = "escape";  // BIFROST_ANDROID_BACK_KEY
+    std::string android_enter_key = "enter";  // BIFROST_ANDROID_ENTER_KEY
     // Guest sockets may reach only loopback; connect/send elsewhere fail with ENETUNREACH.
     bool android_offline = false;             // BIFROST_ANDROID_OFFLINE
     // ── Methods ──────────────────────────────────────────────────────

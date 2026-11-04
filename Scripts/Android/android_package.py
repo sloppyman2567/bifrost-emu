@@ -977,7 +977,7 @@ def main():
     configuration = commands.add_parser("config", help="show, set or reset an app's saved settings (applied at each start)")
     configuration.add_argument("package")
     configuration.add_argument("key", nargs="?", type=android_settings.setting_key,
-                               help="window_stats, window_stats_mode, back_key, network or property.NAME")
+                               help="window_stats, window_stats_mode, back_key, enter_key, jit_disk_cache, jit_disk_cache_mb, network or property.NAME")
     configuration.add_argument("value", nargs="?")
     configuration.add_argument("--reset", action="store_true", help="restore the default of KEY, or of every setting")
     configuration.add_argument("--json", action="store_true")

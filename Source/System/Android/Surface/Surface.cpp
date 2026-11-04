@@ -792,6 +792,7 @@ static constexpr int32_t ACT_HOVER_MOVE = 7;
 static constexpr int32_t ACT_POINTER_INDEX_SHIFT = 8;
 static constexpr int32_t SRC_KEYBOARD    = 0x00000301;
 static constexpr int32_t SRC_TOUCHSCREEN = 0x00001002;
+static constexpr int32_t SRC_GAMEPAD     = 0x00000401;
 static constexpr int32_t SRC_MOUSE       = 0x00002002;
 
 void AndroidSurfaceManager::queue_attach_looper(uint64_t queue,
@@ -925,6 +926,7 @@ int AndroidSurfaceManager::set_window_orientation(int32_t axis) {
 int AndroidSurfaceManager::set_text_input(bool active, int32_t x, int32_t y, int32_t width,
                                           int32_t height) {
     if (!window_open_) return -ENODEV;
+    text_input_active_.store(active, std::memory_order_relaxed);
     return window_backend_->set_text_input(active, x, y, width, height);
 }
 
@@ -991,9 +993,18 @@ void AndroidSurfaceManager::inject_test_tap() {
 
 namespace {
 std::atomic<int> g_back_key{0};
+std::atomic<int> g_enter_key{0};
 }
 
 void set_android_back_key(int android_keycode) { g_back_key.store(android_keycode); }
+void set_android_enter_key(int android_keycode) { g_enter_key.store(android_keycode); }
+
+int android_enter_key_for_name(const std::string& name) {
+    if (name == "enter") return 0;
+    if (name == "dpad_center") return 23;  // AKEYCODE_DPAD_CENTER
+    if (name == "button_a") return 96;     // AKEYCODE_BUTTON_A
+    return -1;
+}
 
 int android_keycode_for_name(const std::string& name) {
     std::string key;
@@ -1035,6 +1046,16 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
         // The configured back key is delivered as KEYCODE_BACK instead.
         const int back = g_back_key.load(std::memory_order_relaxed);
         ev.key_code = back != 0 && e.key_code == back ? 4 : e.key_code;
+        // Enter drives a game's own cursor when configured. A text field keeps it, and the
+        // release follows the press even if the field gained or lost focus in between.
+        if (e.key_code == 66 && ev.key_code == 66) {
+            const int enter = g_enter_key.load(std::memory_order_relaxed);
+            if (e.action == 0 && !e.repeat_count)
+                enter_sent_ = text_input_active_.load(std::memory_order_relaxed) ? 66 : enter ? enter : 66;
+            ev.key_code = enter_sent_ ? enter_sent_ : 66;
+            if (ev.key_code == 96) ev.source = SRC_GAMEPAD;
+            if (e.action == 1) enter_sent_ = 0;
+        }
         ev.scan_code = e.scan_code;
         ev.meta_state = e.meta_state;
         ev.repeat_count = e.repeat_count;

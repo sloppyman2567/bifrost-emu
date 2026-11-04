@@ -6,6 +6,16 @@ SETTINGS = "launcher-settings.json"
 # Names accepted by the emulator's [android] back_key / BIFROST_ANDROID_BACK_KEY.
 BACK_KEYS = (("escape", "Esc"), ("backspace", "Backspace"), ("delete", "Delete"),
              ("f1", "F1"), ("f2", "F2"), ("f12", "F12"), ("none", "No back key"))
+# Names accepted by [android] enter_key / BIFROST_ANDROID_ENTER_KEY: what Enter sends outside a text field, for games
+# that draw their own cursor.
+ENTER_KEYS = (("enter", "Enter"), ("dpad_center", "D-pad centre"), ("button_a", "Gamepad A"))
+# Experimental reuse of JIT translations across launches (BIFROST_JIT_DISK_CACHE); default follows [jit] disk_cache.
+JIT_DISK_CACHES = (("default", "Default (off)"), ("on", "On (experimental)"), ("off", "Off"),
+                   ("verify", "Verify against fresh compiles (slow)"))
+JIT_DISK_CACHE_VALUES = {"on": "1", "off": "0", "verify": "verify"}
+# On-disk budget per app in MB (BIFROST_JIT_DISK_CACHE_MB); default follows [jit] disk_cache_mb, normally 512.
+JIT_DISK_CACHE_SIZES = (("default", "Default (512 MB)"), ("128", "128 MB"), ("256", "256 MB"), ("512", "512 MB"),
+                        ("1024", "1 GB"), ("2048", "2 GB"), ("4096", "4 GB"))
 # auto follows the host's default route; offline blocks all non-loopback IP traffic (BIFROST_ANDROID_OFFLINE=1) and
 # reports no network to Android.
 NETWORKS = ("auto", "offline")
@@ -15,8 +25,11 @@ STATS_MODES = (("minimal", "Minimal: window title only"), ("normal", "Normal: ti
                ("overlay", "Overlay only"))
 STATS_MODE_NUMBERS = {"1": "minimal", "2": "normal", "3": "overlay"}
 CHOICES = {"window_stats_mode": tuple(name for name, _ in STATS_MODES),
-           "back_key": tuple(name for name, _ in BACK_KEYS), "network": NETWORKS}
-KEYS = ("window_stats", "window_stats_mode", "back_key", "network")
+           "back_key": tuple(name for name, _ in BACK_KEYS),
+           "enter_key": tuple(name for name, _ in ENTER_KEYS),
+           "jit_disk_cache": tuple(name for name, _ in JIT_DISK_CACHES),
+           "jit_disk_cache_mb": tuple(name for name, _ in JIT_DISK_CACHE_SIZES), "network": NETWORKS}
+KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "network")
 BOOLEANS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False}
 PROPERTY_PREFIX = "property."
 
@@ -107,6 +120,12 @@ def launch_changes(settings):
     env = {}
     if "back_key" in settings:
         env["BIFROST_ANDROID_BACK_KEY"] = settings["back_key"]
+    if "enter_key" in settings:
+        env["BIFROST_ANDROID_ENTER_KEY"] = settings["enter_key"]
+    if settings.get("jit_disk_cache") in JIT_DISK_CACHE_VALUES:
+        env["BIFROST_JIT_DISK_CACHE"] = JIT_DISK_CACHE_VALUES[settings["jit_disk_cache"]]
+    if settings.get("jit_disk_cache_mb", "default") != "default":
+        env["BIFROST_JIT_DISK_CACHE_MB"] = settings["jit_disk_cache_mb"]
     if settings.get("network") == "offline":
         env["BIFROST_ANDROID_OFFLINE"] = "1"
     return flags, env

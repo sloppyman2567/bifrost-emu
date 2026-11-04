@@ -32,6 +32,7 @@
 #define FROST_ANDROID_SURFACE_HPP_
 
 #include "System/Android/Window/WindowBackend.hpp"
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -55,6 +56,9 @@ int android_keycode_for_name(const std::string& name);
 // android_keycode_for_name; 0 = none). Process-wide, set at startup:
 // Activity back handling (onBackPressed) responds to KEYCODE_BACK.
 void set_android_back_key(int android_keycode);
+// The Android key sent for Enter (0 keeps KEYCODE_ENTER), and that key for an [android] enter_key name, -1 if unknown.
+void set_android_enter_key(int android_keycode);
+int android_enter_key_for_name(const std::string& name);
 
 class AndroidSurfaceManager {
 public:
@@ -447,6 +451,8 @@ public:
     uint64_t strings_addr_ = 0;       // path strings block base
     bool quit_ = false;
     bool tap_injected_ = false;
+    std::atomic<bool> text_input_active_{false};
+    int enter_sent_ = 0;  // the key the held Enter was delivered as, 0 when released
 
     // ── Looper registry ────────────────────────────────────────────────
     struct FdEntry {

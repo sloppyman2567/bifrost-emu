@@ -14,7 +14,7 @@ import tempfile
 import time
 
 from android_package import PACKAGE, ROOT
-from android_settings import BACK_KEYS, NETWORKS, STATS_MODES, load as load_settings, save as save_settings
+from android_settings import BACK_KEYS, ENTER_KEYS, JIT_DISK_CACHE_SIZES, JIT_DISK_CACHES, NETWORKS, STATS_MODES, load as load_settings, save as save_settings
 from android_sessions import session_log
 
 ACTIVE = ("preparing", "starting", "running", "stopping")
@@ -327,6 +327,22 @@ def settings_dialog(window, app, settings):
             for name, text in BACK_KEYS: self.back.addItem(text, name)
             self.back.setCurrentIndex(max(0, self.back.findData(settings.get("back_key", "escape"))))
             form.addRow("Back key", self.back)
+            self.enter = QComboBox()
+            for name, text in ENTER_KEYS: self.enter.addItem(text, name)
+            self.enter.setCurrentIndex(max(0, self.enter.findData(settings.get("enter_key", "enter"))))
+            form.addRow("Enter key", self.enter)
+            self.disk_cache = QComboBox()
+            for name, text in JIT_DISK_CACHES: self.disk_cache.addItem(text, name)
+            self.disk_cache.setCurrentIndex(max(0, self.disk_cache.findData(settings.get("jit_disk_cache", "default"))))
+            self.disk_cache.setToolTip("Keep translated code between launches so later starts compile less. "
+                                       "Default follows [jit] disk_cache in bifrost.toml, which is off unless you set it")
+            form.addRow("JIT disk cache", self.disk_cache)
+            self.disk_cache_mb = QComboBox()
+            for name, text in JIT_DISK_CACHE_SIZES: self.disk_cache_mb.addItem(text, name)
+            self.disk_cache_mb.setCurrentIndex(max(0, self.disk_cache_mb.findData(settings.get("jit_disk_cache_mb", "default"))))
+            self.disk_cache_mb.setToolTip("Most disk space this app's cache may use. "
+                                          "Default follows [jit] disk_cache_mb in bifrost.toml, normally 512 MB")
+            form.addRow("JIT disk cache size", self.disk_cache_mb)
             self.network = QComboBox()
             for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)
             self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
@@ -402,6 +418,7 @@ def settings_dialog(window, app, settings):
             for button in buttons.buttons(): button.setIcon(QIcon())
             buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
+                            self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
                             self.network.currentData())
 
         def add_property(self, name="", value=""):
@@ -417,14 +434,17 @@ def settings_dialog(window, app, settings):
         def reset_profile(self):
             self.settings = {}
             self.stats.setChecked(False); self.stats_mode.setCurrentIndex(self.stats_mode.findData("normal"))
-            self.back.setCurrentIndex(0); self.network.setCurrentIndex(0)
-            self.initial = (False, "normal", "escape", "auto")
+            self.back.setCurrentIndex(0); self.enter.setCurrentIndex(0); self.disk_cache.setCurrentIndex(0)
+            self.disk_cache_mb.setCurrentIndex(0); self.network.setCurrentIndex(0)
+            self.initial = (False, "normal", "escape", "enter", "default", "default", "auto")
             self.emulator.setCurrentIndex(0); self.properties.setRowCount(0); self.error.hide()
 
         def result_settings(self):
             result = {k: v for k, v in self.settings.items() if not android_settings.property_name(k)}
-            for key, value, initial in zip(("window_stats", "window_stats_mode", "back_key", "network"),
+            for key, value, initial in zip(("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb",
+                     "network"),
                     (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
+                     self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
                      self.network.currentData()), self.initial):
                 if value != initial or key in result: result[key] = value
             value = self.emulator.currentData()
@@ -1269,10 +1289,16 @@ def build(state, application, settings=None):
         def configure(self, app):
             if not PACKAGE.fullmatch(app["package"]): return
             directory = self.state / app["package"]
-            dialog = settings_dialog(self, app, load_settings(directory))
+            opened = load_settings(directory)
+            dialog = settings_dialog(self, app, opened)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 try:
-                    save_settings(directory, dialog.result_settings())
+                    # Apply only this dialog's edits: `asgard config` may have saved others while it was open.
+                    edited = dialog.result_settings(); current = load_settings(directory)
+                    for key in opened.keys() | edited.keys():
+                        if key not in edited: current.pop(key, None)
+                        elif edited[key] != opened.get(key): current[key] = edited[key]
+                    save_settings(directory, current)
                     if app["session"].get("state") in ACTIVE:
                         self.show_notice(f"Settings saved. They apply the next time {app['label']} starts.", timeout=6000)
                 except OSError as error:

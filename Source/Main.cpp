@@ -435,6 +435,13 @@ int main(int argc, char** argv) {
             return 2;
         }
         frost::set_android_back_key(back);
+        int enter = frost::android_enter_key_for_name(cfg.android_enter_key);
+        if (enter < 0) {
+            fprintf(stderr, "bifrost-emu: unknown [android] enter_key '%s' "
+                    "(enter, dpad_center or button_a)\n", cfg.android_enter_key.c_str());
+            return 2;
+        }
+        frost::set_android_enter_key(enter);
     }
     arm64emu::network_offline().store(cfg.android_offline);
     while (arg_i < argc) {

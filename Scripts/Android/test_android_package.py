@@ -255,6 +255,12 @@ class LauncherArgumentTests(unittest.TestCase):
             self.assertEqual(launch_request(app, trace=True), ["start", app["package"], "--trace-apk", "calls"])
             self.assertEqual(launch_changes(settings),
                              (["--no-window-stats"], {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_OFFLINE": "1"}))
+            self.assertEqual(launch_changes({"enter_key": "dpad_center"}),
+                             ([], {"BIFROST_ANDROID_ENTER_KEY": "dpad_center"}))
+            for value, expected in (("on", "1"), ("off", "0"), ("verify", "verify")):
+                self.assertEqual(launch_changes({"jit_disk_cache": value}), ([], {"BIFROST_JIT_DISK_CACHE": expected}))
+            self.assertEqual(launch_changes({"jit_disk_cache": "default", "jit_disk_cache_mb": "default"}), ([], {}))
+            self.assertEqual(launch_changes({"jit_disk_cache_mb": "1024"}), ([], {"BIFROST_JIT_DISK_CACHE_MB": "1024"}))
             native = dict(app, launcher="native_activity")
             self.assertNotIn("--trace-apk", launch_request(native, trace=True))
             # Saved choices apply to every launch, below the command line and the environment.

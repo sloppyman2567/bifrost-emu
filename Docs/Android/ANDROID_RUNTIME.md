@@ -2473,7 +2473,11 @@ a touch-driven game such as Melon Sandbox uses to zoom and move its view. They
 are checked against a fake SDL3 and the unit test, not on a live desktop. The configured back key
 (`[android] back_key`, `BIFROST_ANDROID_BACK_KEY`; default `escape`, `none`
 disables) is delivered as `KEYCODE_BACK` to NativeActivity and managed apps
-alike; that host key then no longer reaches apps under its own code.
+alike; that host key then no longer reaches apps under its own code. The
+`enter_key` setting (`[android] enter_key`, `BIFROST_ANDROID_ENTER_KEY`; default
+`enter`) sends Enter as `dpad_center` or `button_a` for games that draw their own
+cursor. `button_a` reports a gamepad source; a text field keeps a plain Enter,
+and a release follows its press. Whether a given game reacts is not checked.
 Back follows `ActivityClientController.onBackPressed` (android-15.0.0_r1):
 a stacked Activity is asked to finish through its `IRequestFinishCallback`,
 which posts `finishAfterTransition`. On the launcher root Android moves the
