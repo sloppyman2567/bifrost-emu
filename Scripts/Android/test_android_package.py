@@ -1072,12 +1072,13 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertEqual(path, self.desktop.applications_dir() / "asgard-org.example.game.desktop")
         fields = dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
         self.assertEqual((fields["Type"], fields["Name"], fields["Terminal"]), ("Application", "Example Game", "false"))
+        self.assertEqual(fields["Categories"], "Game;")  # without one, KDE files the entry under "Lost & Found"
         self.assertEqual(fields["Icon"], str(self.icon))
         # The window's application id (SDL_APP_ID) is the entry's name, and StartupWMClass says so for X11.
         self.assertEqual(fields["StartupWMClass"], "asgard-org.example.game")
         arguments = self.split_exec(fields["Exec"])
         self.assertEqual(arguments, [sys.executable, str(Path(self.desktop.__file__).resolve().with_name("asgard.py")),
-                                     "start", "org.example.game"])
+                                     "--state-root", str(self.state.resolve()), "start", "org.example.game"])
         self.assertEqual(path.stat().st_mode & 0o022, 0)
         if shutil.which("desktop-file-validate"):
             result = subprocess.run(["desktop-file-validate", str(path)], capture_output=True, text=True)

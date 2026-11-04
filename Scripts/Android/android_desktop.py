@@ -85,9 +85,12 @@ def exec_argument(argument):
     return '"' + quoted.replace("\\", "\\\\") + '"'
 
 
-def exec_line(package):
+def exec_line(package, state):
+    """The state root is always named: a launcher started from the menu must open the apps this entry was made for, not the
+    default of whichever Asgard it runs."""
     asgard = Path(__file__).resolve().with_name("asgard.py")
-    return " ".join(exec_argument(part) for part in (sys.executable, str(asgard), "start", package))
+    return " ".join(exec_argument(part) for part in
+                    (sys.executable, str(asgard), "--state-root", str(Path(state).resolve()), "start", package))
 
 
 def compose_adaptive(layers, side):
@@ -148,8 +151,10 @@ def icon_file(app, state):
 
 def entry_text(app, state, icon):
     lines = ["[Desktop Entry]", "Type=Application", "Version=1.5", "Name=" + escape_value(app["label"]),
-             "Comment=Android app running on Bifrost", "Exec=" + exec_line(app["package"]), "Terminal=false",
-             "StartupWMClass=" + desktop_id(app["package"])]
+             "Comment=Android app running on Bifrost", "Exec=" + exec_line(app["package"], state), "Terminal=false",
+             # Without a category KDE lists the entry under "Lost & Found". Installed apps carry no Android app category,
+             # and what Bifrost runs is mostly games, so all of them go under Games.
+             "Categories=Game;", "StartupWMClass=" + desktop_id(app["package"])]
     if icon:
         lines.append("Icon=" + escape_value(icon))
     lines += ["X-Asgard-Package=" + app["package"], "X-Asgard-State=" + escape_value(str(Path(state).resolve()))]

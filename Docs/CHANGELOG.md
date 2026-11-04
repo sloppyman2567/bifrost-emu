@@ -27,11 +27,20 @@ there (guided provisioning, update/reinstall) remain in progress.
   uninstall, and `asgard desktop [--remove]` does it on request (details in [APK tooling](Android/ANDROID_APK.md#menu-entries-2026-11-04)).
   Game processes now get `SDL_APP_ID=asgard-PACKAGE`; on KDE Plasma (Wayland) a 2048 window reported that desktop file name. Entries
   pass `desktop-file-validate`, `Exec` quoting is round-tripped through a specification-style parser in a test, and entries are
-  made only for the default state root.
+  made only for the default state root. Launching an entry for real found two faults in the first version, now fixed: its `Exec` did not
+  name the state root (the launcher then looked in the wrong place), and without `Categories` KDE filed it under "Lost & Found" (now Games).
 - **The Battle Cats had no icon in the library either:** its record named `icon-foreground.png`, which was never in the app's
   directory. `refresh-icons` (which the library runs once) now also restores adaptive icons whose layer files are missing; the
   Battle Cats icon is back (the cat with the "13 Years" banner).
 - Not checked: GNOME, X11, native-activity apps, or the entries on a desktop other than the one here.
+
+### The profiler splits the body by operation (2026-11-04)
+
+- **The profile said where in a block time goes, not what the body's time is made of.** With `BIFROST_PROF`, each translated IR operation's
+  code range is kept, and the report adds a line with the body's samples by guest state moves, memory (with guards), integer ALU, flags,
+  branches, helper calls and FP/SIMD, plus the share inside operations whose code contains spills or reloads (an upper bound on spill cost).
+  `jit_profiler` checks it through a real translation: the body's samples are fully accounted for, the `mov`/`add` are ALU and the result a
+  guest-state move. Nothing about codegen changed; the strict suites were rerun. Not run on a game yet.
 
 ### Menu entries for only the apps you choose (2026-11-04)
 

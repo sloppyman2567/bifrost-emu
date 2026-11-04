@@ -359,7 +359,9 @@ fake the answer, so such an app cannot run here; the line only says why it stopp
 ### Menu entries (2026-11-04)
 
 Each installed app gets a launcher in the desktop's own menu: `asgard-PACKAGE.desktop` in `$XDG_DATA_HOME/applications`
-(default `~/.local/share/applications`), with the app's icon. Its `Exec` line runs `start PACKAGE` through the Asgard that wrote it.
+(default `~/.local/share/applications`), with the app's icon, under Games (`Categories=Game;`: installed apps carry no Android app
+category, and without one KDE files an entry under "Lost & Found"). Its `Exec` line runs `--state-root STATE start PACKAGE` through the
+Asgard that wrote it; the state root is always named, because an entry launched from the menu must open the apps it was made for.
 An app's own PNG is used as it is; a JPEG or WebP bitmap, or an adaptive icon, is saved as `desktop-icon.png` beside the app
 (composed the way the library does, 256 px, and only when PyQt6 is present; without it the entry has no icon). Apps with no icon, or
 whose layer files are missing, get the desktop's generic one. The entry is written after an install, removed after an uninstall, and
@@ -374,7 +376,8 @@ as on; `asgard desktop --default off` makes it off (and removes the entries of a
 
 The app's window is named after its entry: Asgard sets `SDL_APP_ID=asgard-PACKAGE` for the game process (unless you set it),
 which SDL3 uses as the Wayland application id and the X11 class, so the taskbar button gets the entry's icon. Checked on KDE
-Plasma (Wayland): the window of 2048 reported `desktopFileName=asgard-com.tpcstld.twozerogame`. Not checked on GNOME, on X11, or with
+Plasma (Wayland) with 2048: `kbuildsycoca6 --menutest` lists the entry under Games, `gio launch` of the entry starts the app, and its
+window reports `desktopFileName=asgard-com.tpcstld.twozerogame`. Not checked on GNOME, on X11, by clicking in the menu itself, or with
 a native-activity app (its launch path sets the variable too, untried). `refresh-icons`, which the library also runs once per state
 root, restores an adaptive icon whose layer files are missing from the app's directory (The Battle Cats had its record without the
 file).
