@@ -95,10 +95,19 @@ static unsigned native_kind(uint32_t w) {
     if ((w & 0xBF20FC00U) == 0x0E208C00U && (sz < 3 || q)) return 30;  /* CMTST */
     if ((w & 0xBF20FC00U) == 0x0E207C00U && (sz < 3)) return 31;  /* SABA */
     if ((w & 0xBF20FC00U) == 0x2E207C00U && (sz < 3)) return 31;  /* UABA */
+    if ((w & 0xBFA0FC00U) == 0x2E20D400U && (fp_lanes)) return 32;  /* FADDP */
+    if ((w & 0xBFA0FC00U) == 0x0E20FC00U && (fp_lanes)) return 33;  /* FRECPS */
+    if ((w & 0xBFA0FC00U) == 0x0EA0FC00U && (fp_lanes)) return 33;  /* FRSQRTS */
+    if ((w & 0xBFBFFC00U) == 0x0EA1D800U && (fp_lanes)) return 33;  /* FRECPE */
+    if ((w & 0xBFBFFC00U) == 0x2EA1D800U && (fp_lanes)) return 33;  /* FRSQRTE */
+    if ((w & 0x9FBFFC00U) == 0x0E21A800U && (fp_lanes)) return 34;  /* FCVTN_V */
+    if ((w & 0x9FBFFC00U) == 0x0EA1A800U && (fp_lanes)) return 34;  /* FCVTP_V */
+    if ((w & 0x9FBFFC00U) == 0x0E21B800U && (fp_lanes)) return 34;  /* FCVTM_V */
+    if ((w & 0x9FBFFC00U) == 0x0E21C800U && (fp_lanes)) return 34;  /* FCVTA_V */
     return 0;
 }
 
-#define CANDIDATES 3431
+#define CANDIDATES 3483
 /* Candidate i is `.inst word; ret` at native_stubs + 8 * i. */
 extern const uint32_t native_stubs[];
 __asm__(".text\n.p2align 3\n.globl native_stubs\nnative_stubs:\n"
@@ -3532,7 +3541,59 @@ __asm__(".text\n.p2align 3\n.globl native_stubs\nnative_stubs:\n"
     ".inst 0x6e217c02\nret\n"
     ".inst 0x6e617c02\nret\n"
     ".inst 0x6ea17c02\nret\n"
-    ".inst 0x6ee17c02\nret\n");
+    ".inst 0x6ee17c02\nret\n"
+    ".inst 0x2e21d402\nret\n"
+    ".inst 0x2e61d402\nret\n"
+    ".inst 0x6e21d402\nret\n"
+    ".inst 0x6e61d402\nret\n"
+    ".inst 0x0e21fc02\nret\n"
+    ".inst 0x0e61fc02\nret\n"
+    ".inst 0x4e21fc02\nret\n"
+    ".inst 0x4e61fc02\nret\n"
+    ".inst 0x0ea1fc02\nret\n"
+    ".inst 0x0ee1fc02\nret\n"
+    ".inst 0x4ea1fc02\nret\n"
+    ".inst 0x4ee1fc02\nret\n"
+    ".inst 0x0ea1d802\nret\n"
+    ".inst 0x0ee1d802\nret\n"
+    ".inst 0x4ea1d802\nret\n"
+    ".inst 0x4ee1d802\nret\n"
+    ".inst 0x2ea1d802\nret\n"
+    ".inst 0x2ee1d802\nret\n"
+    ".inst 0x6ea1d802\nret\n"
+    ".inst 0x6ee1d802\nret\n"
+    ".inst 0x0e21a802\nret\n"
+    ".inst 0x0e61a802\nret\n"
+    ".inst 0x2e21a802\nret\n"
+    ".inst 0x2e61a802\nret\n"
+    ".inst 0x4e21a802\nret\n"
+    ".inst 0x4e61a802\nret\n"
+    ".inst 0x6e21a802\nret\n"
+    ".inst 0x6e61a802\nret\n"
+    ".inst 0x0ea1a802\nret\n"
+    ".inst 0x0ee1a802\nret\n"
+    ".inst 0x2ea1a802\nret\n"
+    ".inst 0x2ee1a802\nret\n"
+    ".inst 0x4ea1a802\nret\n"
+    ".inst 0x4ee1a802\nret\n"
+    ".inst 0x6ea1a802\nret\n"
+    ".inst 0x6ee1a802\nret\n"
+    ".inst 0x0e21b802\nret\n"
+    ".inst 0x0e61b802\nret\n"
+    ".inst 0x2e21b802\nret\n"
+    ".inst 0x2e61b802\nret\n"
+    ".inst 0x4e21b802\nret\n"
+    ".inst 0x4e61b802\nret\n"
+    ".inst 0x6e21b802\nret\n"
+    ".inst 0x6e61b802\nret\n"
+    ".inst 0x0e21c802\nret\n"
+    ".inst 0x0e61c802\nret\n"
+    ".inst 0x2e21c802\nret\n"
+    ".inst 0x2e61c802\nret\n"
+    ".inst 0x4e21c802\nret\n"
+    ".inst 0x4e61c802\nret\n"
+    ".inst 0x6e21c802\nret\n"
+    ".inst 0x6e61c802\nret\n");
 
 static const uint32_t expected[] = {
     0x2e611c02, 0x59fbeea5,
@@ -6965,7 +7026,59 @@ static const uint32_t expected[] = {
     0x6e217c02, 0x049c2861,
     0x6e617c02, 0xd6667951,
     0x6ea17c02, 0x6fca539d,
-    0x00000000, 0x00000000
+    0x00000000, 0x00000000,
+    0x2e21d402, 0x0ef4683c,
+    0x00000000, 0x00000000,
+    0x6e21d402, 0x99fb95a1,
+    0x6e61d402, 0xde1a4e10,
+    0x0e21fc02, 0x3788bdb2,
+    0x00000000, 0x00000000,
+    0x4e21fc02, 0xf10bcf6d,
+    0x4e61fc02, 0x0f1ac24c,
+    0x0ea1fc02, 0x3cb091f6,
+    0x00000000, 0x00000000,
+    0x4ea1fc02, 0xc07354f5,
+    0x4ee1fc02, 0x7245ebb4,
+    0x0ea1d802, 0xa8f0373c,
+    0x00000000, 0x00000000,
+    0x4ea1d802, 0xd744cab9,
+    0x4ee1d802, 0xeac5a9fa,
+    0x2ea1d802, 0x02330710,
+    0x00000000, 0x00000000,
+    0x6ea1d802, 0x3f37dce5,
+    0x6ee1d802, 0xc5350356,
+    0x0e21a802, 0x85d6c52d,
+    0x00000000, 0x00000000,
+    0x2e21a802, 0xccdc4c85,
+    0x00000000, 0x00000000,
+    0x4e21a802, 0x57c8f169,
+    0x4e61a802, 0xf2f03685,
+    0x6e21a802, 0xe3af0241,
+    0x6e61a802, 0xb24882a5,
+    0x0ea1a802, 0x5c79dacd,
+    0x00000000, 0x00000000,
+    0x2ea1a802, 0x88cb2cd1,
+    0x00000000, 0x00000000,
+    0x4ea1a802, 0x1cf703c5,
+    0x4ee1a802, 0xc84e95e5,
+    0x6ea1a802, 0x75438fb5,
+    0x6ee1a802, 0x98caee85,
+    0x0e21b802, 0xe64ded9d,
+    0x00000000, 0x00000000,
+    0x2e21b802, 0xd428c4f1,
+    0x00000000, 0x00000000,
+    0x4e21b802, 0x33deca25,
+    0x4e61b802, 0x6d2c6a05,
+    0x6e21b802, 0x12acd705,
+    0x6e61b802, 0xc9c984a5,
+    0x0e21c802, 0x6c636d5d,
+    0x00000000, 0x00000000,
+    0x2e21c802, 0x91c90659,
+    0x00000000, 0x00000000,
+    0x4e21c802, 0x90ab6b55,
+    0x4e61c802, 0x96c130a5,
+    0x6e21c802, 0x82c2c7e5,
+    0x6e61c802, 0xdbe2bac5
 };
 
 typedef struct { uint8_t b[16]; } V;

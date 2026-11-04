@@ -510,6 +510,46 @@ static inline bool exec_reciprocal(uint32_t op, CPU& cpu) {
     memcpy(&cpu.v_lo[rd], result, 8); memcpy(&cpu.v_hi[rd], result + 8, 8);
     return true;
 }
+// FCVTNS/NU, FCVTPS/PU, FCVTMS/MU, FCVTAS/AU (vector): false for any other
+// encoding. Shared by the interpreter and the JIT's native SIMD helper.
+static inline bool exec_vector_fcvt_round(uint32_t op, CPU& cpu) {
+    const unsigned rd = op & 31, rn = (op >> 5) & 31;
+    const bool Q = (op >> 30) & 1, U = (op >> 29) & 1;
+    int fcvt_mode = -1;  // arm_frint mode
+    switch (op & 0x9FBFFC00) {
+        case 0x0E21A800: fcvt_mode = 0; break;  // N
+        case 0x0EA1A800: fcvt_mode = 6; break;  // P
+        case 0x0E21B800: fcvt_mode = 2; break;  // M
+        case 0x0E21C800: fcvt_mode = 1; break;  // A
+    }
+    if (fcvt_mode >= 0) {
+        const bool dbl = (op >> 22) & 1;
+        if (dbl && !Q) throw DecodeError(cpu.pc, op);
+        uint8_t source[16], result[16] = {};
+        memcpy(source, &cpu.v_lo[rn], 8);
+        memcpy(source + 8, &cpu.v_hi[rn], 8);
+        RecipFpEnv environment(cpu);
+        fesetround(FE_TONEAREST);
+        const int bytes = dbl ? 8 : 4;
+        const double limit = dbl ? 18446744073709551616.0 : 4294967296.0;
+        for (int i = 0; i < (Q ? 16 : 8) / bytes; ++i) {
+            double value;
+            if (dbl) { memcpy(&value, source + i * bytes, 8); value = recip_input(cpu, value); }
+            else { float f; memcpy(&f, source + i * bytes, 4); value = recip_input(cpu, f); }
+            double rounded = arm_frint(fcvt_mode, value, false);
+            const double lo = U ? 0 : -limit / 2, hi = U ? limit : limit / 2;
+            if (std::isnan(value) || rounded < lo || rounded >= hi) cpu.fpsr |= 1;
+            else if (rounded != value) cpu.fpsr |= 16;
+            uint64_t integer = U ? fp_to_unsigned_sat(rounded, dbl)
+                                 : static_cast<uint64_t>(fp_to_signed_sat(rounded, dbl));
+            memcpy(result + i * bytes, &integer, bytes);
+        }
+        memcpy(&cpu.v_lo[rd], result, 8);
+        memcpy(&cpu.v_hi[rd], result + 8, 8);
+        return true;
+    }
+    return false;
+}
 // ── Integer saturation helpers (SQADD/UQADD/SQSUB/UQSUB/SQSHL/SQABS/
 //    SQNEG/SUQADD/USQADD family, added 2026-08-22). Width-generic via
 //    `bits` (8/16/32/64); sign-extension through int64 so every width

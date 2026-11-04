@@ -1395,6 +1395,12 @@ the classifier accepts against hashes recorded under QEMU
 (`make nativegen-expect`). An encoding QEMU rejects with SIGILL fails the
 test, so the classifier cannot accept unallocated forms unnoticed.
 
+`FADDP` (vector), `FRECPE`/`FRSQRTE`, `FRECPS`/`FRSQRTS` and the vector `FCVTN/P/M/A` forms are helpers too. In Arknights they
+were about 58% of the instructions the interpreter ran from translated code: Unity's vector normalise is a run of them. The
+reciprocal and conversion helpers call the interpreter's own `exec_reciprocal` and `exec_vector_fcvt_round`, so both engines share
+one definition and its FPSR behaviour; each still pays that code's `fenv` calls. A measured gain is not recorded: the
+comparison runs were cut short.
+
 Its first run found 605 classified encodings that QEMU rejects:
 - shift-by-immediate rows missing bit 23;
 - `.1d` forms of FCMEQ/FCMGE/SSHL/CMEQ #0/SCVTF/FCVTZS;

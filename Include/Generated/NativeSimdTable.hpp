@@ -40,7 +40,10 @@ namespace arm64emu {
     X(HalvingAdd) \
     X(RoundShift) \
     X(TestBits) \
-    X(AbsDiffAcc)
+    X(AbsDiffAcc) \
+    X(PairwiseFp) \
+    X(Reciprocal) \
+    X(RoundConvertFp)
 
 enum class NativeSimdKind : uint8_t {
     None,
@@ -130,6 +133,15 @@ inline NativeSimdKind classify_native_simd(uint32_t w) {
     if ((w & 0xBF20FC00U) == 0x0E208C00U && (sz < 3 || q)) return K::TestBits;  // CMTST
     if ((w & 0xBF20FC00U) == 0x0E207C00U && (sz < 3)) return K::AbsDiffAcc;  // SABA
     if ((w & 0xBF20FC00U) == 0x2E207C00U && (sz < 3)) return K::AbsDiffAcc;  // UABA
+    if ((w & 0xBFA0FC00U) == 0x2E20D400U && (fp_lanes)) return K::PairwiseFp;  // FADDP
+    if ((w & 0xBFA0FC00U) == 0x0E20FC00U && (fp_lanes)) return K::Reciprocal;  // FRECPS
+    if ((w & 0xBFA0FC00U) == 0x0EA0FC00U && (fp_lanes)) return K::Reciprocal;  // FRSQRTS
+    if ((w & 0xBFBFFC00U) == 0x0EA1D800U && (fp_lanes)) return K::Reciprocal;  // FRECPE
+    if ((w & 0xBFBFFC00U) == 0x2EA1D800U && (fp_lanes)) return K::Reciprocal;  // FRSQRTE
+    if ((w & 0x9FBFFC00U) == 0x0E21A800U && (fp_lanes)) return K::RoundConvertFp;  // FCVTN_V
+    if ((w & 0x9FBFFC00U) == 0x0EA1A800U && (fp_lanes)) return K::RoundConvertFp;  // FCVTP_V
+    if ((w & 0x9FBFFC00U) == 0x0E21B800U && (fp_lanes)) return K::RoundConvertFp;  // FCVTM_V
+    if ((w & 0x9FBFFC00U) == 0x0E21C800U && (fp_lanes)) return K::RoundConvertFp;  // FCVTA_V
     return K::None;
 }
 

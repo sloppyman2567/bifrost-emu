@@ -20,6 +20,11 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Vector reciprocal and pairwise FP leave the interpreter (2026-11-04)
+
+`FADDP`, `FRECPE`/`FRSQRTE`, `FRECPS`/`FRSQRTS` and the vector `FCVTN/P/M/A` forms are native SIMD helpers instead of an
+interpreter step from translated code. In Arknights these were about 58% of interpreted instructions. The gain has not been measured.
+
 ### Tier-2 stops scanning every block (2026-11-04)
 
 Retiring a region walked every block and every branch profile. With Arknights' thousands of rejected trials that was 43% of its

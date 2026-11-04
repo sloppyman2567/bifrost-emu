@@ -259,6 +259,22 @@ template<NativeSimdKind K> void run(CPU* cpu, uint32_t w) {
             const int64_t b=u?static_cast<int64_t>(get(m,i,size)):signed_lane(get(m,i,size),bits);
             put(out,i,size,get(d,i,size)+static_cast<uint64_t>(a>b?a-b:b-a));
         }
+    } else if constexpr(K==NativeSimdKind::Reciprocal) {
+        exec_reciprocal(w,*cpu); // writes Vd and FPSR; one definition for both engines
+        return;
+    } else if constexpr(K==NativeSimdKind::RoundConvertFp) {
+        exec_vector_fcvt_round(w,*cpu);
+        return;
+    } else if constexpr(K==NativeSimdKind::PairwiseFp) {
+        // Pairs of Vm:Vn, Vn's in the low half. Both are read before Vd is written.
+        const bool dn=(cpu->fpcr>>25)&1;
+        const unsigned esize=(w&(1u<<22))?8:4, half=bytes/esize/2;
+        for(unsigned e=0;e<half*2;e++) {
+            const Vec& src=e<half?n:m;
+            const unsigned i=2*(e<half?e:e-half);
+            if(esize==8) put_fp(out,e,arm_fp_binop(ArmFpOp::Add,fp<double>(src,i),fp<double>(src,i+1),dn));
+            else put_fp(out,e,arm_fp_binop(ArmFpOp::Add,fp<float>(src,i),fp<float>(src,i+1),dn));
+        }
     } else {
         // A kind added to native_simd.txt needs a body above.
         static_assert(kind_without_body<K>, "native SIMD kind without a run<K> body");

@@ -150,39 +150,7 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     // Skia's icon rasterizer uses the in-place FCVTNU .4s form. FCVTZS/ZU
     // live in Arithmetic.cpp; bit 23 set on the A opcode is URECPE/URSQRTE.
     // Q=0,.d is reserved.
-    int fcvt_mode = -1;  // arm_frint mode
-    switch (op & 0x9FBFFC00) {
-        case 0x0E21A800: fcvt_mode = 0; break;  // N
-        case 0x0EA1A800: fcvt_mode = 6; break;  // P
-        case 0x0E21B800: fcvt_mode = 2; break;  // M
-        case 0x0E21C800: fcvt_mode = 1; break;  // A
-    }
-    if (fcvt_mode >= 0) {
-        const bool dbl = (op >> 22) & 1;
-        if (dbl && !Q) throw DecodeError(cpu.pc, op);
-        uint8_t source[16], result[16] = {};
-        memcpy(source, &cpu.v_lo[rn], 8);
-        memcpy(source + 8, &cpu.v_hi[rn], 8);
-        RecipFpEnv environment(cpu);
-        fesetround(FE_TONEAREST);
-        const int bytes = dbl ? 8 : 4;
-        const double limit = dbl ? 18446744073709551616.0 : 4294967296.0;
-        for (int i = 0; i < (Q ? 16 : 8) / bytes; ++i) {
-            double value;
-            if (dbl) { memcpy(&value, source + i * bytes, 8); value = recip_input(cpu, value); }
-            else { float f; memcpy(&f, source + i * bytes, 4); value = recip_input(cpu, f); }
-            double rounded = arm_frint(fcvt_mode, value, false);
-            const double lo = U ? 0 : -limit / 2, hi = U ? limit : limit / 2;
-            if (std::isnan(value) || rounded < lo || rounded >= hi) cpu.fpsr |= 1;
-            else if (rounded != value) cpu.fpsr |= 16;
-            uint64_t integer = U ? fp_to_unsigned_sat(rounded, dbl)
-                                 : static_cast<uint64_t>(fp_to_signed_sat(rounded, dbl));
-            memcpy(result + i * bytes, &integer, bytes);
-        }
-        memcpy(&cpu.v_lo[rd], result, 8);
-        memcpy(&cpu.v_hi[rd], result + 8, 8);
-        return true;
-    }
+    if (exec_vector_fcvt_round(op, cpu)) return true;
     // ── Vector FRINTN/A/M/I/Z/X (round to integral) ──
     // Checked BEFORE the sub_noq switch: FRINTx shares sub_noq
     // with CMGT/CMGE/CMLE-vs-zero (they differ only in bit16,

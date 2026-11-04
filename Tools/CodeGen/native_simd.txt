@@ -91,3 +91,12 @@ URSHR_D    RoundShift     0xFF80FC00 0x7F002400 d,n    h >= 8
 CMTST      TestBits       0xBF20FC00 0x0E208C00 d,n,m  sz < 3 || q
 SABA       AbsDiffAcc     0xBF20FC00 0x0E207C00 d,n,m  sz < 3
 UABA       AbsDiffAcc     0xBF20FC00 0x2E207C00 d,n,m  sz < 3
+FADDP      PairwiseFp     0xBFA0FC00 0x2E20D400 d,n,m  fp_lanes
+FRECPS     Reciprocal     0xBFA0FC00 0x0E20FC00 d,n,m  fp_lanes
+FRSQRTS    Reciprocal     0xBFA0FC00 0x0EA0FC00 d,n,m  fp_lanes
+FRECPE     Reciprocal     0xBFBFFC00 0x0EA1D800 d,n    fp_lanes
+FRSQRTE    Reciprocal     0xBFBFFC00 0x2EA1D800 d,n    fp_lanes
+FCVTN_V    RoundConvertFp 0x9FBFFC00 0x0E21A800 d,n    fp_lanes
+FCVTP_V    RoundConvertFp 0x9FBFFC00 0x0EA1A800 d,n    fp_lanes
+FCVTM_V    RoundConvertFp 0x9FBFFC00 0x0E21B800 d,n    fp_lanes
+FCVTA_V    RoundConvertFp 0x9FBFFC00 0x0E21C800 d,n    fp_lanes
