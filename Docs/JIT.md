@@ -16,6 +16,132 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Growing indirect-branch tables and shared block exits (2026-11-03)
+
+Each thread's IBL table (`FrostJIT::IblTable`) starts at `IBL_MIN_ENTRIES` (1,024) and quadruples up to `IBL_MAX_ENTRIES` (65,536) once it
+has replaced one target per entry since its last resize. Only `entries` moves: the header stays put, so a table pointer saved across a
+nested run (`IblGuard`, Tier-2 trials) stays valid. The probe reads the mask and entry array from the header. In a Subway Surfers lobby,
+65,536 gave 34.1M dispatches a minute, 16,384 gave 42.7M, and the old fixed 4,096 gave 64.6M.
+
+`emit_cold_stubs` adds a shared frame exit (`frame_exit_stub_`), and the probe's miss jumps are `jcc rel8`: every miss lands just past it.
+Recording compiles (`use_cold_stubs()` is false) keep the inline tail, so a disk-cache session records slightly larger code.
+
+Code fell from 64.5 to 61.0 bytes per guest instruction in that lobby, with no measurable change in CPU time: three baselines spread from
+198 to 238 billion cycles over 60 s, which would hide a small effect. Pinned to one core, 15 runs each and alternating builds, `mips`, `sort`,
+`matrix`, `fib` and `jit_dispatch_cache_growth` moved by about 1% or less and `bench_dispatch` was 2.6% slower. Those are small workloads;
+other CPUs were not measured.
+
+**Do not share the probe.** A stub for the lookup, with each block keeping its own `jmp [rcx+entry]`, reached 57.8 bytes per instruction and
+passed every test, and the lobby showed nothing, but `bench_dispatch` was 44% slower (0.96 s to 1.39 s). Sharing only the exit cost about
+3%, so the probe was the cause. The likely reason, not isolated, is the added `call`/`ret` and branches that lose per-site prediction.
+
+`jit_dispatch_cache_growth` replaces code at an address only a grown table reaches: clearing just the first 1,024 entries on a generation
+change makes it fail, which the fixture missed before that check was added.
+
+## Vector FMLA by element, LD1R, loop bodies and Q accesses (2026-11-03)
+
+Four changes from profiling the game-kernel workload (see the next section) against a native AVX2 build:
+
+- **Vector FMLA/FMLS by element** (2S/4S/2D) are `SIMD_FP_FMA` with a Vm element (`SimdFpArithParams::lane`, IR `cond` =
+  element + 1), broadcast into scratch XMM2 the way indexed FMUL does, then one FMA3. They used to be the out-of-line
+  `IndexedFma` helper, which calls libm `fmaf` per lane (single precision), or the interpreter (FMLS and doubles).
+  `fp_decode::vector_fp_fma_by_element` decides for the translator and the fallback predictor; it runs before the native SIMD
+  table, so `IndexedFma` is no longer reached for these words. Reserved D forms (Q=0 or L=1) and FP16 are unchanged.
+- **LD1R {Vt.T}** (one register, not .1D) is a guarded `LOAD_MEM` of the element and the native `SIMD_DUP`, then the post-index
+  update. It was `native_structure`, a C++ call per execution. The base moves after the load, so a fault leaves Vt and Xn as
+  they were. LD2R-LD4R and .1D keep the helper.
+- **Loop bodies up to twice the block cap.** A loop of 33 to 64 instructions was cut at 32, so every iteration crossed a block
+  boundary and reloaded the vector cache. When translation reaches the cap, `selfloop_extent` looks ahead for the first control
+  transfer; if it is a branch back to the block start within twice the cap, the block grows to it. The look-ahead reads only
+  plainly mapped executable pages (like `exit_flags_dead`) and decides only the size: the words are recorded if translated, and
+  a block that does not grow depends on none of them. The known-tail rule that absorbs a compiled loop tail uses the same limit.
+  Longer loops (skinning's 83 instructions) still split; a global cap of 64 helped some kernels and 128 hurt skinning.
+- **Q-register loads and stores** (`SIMD_LD16`/`SIMD_ST16`, one register) take the scalar guarded path at width 16
+  (`compile_guarded_vec16`): the allocator's registers, one window-table compare, a deferred tail, and one MOVUPD into the
+  pinned XMM, or XMM0 and `v_lo`/`v_hi`. The old path evicted six GPRs, loaded a 64-bit limit and kept its page checks and
+  slow helper inline. A 16-byte access can cross a page in bytes 8-15, so its tail keeps its own page checks: the shared stubs
+  are built for widths up to 8. Pairs and Tier-2 keep the old path.
+
+Tests: `jit_simd_fp_indexed` adds FMLA/FMLS by element for every element, high registers, Vd aliasing Vn or Vm and Q=0, with a
+product that survives only a single rounding; `jit_ld1r` (new) covers every arrangement, both post-index forms, SP, a cached
+loop and a fault at the instruction; `jit_guard_stubs` adds Q loads and stores at each pressure level with the gate open and
+closed, and accesses crossing from a readable page into a userfaultfd-missing one (the only case where the software page checks
+decide; a crossing into PROT_NONE faults in the host either way). `run_tests.sh` also runs the by-element fixtures with both FP
+caches off, since their default run keeps every register cached. Breaking the S or D broadcast, the FMA element, the LD1R
+post-index or DUP size, and routing a 16-byte guard to the 8-byte stub each failed a test. Loading only the low half of Vm on
+the uncached FMA path passed the default run and fails only the uncached one. Dropping the 16-byte fault-site registration
+passed everything: an unregistered host fault happens to recover in these fixtures.
+
+Game kernels, three interleaved runs against the same native build (ms per frame, times native): skinning 0.706 (8.6x, from
+2.72 after the scalar by-element change and 8.25 before it), particles 0.260 (5.4x, from 0.401); the other seven moved within
+noise. Geometric mean over the nine: 5.76x native before this session's changes, 4.15x now. Not measured on CoreMark or games.
+
+## Scalar FP by element (2026-11-03)
+
+Scalar FMUL, FMULX, FMLA and FMLS by element (`fmul s3, s6, v0.s[1]`, `fmla d1, d2, v31.d[1]`) ran in the
+interpreter on every execution, through the vector by-element code with three scratch registers swapped in. clang emits
+them for matrix-times-vector code: Subway Surfers' and Arknights' `libunity.so` contain 2,915 and 2,263 of them.
+
+- **Translation.** They become the scalar ops they extend: FMUL and FMULX an `FP_BINOP` multiply, FMLA and FMLS `FMADD` and
+  `FMSUB` with Vd as the accumulator. `FpBinopParams::lane` and `FpFusedParams::lane` name Vm's element (IR `cond` = element
+  + 1, 0 for the register form; the validator allows it only on these forms). `fp_decode::scalar_fp_by_element` decodes them
+  for both the translator and the fallback predictor; FP16 and the unallocated D form with L=1 stay in the interpreter.
+- **FMULX** differs from FMUL only for 0 times infinity, which x86 answers with a NaN; that takes the existing cold step, which
+  interprets the real instruction and returns ±2. NaN results do the same for all four, as for other scalar FP ops.
+- **The element.** `fp_load_lane` moves it into scratch: `pshufd` from a pinned XMM, or a load from `v_lo`/`v_hi`. The full
+  vector cache keeps all 128 bits in its XMM; the low-half FP cache pins only `v_lo`, so an element in the upper half is read
+  from memory, which that cache keeps current. Vd is written after the element is read, so Vd may alias Vm.
+
+`jit_fp_pw_elem` sweeps all four forms at every element against C references over 12 values each for Vn, the element and Vd
+(NaN, infinities, signed zeros, subnormals, 0 times infinity for FMULX), checks that bits above the result are cleared and Vd
+aliasing Vm, and runs loops under each cache, where one register is rewritten as a scalar so its upper elements must read as
+zero. A wrong shuffle for S or D, a wrong upper-half address, reading the upper half from a low-half-cache XMM and an FMLA that
+ignores the element each failed it. It also passes with `BIFROST_NO_FMA3`, `BIFROST_NO_AVX2`, either cache disabled and Tier-2,
+but was not run under QEMU, which is not installed here; its references are C and the interpreter.
+
+A throwaway game-kernel workload (nine engine-shaped kernels, one source built by clang 23 at `-O2` for AArch64 and for
+x86-64-v3, the native build kept off AVX-512) put 4-bone skinning at 8.25 ms per frame against 0.082 natively with AVX2. It now takes
+2.72 ms (3.0x faster, five interleaved runs); the other eight kernels moved within noise. At that point two thirds of skinning's
+time was vector FMLA by element (`IndexedFma`, out of line through libm `fmaf` per lane) and a tenth `ld1r` through
+`native_structure`; [the section above](#vector-fmla-by-element-ld1r-loop-bodies-and-q-accesses-2026-11-03) made both native.
+CPU skinning is uncommon in current engines; the same instructions appear in transform, animation and physics code, whose share
+of game frames has not been measured.
+
+## Exit spills, CSET and two-flag branches (2026-11-03)
+
+A review of the code emitted for the hottest blocks of a throwaway guest workload (tree insert, musl `qsort`,
+`snprintf` hashing, a dot product, a switch-dispatched bytecode VM) found waste around exits, flags and constants:
+
+- **Exits store no scratch values.** `BR` (`ret`/`br`/`blr`) and `BRCOND_FALLTHRU` end a Tier-1 block, so they use
+  `flush_all_vregs_exit` like the shared epilogue; every indirect exit had stored its target to a frame slot nothing read.
+  Regions never admit `BR` and lay out their own direct edges. A memory fault exit drops its scratch stores too: every path
+  through it ends the frame, and its loop over mapped architectural registers already covers the dirty ones.
+- **Two-flag conditions test `pstate`.** A `BRCOND` whose flags are only in `cpu.pstate` tested one-flag conditions in memory but
+  rebuilt RFLAGS (14 instructions, three registers) for the others, so the second branch of `cmp; b.eq; b.hi` paid that for one
+  `ja`. HI/LS now compare `pstate & (Z|C)` with C, GE/LT take the sign of `pstate ^ (pstate << 3)`, and GT/LE OR in Z shifted to
+  bit 31 (RAX, plus RCX for GT/LE). This relies on bit 29 holding ARM C whatever set it, as the CS/CC test already did.
+- **CSET is `setcc` + `movzx`.** CSINC/CSINV become constants plus `CSEL`, so `cset w1, gt` was two constant moves, a copy, a
+  `cmov` and a ZEXT. A `CSEL` whose operands are XZR or block constants 0 and 1 now emits `setcc` and `movzx`, and fold-lookahead
+  kind 3 skips the constants' moves; the pre-scan accepts only that shape, and 0 and 1 are never wide guest PCs, so every such
+  constant is in `jit_consts_`. A `CSEL` read only by a ZEXT 32 joins W-form fusion: its `cmov` is 32-bit, which clears bits 63:32
+  whether or not it moves.
+- **Flag saves and constants.** `clobber_flags` saves RAX around the pack only when RAX is still mapped (RDX-only callers) or holds
+  the next PC; the full form keeps the save, since its callers may stage RAX outside the allocator. ADD/SUB/AND/OR/XOR/MUL use the
+  RDX-only form, as every register they use comes from the allocator. `emit_mov_const` picks the shortest constant load, a
+  sign-extended imm32 for small negatives instead of a 10-byte `movabs`, for both `IMM` and rematerialization.
+
+On that workload Tier-1 code went from 109,331 to 102,112 bytes over the same 376 blocks (-6.6%), and a 600-round run took 6.88 to
+6.98 s against 7.09 to 7.24 s for the previous commit (five interleaved runs each, headless builds from `git archive`, one desktop).
+That is one program; CoreMark and games were not measured. `jit_csel` checks CSET, CSETM, CINC and a W-form `CSEL` with dirty
+upper source bits for every condition, with flags from MSR, CMP and CMN; `jit_imm_flags_zext` checks constants on each side of the
+encoding boundaries outside its QEMU hash; `jit_branch_flags` already drove every condition from `pstate`. Breaking each fix on
+purpose (setcc polarity, the HI/LS `cmc`, the 32-bit `cmov`, the HI mask, GT without Z, a positive constant taken as
+sign-extended) failed one of them. That last one passed both whole suites at first and was caught only by `BIFROST_JIT_VERIFY`: a
+wrong `0x0101010101010101` in musl's string routines rarely changes a result.
+
+Not changed: deferring architectural stores within a Tier-1 block, laying out a conditional exit so its fall-through needs no
+jump, and CSEL/`BRCOND_SKIP` flag loads from `pstate`, which still rebuild RFLAGS.
+
 ## Shared cold stubs and smaller encodings (2026-11-02)
 
 A Tier-1 guarded access used to carry its own software page checks (58 bytes) and fault exit (45 to 50 bytes) after
@@ -567,7 +693,10 @@ for the independent value/flag checks and timing bounds.
 
 The default block instruction limit remains 32. `BIFROST_JIT_BLOCK_LIMIT=8..128`
 allows bounded comparisons; both Tier-1 and the Tier-2 collector stop growth
-at the instruction cap or the shared IR/vreg complexity budget. Long blocks
+at the instruction cap or the shared IR/vreg complexity budget. A Tier-1 loop
+body may reach twice the cap: at the cap `selfloop_extent` looks for a branch
+back to the block start, and an already compiled loop tail is absorbed under the
+same limit ([details](#vector-fmla-by-element-ld1r-loop-bodies-and-q-accesses-2026-11-03)). Long blocks
 are no longer automatically demoted solely for exceeding 32 instructions;
 actual interpreter-fallback density still controls demotion. Larger limits
 are diagnostic options, not a verified performance default for every game.
@@ -1146,7 +1275,10 @@ The cross-thread regression passes five interpreter repeats and QEMU.
 
 ## Indexed vector floating-point multiply
 
-Vector FMUL by a scalar lane is native for 2S, 4S and 2D. The generated
+Vector FMUL by a scalar lane is native for 2S, 4S and 2D, and FMLA/FMLS by
+element use the same broadcast before their FMA (`SIMD_FP_FMA` with a lane);
+scalar FMUL/FMULX/FMLA/FMLS by element are the scalar ops with a source element
+([details](#scalar-fp-by-element-2026-11-03)). The generated
 classifier retains the five-bit Rm field, rejects reserved 1D encodings, and
 distinguishes single-precision L/H lane bits from the double-precision H bit.
 `SimdFpArithParams::lane` is -1 for a vector operand and otherwise selects

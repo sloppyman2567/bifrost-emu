@@ -150,8 +150,9 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // (fp_load_operand uses a reg-reg move when the fp cache pins
             // src1 — partial pinning; unpinned operands load from memory).
             fp_load_operand(0, inst.src1, is_double);
-            // Load src2 into XMM1: movsd/movss xmm1, [rbx+off]
-            fp_load_operand(1, inst.src2, is_double);
+            // Load src2 into XMM1: movsd/movss xmm1, [rbx+off], or its
+            // element for FMUL/FMULX by element.
+            fp_load_lane(1, inst.src2, bp.lane < 0 ? 0 : bp.lane, is_double);
             // Execute SSE2 op
             uint8_t sse_op;
             switch (opc) {

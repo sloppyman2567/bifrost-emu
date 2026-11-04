@@ -146,12 +146,32 @@ static void zero_extension(void) {
     }
 }
 
+// Constants on each side of the JIT's encodings (imm32 zero-extended, imm32 sign-extended, imm64), moved
+// into registers in one block and used as a non-foldable ALU operand. Checked directly, outside the hash:
+// a positive 64-bit value taken for a sign-extended imm32 kept only its low half.
+static int constants(void) {
+    uint64_t r[8], sum;
+    __asm__ volatile("mov %0, #0x0101010101010101\n mov %1, #0xffffffff\n mov %2, #-16\n"
+                     "mov %3, #-0x80000000\n mov %4, #0xffffffff7fffffff\n mov %5, #0x7fffffff00000000\n"
+                     "mov %6, #0x8000000000000000\n mov %7, #0x80000000\n add %8, %0, %4"
+                     : "=&r"(r[0]), "=&r"(r[1]), "=&r"(r[2]), "=&r"(r[3]), "=&r"(r[4]), "=&r"(r[5]), "=&r"(r[6]),
+                       "=&r"(r[7]), "=&r"(sum));
+    static const uint64_t want[8] = {0x0101010101010101ull, 0xffffffffull, (uint64_t)-16, 0xffffffff80000000ull,
+                                     0xffffffff7fffffffull, 0x7fffffff00000000ull, 0x8000000000000000ull, 0x80000000ull};
+    int bad = sum != want[0] + want[4];
+    for (int i = 0; i < 8; ++i)
+        if (r[i] != want[i]) { ++bad; printf("NG constant %d %016llx want %016llx\n", i,
+                                             (unsigned long long)r[i], (unsigned long long)want[i]); }
+    return bad;
+}
+
 int main(void) {
     h = 1469598103934665603ull;
     immediates();
     zero_extension();
+    const int bad = constants();
     static const uint64_t want = 0x68b2df78cbaec314ull;
     if (h != want) { printf("NG hash %016llx want %016llx\n", (unsigned long long)h, (unsigned long long)want); }
-    printf("jit_imm_flags_zext: %s\n", h == want ? "ALL PASS" : "FAILED");
-    return h != want;
+    printf("jit_imm_flags_zext: %s\n", h == want && !bad ? "ALL PASS" : "FAILED");
+    return h != want || bad;
 }

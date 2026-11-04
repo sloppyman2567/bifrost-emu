@@ -16,6 +16,7 @@ namespace jit_analysis {
 // moved here from Flags.cpp (where it was
 // extracted by accident — it's only used by translate_block).
 bool instr_will_call_interp(const DecodedInst& d) {
+    if (d.cls == InstClass::SIMD_DP && fp_decode::vector_fp_fma_by_element(d.raw).ok) return false;
     if ((d.cls == InstClass::SIMD_DP || d.cls == InstClass::FP_SCALAR) &&
         classify_native_simd(d.raw) != NativeSimdKind::None) return false;
     switch (d.cls) {
@@ -72,6 +73,12 @@ bool instr_will_call_interp(const DecodedInst& d) {
             // FP op — splitting FP-heavy blocks every 2 instructions and,
             // via the old interp_only heuristic, demoting tiny FP blocks
             // to the interpreter.)
+            // Scalar FMUL/FMULX (2-source group) and FMLA/FMLS (FMA group) by
+            // element; S/D only, so before the half-precision bail-out below.
+            if (const auto el = fp_decode::scalar_fp_by_element(op); el.kind != fp_decode::ScalarFpElem::None) {
+                const bool fused = el.kind == fp_decode::ScalarFpElem::Mla || el.kind == fp_decode::ScalarFpElem::Mls;
+                return fp_gate >= 0 && !(fp_gate & (fused ? 0x40 : 0x04));
+            }
             if ((op & 0xFF200C00) == 0x1E200400 && ftype <= 1)
                 return fp_gate >= 0 && !(fp_gate & 0x02);
             // FMOV GPR↔FP (32/64-bit) — ftype-agnostic in the translator.

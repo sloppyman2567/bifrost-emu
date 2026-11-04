@@ -365,20 +365,34 @@ public:
     // JIT's dispatch generation, so every invalidation revokes all entries;
     // the probe also honors jit_stop_pc, nested helper calls and the shared
     // 256-edge chain budget. See emit_indirect_branch_probe.
-    static constexpr uint32_t IBL_ENTRIES = 4096;  // power of two
+    //
+    // A thread starts with IBL_MIN_ENTRIES and quadruples once it has replaced
+    // one target per entry since its last resize. A miss costs a full dispatch,
+    // and Unity's main thread dispatches far more targets than 4096 slots hold,
+    // but most of an Android app's hundreds of threads never need more than the
+    // minimum. The header stays put: only `entries` moves, so a table pointer
+    // saved across a nested run stays valid.
+    static constexpr uint32_t IBL_MIN_ENTRIES = 1024;   // power of two
+    static constexpr uint32_t IBL_MAX_ENTRIES = 65536;  // power of two
     struct IblEntry {
         uint64_t pc;     // guest target; ~0ULL = empty
         uint64_t entry;  // chain-skip entry address
     };
     struct IblTable {
-        uint64_t generation;
-        uint64_t reserved;
-        IblEntry entries[IBL_ENTRIES];
+        uint64_t generation = 0;
+        uint64_t mask = 0;            // entry count - 1
+        IblEntry* entries = nullptr;
+        uint32_t replaced = 0;        // targets replaced since the last resize
+        IblTable() { resize(IBL_MIN_ENTRIES); }
+        ~IblTable();
+        IblTable(const IblTable&) = delete;
+        IblTable& operator=(const IblTable&) = delete;
+        void resize(uint32_t count);  // replaces the entries with an empty table
     };
     static thread_local std::unique_ptr<IblTable> tls_ibl_;
-    static size_t ibl_index(uint64_t pc) { return (pc >> 2) & (IBL_ENTRIES - 1); }
     void reset_ibl(uint64_t generation) {
-        for (auto& e : tls_ibl_->entries) e = IblEntry{~0ULL, 0};
+        std::fill_n(tls_ibl_->entries, tls_ibl_->mask + 1, IblEntry{~0ULL, 0});
+        tls_ibl_->replaced = 0;
         tls_ibl_->generation = generation;
     }
     // Allocate this thread's table (synced to this JIT) and bind it to cpu.
@@ -386,10 +400,16 @@ public:
     // Record a dispatched block's chain-skip entry. Only this thread reads
     // the table, and only from generated code it runs itself.
     void ibl_note(uint64_t pc, uint64_t (*chain)(CPU*, Emulator*)) {
-        if (!chain || !tls_ibl_) return;
-        IblEntry& e = tls_ibl_->entries[ibl_index(pc)];
-        e.entry = reinterpret_cast<uint64_t>(chain);
-        e.pc = pc;
+        IblTable* table = tls_ibl_.get();
+        if (!chain || !table) return;
+        IblEntry* e = &table->entries[(pc >> 2) & table->mask];
+        if (e->pc != pc && e->pc != ~0ULL && ++table->replaced > table->mask &&
+            table->mask + 1 < IBL_MAX_ENTRIES) {
+            table->resize(static_cast<uint32_t>(table->mask + 1) * 4);
+            e = &table->entries[(pc >> 2) & table->mask];
+        }
+        e->entry = reinterpret_cast<uint64_t>(chain);
+        e->pc = pc;
     }
     // Stats TLS shared by run_block AND jit_call_helper (2026-08-21):
     // hot-path block/instruction counts, batch-flushed into the shared
@@ -635,6 +655,7 @@ public:
     size_t emit_mt_chain_slot(uint64_t target_pc, bool cold_entry = false, int cpu_reg = RBX);
     // MT preemption poll (loads only); returns the jne-to-cold patch offset.
     size_t emit_preempt_poll(int cpu_reg, int scratch);
+    void emit_preempt_compare(int cpu_reg, int scratch);  // leaves the flags for a JNE on expiry
     // Published MT code polls the epoch; ST code and timed Tier-2 sampling code
     // (whose windows count dispatcher resumptions) keep the 256-edge budget.
     bool preempt_by_epoch() const { return mt_active() && !tier2_sampling_compile_; }
@@ -893,6 +914,7 @@ private:
     size_t fault_site_constructed_ = 0;
     size_t memory_fault_stub_ = 0; // current IR op, zero when software-only
     bool compile_guarded_mem(const IRInst& inst);
+    bool compile_guarded_vec16(const IRInst& inst);
     void emit_memory_fault_exit(const IRInst& inst, bool recoverable);
     // Tier-1 guarded accesses keep only the bounds and sticky software-check
     // tests inline. The software page checks and the recoverable fault exit
@@ -927,6 +949,7 @@ private:
     bool cold_stubs_ready_ = false;
     uint32_t guard_stub_[16][4][2] = {};
     uint32_t fault_exit_stub_ = 0;
+    uint32_t frame_exit_stub_ = 0;
     void emit_cold_stubs();
     bool use_cold_stubs() const { return cold_stubs_ready_ && defer_guards_ && !recording_; }
     static constexpr bool cold_stub_register(int r);
@@ -1360,6 +1383,9 @@ private:
     void emit_mov_imm64(int dst, uint64_t imm);
     void emit_mov_imm32(int dst, uint32_t imm);
     void emit_mov_imm32_zext(int dst, uint32_t imm);
+    // Shortest flag-neutral load of a constant: imm32 zero- or sign-extended,
+    // else imm64. Not for values a recording must relocate (wide_guest_pc).
+    void emit_mov_const(int dst, uint64_t imm);
     // dst = the highest guest address an access of `width` bytes may start
     // at (window_size - width). An access is inline when addr <= dst; the
     // reservation can exceed 4 GiB, so this may be a 64-bit immediate (and
@@ -1988,11 +2014,14 @@ private:
     //       sign-extension (the consumer's exact fold check).
     //   2 = same but the consumer is a shift (SHL/SHR/SAR/ROR) — any count
     //       folds, so the IMM mov is always skippable.
+    //   3 = IMM 0 or 1 read only by a CSET-form CSEL at op i+1 or i+2 (only
+    //       IMMs between): both CSEL operands are 0/1 constants, which it
+    //       emits as setcc without reading either vreg.
     // The consumer's fold conditions are replicated EXACTLY so a skipped
     // mov never leaves a vreg unmapped that the consumer then reads (its
     // ensure_vreg would reload garbage from the stack slot).
     std::vector<uint8_t> fold_ahead_kind_;
-    // zext32_fused_[i] = 1: op i (ADD/SUB/AND/OR/XOR/MUL, SEXT 8/16) defines a
+    // zext32_fused_[i] = 1: op i (ADD/SUB/AND/OR/XOR/MUL, CSEL, SEXT 8/16) defines a
     // scratch vreg read only by op i+1, a ZEXT 32 of it. Op i is emitted in
     // its 32-bit x86 form (bits 63:32 cleared) and the ZEXT emits nothing
     // when it keeps the same host register. Tier-1 only; empty elsewhere.
@@ -2006,6 +2035,14 @@ private:
     // per block, so a vreg keyed here is always an IMM result. Defensively
     // erased when any non-IMM op writes the same dest vreg.
     std::unordered_map<uint16_t, uint64_t> jit_consts_;
+    // A CSEL operand's constant value: XZR, or a block constant above.
+    bool csel_const(uint16_t v, uint64_t& out) const {
+        if (v == 32) { out = 0; return true; }
+        const auto it = jit_consts_.find(v);
+        if (it == jit_consts_.end()) return false;
+        out = it->second;
+        return true;
+    }
     // Returns true if scratch vreg `v` has its LAST use at the current op
     // (i.e. it is dead once the current op is emitted) and is NOT the dest
     // of the current op. Used by the flush-skip fast paths in UBFM/SBFM/
@@ -2191,6 +2228,9 @@ private:
     // otherwise they load/store cpu.v_lo[vreg] exactly as the non-cached
     // codegen does. `is_double` selects MOVSD/MOVSS width.
     void fp_load_operand(int xmm, int vreg, bool is_double);
+    // Element `lane` of FP register `vreg` into scratch `xmm`'s low element
+    // (by-element operands); lane 0 is fp_load_operand.
+    void fp_load_lane(int xmm, int vreg, int lane, bool is_double);
     void fp_store_operand(int xmm, int vreg, bool is_double);
     // Resolve FP operand `vreg` to the XMM that holds its value: the pinned
     // XMM if cached (no code emitted), else `scratch` after loading
@@ -2229,6 +2269,11 @@ private:
     // verdict relies on as a dependency of the block being compiled. Public
     // Tier-1 compiles only; false otherwise.
     bool exit_flags_dead(uint64_t pc);
+    // A loop body just past the block cap would split every iteration in two,
+    // reloading the vector cache at the seam. Returns the block length that
+    // ends with a branch back to start_pc when the first control transfer at
+    // or after `pc` is one within `limit` instructions of the start, else 0.
+    int selfloop_extent(uint64_t start_pc, uint64_t pc, int count, int limit);
     // Materialize host flags (NZCV) to cpu.pstate, preserving the current
     // RFLAGS around the materialization (which clobbers RAX/RCX/RDX).
     // Used at block exits (BRCOND fall-through and taken paths) where the

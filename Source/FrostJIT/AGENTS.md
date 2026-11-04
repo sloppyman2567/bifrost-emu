@@ -51,12 +51,25 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   whose stub releases the bucket first. `CLEAR_EXCLUSIVE` implements CLREX.
 - `flags_match_pstate_` (host flags loaded by a BRCOND, unchanged since) lets exits and
   `clobber_flags` skip the store; every flag setter must clear it, and only public
-  Tier-1 compiles use it (`host_flags_match_pstate()`). A BRCOND on one flag with its flags
-  still in `pstate` tests the bit in memory. `clobber_flags(false, true)` (RDX only) is for
-  callers that pick registers through the allocator afterwards; others assume RAX/RCX/RDX.
+  Tier-1 compiles use it (`host_flags_match_pstate()`). A BRCOND with its flags still in
+  `pstate` tests them there: one flag as a bit, HI/LS and the signed pairs through RAX (and
+  RCX). `clobber_flags(false, true)` (RDX only, ALU ops and guarded accesses) is for callers
+  that pick registers through the allocator afterwards; others assume RAX/RCX/RDX and keep
+  the RAX save, since they may hold a value in RAX the allocator does not know about.
 - `fold_ahead_kind_` (BlockCompiler.cpp) must mirror its consumer's fold guards exactly: a
-  skipped `mov` whose consumer then does not fold leaves the vreg unmapped. Pass 0b of
+  skipped `mov` whose consumer then does not fold leaves the vreg unmapped. Kind 3 is the CSET
+  form of CSEL (constants 0 and 1, read through `csel_const`). Pass 0b of
   `optimize_ir` relies on `LOAD_MEM` and the shared 32-bit `ADDS/SUBS` emitter zero-extending.
+- Scalar FMUL/FMULX/FMLA/FMLS by element are `FP_BINOP`/`FMADD`/`FMSUB` with a source element
+  (`lane`, IR `cond` = element + 1); `fp_decode::scalar_fp_by_element` decides for the translator
+  and `BlockAnalysis` alike. The element comes from `fp_load_lane`: under the low-half FP cache an
+  upper-half element is read from memory, never from the XMM.
+- Vector FMLA/FMLS by element are `SIMD_FP_FMA` with a lane (`fp_decode::vector_fp_fma_by_element`,
+  checked before the native SIMD table). Single-register LD1R is `LOAD_MEM` + `SIMD_DUP`.
+- A single LD16/ST16 in Tier-1 is `compile_guarded_vec16`. Its 16-byte page checks stay in its own
+  tail: the shared cold stubs exist for widths up to 8 (`flush_deferred_guards` checks `g.width`).
+- Block growth past the cap is only for loops (`selfloop_extent`, at most twice the cap); its look-ahead
+  reads mapped executable pages directly and must stay a hint that adds no code-word dependency.
 - A scalar FP load or store is `LOAD_MEM` + `FMOV_G2F` or `FMOV_F2G` + `STORE_MEM`,
   never `SIMD_LDST`: that op is not cache-compatible and would veto the XMM cache
   for the whole block. Vd is written only after the load, so a fault leaves it intact.
@@ -138,7 +151,8 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   (`emit_frame_return(true)`); block exits keep their own (a jump on the
   dispatcher-return path cost 10%). Reset `frame_return_off_` wherever a block or
   region compile starts (`rewind_codegen` drops it); never jump to another unit's.
-- Tier-1 cold tails call one copy per JIT of the page checks and jump to one fault exit
+- Tier-1 cold tails (widths up to 8; a 16-byte access keeps its checks in its tail) call one
+  copy per JIT of the page checks and jump to one fault exit
   (`emit_cold_stubs`, `use_cold_stubs`). A page-check stub preserves every register and answers
   in ZF, and its failing path must clear ZF. A persistent-cache recording keeps full tails: a
   reference out of the block cannot be reused in another process. Tier-2 keeps inline guards.

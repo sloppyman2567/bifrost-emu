@@ -27,6 +27,7 @@
 #include "FrostJIT/Runtime/Preemption.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "Bifrost/Version.hpp"  // CODENAME
+#include <stdexcept>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <algorithm>
@@ -323,6 +324,10 @@ void FrostJIT::dump_code_cache_stats() {
 // MT code uses this instead of the ST edge budget, whose read-modify-write
 // serializes every back-edge through the store buffer. Overwrites RFLAGS.
 size_t FrostJIT::emit_preempt_poll(int cpu_reg, int scratch) {
+    emit_preempt_compare(cpu_reg, scratch);
+    return emit_jcc_rel32_placeholder(0x5);
+}
+void FrostJIT::emit_preempt_compare(int cpu_reg, int scratch) {
     emit_mov_imm64(scratch, reinterpret_cast<uint64_t>(&g_jit_preempt_epoch));
     note_host_reloc(HostReloc::Image);
     if (scratch >= 8) emit_byte(0x45);
@@ -330,7 +335,6 @@ size_t FrostJIT::emit_preempt_poll(int cpu_reg, int scratch) {
     if (scratch >= 8) emit_byte(0x44);
     emit_byte(0x3B); emit_byte(static_cast<uint8_t>(0x80 | ((scratch & 7) << 3) | (cpu_reg & 7)));
     emit_u32(offsetof(CPU, jit_epoch_seen));                                                // cmp s32,[cpu+seen]
-    return emit_jcc_rel32_placeholder(0x5);                                                 // jne
 }
 // Emit an immutable load/test/jump edge. The dispatcher supplies a bounded
 // lease; expiry or a host callback sentinel returns through the cold tail.
@@ -394,49 +398,62 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry, int cpu
 // caller's cold exit (dispatcher return) on any miss. Immutable code that
 // reads only data, so it is valid in ST and MT publication alike.
 void FrostJIT::emit_indirect_branch_probe() {
-    constexpr int32_t entries_off = offsetof(IblTable, entries);
+    // Every miss lands just past this probe, in reach of a short jump. A shared
+    // lookup would be smaller but made an indirect-call loop 44% slower: the
+    // call, and the shared branches lose their per-site prediction.
     std::vector<size_t> cold;
+    auto miss = [&](uint8_t condition) {
+        emit_byte(static_cast<uint8_t>(0x70 | condition)); emit_byte(0);
+        cold.push_back(code_buf_used_);
+    };
     // Inside a nested jit_call_helper or a native BL callee the return PC must reach
     // that caller, so every probe misses there: test it before the table work.
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xBB);          // cmp qword [rbx+depth],0
     emit_u32(offsetof(CPU, jit_call_depth)); emit_byte(0);
-    cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
+    miss(0x5);                                                   // jne
     // RCX = this thread's table; none bound (trial, foreign entry) → cold.
     emit_load(RCX, CPU_REG, offsetof(CPU, jit_ibl_table));
     emit_test_reg(RCX, RCX);
-    cold.push_back(emit_jcc_rel32_placeholder(0x4));             // jz
+    miss(0x4);                                                   // jz
     // Table generation must equal this JIT's live dispatch generation.
     emit_load(R11, RCX, offsetof(IblTable, generation));
     emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(&cache_generation_));
     note_host_reloc(HostReloc::JitObject);
     emit_byte(0x4C); emit_byte(0x3B); emit_byte(0x1A);          // cmp r11,[rdx]
-    cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
-    // RCX = &entries[(pc >> 2) & (IBL_ENTRIES - 1)] - entries_off
+    miss(0x5);                                                   // jne
+    // RCX = &entries[(pc >> 2) & mask]; each thread's table has its own size.
     emit_mov_reg(RDX, RAX);
     emit_shift_imm8(RDX, 5, 2);                                  // shr rdx,2
-    emit_alu_imm(RDX, 4, IBL_ENTRIES - 1);                       // and rdx,mask
+    emit_byte(0x48); emit_byte(0x23); emit_byte(0x91);          // and rdx,[rcx+mask]
+    emit_u32(offsetof(IblTable, mask));
     emit_shift_imm8(RDX, 4, 4);                                  // shl rdx,4
+    emit_load(RCX, RCX, offsetof(IblTable, entries));
     emit_add_reg(RCX, RDX);
-    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x81);          // cmp rax,[rcx+pc]
-    emit_u32(static_cast<uint32_t>(entries_off + offsetof(IblEntry, pc)));
-    cold.push_back(emit_jcc_rel32_placeholder(0x5));             // jne
+    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x41);          // cmp rax,[rcx+pc]
+    emit_byte(offsetof(IblEntry, pc));
+    miss(0x5);                                                   // jne
     // Host-managed return boundary (SDL thread sentinel) → dispatcher.
     emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);          // cmp rax,[rbx+stop]
     emit_u32(offsetof(CPU, jit_stop_pc));
-    cold.push_back(emit_jcc_rel32_placeholder(0x4));             // je
+    miss(0x4);                                                   // je
     // Return to dispatch (signals, exit) regularly: the shared 256-edge budget
     // in ST, the read-only preemption epoch once MT code is published.
     if (preempt_by_epoch()) {
-        cold.push_back(emit_preempt_poll(CPU_REG, R11));
+        emit_preempt_compare(CPU_REG, R11);
+        miss(0x5);                                               // jne
     } else {
         emit_byte(0x83); emit_byte(0xAB);                        // sub dword [rbx+budget],1
         emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
-        cold.push_back(emit_jcc_rel32_placeholder(0x6));         // jbe
+        miss(0x6);                                               // jbe
     }
-    emit_byte(0xFF); emit_byte(0xA1);                            // jmp [rcx+entry]
-    emit_u32(static_cast<uint32_t>(entries_off + offsetof(IblEntry, entry)));
-    for (size_t p : cold)
-        patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+    emit_byte(0xFF); emit_byte(0x61);                            // jmp [rcx+entry]
+    emit_byte(offsetof(IblEntry, entry));
+    if (code_buf_overflow_) return;
+    for (size_t after : cold) {
+        const size_t distance = code_buf_used_ - after;
+        if (distance > 127) throw std::logic_error("indirect-branch probe outgrew its short jumps");
+        code_buf_[after - 1] = static_cast<uint8_t>(distance);
+    }
 }
 void FrostJIT::refresh_mt_edges(uint64_t pc) {
     auto refs = mt_edge_refs_.find(pc);

@@ -167,6 +167,21 @@ static pthread_key_t inline_cache_key() {
     (void)key_error;  // a failed key leaks the sets at thread exit, as before
     return key;
 }
+void FrostJIT::IblTable::resize(uint32_t count) {
+    if (entries) inline_cache_bytes_.fetch_sub((mask + 1) * sizeof(IblEntry), std::memory_order_relaxed);
+    delete[] entries;
+    entries = new IblEntry[count];
+    std::fill_n(entries, count, IblEntry{~0ULL, 0});
+    inline_cache_bytes_.fetch_add(count * sizeof(IblEntry), std::memory_order_relaxed);
+    mask = count - 1;
+    replaced = 0;
+}
+
+FrostJIT::IblTable::~IblTable() {
+    inline_cache_bytes_.fetch_sub((mask + 1) * sizeof(IblEntry), std::memory_order_relaxed);
+    delete[] entries;
+}
+
 void FrostJIT::ensure_inline_cache() {
     if (tls_inline_cache_) return;
     tls_inline_cache_ = new InlineCacheSet[INLINE_CACHE_MIN_SETS];
@@ -749,8 +764,10 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
         }
         case IROp::BR: {
             int s = ensure_vreg(inst.src1, RAX);
-            // Flush all dirty vregs before returning.
-            flush_all_vregs();
+            // BR always ends the block (regions never admit it): commit the
+            // architectural registers; scratch values, the target included, die
+            // here and need no stack store. The target stays in s for the mov.
+            flush_all_vregs_exit();
             if (s != RAX) emit_mov_reg(RAX, s);
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;  // indirect branch — target is dynamic

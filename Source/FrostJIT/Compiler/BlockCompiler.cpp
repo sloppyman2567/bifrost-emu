@@ -226,7 +226,18 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     bool has_inlined_leaf = false;  // cannot use contiguous interpreter step counts
     bool has_brcond_skip = false;   // blocks with BRCOND_SKIP skip optimize_ir (op-count stability)
     uint64_t loop_tail_end = 0;
-    while (!block_ended && instr_count < max_block_insts &&
+    // A loop body up to twice the cap stays one block (selfloop_extent).
+    int block_cap = max_block_insts;
+    bool loop_probed = false;
+    auto within_cap = [&] {
+        if (instr_count < block_cap) return true;
+        if (loop_probed) return false;
+        loop_probed = true;
+        const int n = selfloop_extent(start_pc, cur_pc, instr_count, 2 * max_block_insts);
+        if (n > instr_count) block_cap = n;
+        return instr_count < block_cap;
+    };
+    while (!block_ended && within_cap() &&
            !block_translation_budget_reached(ir_block, instr_count, g_alloc.next)) {
         // ── Block splitting at known entry points ──────────────────
         if (instr_count > 0 && cur_pc >= loop_tail_end) {
@@ -241,10 +252,13 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
                 // No speculative guest reads become cache dependencies.
                 const bool back_to_start = tail.chain_target_pc == start_pc ||
                     (tail.has_taken_chain_slot && tail.taken_chain_target_pc == start_pc);
+                // The loop may then reach twice the cap, as selfloop_extent allows.
                 if (tail.fn && !tail.interp_only && !tail.has_call && !tail.has_svc &&
                     tail.ends_with_branch && back_to_start && tail.instr_count > 0 &&
-                    tail.instr_count <= max_block_insts - instr_count) {
+                    tail.instr_count <= 2 * max_block_insts - instr_count) {
                     loop_tail_end = cur_pc + static_cast<uint64_t>(tail.instr_count) * 4;
+                    block_cap = std::max(block_cap, instr_count + static_cast<int>(tail.instr_count));
+                    loop_probed = true;
                 } else {
                     block_profile.entry_point++;
                     chain_target_pc_ = cur_pc;
@@ -969,6 +983,37 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                     break;
             }
         }
+        // CSET-form CSEL (its setcc path in Arithmetic.cpp): the IMMs that only
+        // it reads need no mov. Its runtime test is "both operands XZR or in
+        // jit_consts_, values 0 and 1"; 0 and 1 are never wide guest PCs, so
+        // every IMM here does reach jit_consts_.
+        auto block_const = [&](uint16_t v, size_t before, uint64_t& out) {
+            if (v == 32) { out = 0; return true; }
+            if (v <= 32 || v >= 4096) return false;
+            for (size_t k = before; k-- > 0;) {
+                const IRInst& d = ir_block.insts[k];
+                if (d.dest != v) continue;
+                if (d.op != IROp::IMM) return false;
+                out = d.imm_value();
+                return true;
+            }
+            return false;
+        };
+        for (size_t i = 0; i + 1 < n; i++) {
+            const IRInst& im = ir_block.insts[i];
+            if (im.op != IROp::IMM || fold_ahead_kind_[i]) continue;
+            if (!(im.dest > 32 && im.dest < 4096)) continue;
+            size_t j = i + 1;
+            if (j < n && ir_block.insts[j].op == IROp::IMM) ++j;
+            if (j >= n || vreg_last_use_op_[im.dest] != static_cast<int>(j)) continue;
+            const IRInst& cs = ir_block.insts[j];
+            if (cs.op != IROp::CSEL || cs.src1 == cs.src2) continue;
+            if (cs.src1 != im.dest && cs.src2 != im.dest) continue;
+            uint64_t c1, c2;
+            if (block_const(cs.src1, j, c1) && block_const(cs.src2, j, c2) &&
+                c1 <= 1 && c2 <= 1 && c1 != c2)
+                fold_ahead_kind_[i] = 3;
+        }
         // W-form fusion: the translator follows each 32-bit ALU result with
         // ZEXT 32. When that ZEXT is the result's only reader, the op can
         // write the 32-bit x86 form instead (low 32 bits are identical for
@@ -979,6 +1024,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             switch (op.op) {
                 case IROp::ADD: case IROp::SUB: case IROp::AND:
                 case IROp::OR:  case IROp::XOR: case IROp::MUL: break;
+                // CMOV r32 clears bits 63:32 even when it does not move; the
+                // CSET form's movzx always does.
+                case IROp::CSEL: break;
                 // MOVSX r32 sign-extends into the low 32 bits only.
                 case IROp::SEXT:
                     if (op.sext_bits() != 8 && op.sext_bits() != 16) continue;

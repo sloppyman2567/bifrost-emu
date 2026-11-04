@@ -87,6 +87,12 @@ void FrostJIT::emit_mov_imm32_zext(int dst, uint32_t imm) {
     emit_byte(0xB8 + (dst&7));
     emit_u32(imm);
 }
+void FrostJIT::emit_mov_const(int dst, uint64_t imm) {
+    if (imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(dst, static_cast<uint32_t>(imm));
+    else if (static_cast<int64_t>(imm) < 0 && static_cast<int64_t>(imm) >= INT32_MIN)
+        emit_mov_imm32(dst, static_cast<uint32_t>(imm));  // sign-extended
+    else emit_mov_imm64(dst, imm);
+}
 void FrostJIT::emit_mov_reg(int dst, int src) {
     if (dst==src) return;
     emit_byte(rex(true,src>=8,false,dst>=8));
@@ -323,6 +329,12 @@ void FrostJIT::emit_call_abs(void* target) {
     emit_byte(0xFF); emit_byte(0xD0);
 }
 void FrostJIT::emit_frame_return(bool cold) {
+    // The tail is the same everywhere and only an unchained exit reaches it.
+    if (use_cold_stubs() && (!cold || frame_return_off_ == SIZE_MAX)) {
+        const size_t jump = emit_jmp_rel32_placeholder();
+        patch_jmp_rel32(jump, static_cast<int32_t>(static_cast<int64_t>(frame_exit_stub_) - static_cast<int64_t>(jump + 5)));
+        return;
+    }
     if (cold && frame_return_off_ != SIZE_MAX) {
         const int64_t rel8 = static_cast<int64_t>(frame_return_off_) - static_cast<int64_t>(code_buf_used_ + 2);
         if (rel8 >= -128) { emit_byte(0xEB); emit_byte(static_cast<uint8_t>(rel8)); return; }

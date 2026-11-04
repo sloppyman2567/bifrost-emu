@@ -122,16 +122,13 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                         int64_t c = static_cast<int64_t>(inst.imm_value());
                         if (static_cast<int64_t>(static_cast<int32_t>(c)) == c)
                             return 0;
-                    } else if (fa == 2) {
+                    } else if (fa == 2 || fa == 3) {
                         return 0;
                     }
                 }
                 int d = alloc_reg_for(inst.dest, -1);
-                if (inst.imm_value() <= 0xFFFFFFFFULL && !wide) {
-                    emit_mov_imm32_zext(d, static_cast<uint32_t>(inst.imm_value()));
-                } else {
-                    emit_mov_imm64(d, inst.imm_value());
-                }
+                if (wide) emit_mov_imm64(d, inst.imm_value());
+                else emit_mov_const(d, inst.imm_value());
             }
             return 0;
         case IROp::MOV:
@@ -173,7 +170,8 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     lea_sub = c > INT32_MIN && c <= INT32_MAX;
                 }
             }
-            if (inst.op != IROp::ADD && !lea_sub) clobber_flags();
+            // Every register below comes from the allocator: only RDX need go.
+            if (inst.op != IROp::ADD && !lea_sub) clobber_flags(false, /*rdx_only=*/true);
             // ── Constant-src2 immediate folding ──
             // If src2 is a block-local IMM constant (dead after this op and
             // not the dest), fold it into an x86 immediate form. The JIT ALU
@@ -634,6 +632,43 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // resolve_arm_cond_with_carry uses the default mapping.
             bool need_cmc = false;
             uint8_t cc = resolve_arm_cond_with_carry(cp.cond, need_cmc);
+            // W-form fusion: the next op is a ZEXT 32 reading only this result.
+            const bool w32 = cur_op_index_ < zext32_fused_.size() && zext32_fused_[cur_op_index_];
+            auto finish = [&](int d) {
+                // A scratch value stays in d until it is spilled or dies; an
+                // architectural destination is committed eagerly.
+                if (inst.dest <= 31) store_reg_to_vreg(inst.dest, d);
+                set_vreg_reg(inst.dest, d);
+                // If we loaded flags from pstate, clear flags_in_host_ so the
+                // epilogue doesn't re-materialize. The flags in pstate are
+                // already correct (CSEL doesn't modify flags). Re-materializing
+                // with the loaded x86 flags would corrupt the C flag: the load
+                // inverted CF based on the from_sub bit, and materialize(false)
+                // would set ARM C = x86 CF (the inverted value), losing the C.
+                // If flags were already in host (not loaded), keep flags_in_host_
+                // so the epilogue materializes them normally.
+                if (loaded_from_pstate) flags_in_host_ = false;
+            };
+            // CSET (cond ? 1 : 0, either way round): setcc + movzx, no operand
+            // registers. The fold-lookahead pre-scan (BlockCompiler.cpp) skips
+            // the IMMs feeding this form, so the test must stay exactly
+            // "both operands XZR or block constants, values 0 and 1".
+            uint64_t c1 = 0, c2 = 0;
+            if (inst.op == IROp::CSEL && csel_const(inst.src1, c1) &&
+                csel_const(inst.src2, c2) && c1 <= 1 && c2 <= 1 && c1 != c2) {
+                const int d = alloc_reg();
+                const uint8_t scc = c1 == 1 ? cc : static_cast<uint8_t>(cc ^ 1);
+                if (need_cmc) emit_byte(0xF5);  // invert CF for HI/LS
+                // setcc r8: a REX prefix (even 0x40) selects SPL..DIL, not AH..BH.
+                if (d >= 4) emit_byte(rex(false, false, false, d >= 8));
+                emit_byte(0x0F); emit_byte(0x90 + scc); emit_byte(modrm(3, 0, d & 7));
+                if (need_cmc) emit_byte(0xF5);  // restore CF for later consumers
+                // movzx r32, r8 clears bits 63:8 without touching RFLAGS.
+                if (d >= 4) emit_byte(rex(false, d >= 8, false, d >= 8));
+                emit_byte(0x0F); emit_byte(0xB6); emit_byte(modrm(3, d & 7, d & 7));
+                finish(d);
+                return 0;
+            }
             // Operands in their own registers (XZR = vreg 32 → immediate 0).
             const bool z1 = (inst.src1 == 32);
             const bool z2 = (inst.src2 == 32);
@@ -667,28 +702,15 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 emit_popfq();
             }
             if (need_cmc) emit_byte(0xF5);  // invert CF for HI/LS
-            // cmovcc d, s1: REX.W + 0F 4x /r — dest d in the REG field,
-            // source s1 in r/m (REX.R=d, REX.B=s1; cc same as jcc).
-            emit_byte(rex(true, d >= 8, false, s1 >= 8));
+            // cmovcc d, s1: [REX.W] 0F 4x /r — dest d in the REG field,
+            // source s1 in r/m (REX.R=d, REX.B=s1; cc same as jcc). The 32-bit
+            // form (W-form fusion) clears bits 63:32 whether or not it moves.
+            if (!w32 || d >= 8 || s1 >= 8) emit_byte(rex(!w32, d >= 8, false, s1 >= 8));
             emit_byte(0x0F);
             emit_byte(0x40 + cc);
             emit_byte(modrm(3, d & 7, s1 & 7));
             if (need_cmc) emit_byte(0xF5);  // restore CF for later consumers
-            // A scratch value stays in d until it is spilled or dies; an
-            // architectural destination is committed eagerly.
-            if (inst.dest <= 31) store_reg_to_vreg(inst.dest, d);
-            set_vreg_reg(inst.dest, d);
-            // If we loaded flags from pstate, clear flags_in_host_ so the
-            // epilogue doesn't re-materialize. The flags in pstate are
-            // already correct (CSEL doesn't modify flags). Re-materializing
-            // with the loaded x86 flags would corrupt the C flag: the load
-            // inverted CF based on the from_sub bit, and materialize(false)
-            // would set ARM C = x86 CF (the inverted value), losing the C.
-            // If flags were already in host (not loaded), keep flags_in_host_
-            // so the epilogue materializes them normally.
-            if (loaded_from_pstate) {
-                flags_in_host_ = false;
-            }
+            finish(d);
             return 0;
         }
         // These are very common (SXTB/SXTH/SXTW/UXTB/UXTH/UXTW/LSL/LSR/

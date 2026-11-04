@@ -2,7 +2,9 @@
  * cleared by invalidations while grown. Four threads call 2048 distinct
  * functions through a table (far more targets than a starting cache holds);
  * another thread maps, runs and unmaps a code page, which retires a block
- * and changes the dispatch generation. Results use a closed-form oracle. */
+ * and changes the dispatch generation. A last thread grows its own tables, then
+ * replaces code at one address whose indirect-branch slot only a grown table has:
+ * a stale slot would run the old code. Results use a closed-form oracle. */
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -66,11 +68,44 @@ static void *churn(void *arg) {
     return NULL;
 }
 
+/* Runs `mov x0, #n; ret` at the fixed address, twice so the target is in the table. */
+static int run_at(uint32_t *page, unsigned n) {
+    if (mmap(page, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != page) { perror("mmap"); return 0; }
+    page[0] = 0xd2800000 | (n << 5);
+    page[1] = 0xd65f03c0;
+    __builtin___clear_cache((char *)page, (char *)(page + 2));
+    uint64_t (*volatile code)(void) = (uint64_t (*)(void))page;
+    uint64_t first = code(), second = code();
+    munmap(page, 4096);
+    if (first == n && second == n) return 1;
+    fprintf(stderr, "FAIL replaced code %u: got %llu then %llu\n", n,
+            (unsigned long long)first, (unsigned long long)second);
+    return 0;
+}
+
+static void *replace(void *arg) {
+    (void)arg;
+    /* Page number 3 mod 4: slot 3072 of a 4096-entry table, past the first 1024. */
+    char *span = mmap(NULL, 8 * 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (span == MAP_FAILED) { perror("mmap"); __atomic_store_n(&failed, 1, __ATOMIC_RELAXED); return NULL; }
+    while (((uintptr_t)span >> 12 & 3) != 3) span += 4096;
+    uint64_t sum = 0;
+    for (unsigned n = 0; n < 512; ++n) {
+        for (unsigned round = 0; round < 2; ++round)
+            for (unsigned i = 0; i < FUNCTIONS; ++i) sum = table[i](sum);
+        if (!run_at((uint32_t *)span, n)) { __atomic_store_n(&failed, 1, __ATOMIC_RELAXED); break; }
+    }
+    return (void *)(uintptr_t)sum;
+}
+
 int main(void) {
-    pthread_t callers[CALLERS], churner;
+    pthread_t callers[CALLERS], churner, replacer;
     pthread_create(&churner, NULL, churn, NULL);
+    pthread_create(&replacer, NULL, replace, NULL);
     for (unsigned i = 0; i < CALLERS; ++i) pthread_create(&callers[i], NULL, caller, (void *)(uintptr_t)i);
     for (unsigned i = 0; i < CALLERS; ++i) pthread_join(callers[i], NULL);
+    pthread_join(replacer, NULL);
     __atomic_store_n(&callers_done, 1, __ATOMIC_RELEASE);
     pthread_join(churner, NULL);
     if (failed) return 1;

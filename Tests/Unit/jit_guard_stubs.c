@@ -5,7 +5,9 @@
 // missing userfaultfd page does for every access in the process. This drives
 // each width and direction, in and out of a page crossing, with the address in
 // different host registers (the live values before an access move it), and
-// checks results, fault kinds and the state a guest handler sees.
+// checks results, fault kinds and the state a guest handler sees. The 16-byte
+// Q-register accesses keep their page checks in their own tail (the shared
+// stubs serve widths up to 8); their crossing case faults in bytes 8-15.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -24,8 +26,12 @@
 static int failures, checks;
 #define CHECK(c) do { checks++; if (!(c)) { failures++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
 
-enum { PAGE = 4096, LEVELS = 8, WIDTHS = 4, REPEATS = 8 };
-static const int widths[WIDTHS] = {1, 2, 4, 8};
+enum { PAGE = 4096, LEVELS = 8, WIDTHS = 5, REPEATS = 8 };
+static const int widths[WIDTHS] = {1, 2, 4, 8, 16};
+// Kinds 0-15: GPR widths 1-8 (load, store; +8 at offset 1). 16-19: Q loads and
+// stores, at offset 0 and 1. A Q load returns low ^ ror(high, 8).
+static int load_kind(int w, int offset) { return w < 4 ? w + (offset ? 8 : 0) : 16 + (offset ? 2 : 0); }
+static int store_kind(int w, int offset) { return w < 4 ? w + 4 + (offset ? 8 : 0) : 17 + (offset ? 2 : 0); }
 static const uint64_t PATTERN = 0x8877665544332211ull;
 
 // Each kind of access at each pressure level is its own guest code, so each
@@ -38,7 +44,7 @@ static const uint64_t PATTERN = 0x8877665544332211ull;
 #define LIVE5 LIVE4 "mov x17,#0x88\n eor x17,x17,x9\n mov x19,#0x99\n eor x19,x19,x9\n"
 #define LIVE6 LIVE5 "mov x20,#0xaa\n eor x20,x20,x9\n mov x21,#0xbb\n eor x21,x21,x9\n"
 #define LIVE7 LIVE6 "mov x22,#0xcc\n eor x22,x22,x9\n mov x23,#0xdd\n eor x23,x23,x9\n"
-#define CLOBBERS "x8","x9","x10","x11","x12","x13","x14","x15","x16","x17","x19","x20","x21","x22","x23","memory"
+#define CLOBBERS "x8","x9","x10","x11","x12","x13","x14","x15","x16","x17","x19","x20","x21","x22","x23","x24","v0","memory"
 
 #define OP(live, insn) \
     __asm__ volatile("mov x9,%[a]\n mov x8,%[v]\n" live insn "\n mov %[r],x8\n" \
@@ -61,6 +67,10 @@ static const uint64_t PATTERN = 0x8877665544332211ull;
     case 13: OP(live, "sturh w8,[x9,#1]"); break; \
     case 14: OP(live, "stur w8,[x9,#1]"); break; \
     case 15: OP(live, "stur x8,[x9,#1]"); break; \
+    case 16: OP(live, "ldr q0,[x9]\n fmov x8,d0\n mov x24,v0.d[1]\n eor x8,x8,x24,ror #8"); break; \
+    case 17: OP(live, "dup v0.2d,x8\n str q0,[x9]"); break; \
+    case 18: OP(live, "ldur q0,[x9,#1]\n fmov x8,d0\n mov x24,v0.d[1]\n eor x8,x8,x24,ror #8"); break; \
+    case 19: OP(live, "dup v0.2d,x8\n stur q0,[x9,#1]"); break; \
     }
 
 __attribute__((noinline)) static uint64_t access_at(int level, int kind, uint64_t address, uint64_t value_in) {
@@ -94,6 +104,7 @@ static void on_fault(int signo, siginfo_t *info, void *raw) {
 }
 
 static inline uint64_t low_bytes(uint64_t v, int width) {
+    if (width == 16) return v ^ ((v >> 8) | (v << 56));  // a Q load of {v, v}
     return width == 8 ? v : v & ((1ull << (width * 8)) - 1);
 }
 
@@ -108,9 +119,10 @@ static void check_values(char *base, const char *what) {
                 // above one cross it; a byte access stays inside the first page.
                 const size_t start = PAGE - (width > 1 ? width / 2 : 1);
                 char *at = base + start - offset;
-                const int load = w + (offset ? 8 : 0), store = load + 4;
+                const int load = load_kind(w, offset), store = store_kind(w, offset);
+                const uint64_t pattern2[2] = {PATTERN, PATTERN};
                 for (int repeat = 0; repeat < REPEATS; repeat++) {
-                    memcpy(base + start, &PATTERN, (size_t)width);
+                    memcpy(base + start, pattern2, (size_t)width);
                     uint64_t got = access_at(level, load, (uint64_t)at, 0);
                     if (got != low_bytes(PATTERN, width)) {
                         printf("%s: level %d width %d offset %d load %llx\n", what, level, width, offset,
@@ -119,9 +131,10 @@ static void check_values(char *base, const char *what) {
                     }
                     memset(base + start - 1, 0xAA, (size_t)width + 2);
                     access_at(level, store, (uint64_t)at, PATTERN);
-                    uint64_t stored = 0;
-                    memcpy(&stored, base + start, (size_t)width);
-                    if (stored != low_bytes(PATTERN, width) ||
+                    uint64_t stored = 0, stored_hi = PATTERN;
+                    memcpy(&stored, base + start, width < 8 ? (size_t)width : 8);
+                    if (width == 16) memcpy(&stored_hi, base + start + 8, 8);
+                    if (stored != (width == 16 ? PATTERN : low_bytes(PATTERN, width)) || stored_hi != PATTERN ||
                         (unsigned char)base[start - 1] != 0xAA ||
                         (unsigned char)base[start + width] != 0xAA) {
                         printf("%s: level %d width %d offset %d store %llx\n", what, level, width, offset,
@@ -205,8 +218,12 @@ int main(void) {
     // A registered page that stays missing closes the gate for the whole test.
     int uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | UFFD_USER_MODE_ONLY);
     if (uffd < 0 && errno == EINVAL) uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC);
-    char *missing = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    CHECK(missing != MAP_FAILED);
+    // [RW][missing][missing]: only the software checks see the second page
+    // as absent, so an access crossing into it must not complete natively.
+    char *before_missing = mmap(NULL, 3 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(before_missing != MAP_FAILED);
+    memset(before_missing, 0x5A, PAGE);
+    char *missing = before_missing + PAGE;
     // Discarded before registering, as ART does (a page never touched stays
     // missing under the kernel either way).
     CHECK(madvise(missing, 2 * PAGE, MADV_DONTNEED) == 0);
@@ -227,18 +244,19 @@ int main(void) {
             const uint64_t none = (uint64_t)base + 2 * PAGE, ro = (uint64_t)base + 3 * PAGE;
             const uint64_t unmapped = (uint64_t)base + 4 * PAGE;
             // No access, wrong direction, nothing mapped, a crossing into no access.
-            expect_fault(level, w, none, SIGSEGV, SEGV_ACCERR, none);
-            expect_fault(level, w + 4, none, SIGSEGV, SEGV_ACCERR, none);
-            expect_fault(level, w + 4, ro, SIGSEGV, SEGV_ACCERR, ro);
-            CHECK(access_at(level, w, ro, 0) == 0);
+            const int ld = load_kind(w, 0), st = store_kind(w, 0);
+            expect_fault(level, ld, none, SIGSEGV, SEGV_ACCERR, none);
+            expect_fault(level, st, none, SIGSEGV, SEGV_ACCERR, none);
+            expect_fault(level, st, ro, SIGSEGV, SEGV_ACCERR, ro);
+            CHECK(access_at(level, ld, ro, 0) == 0);
             CHECK(((unsigned char *)ro)[0] == 0);
-            expect_fault(level, w, unmapped, SIGSEGV, SEGV_MAPERR, unmapped);
-            expect_fault(level, w + 4, unmapped, SIGSEGV, SEGV_MAPERR, unmapped);
+            expect_fault(level, ld, unmapped, SIGSEGV, SEGV_MAPERR, unmapped);
+            expect_fault(level, st, unmapped, SIGSEGV, SEGV_MAPERR, unmapped);
             if (width > 1) {
                 const uint64_t crossing = none - (uint64_t)(width / 2);
                 caught_signo = 0;
                 if (sigsetjmp(resume, 1) == 0) {
-                    access_at(level, w, crossing, 0);
+                    access_at(level, ld, crossing, 0);
                     printf("no fault: crossing load level %d width %d\n", level, width);
                     failures++;
                 } else {
@@ -247,8 +265,14 @@ int main(void) {
             }
             // Far outside the window: the real bound rejects it, not the page flags.
             const uint64_t far = 1ull << 50;
-            expect_fault(level, w, far, SIGSEGV, SEGV_MAPERR, far);
-            if (closed) expect_fault(level, w, (uint64_t)missing, SIGBUS, BUS_ADRERR, (uint64_t)missing);
+            expect_fault(level, ld, far, SIGSEGV, SEGV_MAPERR, far);
+            if (closed) expect_fault(level, ld, (uint64_t)missing, SIGBUS, BUS_ADRERR, (uint64_t)missing);
+            if (closed && width > 1) {
+                // Crossing into the missing page; the fault names its first byte.
+                const uint64_t into = (uint64_t)missing - (uint64_t)(width / 2);
+                expect_fault(level, ld, into, SIGBUS, BUS_ADRERR, (uint64_t)missing);
+                expect_fault(level, st, into, SIGBUS, BUS_ADRERR, (uint64_t)missing);
+            }
         }
     }
 

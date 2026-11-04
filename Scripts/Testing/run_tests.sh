@@ -280,6 +280,7 @@ UNIT_TESTS=(
     "native_simd_alias|Tests/Unit/jit_native_simd_alias.elf||5|ALL PASS"
     "simd_unary_fp|Tests/Unit/jit_simd_unary_fp.elf||5|simd_unary_fp: ALL PASS"
     "simd_fp_indexed|Tests/Unit/jit_simd_fp_indexed.elf||5|simd_fp_indexed: ALL PASS"
+    "jit_ld1r|Tests/Unit/jit_ld1r.elf||5|jit_ld1r: ALL PASS"
     "round_away|Tests/Unit/jit_round_away.elf||5|round_away: ALL PASS"
     "doom_gap|Tests/Unit/jit_doom_gap.elf||10|doom_gap: ALL PASS"
     # An exec'd fork child drops the parent's memory instead of copying it (host /proc measurement).
@@ -1328,6 +1329,16 @@ if [ "$RUN_UNIT" = "1" ]; then
     RUN_ENV=("BIFROST_NO_SHARED_JIT=1" "${RUN_ENV[@]}")
     run_category "Per-thread JIT" \
         "test_jit_thread_invalidate_perthread|Tests/Unit/test_jit_thread_invalidate.elf||60|ALL PASS"
+    RUN_ENV=("${OLD_RUN_ENV[@]}")
+fi
+# By-element FP ops read Vm's element from memory when no XMM caches it; the
+# default run keeps these fixtures' registers cached.
+if [ "$RUN_UNIT" = "1" ]; then
+    OLD_RUN_ENV=("${RUN_ENV[@]}")
+    RUN_ENV=("BIFROST_NO_VEC_CACHE=1" "BIFROST_NO_FP_CACHE=1" "${RUN_ENV[@]}")
+    run_category "Uncached FP registers" \
+        "simd_fp_indexed_uncached|Tests/Unit/jit_simd_fp_indexed.elf||5|simd_fp_indexed: ALL PASS" \
+        "fp_pw_elem_uncached|Tests/Unit/jit_fp_pw_elem.elf||5|ALL PASS"
     RUN_ENV=("${OLD_RUN_ENV[@]}")
 fi
 [ "$RUN_INTERACTIVE" = "1" ] && run_category "Interactive tests" "${INTERACTIVE_TESTS[@]}"

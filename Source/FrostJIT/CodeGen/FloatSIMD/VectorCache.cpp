@@ -832,6 +832,32 @@ void FrostJIT::fp_load_operand(int xmm, int vreg, bool is_double) {
     }
 }
 
+// A pinned XMM in the vector cache holds all 128 bits; the low-half FP cache
+// pins only v_lo (its XMM bits 63:0), and v_hi stays current in memory, since
+// that cache admits no op that writes v_hi through a register.
+void FrostJIT::fp_load_lane(int xmm, int vreg, int lane, bool is_double) {
+    const int bytes = lane * (is_double ? 8 : 4);
+    if (bytes == 0) {
+        fp_load_operand(xmm, vreg, is_double);
+        return;
+    }
+    const int xs = vec_xmm(vreg);
+    if (xs >= 0 && (bytes < 8 || !fp_cache_active_)) {
+        // pshufd xmm, xs, imm: the element to lane 0 (the others are unused).
+        emit_byte(0x66);
+        emit_rex_if_needed(xmm >= 8, false, xs >= 8);
+        emit_byte(0x0F); emit_byte(0x70);
+        emit_byte(modrm(3, xmm & 7, xs & 7));
+        emit_byte(is_double ? 0xEE : static_cast<uint8_t>(lane * 0x55));
+        return;
+    }
+    emit_byte(is_double ? 0xF2 : 0xF3);  // movsd/movss xmm, [element]
+    emit_rex_if_needed(xmm >= 8, false, false);
+    emit_byte(0x0F); emit_byte(0x10);
+    emit_modrm_disp(xmm, CPU_REG, bytes < 8 ? V_LO_OFF + vreg * 8 + bytes
+                                            : V_HI_OFF + vreg * 8 + bytes - 8);
+}
+
 // Resolve FP operand `vreg` to the XMM holding its value: the pinned XMM
 // if cached (no code), else `scratch` after loading v_lo[vreg] into it.
 int FrostJIT::fp_resolve_operand(int vreg, int scratch, bool is_double) {

@@ -20,8 +20,8 @@ namespace arm64emu {
 void FrostJIT::clobber_flags(bool dead, bool rdx_only) {
     if (flags_in_host_) {
         dead = dead || host_flags_match_pstate();
-        // emit_materialize_flags overwrites RDX only (it saves and restores RAX,
-        // never touches RCX). Callers that go on to pick registers through the
+        // emit_materialize_flags overwrites RDX and RAX (RAX optionally saved,
+        // RCX never touched). Callers that go on to pick registers through the
         // allocator can leave RAX/RCX mapped; the rest take all three, as an
         // unspecific caller may use RAX/RCX/RDX as fixed scratch next.
         const uint16_t FLAGS_CLOBBER = rdx_only
@@ -35,7 +35,11 @@ void FrostJIT::clobber_flags(bool dead, bool rdx_only) {
         // `toybox ls /` (x30 store using a stale/garbage value).
         flush_dirty_host_regs(FLAGS_CLOBBER);
         flush_scratch_host_regs(FLAGS_CLOBBER);
-        if (!dead) emit_materialize_flags(flags_from_sub_);
+        // RAX needs saving only while it holds a mapped vreg (rdx_only leaves
+        // the mapping) or the exit's next PC. The full form keeps the save:
+        // its callers may stage a value in RAX outside the allocator.
+        const bool keep_rax = !rdx_only || rax_holds_next_pc_ || reg_vreg_[RAX] >= 0;
+        if (!dead) emit_materialize_flags(flags_from_sub_, keep_rax);
         flags_in_host_ = false;
         // Drop cache mappings for the clobbered registers (values were spilled above).
         invalidate_host_regs(FLAGS_CLOBBER);
@@ -85,6 +89,37 @@ bool FrostJIT::exit_flags_dead(uint64_t pc) {
     flag_deps_scratch_.push_back({pc, std::vector<uint32_t>(words, words + used)});
     flag_store_skipped_ = true;
     return true;
+}
+// A growth hint only: the words it reads are translated (and recorded) only if
+// the block grows, and a block that does not grow depends on none of them.
+// Like exit_flags_dead it reads plainly mapped executable pages directly, so a
+// prediction never populates a missing page or raises a fault.
+int FrostJIT::selfloop_extent(uint64_t start_pc, uint64_t pc, int count, int limit) {
+    if (!window_base_ || !guest_memory_ || count >= limit) return 0;
+    const uint64_t window = guest_memory_->window_size();
+    const auto* flags = guest_memory_->direct_page_flags();
+    constexpr uint8_t need = Memory::GUEST_PAGE_MAPPED | Memory::GUEST_PROT_EXEC;
+    for (int n = count; n < limit; ++n, pc += 4) {
+        const uint64_t at = fetch_address(pc);
+        if ((at & 3) || at > window - 4) return 0;
+        const uint8_t f = flags[at / Memory::PAGE_SIZE].load(std::memory_order_acquire);
+        if ((f & need) != need || (f & Memory::GUEST_PAGE_UFFD_MISSING)) return 0;
+        uint32_t word;
+        std::memcpy(&word, window_base_ + at, sizeof word);
+        DecodedInst d;
+        if (!decode(d, word) || jit_analysis::instr_will_call_interp(d)) return 0;
+        switch (d.cls) {
+            case InstClass::B: case InstClass::Bcond: case InstClass::CBZ: case InstClass::CBNZ:
+            case InstClass::TBZ: case InstClass::TBNZ:
+                return pc + static_cast<uint64_t>(d.imm) == start_pc ? n + 1 : 0;
+            case InstClass::BL: case InstClass::BLR: case InstClass::BR: case InstClass::RET:
+            case InstClass::SVC: case InstClass::BRK: case InstClass::UNKNOWN:
+                return 0;
+            default:
+                break;
+        }
+    }
+    return 0;
 }
 // ── Block chaining helpers ──────────────────────────────────────────────
 // Patch a block's 5-byte chain slot (originally `ret` + 4 NOPs) in place

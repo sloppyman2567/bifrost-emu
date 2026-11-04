@@ -18,10 +18,13 @@ see [the vkQuake reproduction](Apps/vkquake.md).
 
 The fully provisioned suite was 377 runs under `run_tests.sh --strict` (2026-11-01) with the JIT and 362 with `--no-jit` (15 tests that exist only in the JIT run are not selected there), in these categories: unit
 (focused guest instruction and JIT regressions and host gates), integration (guest programs in `Tests/Apps/` and
-`Tests/Asm/`), sandbox, per-thread JIT, interactive (scripted stdin), toybox, real-world static and dynamic programs,
+`Tests/Asm/`), sandbox, per-thread JIT, uncached FP registers (the by-element FP fixtures with `BIFROST_NO_VEC_CACHE=1` and
+`BIFROST_NO_FP_CACHE=1`), interactive (scripted stdin), toybox, real-world static and dynamic programs,
 dynamic linking (musl/glibc and XWayland; needs a rootfs) and benchmarks (omitted by `--quick`). The runner prints
 each category's count when it starts, and `--filter REGEX` runs only the tests whose names match. Without a configured rootfs the
 dynamic runs are not selected; missing guest fixtures and unavailable display or SDL support appear as skips, never as passes.
+Since that count, `jit_ld1r` and the uncached FP registers category added three runs in each mode; without a rootfs the suite
+was 353 runs with the JIT and 337 with `--no-jit` (16 skips) on 2026-11-03. The fully provisioned total was not re-run.
 
 ### Persistent JIT cache (2026-10-26)
 

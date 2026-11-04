@@ -2,15 +2,12 @@
  * jit_csel.c — JIT conditional-select tests.
  *
  * Background:
- *   CSEL/CSINC/CSINV/CSNEG all share the same encoding shape.  These
- *   ops go through CALL_INTERP in the JIT (native CMOVcc was tried
- *   but reverted due to flag polarity issues).  Each CALL_INTERP
- *   invalidates cached vregs, and the block-splitter caps the count
- *   at MAX_CALL_INTERP_PER_BLOCK = 2 per block.
+ *   CSEL/CSINC/CSINV/CSNEG all share the same encoding shape.  The
+ *   JIT translates them to a transform plus native CSEL (CMOVcc, or
+ *   setcc for CSET).
  *
  *   Tests use noinline functions so the compiler emits actual CSEL
- *   instructions (which become CALL_INTERP in the JIT).  Each
- *   function uses at most 1 CSEL to stay within the block limit.
+ *   instructions; cset_forms_ok() fixes the exact forms in inline asm.
  *
  *   Note: main() is compiled at -O1 via __attribute__((optimize("O1")))
  *   because the -O2 codegen for repeated CHECK macros triggers a JIT
@@ -36,6 +33,72 @@ __attribute__((noinline)) static uint64_t csel_umax(uint64_t a, uint64_t b) { re
 __attribute__((noinline)) static uint64_t csel_umin(uint64_t a, uint64_t b) { return a < b ? a : b; }
 __attribute__((noinline)) static int csel_sign(int v) { return (v > 0) ? 1 : (v < 0 ? -1 : 0); }
 __attribute__((noinline)) static int csinc_test(int cond, int v) { return cond ? v : v + 1; }
+
+/* CSET/CSETM/CINC and a W-form CSEL for every condition: the JIT emits
+ * CSET as setcc+movzx (its constants never reach a register), a W-form
+ * CSEL as a 32-bit CMOV that must clear bits 63:32 of dirty sources, and
+ * CSETM's -1 as a sign-extended imm32. Flags come from MSR (cpu.pstate),
+ * CMP and CMN (host flags, carry inverted for HI/LS after CMN). */
+static int cond_true(int cc, unsigned nzcv) {
+    const int n = (nzcv >> 3) & 1, z = (nzcv >> 2) & 1, c = (nzcv >> 1) & 1, v = nzcv & 1;
+    switch (cc) {
+        case 0: return z;            case 1: return !z;
+        case 2: return c;            case 3: return !c;
+        case 4: return n;            case 5: return !n;
+        case 6: return v;            case 7: return !v;
+        case 8: return c && !z;      case 9: return !(c && !z);
+        case 10: return n == v;      case 11: return n != v;
+        case 12: return !z && n == v; default: return z || n != v;
+    }
+}
+#define FORMS(cc, setup) __asm__ volatile(setup "\n" \
+    "cset %[r0], " #cc "\n cset %w[r1], " #cc "\n csetm %w[r2], " #cc "\n" \
+    "csel %w[r3], %w[a], %w[b], " #cc "\n cinc %[r4], %[a], " #cc \
+    : [r0] "=&r"(o[0]), [r1] "=&r"(o[1]), [r2] "=&r"(o[2]), [r3] "=&r"(o[3]), [r4] "=&r"(o[4]) \
+    : [x] "r"(x), [y] "r"(y), [a] "r"(a), [b] "r"(b) : "cc")
+#define FORMS_FN(cc) __attribute__((noinline)) static void forms_##cc(int mode, uint64_t x, \
+    uint64_t y, uint64_t a, uint64_t b, uint64_t *o) { \
+    if (mode == 0) FORMS(cc, "msr nzcv, %[x]"); \
+    else if (mode == 1) FORMS(cc, "cmp %[x], %[y]"); \
+    else FORMS(cc, "cmn %[x], %[y]"); }
+FORMS_FN(eq) FORMS_FN(ne) FORMS_FN(cs) FORMS_FN(cc) FORMS_FN(mi) FORMS_FN(pl) FORMS_FN(vs)
+FORMS_FN(vc) FORMS_FN(hi) FORMS_FN(ls) FORMS_FN(ge) FORMS_FN(lt) FORMS_FN(gt) FORMS_FN(le)
+static void (*const forms[14])(int, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t *) = {
+    forms_eq, forms_ne, forms_cs, forms_cc, forms_mi, forms_pl, forms_vs,
+    forms_vc, forms_hi, forms_ls, forms_ge, forms_lt, forms_gt, forms_le};
+static unsigned nzcv_of(int mode, uint64_t x, uint64_t y) {
+    if (mode == 0) return (unsigned)(x >> 28) & 0xf;
+    const uint64_t r = mode == 1 ? x - y : x + y;
+    const unsigned n = (int64_t)r < 0, z = r == 0;
+    const unsigned c = mode == 1 ? x >= y : r < x;
+    const unsigned v = mode == 1 ? (int64_t)((x ^ y) & (x ^ r)) < 0 : (int64_t)(~(x ^ y) & (x ^ r)) < 0;
+    return n << 3 | z << 2 | c << 1 | v;
+}
+static int cset_forms_ok(void) {
+    static const uint64_t vals[] = {0, 1, 2, (uint64_t)-1, (uint64_t)-2, 0x7fffffffffffffffULL,
+                                    0x8000000000000000ULL, 0x80000000ULL, 0xffffffffULL};
+    const uint64_t a = 0xdead0000beef1234ULL, b = 0xfeed00004321cafeULL;  /* dirty bits 63:32 */
+    const int nv = (int)(sizeof vals / sizeof vals[0]);
+    int bad = 0;
+    for (int mode = 0; mode < 3; mode++)
+        for (int i = 0; i < (mode ? nv : 16); i++)
+            for (int j = 0; j < (mode ? nv : 1); j++) {
+                const uint64_t x = mode ? vals[i] : (uint64_t)i << 28, y = mode ? vals[j] : 0;
+                const unsigned nzcv = nzcv_of(mode, x, y);
+                for (int cc = 0; cc < 14; cc++) {
+                    uint64_t o[5];
+                    forms[cc](mode, x, y, a, b, o);
+                    const int t = cond_true(cc, nzcv);
+                    const uint64_t want[5] = {(uint64_t)t, (uint64_t)t, t ? 0xffffffffULL : 0,
+                                              (t ? a : b) & 0xffffffffULL, t ? a + 1 : a};
+                    for (int k = 0; k < 5; k++)
+                        if (o[k] != want[k] && ++bad <= 8)
+                            printf("NG cset form %d mode %d cc %d nzcv %x: %llx want %llx\n", k, mode,
+                                   cc, nzcv, (unsigned long long)o[k], (unsigned long long)want[k]);
+                }
+            }
+    return bad == 0;
+}
 
 __attribute__((optimize("O1")))
 int main(void) {
@@ -185,6 +248,8 @@ int main(void) {
         CHECK(hi_ok, "fcmp_csel_hi");
         CHECK(tr_ok, "fcmp_csinc_csinv_csneg_d");
     }
+
+    CHECK(cset_forms_ok(), "cset_csetm_cinc_csel_w_all_conditions");
 
     printf("csel: %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

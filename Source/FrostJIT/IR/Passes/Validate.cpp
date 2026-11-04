@@ -452,6 +452,15 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                         block.start_pc, i, inst.flags_op, inst.arm_pc);
                     ok = false;
                 }
+                // cond = Vm element + 1 (by element): S 0..3, D 0..1 with Q=1.
+                if (inst.cond > (inst.width == 8 ? 2 : 4) ||
+                    (inst.cond && inst.width == 8 && !(inst.flags_op & 1))) {
+                    std::fprintf(out,
+                        "[ir-validate] block pc=0x%lx inst %zu: SIMD_FP_FMA "
+                        "element %d invalid (arm_pc=0x%lx)\n",
+                        block.start_pc, i, inst.cond - 1, inst.arm_pc);
+                    ok = false;
+                }
                 break;
             }
             case IROp::SIMD_SATADDSUB: {
@@ -859,6 +868,15 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                         block.start_pc, i, inst.flags_op, inst.arm_pc);
                     ok = false;
                 }
+                // cond = element + 1, only for FMUL by element (S: 0..3, D: 0..1).
+                if (inst.cond != 0 && (inst.imm != 0 || inst.cond > (inst.width ? 2 : 4))) {
+                    std::fprintf(out,
+                        "[ir-validate] block pc=0x%lx inst %zu: FP_BINOP "
+                        "element %d invalid for opcode %lu ftype %u (arm_pc=0x%lx)\n",
+                        block.start_pc, i, inst.cond - 1, (unsigned long)inst.imm,
+                        inst.width, inst.arm_pc);
+                    ok = false;
+                }
                 break;
             }
             case IROp::FP_UNOP: {
@@ -1045,6 +1063,15 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                         "acc=%lu out of range (want 0..31, arm_pc=0x%lx)\n",
                         block.start_pc, i, (unsigned long)inst.imm,
                         inst.arm_pc);
+                    ok = false;
+                }
+                // cond = element + 1 for FMLA/FMLS by element (S: 0..3, D: 0..1).
+                if (inst.cond > (inst.width == 64 ? 2 : 4) ||
+                    (inst.cond != 0 && inst.op != IROp::FMADD && inst.op != IROp::FMSUB)) {
+                    std::fprintf(out,
+                        "[ir-validate] block pc=0x%lx inst %zu: FMA "
+                        "element %d invalid (arm_pc=0x%lx)\n",
+                        block.start_pc, i, inst.cond - 1, inst.arm_pc);
                     ok = false;
                 }
                 break;

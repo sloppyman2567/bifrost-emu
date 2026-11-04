@@ -899,7 +899,7 @@ inline void IRInst::set_skip_count(uint64_t n) {
     imm = n;
 }
 // Scalar FP arithmetic (2-source): imm=opcode, width=ftype (0=S,1=D),
-// flags_op is always 0.
+// flags_op is always 0, cond = src2 element + 1 for FMUL by element (0: Sm/Dm).
 inline IRInst IRInst::make_fp_binop(uint16_t dest, uint16_t src1,
                                     uint16_t src2, const FpBinopParams& p,
                                     uint64_t arm_pc) {
@@ -910,12 +910,13 @@ inline IRInst IRInst::make_fp_binop(uint16_t dest, uint16_t src1,
     inst.src2 = src2;
     inst.width = p.ftype;
     inst.flags_op = 0;
+    inst.cond = static_cast<uint8_t>(p.lane + 1);
     inst.imm = p.opcode;
     inst.arm_pc = arm_pc;
     return inst;
 }
 inline FpBinopParams IRInst::fp_binop_params() const {
-    return FpBinopParams{static_cast<uint8_t>(imm), width};
+    return FpBinopParams{static_cast<uint8_t>(imm), width, static_cast<int8_t>(cond - 1)};
 }
 // Scalar FP unary: imm=opcode, width=ftype, rest 0.
 inline IRInst IRInst::make_fp_unop(uint16_t dest, uint16_t src,
@@ -1095,12 +1096,13 @@ inline IRInst IRInst::make_fp_fused(IROp op, uint16_t dest, uint16_t src1,
     inst.src1 = src1;
     inst.src2 = src2;
     inst.width = p.bits;
+    inst.cond = static_cast<uint8_t>(p.lane + 1);  // 0: Vm register form
     inst.imm = p.acc;
     inst.arm_pc = arm_pc;
     return inst;
 }
 inline FpFusedParams IRInst::fp_fused_params() const {
-    return FpFusedParams{width, static_cast<uint8_t>(imm)};
+    return FpFusedParams{width, static_cast<uint8_t>(imm), static_cast<int8_t>(cond - 1)};
 }
 // The remaining unary/binary vector ops share the SimdSubopParams shape
 // (imm=subop, width=esize, flags_op=Q): one factory+reader per op so the
@@ -1153,8 +1155,10 @@ inline IRInst IRInst::make_fp_unary(uint16_t dest, uint16_t src1,
 inline SimdSubopParams IRInst::fp_unary_params() const {
     return SimdSubopParams{static_cast<uint8_t>(imm), width, (flags_op & 1) != 0};
 }
+// Vector FMLA/FMLS: imm=subop (0 FMLA, 1 FMLS), width=esize, flags_op=Q,
+// cond = Vm element + 1 for the by-element forms (0: vector Vm).
 inline IRInst IRInst::make_fp_fma(uint16_t dest, uint16_t src1, uint16_t src2,
-                                  const SimdSubopParams& p, uint64_t arm_pc) {
+                                  const SimdFpArithParams& p, uint64_t arm_pc) {
     IRInst inst{};
     inst.op = IROp::SIMD_FP_FMA;
     inst.dest = dest;
@@ -1162,13 +1166,14 @@ inline IRInst IRInst::make_fp_fma(uint16_t dest, uint16_t src1, uint16_t src2,
     inst.src2 = src2;
     inst.width = p.esize;
     inst.flags_op = p.q ? 1 : 0;
+    inst.cond = static_cast<uint8_t>(p.lane + 1);
     inst.imm = p.subop;
     inst.arm_pc = arm_pc;
     return inst;
 }
-inline SimdSubopParams IRInst::fp_fma_params() const {
-    return SimdSubopParams{static_cast<uint8_t>(imm), width,
-                           (flags_op & 1) != 0};
+inline SimdFpArithParams IRInst::fp_fma_params() const {
+    return SimdFpArithParams{static_cast<uint8_t>(imm), width, (flags_op & 1) != 0,
+                             static_cast<int8_t>(cond - 1)};
 }
 inline IRInst IRInst::make_sataddsub(uint16_t dest, uint16_t src1,
                                      uint16_t src2, const SimdSubopParams& p,

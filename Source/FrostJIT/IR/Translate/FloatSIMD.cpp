@@ -25,6 +25,20 @@ namespace arm64emu {
 // to let the caller
 // handle the InstClass itself.
 bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
+    // Vector FMLA/FMLS by element: the native vector FMA with Vm's element
+    // broadcast (before the native SIMD table, whose IndexedFma kind is an
+    // out-of-line helper).
+    if (d.cls == InstClass::SIMD_DP) {
+        if (const auto el = fp_decode::vector_fp_fma_by_element(d.raw); el.ok) {
+            SimdFpArithParams fp;
+            fp.subop = el.sub ? 1 : 0;
+            fp.esize = el.dbl ? 8 : 4;
+            fp.q = (d.raw >> 30) & 1;
+            fp.lane = static_cast<int8_t>(el.lane);
+            emit_fp_fma(block, d.rd, d.rn, (d.raw >> 16) & 31, fp, cur_pc);
+            return true;
+        }
+    }
     if ((d.cls == InstClass::SIMD_DP || d.cls == InstClass::FP_SCALAR) &&
         classify_native_simd(d.raw) != NativeSimdKind::None) {
         block.insts.push_back(IRInst::make_native_simd(d.raw, cur_pc));
@@ -38,6 +52,25 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 p.q=d.Q; p.load=d.is_load; p.post=d.post_indexed;
                 p.single=d.is_single_struct; p.replicate=d.is_ld1r;
                 p.size=1<<d.size;
+                // LD1R {Vt.T}: a guarded element load broadcast with the native
+                // DUP; the base moves after the load, so a fault leaves Vt and
+                // Xn as they were. LD2R-LD4R and the .1D form keep the helper.
+                if(p.replicate && p.load && p.structure==1 && p.count==1 && (p.q || p.size<8)) {
+                    const uint16_t base=load_arm_reg(block,d.rn,true), val=g_alloc.alloc();
+                    MemParams mp;
+                    mp.width=static_cast<uint8_t>(p.size);
+                    emit_load_mem(block,val,base,mp,cur_pc);
+                    SimdDupParams dp;
+                    dp.esize=static_cast<uint8_t>(p.size); dp.q=p.q;
+                    emit_dup(block,d.rt,val,dp,cur_pc);
+                    if(p.post) {
+                        const uint16_t off=d.rm==31 ? load_imm(block,p.size) : load_arm_reg(block,d.rm);
+                        const uint16_t nb=g_alloc.alloc();
+                        block.insts.push_back(IRInst::make(IROp::ADD,nb,base,off));
+                        store_arm_reg(block,d.rn,nb,true);
+                    }
+                    return true;
+                }
                 if(p.single && !p.replicate) {
                     unsigned scale=(d.raw>>14)&3, s=(d.raw>>12)&1, sz=(d.raw>>10)&3;
                     if(scale==0) { p.size=1; p.lane=(unsigned(d.Q)<<3)|(s<<2)|sz; }
@@ -80,6 +113,27 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint8_t rn = (op >> 5) & 0x1F;
             uint8_t rm = (op >> 16) & 0x1F;
             uint8_t opcode = (op >> 12) & 0xF;
+            // Scalar FMUL/FMULX/FMLA/FMLS by element: the scalar op with Vm's
+            // element as its second source. FMULX differs from FMUL only for
+            // 0 * inf, whose x86 NaN takes the cold step that interprets the
+            // real instruction. FMLA/FMLS are fused (Vd + or - Vn * Vm[i]).
+            if (const auto el = fp_decode::scalar_fp_by_element(op); el.kind != fp_decode::ScalarFpElem::None) {
+                if (el.kind == fp_decode::ScalarFpElem::Mul || el.kind == fp_decode::ScalarFpElem::MulX) {
+                    FpBinopParams bp;
+                    bp.opcode = 0;
+                    bp.ftype = el.dbl;
+                    bp.lane = static_cast<int8_t>(el.lane);
+                    emit_fp_binop(block, rd, rn, rm, bp, cur_pc);
+                } else {
+                    FpFusedParams fp;
+                    fp.bits = el.dbl ? 64 : 32;
+                    fp.acc = rd;
+                    fp.lane = static_cast<int8_t>(el.lane);
+                    emit_fp_fused(block, el.kind == fp_decode::ScalarFpElem::Mla ? IROp::FMADD : IROp::FMSUB,
+                                  rd, rn, rm, fp, cur_pc);
+                }
+                return true;
+            }
             // Scalar DUP/MOV lane: imm5's lowest set bit encodes element size.
             if ((op & 0xFF20FC00) == 0x5E000400) {
                 unsigned imm5 = (op >> 16) & 31;
@@ -1009,7 +1063,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint64_t fesize = is_double ? 8 : 4;
                 if (ct.subop == 0xE || ct.subop == 0xF) {
                     // FMLA/FMLS: accumulate into dest (3-source).
-                    SimdSubopParams fp;
+                    SimdFpArithParams fp;
                     fp.subop = static_cast<uint8_t>(ct.subop - 0xE);
                     fp.esize = static_cast<uint8_t>(fesize);
                     fp.q = Q;

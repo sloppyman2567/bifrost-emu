@@ -202,7 +202,7 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
             return true;
         }
         case IROp::SIMD_FP_FMA: {
-            const SimdSubopParams fp = inst.fp_fma_params();
+            const SimdFpArithParams fp = inst.fp_fma_params();
             const int esize = fp.esize;
             const bool Q = fp.q, is_double = esize == 8;
             if ((esize != 4 && esize != 8) || !has_fma3()) {
@@ -213,13 +213,23 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
             clobber_flags();
             const int xd = vec_xmm(inst.dest), xn = vec_xmm(inst.src1), xm = vec_xmm(inst.src2);
             const bool cached = xd >= 0 && xn >= 0 && xm >= 0;
+            // By element: Vm's element broadcast into scratch XMM2 first, as
+            // for indexed FMUL (Vd may alias Vm; it is written last).
+            auto broadcast = [&](int src) {
+                emit_vex3(1, false, is_double ? src : 0, 1, 2, src, true,
+                          is_double ? (fp.lane ? 0x15 : 0x14) : 0x70);
+                if (!is_double) emit_byte(static_cast<uint8_t>(fp.lane * 0x55));
+            };
             if (cached) {
+                int m = xm;
+                if (fp.lane >= 0) { broadcast(xm); m = 2; }
                 emit_vex3(1, false, 0, 0, 0, xd, true, 0x28);
-                emit_vex_fma(0, xn, xm, is_double, fp.subop == 1);
+                emit_vex_fma(0, xn, m, is_double, fp.subop == 1);
             } else {
                 load_fp_vector(0, inst.dest, Q);
                 load_fp_vector(1, inst.src1, Q);
-                load_fp_vector(2, inst.src2, Q);
+                load_fp_vector(2, inst.src2, Q || fp.lane >= 0);
+                if (fp.lane >= 0) broadcast(2);
                 emit_vex_fma(0, 1, 2, is_double, fp.subop == 1);
             }
             const SimdFpGuard special_done = emit_simd_fp_nan_guard(inst, esize, Q);

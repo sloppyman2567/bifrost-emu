@@ -157,10 +157,11 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
 // values when entering this stub, including after a redirected host fault.
 void FrostJIT::emit_memory_fault_exit(const IRInst& inst, bool recoverable) {
     if (recoverable) memory_fault_stub_ = code_buf_used_;
-    flush_all_vregs_keep();
+    // Every path below ends the frame, so scratch values need no stack store.
     // A self-loop/region may carry a dirty architectural pin from a write
     // later in the previous iteration, even when it is statically clean
-    // at this guard. Commit all mapped architectural registers on this exit.
+    // at this guard. Commit all mapped architectural registers on this exit
+    // (a superset of the dirty ones).
     for (int v = 0; v < 32; ++v)
         if (vreg_home_[v] >= 0) emit_store_arm(v, vreg_home_[v]);
     // Include loop-carried vector writes, preserving compile-time dirtiness

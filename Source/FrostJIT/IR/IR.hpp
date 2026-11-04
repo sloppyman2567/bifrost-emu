@@ -700,9 +700,9 @@ struct IRInst {
                                 const struct SimdSubopParams& p, uint64_t arm_pc);
     struct SimdSubopParams fp_unary_params() const;
     static IRInst make_fp_fma(uint16_t dest, uint16_t src1, uint16_t src2,
-                              const struct SimdSubopParams& p,
+                              const struct SimdFpArithParams& p,
                               uint64_t arm_pc);
-    struct SimdSubopParams fp_fma_params() const;
+    struct SimdFpArithParams fp_fma_params() const;
     static IRInst make_sataddsub(uint16_t dest, uint16_t src1, uint16_t src2,
                                  const struct SimdSubopParams& p,
                                  uint64_t arm_pc);

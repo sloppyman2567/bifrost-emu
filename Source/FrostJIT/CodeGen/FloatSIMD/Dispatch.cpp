@@ -248,7 +248,10 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             // place. Vd is written only after the NaN check, so the
             // interpreter step still sees every source, aliases included.
             const int xs1 = fp_resolve_operand(inst.src1, 1, is_double);
-            const int xs2 = fp_resolve_operand(inst.src2, 2, is_double);
+            // FMLA/FMLS by element read Vm's element into scratch XMM2.
+            int xs2 = 2;
+            if (fp.lane > 0) fp_load_lane(2, inst.src2, fp.lane, is_double);
+            else xs2 = fp_resolve_operand(inst.src2, 2, is_double);
             fp_load_operand(0, fp.acc, is_double);
             // VEX.128.66.0F38.W[is_double]: vfm*231ss/sd xmm0, xmmS1, xmmS2
             // (FMA3 uses pp=01 for BOTH ss and sd — the W bit selects width).

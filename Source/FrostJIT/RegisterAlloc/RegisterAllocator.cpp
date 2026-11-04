@@ -85,8 +85,7 @@ bool FrostJIT::rematerialize_vreg(int v, int reg) {
     if (v <= 32) return false;
     const auto found = jit_consts_.find(v);
     if (found == jit_consts_.end()) return false;
-    if (found->second <= UINT32_MAX) emit_mov_imm32_zext(reg, found->second);
-    else emit_mov_imm64(reg, found->second);
+    emit_mov_const(reg, found->second);
     ++regalloc_stats_.rematerialized;
     return true;
 }

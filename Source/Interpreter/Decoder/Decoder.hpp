@@ -291,6 +291,38 @@ constexpr bool is_reciprocal_fp16(uint32_t op) {
            step == 0x1E403C00 || step == 0x1EC03C00 ||
            estimate == 0x0EF9D800 || estimate == 0x1EF9D800;
 }
+// Scalar FMUL/FMULX/FMLA/FMLS (by element), single or double: "Advanced SIMD
+// scalar x indexed element" with size<1> = 1. Vm is M:Rm (bits 20:16); the
+// element index is H:L for S and H for D, where L=1 is unallocated. FP16
+// (size 00) is not matched. The JIT translator and its fallback predictor
+// both use this, so they agree on what runs natively.
+enum class ScalarFpElem : uint8_t { None, Mul, MulX, Mla, Mls };
+struct ScalarFpElemForm { ScalarFpElem kind; bool dbl; uint8_t lane; };
+constexpr ScalarFpElemForm scalar_fp_by_element(uint32_t op) {
+    ScalarFpElem kind = ScalarFpElem::None;
+    switch (op & 0xFF80F400) {
+        case 0x5F801000: kind = ScalarFpElem::Mla; break;
+        case 0x5F805000: kind = ScalarFpElem::Mls; break;
+        case 0x5F809000: kind = ScalarFpElem::Mul; break;
+        case 0x7F809000: kind = ScalarFpElem::MulX; break;
+        default: break;
+    }
+    const bool dbl = (op >> 22) & 1, l = (op >> 21) & 1, h = (op >> 11) & 1;
+    if (kind == ScalarFpElem::None || (dbl && l)) return {ScalarFpElem::None, false, 0};
+    return {kind, dbl, static_cast<uint8_t>(dbl ? h : (h << 1) | l)};
+}
+// Vector FMLA/FMLS (by element), 2S/4S or 2D: "Advanced SIMD vector x
+// indexed element" with size<1> = 1. Vm is M:Rm; the index is H:L for S and
+// H for D. D needs Q=1 and L=0 (the others are reserved/unallocated); FP16
+// is not matched. Shared by the JIT translator and its fallback predictor.
+struct VectorFpFmaElem { bool ok, sub, dbl; uint8_t lane; };
+constexpr VectorFpFmaElem vector_fp_fma_by_element(uint32_t op) {
+    const uint32_t form = op & 0xBF80F400;
+    if (form != 0x0F801000 && form != 0x0F805000) return {false, false, false, 0};
+    const bool dbl = (op >> 22) & 1, q = (op >> 30) & 1, l = (op >> 21) & 1, h = (op >> 11) & 1;
+    if (dbl && (l || !q)) return {false, false, false, 0};
+    return {true, form == 0x0F805000, dbl, static_cast<uint8_t>(dbl ? h : (h << 1) | l)};
+}
 constexpr bool is_reciprocal(uint32_t op) {
     if ((op & (1u << 28)) && !(op & (1u << 30))) return false;
     uint32_t step = op & 0xBFA0FC00;

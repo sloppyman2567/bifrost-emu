@@ -26,6 +26,7 @@ namespace arm64emu {
 // cold exit spills live state for a C call; successful accesses retain all
 // other mappings.
 bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
+    if (inst.op == IROp::SIMD_LD16 || inst.op == IROp::SIMD_ST16) return compile_guarded_vec16(inst);
     if (inst.op == IROp::LDXR_FAST && !inst.llsc_exclusive()) {
         // LDAR is an acquire load, not a reservation. Keep the original
         // atomic IR as an optimizer barrier; reuse only the guarded emitter.
@@ -139,6 +140,100 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     } else {
         emit_store_mem(effective, 0, value, mp.width);
     }
+    pinned_host_regs_ = saved_pins;
+    return true;
+}
+// A single Q-register load or store (Tier-1): the scalar guard above at width
+// 16, then one MOVUPD between guest memory and the register's pinned XMM, or
+// XMM0 and v_lo/v_hi when it is not cached. A fault leaves the register and
+// memory untouched, so the fault exit interprets the whole instruction. A
+// 16-byte access may cross a page in bytes 8-15, so its page checks stay in
+// its own tail rather than the shared stubs (built for widths up to 8). Pairs
+// and Tier-2 keep emit_memory_guard and compile_simd_memory_.
+bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
+    const bool load = inst.op == IROp::SIMD_LD16;
+    if (!defer_guards_ || !fault_sites_ || !guest_memory_ || !window_base_ || !inst.arm_pc) return false;
+    uint64_t offset;
+    unsigned count;
+    int reg;
+    if (load) {
+        const auto p = inst.ld16_params();
+        offset = p.offset; count = p.count ? p.count : 1; reg = inst.dest & 31;
+    } else {
+        const auto p = inst.st16_params();
+        offset = p.offset; count = p.count ? p.count : 1; reg = inst.src2 & 31;
+    }
+    const int64_t disp = static_cast<int64_t>(offset);
+    if (count != 1 || disp < INT32_MIN || disp > INT32_MAX) return false;
+    constexpr int width = 16;
+
+    memory_fault_stub_ = 0;
+    clobber_flags(false, /*rdx_only=*/true);
+    const int address = ensure_vreg(inst.src1);
+    const uint16_t saved_pins = pinned_host_regs_;
+    pinned_host_regs_ |= (1u << address);
+    int effective = address;
+    if (disp) {
+        effective = alloc_reg();
+        pinned_host_regs_ |= (1u << effective);
+        emit_byte(rex(true, effective >= 8, false, address >= 8));
+        emit_byte(0x8D);
+        emit_modrm_disp(effective, address, static_cast<int32_t>(disp));
+    }
+    const int temp = alloc_reg();
+    pinned_host_regs_ |= (1u << temp);
+    const int page = alloc_reg();
+    pinned_host_regs_ |= (1u << page);
+    std::vector<size_t> cold;
+    const int outside = emit_window_bound_cmp(effective, width, temp, true);
+    const bool gated = outside == kJccAE;
+    size_t checked;
+    if (gated) {
+        checked = emit_jcc_rel32_placeholder(outside);
+    } else {
+        cold.push_back(emit_jcc_rel32_placeholder(outside));
+        emit_test_software_checks();
+        checked = emit_jcc_rel32_placeholder(5);  // JNE
+    }
+    const uint8_t required = Memory::GUEST_PAGE_MAPPED |
+        (load ? Memory::GUEST_PROT_READ : Memory::GUEST_PROT_WRITE);
+    const uint8_t mask = required | Memory::GUEST_PAGE_UFFD_MISSING;
+    DeferredGuard guard{inst, effective, temp, page, width, required, mask,
+                        0, checked, 0, false, gated, std::move(cold), capture_guard_state()};
+    guard.access = code_buf_used_;
+    memory_fault_stub_ = 1;  // placeholder; flush_deferred_guards patches the site
+    guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
+    const int pinned = vec_xmm(reg);
+    // movupd xmm, [WIN_REG + effective]: 66 REX(R=xmm, X=index, B=1) 0F 10/11.
+    auto access = [&](int xmm, uint8_t opcode) {
+        register_memory_fault_site();
+        emit_byte(0x66);
+        emit_byte(rex(false, xmm >= 8, effective >= 8, true));
+        emit_byte(0x0F); emit_byte(opcode);
+        emit_modrm_sib_win(xmm, effective, 0);
+    };
+    if (load) {
+        access(pinned >= 0 ? pinned : 0, 0x10);
+        if (pinned >= 0) {
+            vec_cache_mark_dirty(reg);
+        } else {
+            emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);  // movsd [v_lo], xmm0
+            emit_modrm_disp(0, CPU_REG, V_LO_OFF + reg * 8);
+            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x17);  // movhpd [v_hi], xmm0
+            emit_modrm_disp(0, CPU_REG, V_HI_OFF + reg * 8);
+        }
+    } else {
+        if (pinned < 0) {
+            emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);  // movsd xmm0, [v_lo]
+            emit_modrm_disp(0, CPU_REG, V_LO_OFF + reg * 8);
+            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x16);  // movhpd xmm0, [v_hi]
+            emit_modrm_disp(0, CPU_REG, V_HI_OFF + reg * 8);
+        }
+        access(pinned >= 0 ? pinned : 0, 0x11);
+    }
+    guard.has_site = fault_site_count_.load(std::memory_order_relaxed) == guard.site_index + 1;
+    memory_fault_stub_ = 0;
+    deferred_guards_.push_back(std::move(guard));
     pinned_host_regs_ = saved_pins;
     return true;
 }
@@ -283,6 +378,7 @@ void FrostJIT::emit_cold_stubs() {
     emit_mov_reg(RSI, CPU_REG);
     emit_push(RAX);  // aligns the call; the frame return drops it
     emit_call_abs(reinterpret_cast<void*>(&jit_fault_step));
+    frame_exit_stub_ = static_cast<uint32_t>(code_buf_used_);
     emit_frame_return(false);
     recording_ = recording;
     if (code_buf_overflow_) {
@@ -295,7 +391,7 @@ void FrostJIT::emit_cold_stubs() {
 void FrostJIT::flush_deferred_guards() {
     for (DeferredGuard& g : deferred_guards_) {
         patch_jcc_rel32(g.sw_jump, static_cast<int32_t>(code_buf_used_ - (g.sw_jump + 6)));
-        if (g.gated && use_cold_stubs() && cold_stub_register(g.effective)) {
+        if (g.gated && g.width <= 8 && use_cold_stubs() && cold_stub_register(g.effective)) {
             const int width = g.width == 1 ? 0 : g.width == 2 ? 1 : g.width == 4 ? 2 : 3;
             const uint32_t target = guard_stub_[g.effective][width][(g.required & Memory::GUEST_PROT_WRITE) ? 1 : 0];
             emit_byte(0xE8);  // call rel32

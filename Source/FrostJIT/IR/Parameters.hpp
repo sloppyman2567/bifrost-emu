@@ -226,6 +226,7 @@ struct BrCondSkipParams {
 struct FpBinopParams {
     uint8_t opcode = 0;  // 0=mul,1=div,2=add,3=sub,4=max,5=min,6=nmul (imm)
     uint8_t ftype = 0;   // 0=S, 1=D (width); flags_op is always 0
+    int8_t lane = -1;    // FMUL by element: src2's element; -1 = Sm/Dm (cond = lane + 1)
 };
 struct FpUnopParams {
     uint8_t opcode = 0;  // 0=mov,1=abs,2=neg,3=sqrt (imm)
@@ -277,5 +278,6 @@ struct FpFrintParams {
 struct FpFusedParams {
     uint8_t bits = 32;  // 32 or 64 BITS, not bytes (width)
     uint8_t acc = 0;    // accumulator FP register index (imm)
+    int8_t lane = -1;   // FMLA/FMLS by element: src2's element; -1 = Sm/Dm (cond = lane + 1)
 };
 } // namespace arm64emu

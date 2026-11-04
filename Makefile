@@ -322,7 +322,7 @@ $(JIT_SWITCHES): FORCE
 	@mkdir -p $(dir $@)
 	@{ grep -rhoE 'getenv\("BIFROST_[A-Z0-9_]+"' Source/FrostJIT; \
 	   grep -hoE '"BIFROST_[A-Z0-9_]+"' Source/System/Core/DebugFlags.hpp; } | \
-	  grep -oE 'BIFROST_[A-Z0-9_]+' | grep -vE '^BIFROST_JIT_(DISK_CACHE.*|CACHE_APP)$$' | \
+	  grep -oE 'BIFROST_[A-Z0-9_]+' | grep -vE '^BIFROST_JIT_(DISK_CACHE.*|CACHE_APP)$$|^BIFROST_WINDOW_STATS' | \
 	  LC_ALL=C sort -u | sed 's/.*/"&",/' > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
 $(OBJDIR)/Source/FrostJIT/Runtime/CacheRecording.o: $(JIT_SWITCHES)
