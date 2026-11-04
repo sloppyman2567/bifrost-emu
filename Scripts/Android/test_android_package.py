@@ -376,6 +376,76 @@ class LauncherArgumentTests(unittest.TestCase):
                 self.assertEqual(package.main(), 0)
             self.assertEqual(calls[-1], ["--window-stats-mode=2"])
 
+    def test_app_names_resolve_by_part_of_package_or_title_but_never_for_deletion(self):
+        import json
+        apps = {"com.kiloo.subwaysurf": "Subway Surfers", "com.tpcstld.twozerogame": "2048", "com.example.twozero": "Two Zero"}
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            for name, label in apps.items():
+                (state / name).mkdir()
+                (state / name / "package.json").write_text(json.dumps({"package": name, "label": label}))
+            (state / "org.old.record").mkdir()
+            (state / "org.old.record/package.json").write_text("{}")      # records without a title still resolve exactly
+            resolve = package.resolve_package
+            self.assertEqual(resolve(state, "com.kiloo.subwaysurf"), "com.kiloo.subwaysurf")
+            self.assertEqual(resolve(state, "org.old.record"), "org.old.record")
+            for typed in ("subway", "Subway Surfers", "SUBWAYSURF", "kiloo"):
+                self.assertEqual(resolve(state, typed), "com.kiloo.subwaysurf", typed)
+            self.assertEqual(resolve(state, "2048"), "com.tpcstld.twozerogame")
+            self.assertEqual(resolve(state, "twozero"), "com.example.twozero")   # exactly an app's title: it wins
+            with self.assertRaisesRegex(ValueError, "more than one app.*example.twozero.*twozerogame"):
+                resolve(state, "two")
+            with self.assertRaisesRegex(ValueError, "Did you mean com.kiloo.subwaysurf"):
+                resolve(state, "subwaysufers")
+            with self.assertRaisesRegex(ValueError, "See: asgard list"):
+                resolve(state, "zzzz")
+            with self.assertRaisesRegex(ValueError, "No such file: game.apk"):
+                resolve(state, "game.apk")
+            # Deleting commands take the full name only: a partial one is answered with a suggestion.
+            with self.assertRaisesRegex(ValueError, "Did you mean com.kiloo.subwaysurf.*full package name"):
+                resolve(state, "subway", fuzzy=False)
+            with self.assertRaisesRegex(ValueError, "No apps are installed"):
+                resolve(state / "empty", "subway")
+            def cli(*arguments):
+                return subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
+                                       "--state-root", str(state), *arguments], capture_output=True, text=True)
+            self.assertEqual(cli("config", "tpcstld", "--json").returncode, 0)
+            for command in ("uninstall", "clear-data"):
+                result = cli(command, "--yes", "subway")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Did you mean com.kiloo.subwaysurf", result.stderr)
+                self.assertTrue((state / "com.kiloo.subwaysurf/package.json").is_file())
+            self.assertIn("No such file", cli("install", str(state / "missing.apk")).stderr)
+
+    def test_asgard_help_lists_every_command_and_forwards_help(self):
+        import asgard
+        env = dict(os.environ, BIFROST_ANDROID_STATE=tempfile.gettempdir())
+        def run(*arguments):
+            return subprocess.run([sys.executable, str(ROOT / "Scripts/Android/asgard.py"), *arguments],
+                                  capture_output=True, text=True, env=env)
+        parser_help = run("--help")
+        self.assertEqual(parser_help.returncode, 0)
+        self.assertEqual(run().stdout, parser_help.stdout)
+        self.assertEqual(run("help").stdout, parser_help.stdout)
+        # The commands asgard lists are the ones android_package.py implements, plus the realm it runs itself.
+        implemented = {"realm"}
+        for name in asgard.COMMANDS:
+            if name != "realm":
+                result = subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"), name, "-h"],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, (name, result.stderr))
+                self.assertIn(f"usage: asgard {'list' if name == 'apps' else name}", result.stdout)
+                implemented.add(name)
+        for name in asgard.COMMANDS:
+            self.assertIn(f"  {name} ", parser_help.stdout if name != "apps" else "  apps (listed under list)")
+        self.assertEqual(set(asgard.COMMANDS), implemented)
+        forwarded = run("run", "-h")
+        self.assertEqual(forwarded.returncode, 0)
+        self.assertIn("usage: asgard run", forwarded.stdout)
+        unknown = run("lst")
+        self.assertEqual(unknown.returncode, 2)
+        self.assertIn("did you mean 'list'", unknown.stderr)
+
     def test_config_command_shows_sets_validates_and_resets(self):
         import json
         with tempfile.TemporaryDirectory() as directory:

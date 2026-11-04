@@ -56,6 +56,8 @@ def digest(path):
 
 
 def snapshot_input(source, destination):
+    if not source.exists():
+        raise ValueError(f"No such file: {source}")
     with source.open("rb") as incoming, destination.open("wb") as output:
         info = os.fstat(incoming.fileno())
         if not stat.S_ISREG(info.st_mode):
@@ -772,6 +774,54 @@ def installed_apps(state):
     return result
 
 
+def installed_labels(state):
+    """{package: title} for every installed app, read from the records without probing sessions."""
+    labels = {}
+    if not state.is_dir(): return labels
+    for app in sorted(state.iterdir()):
+        if not PACKAGE.fullmatch(app.name) or not (app / "package.json").is_file(): continue
+        try:
+            metadata = json.loads((app / "package.json").read_text())
+            base = next((x for x in metadata.get("packages", []) if not x.get("split")), {})
+            labels[app.name] = metadata.get("label") or base.get("label") or ""
+        except (OSError, ValueError, AttributeError, TypeError):
+            labels[app.name] = ""
+    return labels
+
+
+def resolve_package(state, name, fuzzy=True):
+    """The installed package `name` stands for: the exact name, else (unless `fuzzy` is off) the one app whose
+    package name or title contains it, ignoring case, spaces and punctuation. Anything else says what to try."""
+    if PACKAGE.fullmatch(name) and (state / name / "package.json").is_file():
+        return name
+    if Path(name).suffix.lower() in (".apk", ".apkm", ".apks", ".xapk"):
+        raise ValueError(f"No such file: {name}")
+    apps = installed_labels(state)
+    if not apps:
+        raise ValueError(f"Package is not installed: {name}. No apps are installed yet: asgard install FILE")
+    squash = lambda text: re.sub(r"[^a-z0-9]", "", text.lower())
+    wanted = squash(name)
+    found = [package for package, label in apps.items()
+             if wanted and (wanted in squash(package) or wanted in squash(label))]
+    if len(found) > 1:  # "2048" in two names: an app whose title is exactly the words given wins
+        exact = [package for package in found if wanted in (squash(apps[package]), squash(package.rsplit(".", 1)[-1]))]
+        found = exact if len(exact) == 1 else found
+    if fuzzy and len(found) == 1:
+        print(f"Using {found[0]}" + (f" ({apps[found[0]]})" if apps[found[0]] else ""), file=sys.stderr)
+        return found[0]
+    import difflib
+    guesses = found or difflib.get_close_matches(name, list(apps), n=3, cutoff=.5) or \
+        [package for label in difflib.get_close_matches(name, list(apps.values()), n=3, cutoff=.5) if label
+         for package, title in apps.items() if title == label]
+    if guesses:
+        shown = ", ".join(f"{package}" + (f" ({apps[package]})" if apps[package] else "") for package in guesses)
+        if len(found) > 1:
+            raise ValueError(f"{name!r} matches more than one app: {shown}")
+        raise ValueError(f"Package is not installed: {name}. Did you mean {shown}?" +
+                         ("" if fuzzy else " (this command needs the full package name)"))
+    raise ValueError(f"Package is not installed: {name}. See: asgard list")
+
+
 # App-owned locations in a guest root (credential and device storage, ART profiles, the
 # app-specific external directories), each holding one directory per package. OBBs are kept:
 # Android 10+ clears them, but nothing here could fetch them again.
@@ -965,10 +1015,10 @@ def add_launch_options(parser):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="asgard", description=__doc__)
     parser.add_argument("--state-root", type=Path, default=android_paths.state_root())
     commands = parser.add_subparsers(dest="command", required=True)
-    installer = commands.add_parser("install")
+    installer = commands.add_parser("install", help="install an .apk, .apkm, .apks or .xapk")
     installer.add_argument("input", type=Path)
     installer.add_argument("-d", "--allow-downgrade", action="store_true",
                            help="allow an older signed version, preserving app data and settings")
@@ -986,7 +1036,7 @@ def main():
     )
     installer.add_argument("--media-root", type=Path,
                            help="verified real Media NDK bundle from Tools/Android/android_media.py")
-    runner = commands.add_parser("run")
+    runner = commands.add_parser("run", help="run one app in the foreground (an APK file is installed first)")
     add_launch_options(runner)
     runner.add_argument("package")
     runner.add_argument("--session-id", help=argparse.SUPPRESS)
@@ -995,8 +1045,9 @@ def main():
     add_launch_options(starter)
     listing = commands.add_parser("list", aliases=["apps"], help="show installed apps and live sessions")
     listing.add_argument("--json", action="store_true")
-    for name in ("status", "stop", "logs", "resume"):
-        command = commands.add_parser(name)
+    for name, text in (("status", "show whether an app is running"), ("stop", "ask a running app to stop"),
+                       ("logs", "print the end of an app's session log"), ("resume", "bring a backgrounded app back")):
+        command = commands.add_parser(name, help=text)
         command.add_argument("package")
         if name == "status": command.add_argument("--json", action="store_true")
         if name == "logs":
@@ -1045,6 +1096,12 @@ def main():
     diagnostic.add_argument("--timeout", type=int, default=45, help="seconds per library, 1..300")
     args = parser.parse_args()
     try:
+        # Names typed by hand: part of a package name or title will do, except where a wrong guess destroys data.
+        fuzzy = args.command not in ("uninstall", "clear-data")
+        if args.command in ("run", "status", "stop", "logs", "resume", "config", "probe", "uninstall", "clear-data"):
+            args.package = resolve_package(args.state_root, args.package, fuzzy)
+        elif args.command == "start":
+            args.packages = [resolve_package(args.state_root, name, fuzzy) for name in args.packages]
         if args.command == "launcher":
             from android_launcher import show
             return show(args.state_root.resolve())
@@ -1215,7 +1272,7 @@ def main():
         zipfile.BadZipFile,
         subprocess.SubprocessError,
     ) as error:
-        print(f"Android package: {error}", file=sys.stderr)
+        print(f"Asgard: {error}", file=sys.stderr)
         return 1
 
 

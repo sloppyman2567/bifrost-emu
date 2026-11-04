@@ -98,10 +98,9 @@ def card_state(app, pending=None):
     return {"action": "play", "enabled": True, "badge": None, "text": "Play"}
 
 
-def launch_request(app, interpreter=False, trace=False):
+def launch_request(app, trace=False):
     """CLI arguments for one Play click; the saved per-app settings are applied by the command."""
     args = ["start", app["package"]]
-    if interpreter: args.append("--no-jit")
     # Call tracing follows ART methods, so NativeActivity apps launch without it.
     if trace and app.get("launcher") == "managed_activity": args += ["--trace-apk", "calls"]
     return args
@@ -1038,13 +1037,12 @@ def build(state, application, settings=None):
             layout.addWidget(self.developer_toggle)
             self.developer = QFrame(); self.developer.setObjectName("developer")
             panel = QVBoxLayout(self.developer); panel.setContentsMargins(12, 10, 12, 10)
-            self.interpreter = QCheckBox("Run in the interpreter (very slow; for debugging emulator bugs)")
             self.trace = QCheckBox("Trace Java framework calls (apps with a Java Activity only)")
             self.trace.setToolTip("NativeActivity apps launch without tracing")
             row = QHBoxLayout(); self.path = muted(QLabel()); self.path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             choose = QPushButton("Choose library…"); choose.clicked.connect(self.choose)
             row.addWidget(QLabel("Library folder:")); row.addWidget(self.path, 1); row.addWidget(choose)
-            for widget in (self.interpreter, self.trace): panel.addWidget(widget)
+            panel.addWidget(self.trace)
             panel.addLayout(row)
             self.path.setText(str(self.state)); self.developer.hide(); layout.addWidget(self.developer)
             return box
@@ -1055,7 +1053,7 @@ def build(state, application, settings=None):
         def toggle_developer(self, shown):
             self.developer_toggle.setArrowType(Qt.ArrowType.DownArrow if shown else Qt.ArrowType.RightArrow)
             self.developer.setVisible(shown)
-            if not shown: self.interpreter.setChecked(False); self.trace.setChecked(False)
+            if not shown: self.trace.setChecked(False)
             self.path.setText(str(self.state))
             for card in self.cards.values(): card.developer.setVisible(shown)
             self.render(True); self.update_drawer(force=True)
@@ -1260,7 +1258,7 @@ def build(state, application, settings=None):
                     self.refresh()
                 self.command(["resume", package], resumed)
                 return
-            args = launch_request(app, self.interpreter.isChecked(), self.trace.isChecked())
+            args = launch_request(app, self.trace.isChecked())
             self.pending[package] = "play"; self.render()
             def started(code, output):
                 self.pending.pop(package, None)

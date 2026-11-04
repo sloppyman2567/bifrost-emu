@@ -335,7 +335,8 @@ button accepts several files too), and a failure in one does not stop the rest. 
 size and sort order are remembered (Qt settings, `Asgard/Library`). The library refreshes every 1.5 s
 while the window is focused or an app is running, every 10 s otherwise, and not at all while
 it is minimized; it refreshes at once when the window is activated. Package IDs, library
-paths, interpreter launch and Java call tracing are grouped under Developer.
+paths and Java call tracing are grouped under Developer. (There is no interpreter checkbox: `asgard run --no-jit`
+covers that debugging use.)
 
 Install records now retain the base APK's label/version and a bounded launcher
 bitmap; older records recover labels and versions from their saved base report.

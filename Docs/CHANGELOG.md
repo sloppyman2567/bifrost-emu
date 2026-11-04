@@ -20,6 +20,20 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### `asgard` explains itself and takes short names (2026-11-04)
+
+- **`asgard --help` listed 19 command names and nothing else, `asgard run -h` showed that same list instead of the options of `run`, and a
+  mistyped app name ended in `[Errno 2] No such file or directory: '.../package.json'`.** `asgard` and `asgard --help` now print one line
+  per command and examples; `asgard COMMAND -h` shows that command's options (usage lines say `asgard`, not `android_package.py`); a
+  mistyped command suggests the closest one. Commands that take an app accept part of its package name or title (`asgard run subway`,
+  `asgard config 2048`), say which app they chose, and name the candidates when more than one fits. `uninstall` and `clear-data` still
+  need the full package name and answer a partial one with a suggestion, so a guess cannot delete the wrong app. A name that is not
+  installed points to `asgard list`; a missing `.apk` says `No such file`. Error lines start with `Asgard:` rather than `Android package:`.
+- **The library's Developer panel no longer has "Run in the interpreter".** It only added `--no-jit` to a launch; `asgard run --no-jit`
+  does the same from a terminal.
+- Tested for the name matching, the refusal to guess for deletion, the command table against `android_package.py`, and forwarded
+  `-h`. Not checked: the launcher window itself after removing the checkbox (no display session driven here).
+
 ### Menu entries with icons for installed apps (2026-11-04)
 
 - **Installed apps had no presence on the desktop: not in the application menu, and a game window had no application id for the

@@ -402,17 +402,66 @@ def install_for_run(script, state, arguments):
     return arguments[:index] + [match[1]] + arguments[index + 1:]
 
 
+# One line per command for `asgard --help`. android_package.py implements all but `realm`; a test checks the two agree.
+COMMANDS = {
+    "install": "install an .apk, .apkm, .apks or .xapk",
+    "run": "run an app in the foreground (an APK file is installed first)",
+    "start": "start apps in the background",
+    "list": "installed apps and what each is doing (also: apps)",
+    "apps": "same as list",
+    "status": "whether an app is running",
+    "stop": "ask a running app to stop",
+    "resume": "bring a backgrounded app back",
+    "logs": "the end of an app's session log",
+    "config": "show or change an app's saved settings",
+    "uninstall": "remove an app with its code and all its data",
+    "clear-data": "reset an app's saves and settings; it stays installed",
+    "launcher": "open the desktop app library",
+    "desktop": "put installed apps in the desktop's application menu, or take them out",
+    "refresh-icons": "read icons of apps installed by an older version",
+    "compat": "what is known to work, from the compatibility records",
+    "google": "sign in to Google (microG) and manage accounts",
+    "realm": "the shared service process apps join: start, stop, restart, status",
+    "probe": "load an app's native libraries without starting it (diagnostics)",
+}
+EXAMPLES = """\
+examples:
+  asgard install game.apk        install an app (also .apkm, .apks, .xapk)
+  asgard run game.apk            install it if needed, then run it
+  asgard list                    installed apps and what each is doing
+  asgard run arknights           part of a package name or an app's title is enough
+  asgard config arknights        its saved settings
+  asgard launcher                the desktop library
+  asgard COMMAND --help          the options of one command
+"""
+
+
+def help_text(parser):
+    width = max(map(len, COMMANDS))
+    return parser.format_help() + "\ncommands:\n" + "".join(
+        f"  {name:<{width}}  {text}\n" for name, text in COMMANDS.items() if name != "apps") + "\n" + EXAMPLES
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    # -h belongs to the command when one is given: `asgard run -h` lists the options of `run`.
+    parser = argparse.ArgumentParser(prog="asgard", description=__doc__, add_help=False, usage="asgard [options] COMMAND [...]")
     parser.add_argument("--state-root", type=Path, default=android_paths.state_root())
     parser.add_argument("--emu", type=Path, default=android_paths.emulator())
     parser.add_argument("--debug", metavar="CHANNELS", default="",
                         help="trace channels, comma-separated: " + ", ".join(DEBUG_CHANNELS) +
                              " (a running realm broker keeps the channels it started with)")
-    parser.add_argument("command", choices=("realm", "run", "start", "list", "apps", "status",
-                                           "stop", "resume", "logs", "install", "uninstall", "clear-data", "config", "compat",
-                                           "launcher", "refresh-icons", "desktop", "probe", "google"))
+    parser.add_argument("command", nargs="?", metavar="COMMAND")
     args, remainder = parser.parse_known_args()
+    if args.command is None or args.command == "help":
+        if args.command is None and any(value not in ("-h", "--help") for value in remainder):
+            parser.error(f"unrecognized arguments: {' '.join(remainder)}")
+        print(help_text(parser), end="")
+        return 0
+    if args.command not in COMMANDS:
+        import difflib
+        close = difflib.get_close_matches(args.command, COMMANDS, n=1)
+        parser.error(f"unknown command {args.command!r}" + (f" (did you mean {close[0]!r}?)" if close else "")
+                     + "; asgard --help lists the commands")
     state = args.state_root.resolve()
     try:
         os.environ.update(debug_environment(args.debug))
