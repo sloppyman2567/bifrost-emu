@@ -849,6 +849,34 @@ result oracles; suspension in a differential fixture fails the gate. CoreMark is
 compute workload, but it does not replace application workloads or targeted
 correctness regressions.
 
+### Where host time goes: `BIFROST_PROF` (2026-11-04)
+
+```bash
+BIFROST_PROF=1 BIFROST_PC_HIST=1 bifrost-emu -v program      # report at exit
+BIFROST_PROF=1 BIFROST_STATS_PERIOD=30 bifrost-emu program   # and every 30 s
+```
+
+`BIFROST_PROF=1` samples the host pc at 100 Hz of CPU time (`ITIMER_PROF`) and prints, besides the dispatch / translate /
+interpreter / other split, one line for the JIT samples: how many, on how many threads, how many were lost, and how they divide
+into the parts of a translated block. **Entry** loads the canonical register layout, **body** is the translated instructions,
+**exit** publishes state back, **cold** is recovery and exit code (the same four parts as the `entry`, `tier1-ir`, `exit` and
+`cold` rows of the allocation profile), and **shared stubs** is code outside any registered block: the frame-exit and cold-path
+stubs, and blocks loaded from the persistent cache, which are not registered. Below it come the busiest eight threads, and with
+`BIFROST_PC_HIST=1` the twenty hottest guest blocks (`pc=` values map to functions with `aarch64 objdump`).
+
+Samples go to a per-thread ring of 16,384 and are resolved into running totals whenever a report is printed, when a thread ends
+and when a code buffer is released. A thread that outlives 164 s of samples between two reports overwrites its oldest ones; those
+are counted as *lost*, not folded into a bucket, so `BIFROST_STATS_PERIOD` keeps a long run complete. The numbers are time, not
+instruction counts: a 10 ms sample says where the host was, not how often a block ran. Sampling and section registration
+(`Runtime/SampleProfile.cpp`) run only when the variable is set; otherwise the translator tests one flag per compiled
+instruction (its cost was not measured). `Tests/Unit/jit_profiler.cpp` checks the classification at
+each section boundary, across threads and after a code buffer is released, with synthetic samples and no timing.
+
+`BIFROST_REGALLOC_PROFILE=path` writes a row per emitted IR range (`%p` in the path is the process id). It is large: an Android
+game wrote 3.3 GB in 15 seconds. The file now stops at `BIFROST_REGALLOC_PROFILE_MB` (default 256 MiB, counting what the file
+already holds, since it is appended to), prints a notice on stderr and leaves a `# cap reached` line; blocks translated after that
+are not recorded.
+
 ### Fault, block-entry and FWD bisection traces
 
 These opt-in switches are parsed once in `Source/System/Core/DebugFlags.hpp`. Each

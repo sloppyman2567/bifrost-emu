@@ -26,6 +26,7 @@
 //   store_reg_to_vreg, verify_dirty_host_regs_ + check_* guards
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "Bifrost/Version.hpp"  // CODENAME
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>   // getenv, abort
@@ -42,7 +43,12 @@ void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t col
     static std::mutex output_mutex;
     static FILE* output = nullptr;
     static bool attempted = false;
+    // The file holds a row for every emitted IR range: a game wrote 3.3 GB in 15 seconds. Past the cap the blocks
+    // translated later are not recorded, and the file says so once.
+    static uint64_t written = 0;
+    static bool capped = false;
     std::lock_guard<std::mutex> lock(output_mutex);
+    if (capped) return;
     if (!attempted) {
         attempted = true;
         std::string path = dbg().regalloc_profile;
@@ -50,16 +56,27 @@ void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t col
             path.replace(pos, 2, std::to_string(getpid()));
         output = std::fopen(path.c_str(), "a");
         if (!output) { std::perror("register allocation profile"); return; }
-        if (std::ftell(output) == 0)
-            std::fprintf(output, "block_pc\tguest_pc\thost_begin\thost_end\tkind\tir_op\t"
+        written = static_cast<uint64_t>(std::max<long>(0, std::ftell(output)));  // the file is appended to: count what it has
+        if (written == 0)
+            written += std::fprintf(output, "block_pc\tguest_pc\thost_begin\thost_end\tkind\tir_op\t"
                 "gpr_spill\tgpr_reload\tgpr_evict\trematerialize\tvector_spill\tvector_reload\tvector_evict\treason\tcounter_scope\n");
     }
     if (!output) return;
+    if (written >= uint64_t(dbg().regalloc_profile_mb) << 20) {
+        capped = true;
+        std::fprintf(output, "# cap reached: blocks translated after this are not recorded (BIFROST_REGALLOC_PROFILE_MB=%zu)\n",
+                     dbg().regalloc_profile_mb);
+        std::fprintf(stderr, "[%s] register allocation profile reached %zu MiB; later blocks are not recorded "
+                     "(BIFROST_REGALLOC_PROFILE_MB)\n", CODENAME, dbg().regalloc_profile_mb);
+        std::fclose(output);
+        output = nullptr;
+        return;
+    }
     auto emit = [&](uint64_t pc, size_t first, size_t last, const char* kind, unsigned op,
                     const regalloc_stats_t& rs, uint64_t spills, uint64_t reloads,
                     uint64_t evictions, const char* reason, bool counted = true) {
         if (first == last) return;
-        std::fprintf(output, "0x%llx\t0x%llx\t0x%llx\t0x%llx\t%s\t%u\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\t%s\n",
+        written += std::fprintf(output, "0x%llx\t0x%llx\t0x%llx\t0x%llx\t%s\t%u\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\t%s\n",
             (unsigned long long)current_start_pc_, (unsigned long long)pc,
             (unsigned long long)(reinterpret_cast<uintptr_t>(code_buf_) + first),
             (unsigned long long)(reinterpret_cast<uintptr_t>(code_buf_) + last), kind, op,

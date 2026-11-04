@@ -108,6 +108,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     regalloc_stats_reset();
     allocation_events_.clear();
     allocation_profile_active_ = !dbg().regalloc_profile.empty();
+    profile_sections_active_ = dbg().cpu_profile;
+    profile_body_begin_ = SIZE_MAX;
     // Regions keep guarded-access cold paths inline (Tier-1 only defers).
     defer_guards_ = false;
     deferred_guards_.clear();
@@ -893,6 +895,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
 
     // ── Publish the region ───────────────────────────────────────────
     write_allocation_profile(block_start, hot_end, cold_begin, true);
+    note_profile_sections(block_start, hot_end, cold_begin);
     size_t size = code_buf_used_ - block_start;
     make_executable();
     prev_max_vreg_ = max_vreg_;  // next translate_block's clear_limit (BlockCompiler.cpp:326)

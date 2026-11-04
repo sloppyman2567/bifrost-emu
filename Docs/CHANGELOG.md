@@ -41,6 +41,19 @@ there (guided provisioning, update/reinstall) remain in progress.
   prints the same with the log path. Checked on the real session log and on a live run of the XAPK; ordinary exits stay quiet. The
   check is not answered: Bifrost does not fake a licence response, so the game still cannot run.
 
+### A profiler that works on every thread and says where in a block (2026-11-04)
+
+- **`BIFROST_PROF` resolved only the calling thread's samples, and charged shared stubs to whichever block came first.** Its
+  per-thread rings and the block lookup are replaced by `Runtime/SampleProfile.cpp`: a ring per thread that survives the thread, and
+  a registry of where each translated block's entry, body, exit and cold code are. The report now gives the JIT samples split into
+  those parts and the shared stubs, per thread and for the hottest guest blocks, and counts lost samples instead of hiding them
+  (details in [JIT.md](JIT.md#where-host-time-goes-bifrost_prof-2026-11-04)). On `bench_dispatch` 56.5% of the samples fell in block
+  exits and 43.5% in bodies (85 samples, one run): a first reading, not a measurement of a game.
+- **`BIFROST_REGALLOC_PROFILE` is capped** at `BIFROST_REGALLOC_PROFILE_MB` (default 256 MiB). An Android game had written 3.3 GB to
+  it in 15 seconds, enough to fill a tmpfs `/tmp` before it reached steady state.
+- `jit_profiler` gains a deterministic check of the report. Not checked: a full game session; the persistent cache (its blocks are
+  not registered, so their samples count as shared stubs); a JIT code-cache replacement during a long run.
+
 ### Apps linked against OpenGL ES 1.x load (2026-11-04)
 
 - **DevilutionX's APK installed and then exited with status 1:** its native library imports OpenGL ES 1.x names (SDL2's GLES1

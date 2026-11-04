@@ -20,6 +20,7 @@
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "Bifrost/Version.hpp"  // CODENAME
+#include "FrostJIT/Runtime/SampleProfile.hpp"
 #include <sys/mman.h>
 #include <cerrno>
 #include <cstring>   // memcpy
@@ -105,6 +106,7 @@ FrostJIT::FrostJIT() {
 }
 FrostJIT::~FrostJIT() {
     destroy_fault_recovery();
+    if (code_buf_ && dbg().cpu_profile) prof_release_code(code_buf_, code_buf_limit_);
     if (code_buf_) munmap(code_buf_, code_buf_limit_);
 }
 // ── W^X protection toggle (reference-counted) ──────────────────────────
@@ -146,6 +148,13 @@ void FrostJIT::make_executable() {
         // If mprotect fails, leave the buffer writable (better than crashing).
     }
 }
+void FrostJIT::note_profile_sections(size_t begin, size_t hot_end, size_t cold_begin) {
+    if (!profile_sections_active_ || code_buf_overflow_) return;
+    const size_t body = std::min(profile_body_begin_ == SIZE_MAX ? hot_end : profile_body_begin_, hot_end);
+    const uint64_t base = reinterpret_cast<uint64_t>(code_buf_);
+    prof_note_block({base + begin, base + body, base + hot_end, base + cold_begin, base + code_buf_used_, current_start_pc_});
+}
+
 void FrostJIT::flush_cache() {
     // Clear block metadata. We don't need writable access for this —
     // blocks_/back_refs_/hot_pc_counts_ are STL containers, not the code
@@ -165,62 +174,5 @@ void FrostJIT::flush_cache() {
     invalidate_dispatch_cache();
     tls_hot_pc_counts_.clear();  // clear hotness tracker (thread-local)
     // Retain code bytes; live function pointers must remain valid.
-}
-// ── dump_pc_histogram — where the JIT spends its time ───────────────────
-// The SIGPROF sampler buckets "jit" (RIP inside the code buffer) but can't
-// say WHICH guest code. This resolves a ring of sampled host RIPs back to
-// guest PCs using the block table: every BlockEntry.fn points into the
-// code buffer, so we sort blocks by their code offset and binary-search
-// each sampled RIP into the [start, next_start) range (the code buffer is
-// appended contiguously per block, so the next block's start is this
-// block's end). Prints the top-N hottest guest PCs as a histogram — feed
-// them to aarch64 objdump to map to functions (BIFROST_PROF=1 +
-// BIFROST_PC_HIST=1 enables).
-void FrostJIT::dump_pc_histogram(const uint64_t* rips, uint32_t n, uint32_t top) {
-    if (n == 0) {
-        fprintf(stderr, "[%s] pc-hist: no jit samples\n", CODENAME);
-        return;
-    }
-    std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
-    // Build sorted array of (code offset, guest pc).
-    std::vector<std::pair<uint64_t, uint64_t>> blocks;
-    blocks.reserve(blocks_.size());
-    for (auto& kv : blocks_) {
-        const BlockEntry& e = kv.second;
-        if (!e.fn) continue;  // interp_only blocks have no code
-        blocks.emplace_back(static_cast<uint64_t>(reinterpret_cast<const uint8_t*>(e.fn) - code_buf_),
-                            kv.first);
-    }
-    if (blocks.empty()) {
-        fprintf(stderr, "[%s] pc-hist: no translated blocks\n", CODENAME);
-        return;
-    }
-    std::sort(blocks.begin(), blocks.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-    // Accumulate per-guest-pc sample counts.
-    std::map<uint64_t, uint64_t> hist;
-    uint64_t base = reinterpret_cast<uint64_t>(code_buf_);
-    for (uint32_t i = 0; i < n; i++) {
-        if (rips[i] < base) continue;
-        uint64_t off = rips[i] - base;
-        // Binary search: largest block start <= off.
-        auto it = std::upper_bound(
-            blocks.begin(), blocks.end(), std::make_pair(off, UINT64_MAX),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-        if (it == blocks.begin()) continue;
-        --it;
-        hist[it->second]++;
-    }
-    // Sort by count descending, print top.
-    std::vector<std::pair<uint64_t, uint64_t>> sorted(hist.begin(), hist.end());
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
-    fprintf(stderr, "[%s] pc-hist: %u samples across %zu guest PCs (top %u):\n",
-            CODENAME, n, hist.size(), top);
-    for (uint32_t i = 0; i < top && i < sorted.size(); i++) {
-        fprintf(stderr, "  pc=0x%016llx x%llu\n",
-                static_cast<unsigned long long>(sorted[i].first),
-                static_cast<unsigned long long>(sorted[i].second));
-    }
 }
 } // namespace arm64emu

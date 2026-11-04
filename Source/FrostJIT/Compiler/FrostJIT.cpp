@@ -245,6 +245,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         for (int i = 0; i < vec_fixed_count_; ++i) vec_valid_[vec_pinned_[i]] = false;
         return ends;
     };
+    if (profile_sections_active_ && profile_body_begin_ == SIZE_MAX) profile_body_begin_ = code_buf_used_;
     if (!allocation_profile_active_) return compile();
     const size_t begin = code_buf_used_;
     const auto before = regalloc_stats_;

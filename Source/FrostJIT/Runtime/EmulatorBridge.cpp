@@ -7,6 +7,7 @@
 #include "System/Core/DebugFlags.hpp"
 #include "FrostJIT/Runtime/FallbackProfile.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "FrostJIT/Runtime/SampleProfile.hpp"
 #include "FrostJIT/Runtime/Generations.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include <csignal>
@@ -43,14 +44,8 @@ thread_local size_t         tls_prof_codebuf_size = 0;
 thread_local bool prof_in_run_block = false;
 thread_local bool prof_in_translate = false;
 thread_local bool prof_in_interp = false;
-// Per-thread ring of sampled RIPs that landed inside the JIT code buffer.
-// The handler is async-signal-safe (plain TLS array writes only); the
-// buffers are resolved to guest PCs at exit by prof_pc_histogram(). Fixed
-// size, power-of-two, wraps (dropping the oldest) — at 100 Hz a 4096-ring
-// holds 41s of samples.
-constexpr size_t PROF_RIP_MAX = 4096;
-thread_local uint64_t tls_prof_rips[PROF_RIP_MAX];
-thread_local uint32_t tls_prof_rip_head = 0;
+// Samples that land inside the JIT code buffer go to the thread's ring in SampleProfile.cpp, which resolves them
+// to a thread and a part of a translated block when the report is printed.
 namespace {
 struct ProfGuard {
     bool* f_;
@@ -73,8 +68,7 @@ static void prof_signal_handler(int, siginfo_t*, void* ctx) {
     uint64_t rip = static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RIP]);
     if (bifrost_prof_contains_ip(rip)) {
         prof_jit.fetch_add(1, std::memory_order_relaxed);
-        tls_prof_rips[tls_prof_rip_head & (PROF_RIP_MAX - 1)] = rip;
-        tls_prof_rip_head++;
+        prof_record_sample(rip);
     } else if (prof_in_translate) {
         prof_translate.fetch_add(1, std::memory_order_relaxed);
     } else if (prof_in_interp) {
@@ -107,6 +101,7 @@ void bifrost_prof_init(FrostJIT* jit) {
     // timer is installed once. The reserved range remains stable on growth.
     tls_prof_codebuf = jit->code_buf();
     tls_prof_codebuf_size = jit->code_buf_size();
+    prof_claim_thread();
     static std::once_flag installed;
     std::call_once(installed, prof_install);
 }
@@ -329,14 +324,10 @@ void Emulator::dump_prof_snapshot() {
                 static_cast<unsigned long long>(interp), 100.0 * interp / total,
                 static_cast<unsigned long long>(other), 100.0 * other / total);
     }
-    // BIFROST_PC_HIST=1: resolve the sampled jit-bucket RIPs to guest
-    // PCs and print the hottest ones (map to functions with aarch64
-    // objdump). Gated separately so the default run stays quiet.
-    static const bool pc_hist_ = (getenv("BIFROST_PC_HIST") != nullptr);
-    if (pc_hist_ && tls_prof_rip_head > 0) {
-        uint32_t n = std::min<uint32_t>(tls_prof_rip_head, (uint32_t)PROF_RIP_MAX);
-        jit_->dump_pc_histogram(tls_prof_rips, n);
-    }
+    // Where the JIT samples fell: thread, and entry/body/exit/cold of the block. BIFROST_PC_HIST=1 also lists the hottest
+    // guest blocks (map a pc to a function with aarch64 objdump). Gated separately so the default run stays short.
+    static const bool pc_hist = (getenv("BIFROST_PC_HIST") != nullptr);
+    prof_print(stderr, prof_collect(pc_hist ? 20 : 0), pc_hist);
 }
 // Periodic real-guest-throughput + block-structure reporter. The old
 // BIFROST_STATS_PERIOD "rolling MIPS" used the run-loop dispatch counter

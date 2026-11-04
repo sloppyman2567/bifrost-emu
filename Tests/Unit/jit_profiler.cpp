@@ -1,6 +1,7 @@
 // Deterministic checks of the sampler's actual per-thread range predicate.
 // No statistical sample thresholds or wall-clock timing assertions.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "FrostJIT/Runtime/SampleProfile.hpp"
 #include "System/Core/Emulator.hpp"
 #include <atomic>
 #include <cstdio>
@@ -47,6 +48,52 @@ int main() {
     // A worker's registration must not overwrite the main thread's range.
     check(bifrost_prof_contains_ip(pa));
     check(!bifrost_prof_contains_ip(pb));
+    // The sample report puts each pc into the part of its block, across threads, and keeps what threads leave behind.
+    // The process timer is stopped first so that no real sample can land among the synthetic ones.
+    {
+        struct itimerval off{};
+        setitimer(ITIMER_PROF, &off, nullptr);
+        const uint64_t base = pa + 0x1000, other = pa + 0x100;
+        // entry [0x00,0x10) body [0x10,0x40) exit [0x40,0x50) cold [0x50,0x60); a lower block registered later (unsorted)
+        prof_note_block({base, base + 0x10, base + 0x40, base + 0x50, base + 0x60, 0x1234});
+        prof_note_block({other, other + 0x10, other + 0x20, other + 0x30, other + 0x40, 0x5678});
+        a->sync_dispatch_cache();  // this thread gets a ring
+        for (uint64_t rip : {base + 0x00, base + 0x0f, base + 0x10, base + 0x3f, base + 0x40, base + 0x4f, base + 0x50,
+                             base + 0x5f, base + 0x60, pa + 0x5000})
+            prof_record_sample(rip);
+        std::thread worker([&] {
+            b->sync_dispatch_cache();
+            prof_record_sample(other + 0x18);  // body of the other block
+            prof_record_sample(other + 0x18);
+        });
+        worker.join();  // its ring is resolved as the thread ends
+        ProfReport report = prof_collect(8);
+        check(report.lost == 0);
+        // base: entry 2 (0x00,0x0f), body 2 (0x10,0x3f), exit 2 (0x40,0x4f), cold 2 (0x50,0x5f); 0x60 is the block's end
+        // and 0x5000 lies in no block: both are shared. other: body 2.
+        check(report.total.entry == 2 && report.total.body == 4 && report.total.exit == 2 && report.total.cold == 2 &&
+              report.total.shared == 2);
+        check(report.total.total() == 12);
+        check(report.hottest.size() == 2 && report.hottest[0].guest_pc == 0x1234 &&
+              report.hottest[0].counts.total() == 8 && report.hottest[1].guest_pc == 0x5678 &&
+              report.hottest[1].counts.body == 2);
+        unsigned exited = 0, live = 0;
+        for (const ProfThreadReport& t : report.threads) {
+            if (t.counts.total() == 2 && t.exited) ++exited;
+            if (t.counts.total() == 10 && !t.exited) ++live;
+        }
+        check(exited == 1 && live == 1);
+        // A code buffer that goes away takes its blocks with it: the same pc is then shared.
+        prof_release_code(a->code_buf(), a->code_buf_size());
+        prof_record_sample(base + 0x20);
+        report = prof_collect(8);
+        check(report.total.body == 4 && report.total.shared == 3);  // what was seen before stays in the totals
+        check(report.hottest.size() == 2 && report.hottest[0].counts.total() == 8);
+        // Lost samples are counted and not folded into a bucket: a ring holds fewer than this.
+        for (unsigned i = 0; i < 40000; ++i) prof_record_sample(pa + 0x5000);
+        report = prof_collect(0);
+        check(report.lost >= 40000 - 16384 && report.total.shared == 3 + 16384);
+    }
     // The optional allocation profile must report real IR provenance and
     // executable ranges, including operations constructed by shared helpers.
     if (const char* path = std::getenv("BIFROST_REGALLOC_PROFILE")) {

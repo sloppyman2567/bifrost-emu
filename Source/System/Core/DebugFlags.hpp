@@ -114,6 +114,7 @@ struct DebugFlags {
                         // interp pc (heap wild-write hunt; --no-jit).
     std::string fallback_profile; // BIFROST_FALLBACK_PROFILE=path: complete per-thread inventory ("%p" = host PID)
     std::string regalloc_profile; // BIFROST_REGALLOC_PROFILE=path: emitted IR ranges and allocation costs
+    size_t regalloc_profile_mb = 256; // BIFROST_REGALLOC_PROFILE_MB: per-process size cap of that file (1..65536 MiB)
     std::string write_trace;  // BIFROST_WRITE_TRACE=path — complete guest
                               // store log (addr/size/tid/guest pc/value)
     std::string write_trace_range;  // BIFROST_WRITE_TRACE_RANGE=lo:hi hex
@@ -187,6 +188,11 @@ struct DebugFlags {
         }
         if (const char* path = std::getenv("BIFROST_FALLBACK_PROFILE")) f.fallback_profile = host_path(path);
         if (const char* path = std::getenv("BIFROST_REGALLOC_PROFILE")) f.regalloc_profile = host_path(path);
+        if (const char* cap = std::getenv("BIFROST_REGALLOC_PROFILE_MB")) {
+            char* end = nullptr;
+            unsigned long mb = std::strtoul(cap, &end, 10);
+            if (end != cap && *end == '\0' && mb >= 1 && mb <= 65536) f.regalloc_profile_mb = static_cast<size_t>(mb);
+        }
         const bool all = env("BIFROST_TRACE");
         f.xtrace    = all || env("BIFROST_XTRACE");
         f.xfull     = all || env("BIFROST_XFULL");

@@ -143,6 +143,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     regalloc_stats_reset();
     allocation_events_.clear();
     allocation_profile_active_ = !dbg().regalloc_profile.empty();
+    profile_sections_active_ = dbg().cpu_profile;
+    profile_body_begin_ = SIZE_MAX;
     // Only clear the vreg arrays up to the previous block's max_vreg_+1,
     // not all 4096 entries. This saves ~12KB of writes per block
     // translation when blocks are small (typical: max_vreg_ ≈ 33-100).
@@ -1285,6 +1287,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
 
     defer_guards_ = false;
     write_allocation_profile(block_start, epilogue_off, recovery_start, false);
+    note_profile_sections(block_start, epilogue_off, recovery_start);
     if (code_buf_overflow_) {
         rewind_codegen(block_start);
         // The budget is fixed for this JIT. Cache the failure so every

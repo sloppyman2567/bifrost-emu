@@ -744,11 +744,6 @@ public:
     size_t code_buf_size()  const { return code_buf_limit_; }
     size_t cache_entries()  const { return blocks_.size(); }
     const uint8_t* code_buf() const { return code_buf_; }
-    // Resolve sampled host RIPs (from the SIGPROF jit-bucket ring) to guest
-    // PCs via the block table and print the hottest guest PCs. For
-    // diagnosing what the JIT spends its time executing. Takes the block
-    // table's shared lock internally.
-    void dump_pc_histogram(const uint64_t* rips, uint32_t n, uint32_t top = 20);
     // x8 value of the host-call trampolines (GraphicThunk/AudioThunk/DisplayThunk
     // SYSCALL_NUMBER; InterpreterBridge.cpp asserts they agree). Such SVCs stay
     // inline in generated code; every other SVC leaves it first (see
@@ -1618,6 +1613,11 @@ private:
     bool allocation_profile_active_ = false;
     void write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin,
                                   bool region);
+    // BIFROST_PROF: registers where the parts of the block just emitted are, for the sample report (SampleProfile.cpp).
+    // The body starts at the first IR instruction; everything before it is the entry that loads the register layout.
+    bool profile_sections_active_ = false;
+    size_t profile_body_begin_ = SIZE_MAX;
+    void note_profile_sections(size_t begin, size_t hot_end, size_t cold_begin);
     // Returns true if `r` is caller-saved (clobbered by C calls).
     // R12/R13/R14/R15 are callee-saved → preserved across calls.
     static constexpr bool is_caller_saved(int r) {
