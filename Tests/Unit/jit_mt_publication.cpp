@@ -64,10 +64,11 @@ static bool check_entry_order_loops(bool mt) {
     for (bool oversized : {false, true}) {
         auto e = std::make_unique<Emulator>();
         if (!e->mem().map_range(head, 4096)) return false;
-        std::vector<uint32_t> code(oversized ? 33 : 5, 0xd503201f);
-        // A tail that loops to itself, or cannot fit with the prefix, must
-        // retain the ordinary split at its known entry.
-        code.back() = oversized ? 0x17ffffe0 : 0x17fffffd;
+        std::vector<uint32_t> code(oversized ? 34 : 5, 0xd503201f);
+        // A tail that loops to itself, or one that leaves its 32-instruction block
+        // at the cap instead of branching to the head, must retain the ordinary
+        // split at its known entry. A 33-instruction loop is absorbed (twice the cap).
+        code.back() = oversized ? 0x17ffffdf : 0x17fffffd;
         e->mem().write(head, code.data(), code.size() * 4);
         if (!e->mem().mprotect_guest(head, 4096, 5)) return false;
         e->enable_jit();

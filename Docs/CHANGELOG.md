@@ -20,6 +20,12 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Ten more test scripts run in the suite, and what they found (2026-11-04)
+
+20 of 32 test scripts were in no suite. Ten now run in `run_tests.sh`. `jit_mt_publication` had failed unseen since the loop-body
+change; a Tier-2 trial could overwrite a frame return with NOPs, a crash reachable in MT mode, reproduced with `BIFROST_NO_CHAIN`
+(27% of runs, now 0 of 100); and the fallback profile could read its path after exit had destroyed it.
+
 ### An app with no ARM64 code says so (2026-11-04)
 
 An APK with only 32-bit ARM or x86 native code used to install and then fail inside the app ("Your hardware does not support this

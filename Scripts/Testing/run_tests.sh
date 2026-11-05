@@ -296,6 +296,17 @@ UNIT_TESTS=(
     "guest_memory|Scripts/Testing/test_guest_memory.sh||60|guest_memory: ALL PASS|HOST_JIT"
     # An idle guest thread costs well under 1 MiB of resident memory (the decode cache is mapped on first use).
     "thread_memory|Scripts/Testing/test_thread_memory.sh||60|thread_memory: ALL PASS|HOST_JIT"
+    # These scripts existed without a suite entry, which is how a stale jit_mt_publication check failed unseen.
+    "jit_mt|Scripts/Testing/test_jit_mt.sh||120|no-chain-skip: arithmetic and invalidation oracle passed|HOST_JIT"
+    "jit_mt_publication|Scripts/Testing/test_jit_mt_publication.sh||120|jit_mt_publication: immutable bytes and epoch exits PASS|HOST_JIT"
+    "exec_jit|Scripts/Testing/test_exec_jit.sh||60|PASS the pipeline still computes the right answer|HOST_JIT"
+    "fallback_profile|Scripts/Testing/test_fallback_profile.sh||60|fallback_profile: ALL PASS|HOST_JIT"
+    "guest_cwd|Scripts/Testing/test_guest_cwd.sh||60|PASS an absolute cd back out works|HOST_JIT"
+    "jit_profiler|Scripts/Testing/test_jit_profiler.sh||60|jit_profiler: ALL PASS|HOST_JIT"
+    "late_tls|Scripts/Testing/test_late_tls.sh||60|late TLS regression: PASS|HOST_JIT"
+    "rootfs_profile|Scripts/Testing/test_rootfs_profile.sh||60|PASS uninstall removes the profile|HOST_JIT"
+    "sdl_surface_format|Scripts/Testing/test_sdl_surface_format.sh||60|ALL PASS: copied SDL surface formats and palettes|HOST_JIT"
+    "window_stats|Scripts/Testing/test_window_stats.sh||150|window_stats regression: ALL PASS|HOST_JIT"
     "jit_tier2_mutex|Scripts/Testing/test_jit_tier2_mutex.sh||180|jit_tier2_mutex: 20 promotion-stress runs PASS|HOST_JIT"
     "jit_tier2_discovery|Scripts/Testing/test_jit_tier2_discovery.sh||180|jit_tier2_discovery: direct edges, capped bodies, exits and invalidation PASS|HOST_JIT"
     "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries and concurrent phases PASS|HOST_JIT"

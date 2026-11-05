@@ -5,6 +5,7 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 EMU=${BIFROST_EMU:-"$REPO_ROOT/bifrost-emu"}
+[[ $EMU = /* ]] || EMU="$PWD/$EMU"  # this script changes directory
 TOYBOX="$REPO_ROOT/Tests/Apps/toybox"
 for need in "$EMU" "$TOYBOX"; do [[ -e "$need" ]] || { echo "missing: $need" >&2; exit 2; }; done
 

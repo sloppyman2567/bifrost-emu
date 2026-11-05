@@ -37,7 +37,8 @@ struct Entry {
 struct Registry {
     std::mutex mutex, output_mutex;
     std::vector<std::unique_ptr<Entry>> entries;
-    Registry() { std::atexit(dump_interpreted_profile); }
+    // atexit runs in reverse: DebugFlags must exist first, or the dump reads its path after it is destroyed.
+    Registry() { (void)dbg(); std::atexit(dump_interpreted_profile); }
 };
 Registry& registry() {
     // Process lifetime: host thread-local caches and exit snapshots may outlive
