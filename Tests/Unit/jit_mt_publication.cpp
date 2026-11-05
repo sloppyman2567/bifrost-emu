@@ -136,6 +136,48 @@ static bool check_signal_return(bool mt) {
                 mt ? "MT" : "ST");
     return true;
 }
+// MT probes have no generation check: an entry made stale by an invalidation is
+// refused by the epoch compare, since the thread's lease predates the invalidation.
+static bool check_ibl_revocation() {
+    if (!FrostJIT::chain_skip_enabled()) return true;  // only chain-skip exits probe
+    auto e = std::make_unique<Emulator>();
+    constexpr uint64_t caller = 0x50000, target = 0x50100, stop = 0x60000;
+    e->mem().map_range(caller, 4096);
+    e->mem().mprotect_guest(caller, 4096, 7);
+    const uint32_t first[] = {0x91000421, 0xd65f03c0};   // add x1,x1,#1; ret
+    const uint32_t second[] = {0x91000442, 0xaa1303fe, 0xd65f03c0};  // add x2,x2,#1; mov x30,x19; ret
+    e->mem().write(caller, first, sizeof(first));
+    e->mem().write(target, second, sizeof(second));
+    e->enable_jit();
+    auto* j = e->jit();
+    j->enter_multithreaded();
+    CPU cpu;
+    cpu.jit_stop_pc = stop; cpu.regs[19] = stop;
+    auto reset = [&] { cpu.pc = caller; cpu.regs[30] = target; cpu.regs[1] = cpu.regs[2] = 0; };
+    for (unsigned k = 0; k < 4; ++k) {
+        reset();
+        for (unsigned n = 0; cpu.pc != stop && n < 100; ++n) cpu.pc = j->run_block(cpu, *e);
+        if (cpu.pc != stop) return false;
+    }
+    auto fn = j->lookup_or_translate(*e, caller);
+    // The control: on a live lease the probe reaches the target in native code.
+    // The JIT's own ticker can end a lease early, so a miss here earns a retry.
+    for (unsigned k = 0; k < 100 && cpu.regs[2] != 1; ++k) {
+        reset(); jit_grant_lease(cpu);
+        cpu.pc = fn(&cpu, e.get());
+    }
+    if (cpu.regs[2] != 1) { std::fputs("IBL entry was never live\n", stderr); return false; }
+    reset(); jit_grant_lease(cpu);
+    j->invalidate_range(target, 4);
+    cpu.pc = fn(&cpu, e.get());
+    if (cpu.regs[2] || cpu.pc != target) {
+        std::fprintf(stderr, "stale IBL entry ran: pc=0x%llx x2=%llu\n",
+                     (unsigned long long)cpu.pc, (unsigned long long)cpu.regs[2]);
+        return false;
+    }
+    std::puts("jit_mt_publication: invalidation revokes a leased IBL entry PASS");
+    return true;
+}
 static bool check_selfloops() {
     auto e = std::make_unique<Emulator>();
     constexpr uint64_t head = 0x30000, stop = 0x40000;
@@ -216,7 +258,9 @@ static bool check_selfloops() {
                     std::this_thread::yield();
                 }
             });
+            const uint64_t epoch_before = g_jit_preempt_epoch.load();
             cpu.pc = fn(&cpu, e.get());
+            const bool preempted = g_jit_preempt_epoch.load() != epoch_before;
             done.store(true, std::memory_order_relaxed);
             if (ticker.joinable()) ticker.join();
             const uint64_t n = cpu.regs[2];
@@ -232,7 +276,8 @@ static bool check_selfloops() {
             const bool pc_ok = finished ? cpu.pc == stop || cpu.pc == head + 16 : cpu.pc == head;
             double lo, hi;
             std::memcpy(&lo, &cpu.v_lo[0], 8); std::memcpy(&hi, &cpu.v_hi[0], 8);
-            if (!n || n > total || (mode == 0 && !finished) || ((mode == 1 || mode == 2) && n != 1) ||
+            // The JIT's own preemption ticker can end a mode 0 run early too.
+            if (!n || n > total || (mode == 0 && !finished && !preempted) || ((mode == 1 || mode == 2) && n != 1) ||
                 !pc_ok ||
                 cpu.regs[1] != n * (n - 1) / 2 + 7 + (kind == 4 ? n : 0) ||
                 cpu.regs[0] != (kind == 2 ? n : 5000 - n) ||
@@ -354,7 +399,7 @@ int main() {
     j->invalidate_all();
     if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
-    if (!check_signal_return(false) || !check_signal_return(true) || !check_selfloops() ||
+    if (!check_signal_return(false) || !check_signal_return(true) || !check_ibl_revocation() || !check_selfloops() ||
         !check_entry_order_loops(false) || !check_entry_order_loops(true) || !check_forward_chains()) {
         std::fputs("jit_mt_publication: FAILED after the checks that passed above\n", stderr);
         return 1;

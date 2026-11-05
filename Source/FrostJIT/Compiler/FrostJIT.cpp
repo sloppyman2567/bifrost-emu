@@ -29,6 +29,7 @@
 //   - Profiler.cpp      — lifecycle + stats counters
 //   - EmulatorBridge.cpp          — Emulator↔FrostJIT glue
 //   - CpuFeatures.cpp      — host CPU feature detection
+#include "FrostJIT/Runtime/Preemption.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "System/Core/Emulator.hpp"
@@ -174,6 +175,8 @@ void FrostJIT::IblTable::resize(uint32_t count) {
     std::fill_n(entries, count, IblEntry{~0ULL, 0});
     inline_cache_bytes_.fetch_add(count * sizeof(IblEntry), std::memory_order_relaxed);
     mask = count - 1;
+    byte_mask = uint64_t(mask) * sizeof(IblEntry);
+    epoch = &g_jit_preempt_epoch;
     replaced = 0;
 }
 

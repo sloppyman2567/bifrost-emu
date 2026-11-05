@@ -382,6 +382,8 @@ public:
     struct IblTable {
         uint64_t generation = 0;
         uint64_t mask = 0;            // entry count - 1
+        uint64_t byte_mask = 0;       // mask * sizeof(IblEntry): (pc << 2) & this is the entry's offset
+        const void* epoch = nullptr;  // &g_jit_preempt_epoch, nearer than a 10-byte constant in every probe
         IblEntry* entries = nullptr;
         uint32_t replaced = 0;        // targets replaced since the last resize
         IblTable() { resize(IBL_MIN_ENTRIES); }
@@ -390,6 +392,8 @@ public:
         IblTable& operator=(const IblTable&) = delete;
         void resize(uint32_t count);  // replaces the entries with an empty table
     };
+    static_assert(sizeof(IblEntry) == 16 && offsetof(IblEntry, pc) == 0);
+    static_assert(offsetof(IblTable, entries) < 128 && offsetof(IblTable, epoch) < 128);
     static thread_local std::unique_ptr<IblTable> tls_ibl_;
     void reset_ibl(uint64_t generation) {
         std::fill_n(tls_ibl_->entries, tls_ibl_->mask + 1, IblEntry{~0ULL, 0});

@@ -44,7 +44,8 @@ for seg in root.glob('*/*/seg-*.bin'):
 PY
 run damaged
 rm -rf "$work/cache"
-run budget BIFROST_JIT_DISK_CACHE_MB=1
+# Half of what the fixture records, whatever size the code generator makes it.
+run budget BIFROST_JIT_DISK_CACHE_KB=512
 budget_bytes=$(file_bytes "$work/cache")
 rm -rf "$work/cache"
 run writer1 & run writer2 & wait
@@ -90,8 +91,8 @@ damaged=stats('damaged')
 assert damaged['rejected']+damaged['misses']>0,damaged
 print(f"damaged files: {damaged['rejected']} rejected, {damaged['hits']} reused, results correct")
 budget=stats('budget')
-assert budget['over_budget']>0 and int(sys.argv[2])<=1<<20,(budget,sys.argv[2])
-print(f"1 MiB budget: {budget['recorded']} recorded, {budget['over_budget']} dropped, {sys.argv[2]} bytes on disk")
+assert budget['over_budget']>0 and int(sys.argv[2])<=512<<10,(budget,sys.argv[2])
+print(f"512 KiB budget: {budget['recorded']} recorded, {budget['over_budget']} dropped, {sys.argv[2]} bytes on disk")
 w1,w2,merged=stats('writer1'),stats('writer2'),stats('merged')
 assert w1['recorded']>1000 and w2['recorded']>1000 and merged['hits']>0.9*(merged['hits']+merged['misses']),(w1,w2,merged)
 print(f"concurrent writers: {w1['recorded']}+{w2['recorded']} recorded, next run {merged['hits']} hits")

@@ -31,6 +31,12 @@ Code fell from 64.5 to 61.0 bytes per guest instruction in that lobby, with no m
 `matrix`, `fib` and `jit_dispatch_cache_growth` moved by about 1% or less and `bench_dispatch` was 2.6% slower. Those are small workloads;
 other CPUs were not measured.
 
+The probe shrank instead, from 105 to 73 bytes in MT. It took 10.2% of the bytes on instruction-cache lines that missed in Arknights,
+in 28% of the hot blocks, and is still one per site. The table stores its mask pre-scaled (`byte_mask`), so one shift replaces two, and a
+pointer to the epoch replaces a 10-byte constant. MT probes drop the generation check: every generation change advances the epoch, and a
+native entry takes its lease before it syncs the table, so an entry made stale fails the epoch compare. Code without that compare (ST and
+timed sampling) keeps the check. On a generated stand-in matching Arknights' counters this was 1.7% faster, `bench_dispatch` about 2%.
+
 **Do not share the probe.** A stub for the lookup, with each block keeping its own `jmp [rcx+entry]`, reached 57.8 bytes per instruction and
 passed every test, and the lobby showed nothing, but `bench_dispatch` was 44% slower (0.96 s to 1.39 s). Sharing only the exit cost about
 3%, so the probe was the cause. The likely reason, not isolated, is the added `call`/`ret` and branches that lose per-site prediction.
@@ -268,7 +274,7 @@ statistics). `Runtime/CacheRecording.cpp` records and installs; `Runtime/Persist
   header is written; a header-less segment is treated as abandoned only after a minute. Once segments reach
   4 MiB or an eighth of `main.bin`, the next long-running process merges unlocked segments into a new
   `main.bin` (sorted index read in place, `rename` over the old one) in the background, keeping the most
-  recently used records within three quarters of the budget (`BIFROST_JIT_DISK_CACHE_MB`, default 512 per
+  recently used records within three quarters of the budget (`BIFROST_JIT_DISK_CACHE_MB`, or `_KB` for tests, default 512 per
   application). Opening the cache first removes other fingerprints' directories (older builds) down to
   three quarters of the budget, so a new build does not drop what it records. The cache stays off when a
   directory on the way is not the user's own or is group/world-writable, or when the filesystem has no

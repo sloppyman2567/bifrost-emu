@@ -20,6 +20,13 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Returns take less code, and a flaky test was wrong (2026-11-05)
+
+The inline lookup behind every `RET` and `BR` was 10% of the hot code that missed the instruction cache in Arknights. It shrinks
+from 105 to 73 bytes in MT, still one per site, which makes a large-footprint test program 1.7% faster and `bench_dispatch` about 2%.
+No game has been timed with it. `jit_mt_publication` failed about 6% of runs because it treated the JIT's own preemption ticker as an
+error, and it now also proves that an invalidation revokes a leased table entry.
+
 ### Tier-2's A/B trial tells the truth, and CoreMark keeps regions (2026-11-04)
 
 The trial was the reason Tier-2 kept nothing, more than the code it was judging. Each probe saved flags with `popfq`, which

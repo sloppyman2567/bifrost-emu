@@ -414,22 +414,28 @@ void FrostJIT::emit_indirect_branch_probe() {
     emit_load(RCX, CPU_REG, offsetof(CPU, jit_ibl_table));
     emit_test_reg(RCX, RCX);
     miss(0x4);                                                   // jz
-    // Table generation must equal this JIT's live dispatch generation.
-    emit_load(R11, RCX, offsetof(IblTable, generation));
-    emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(&cache_generation_));
-    note_host_reloc(HostReloc::JitObject);
-    emit_byte(0x4C); emit_byte(0x3B); emit_byte(0x1A);          // cmp r11,[rdx]
-    miss(0x5);                                                   // jne
+    // Every generation change advances the epoch, and every native entry takes
+    // its lease before it syncs the table, so a stale table fails the epoch
+    // compare below. Only code without that compare checks the generation.
+    if (preempt_by_epoch()) {
+        emit_byte(0x4C); emit_byte(0x8B); emit_byte(0x59);      // mov r11,[rcx+epoch]
+        emit_byte(offsetof(IblTable, epoch));
+    } else {
+        emit_load(R11, RCX, offsetof(IblTable, generation));
+        emit_mov_imm64(RDX, reinterpret_cast<uint64_t>(&cache_generation_));
+        note_host_reloc(HostReloc::JitObject);
+        emit_byte(0x4C); emit_byte(0x3B); emit_byte(0x1A);      // cmp r11,[rdx]
+        miss(0x5);                                               // jne
+    }
     // RCX = &entries[(pc >> 2) & mask]; each thread's table has its own size.
+    // That equals (pc << 2) & byte_mask, one shift fewer.
     emit_mov_reg(RDX, RAX);
-    emit_shift_imm8(RDX, 5, 2);                                  // shr rdx,2
-    emit_byte(0x48); emit_byte(0x23); emit_byte(0x91);          // and rdx,[rcx+mask]
-    emit_u32(offsetof(IblTable, mask));
-    emit_shift_imm8(RDX, 4, 4);                                  // shl rdx,4
+    emit_shift_imm8(RDX, 4, 2);                                  // shl rdx,2
+    emit_byte(0x48); emit_byte(0x23); emit_byte(0x51);          // and rdx,[rcx+byte_mask]
+    emit_byte(offsetof(IblTable, byte_mask));
     emit_load(RCX, RCX, offsetof(IblTable, entries));
     emit_add_reg(RCX, RDX);
-    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x41);          // cmp rax,[rcx+pc]
-    emit_byte(offsetof(IblEntry, pc));
+    emit_byte(0x48); emit_byte(0x3B); emit_byte(0x01);          // cmp rax,[rcx+pc]
     miss(0x5);                                                   // jne
     // Host-managed return boundary (SDL thread sentinel) → dispatcher.
     emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);          // cmp rax,[rbx+stop]
@@ -438,7 +444,9 @@ void FrostJIT::emit_indirect_branch_probe() {
     // Return to dispatch (signals, exit) regularly: the shared 256-edge budget
     // in ST, the read-only preemption epoch once MT code is published.
     if (preempt_by_epoch()) {
-        emit_preempt_compare(CPU_REG, R11);
+        emit_byte(0x45); emit_byte(0x8B); emit_byte(0x1B);      // mov r11d,[r11]
+        emit_byte(0x44); emit_byte(0x3B); emit_byte(0x9B);      // cmp r11d,[rbx+seen]
+        emit_u32(offsetof(CPU, jit_epoch_seen));
         miss(0x5);                                               // jne
     } else {
         emit_byte(0x83); emit_byte(0xAB);                        // sub dword [rbx+budget],1

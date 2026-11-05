@@ -254,6 +254,11 @@ bool PersistentCache::init(uint64_t fp_hi, uint64_t fp_lo, const std::string& pr
         const unsigned long long v = strtoull(mb, nullptr, 10);
         if (v >= 1 && v <= 1u << 20) budget_ = v << 20;
     }
+    // Finer than a test fixture's whole recording, which is under 1 MiB.
+    if (const char* kb = getenv("BIFROST_JIT_DISK_CACHE_KB")) {
+        const unsigned long long v = strtoull(kb, nullptr, 10);
+        if (v >= 1 && v <= 1u << 30) budget_ = v << 10;
+    }
     // The application: the Android package (Asgard sets it for every process
     // of a session), else the guest program's name and a hash of its path.
     std::string app;

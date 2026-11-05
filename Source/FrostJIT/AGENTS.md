@@ -127,7 +127,8 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   (ordinary frames, Tier-2 chain-outs) RBX is the caller's, so those pass RDI. Reading RBX there compares
   whatever the C++ caller left in it, which only crashes when the compiler happens to leave it null.
 - MT code stays bounded through `g_jit_preempt_epoch` (`Runtime/Preemption.hpp`), polled with loads only by
-  backward edges and IBL probes; new native entries must call `jit_grant_lease(cpu)`. Anything that retires or
+  backward edges and IBL probes; new native entries must call `jit_grant_lease(cpu)`, and before `bind_ibl`: MT
+  probes have no generation check, so a lease taken after the table sync could accept a stale entry. Anything that retires or
   replaces code advances the epoch (`invalidate_dispatch_cache`). Forward static edges carry no poll; ST code and timed
   Tier-2 sampling code keep the 256-edge budget (`preempt_by_epoch()`). MT `BL` calls through a revocable cell.
 - MT Tier-1 compiles run under the shared table lock (`translate_entry`).
