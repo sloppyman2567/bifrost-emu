@@ -184,6 +184,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             trial->candidate_entry = region_entry;
             trial->baseline.tier2_hot_logged = true;
             trial->candidate = rfn; trial->candidate_chain = chain_fn;
+            trial->sampling_cells = mt_active();
             trial->lo = trial_lo; trial->hi = trial_hi;
             trial->linear = trace.blocks.back().side_exits[0].first != trace.head_pc;
             const auto& last = trace.blocks.back();

@@ -1201,6 +1201,7 @@ private:
         std::mutex mutex;
         std::vector<double> ratios;
         bool sampling_revoked = false; // compiler lock only
+        bool sampling_cells = false;  // copies compiled in MT: data cells, no instruction slots
         unsigned attempts = 0;
         unsigned linear_entries = 0;
         std::atomic<unsigned> decision{0}; // 0 trial, 1 keep, 2 reject
