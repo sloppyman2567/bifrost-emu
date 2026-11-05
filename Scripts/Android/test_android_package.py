@@ -244,6 +244,52 @@ class UnsupportedAbiTests(unittest.TestCase):
             self.assertIn("this app is x86 only", result.stderr)
 
 
+class MediaRootTests(unittest.TestCase):
+    """The realm's 750 MB service root: on disk, not in /tmp, and removed once its broker is gone."""
+    def setUp(self):
+        import asgard
+        self.asgard = asgard
+        temporary = tempfile.TemporaryDirectory(prefix="bifrost-media-root-")
+        self.addCleanup(temporary.cleanup)
+        self.work = Path(temporary.name)
+        patcher = patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.work / "cache")})
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    def root(self, path):
+        root = self.asgard.media_root(path)
+        root.mkdir()
+        (root / ".asgard-media-root").write_text(str(path))
+        (root / "file").write_text("x")
+        return root
+
+    def test_it_is_under_the_cache_and_differs_per_socket(self):
+        first, second = (self.asgard.media_root(self.work / name) for name in ("a.sock", "b.sock"))
+        self.assertEqual(first.parent, self.work / "cache/bifrost/media-roots")
+        self.assertNotEqual(first, second)
+
+    def test_an_unusable_cache_falls_back_beside_the_socket(self):
+        (self.work / "cache").write_text("a file, not a folder")
+        self.assertEqual(self.asgard.media_root(self.work / "a.sock"), self.work / "a.sock.media-root")
+
+    def test_only_a_root_marked_for_that_socket_is_removed(self):
+        root = self.root(self.work / "a.sock")
+        self.asgard.remove_media_root(self.work / "other.sock", root)
+        self.assertTrue(root.exists())
+        self.asgard.remove_media_root(self.work / "a.sock")
+        self.assertFalse(root.exists())
+
+    def test_the_sweep_removes_dead_brokers_roots_and_keeps_live_ones(self):
+        live_path, dead_path, ours_path = self.work / "live.sock", self.work / "dead.sock", self.work / "ours.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(live_path)); listener.listen(1)
+        live, dead, ours = self.root(live_path), self.root(dead_path), self.root(ours_path)
+        foreign = dead.parent / "not-ours"; foreign.mkdir()
+        self.asgard.sweep_media_roots(ours)
+        self.assertTrue(live.exists()); self.assertTrue(ours.exists()); self.assertTrue(foreign.exists())
+        self.assertFalse(dead.exists())
+
+
 class ClockStyleTests(unittest.TestCase):
     """The library's times follow the user's clock: the desktop's own setting, then the locale."""
     MORNING, NOON, EVENING = (time.struct_time((2026, 11, 4, hour, 5, 0, 2, 308, 0)) for hour in (0, 12, 16))

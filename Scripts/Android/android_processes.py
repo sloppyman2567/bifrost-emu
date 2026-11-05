@@ -326,4 +326,7 @@ class ProcessHost:
                 self.broker.kill()
                 self.broker.wait()
             self.broker_log.close()
+        if self.broker:  # a private broker's service root goes with it
+            from asgard import remove_media_root
+            remove_media_root(self.socket)
         self.temporary.cleanup()

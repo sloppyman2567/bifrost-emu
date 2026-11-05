@@ -20,6 +20,11 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### A realm costs 750 MB less RAM, and cleans up after itself (2026-11-04)
+
+Each realm kept a 750 MB service root in `/tmp`, which is RAM on many systems, and never removed it. It now lives in
+`~/.cache/bifrost/media-roots/`, goes when the realm stops, and is swept after a crash.
+
 ### Ten more test scripts run in the suite, and what they found (2026-11-04)
 
 20 of 32 test scripts were in no suite. Ten now run in `run_tests.sh`. `jit_mt_publication` had failed unseen since the loop-body

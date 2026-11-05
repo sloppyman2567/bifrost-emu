@@ -840,6 +840,13 @@ Neither these tests nor presented frames establish video-ad playback: JNI
 provisioning is covered below; decoders and the video-surface path remain
 unfinished.
 
+### The realm's service root (2026-11-04)
+
+Each realm's media services run from a private 750 MB copy of the framework. It lives in `~/.cache/bifrost/media-roots/`, not beside
+the socket: only the socket needs a short `/tmp` path, and `/tmp` is often RAM. `realm stop` and a private broker's close remove it,
+and each start sweeps roots whose broker no longer answers, for one that was killed. If the cache cannot be written, it falls back
+beside the socket. Roots left in `/tmp/asgard-<uid>/` by older versions are not swept.
+
 ### RenderScript and audio effects (2026-11-04)
 
 `android.renderscript` runs on its CPU driver: `librs_jni`, `libRS_internal`, `libRSDriver`, `libRSCpuRef`, `libRSCacheDir` and

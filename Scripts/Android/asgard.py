@@ -104,6 +104,44 @@ def configure_media(root, mask):
     properties.write_text('\n'.join(retained) + '\n' + generated)
 
 
+def media_root(path):
+    """Where this broker's service root goes: on disk, because /tmp is often RAM and the root is 750 MB. Only the
+    socket has to stay in /tmp."""
+    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "bifrost/media-roots"
+    try:
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        return Path(str(path) + '.media-root')
+    return base / hashlib.sha256(str(path).encode()).hexdigest()[:24]
+
+
+def remove_media_root(path, root=None):
+    """Delete a broker's service root, only if it is ours for that socket."""
+    root = root or media_root(path)
+    marker = root / '.asgard-media-root'
+    if not root.is_symlink() and marker.is_file() and marker.read_text() == str(path):
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def broker_alive(path):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        try:
+            probe.connect(str(path))
+            return True
+        except OSError:
+            return False
+
+
+def sweep_media_roots(keep):
+    """A broker that was killed never removed its root. Each root names its socket, so a dead one is known."""
+    for root in keep.parent.iterdir():
+        marker = root / '.asgard-media-root'
+        if root != keep and not root.is_symlink() and marker.is_file():
+            socket_path = marker.read_text()
+            if not broker_alive(socket_path):
+                remove_media_root(socket_path, root)
+
+
 def ensure_media(path, emu, framework, art, adapters, mask):
     """Attach one independent verified service root to a broker, never to an app."""
     path, framework, art, adapters = map(Path, (path, framework, art, adapters))
@@ -117,14 +155,15 @@ def ensure_media(path, emu, framework, art, adapters, mask):
             mapper = adapters / 'managed/mapper.bifrost.so'
             if hashlib.sha256(mapper.read_bytes()).hexdigest() != manifest['files']['managed/mapper.bifrost.so']:
                 raise ValueError('Modified media mapper adapter')
-            root = Path(str(path) + '.media-root')
+            root = media_root(path)
+            sweep_media_roots(root)
             if root.exists() or root.is_symlink():
                 # Only replace our own previous service tree, under the realm lock.
                 marker = root / '.asgard-media-root'
                 if root.is_symlink() or not marker.is_file() or marker.read_text() != str(path):
                     raise ValueError('Refusing to replace foreign media service root')
                 shutil.rmtree(root)
-            with tempfile.TemporaryDirectory(prefix='.media-', dir=path.parent) as temporary:
+            with tempfile.TemporaryDirectory(prefix='.media-', dir=root.parent) as temporary:
                 fresh = Path(temporary) / 'rootfs'
                 shutil.copytree(framework, fresh, symlinks=True)
                 target = fresh / 'vendor/lib64/hw/mapper.bifrost.so'
@@ -266,6 +305,8 @@ def stop_realm(state, force=False):
         while time.monotonic() < deadline and broker_status(state)["state"] != "stopped":
             time.sleep(0.05)
         value["state"] = broker_status(state)["state"]
+        if value["state"] == "stopped":
+            remove_media_root(value["socket"])
     return value
 
 
