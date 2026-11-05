@@ -164,7 +164,8 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             if not play:
                 markers += ("ACTIVITY_FRAMEWORK_VSYNC_OK",)
             if "--webview" in probe_args or "--webview-renderer" in probe_args:
-                markers += ("ACTIVITY_WEBVIEW_PACKAGE_OK", "ACTIVITY_APPLICATION_RESTRICTIONS_OK",
+                markers += ("ACTIVITY_WEBVIEW_PACKAGE_OK", "ACTIVITY_NETWORK_SECURITY_OK",
+                            "ACTIVITY_APPLICATION_RESTRICTIONS_OK",
                             "ACTIVITY_WINDOW_CONTEXT_OK", "ACTIVITY_INPUT_METHOD_OK",
                             "ACTIVITY_WEBVIEW_CONSTRUCTION_OK", "ACTIVITY_WEBVIEW_OK")
             if "--webview-renderer" in probe_args:

@@ -269,6 +269,11 @@ processes, under its own UIDs:
   merged manifest repeats `InitializationProvider`, keeping the initializers on the first.
 - `updateServiceGroup` checks the connection exists and records nothing: groups only order
   isolated processes for a low-memory killer this runtime does not have.
+- Every bound process installs its app's network security config first, as
+  `handleBindApplication` does (`bindApplicationMetadata`). `systemMain()` leaves the `android`
+  package's config as the process default; an app that differs from it on cleartext and has a
+  `domain-config` would otherwise fail in `makeApplicationInner` with "Found multiple conflicting
+  per-domain rules", and other apps would run without their own config applied to TLS.
 - A service child is bound like `handleBindApplication`: it installs its
   process's providers, publishes them to the session, then runs
   `Application.onCreate`. Publication sends only provider class names and

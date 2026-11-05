@@ -20,6 +20,13 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Apps get their own network security config (2026-11-05)
+
+The launcher never installed an app's network security config, which Android does before loading app code. The process default
+stayed the `android` package's, so Zenless Zone Zero, which allows cleartext and has a `domain-config`, exited at startup with
+"Found multiple conflicting per-domain rules". It now starts and reaches Unity, then crashes with a null dereference in `libunity`
+during graphics startup; that is not fixed. Other apps now have their own config and its TLS rules applied.
+
 ### Returns take less code, and a flaky test was wrong (2026-11-05)
 
 The inline lookup behind every `RET` and `BR` was 10% of the hot code that missed the instruction cache in Arknights. It shrinks

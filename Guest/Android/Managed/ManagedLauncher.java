@@ -1250,6 +1250,32 @@ public final class ManagedLauncher {
         call(Process.class, "setArgV0", new Class<?>[] {String.class}, processName);
         if (!processName.equals(Application.getProcessName()))
             throw new AssertionError("Java process identity differs from bound application");
+        // handleBindApplication installs the app's network security config before its code loads.
+        // Without it the default stays systemMain()'s "android" config, and makeApplicationInner
+        // throws for an app that differs on cleartext and has per-domain rules (Zenless Zone Zero).
+        Object appContext = call(Class.forName("android.app.ContextImpl"), "createAppContext",
+                new Class<?>[] {thread.getClass(), loaded.getClass()}, thread, loaded);
+        call(Class.forName("android.security.net.config.NetworkSecurityConfigProvider"), "install",
+                new Class<?>[] {Context.class}, appContext);
+    }
+
+    // The bound app's config answers for TLS and cleartext, and its trust managers reach the CA store.
+    private static void checkNetworkSecurity() throws Exception {
+        if (!"AndroidNSSP".equals(java.security.Security.getProviders()[0].getName()))
+            throw new AssertionError("network security provider is not the highest priority");
+        Object policy = call(Class.forName("libcore.net.NetworkSecurityPolicy"), "getInstance", new Class<?>[0]);
+        if (!policy.getClass().getName().equals("android.security.net.config.ConfigNetworkSecurityPolicy"))
+            throw new AssertionError("network security policy was not installed");
+        javax.net.ssl.TrustManagerFactory factory = javax.net.ssl.TrustManagerFactory.getInstance(
+                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm());
+        factory.init((java.security.KeyStore) null);
+        for (javax.net.ssl.TrustManager manager : factory.getTrustManagers())
+            if (manager instanceof javax.net.ssl.X509TrustManager
+                    && ((javax.net.ssl.X509TrustManager) manager).getAcceptedIssuers().length != 0) {
+                System.out.println("ACTIVITY_NETWORK_SECURITY_OK");
+                return;
+            }
+        throw new AssertionError("default trust manager has no system CA certificates");
     }
 
     private static void checkApplicationRestrictions(Context context) {
@@ -1981,6 +2007,7 @@ public final class ManagedLauncher {
             accounts.attach(application, broadcasts::sendSystem);
             jobs.attach(application);
             context = application;
+            checkNetworkSecurity();
             checkApplicationRestrictions(context);
             android.view.Display display = context.getSystemService(android.hardware.display.DisplayManager.class)
                     .getDisplay(0);
