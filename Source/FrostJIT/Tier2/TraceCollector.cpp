@@ -24,9 +24,94 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>  // memcpy
+#include <map>
+#include <set>
 #include <vector>
 #include "FrostJIT/Tier2/Tier2Internal.hpp"
 namespace arm64emu {
+
+// Walks guest code from a hot head along every edge the branch profiles have
+// seen, then keeps the blocks that can get back to the head: the natural loop.
+// A cold or unprofiled edge, a call and an indirect branch leave the loop.
+// Coverage is the share of head entries that return to the head, with each
+// block's flow split by its branch counts. Emits nothing.
+FrostJIT::Tier2Loop FrostJIT::find_tier2_loop(Emulator& emu, uint64_t head_pc) {
+    constexpr unsigned MAX_WALK = 64, MAX_BLOCKS = 16, MAX_INSTS = 256, MAX_BLOCK_INSTS = 64;
+    constexpr double COLD_EDGE = 0.01;
+    struct Edge { uint64_t target; double weight; };
+    struct Node { std::vector<Edge> edges; unsigned insts = 0; };
+    std::map<uint64_t, Node> nodes;
+    auto scan = [&](uint64_t start, Node& node) {
+        uint64_t ip = start;
+        for (; node.insts < MAX_BLOCK_INSTS; ip += 4) {
+            node.insts++;
+            uint32_t word;
+            DecodedInst d;
+            try { word = emu.mem().fetch_inst(ip); } catch (...) { return; }
+            if (!decode(d, word)) return;
+            const uint64_t target = ip + static_cast<uint64_t>(d.imm);
+            switch (d.cls) {
+                case InstClass::Bcond: case InstClass::CBZ: case InstClass::CBNZ:
+                case InstClass::TBZ: case InstClass::TBNZ: {
+                    const auto profile = tier2_profiles_by_pc_.find(ip);
+                    if (profile == tier2_profiles_by_pc_.end()) return;
+                    const double taken = profile->second->taken.load(std::memory_order_relaxed);
+                    const double fallthrough = profile->second->fallthrough.load(std::memory_order_relaxed);
+                    const double total = taken + fallthrough;
+                    if (total < 16) return;
+                    if (taken / total >= COLD_EDGE) node.edges.push_back({target, taken / total});
+                    if (fallthrough / total >= COLD_EDGE) node.edges.push_back({ip + 4, fallthrough / total});
+                    return;
+                }
+                case InstClass::B: node.edges.push_back({target, 1}); return;
+                case InstClass::BL: case InstClass::BLR: case InstClass::BR: case InstClass::RET:
+                case InstClass::SVC: case InstClass::SVC_IMM: return;
+                default: break;
+            }
+        }
+        node.edges.push_back({ip, 1});  // the block cap: straight on
+    };
+    Tier2Loop loop;
+    std::vector<uint64_t> pending{head_pc};
+    while (!pending.empty()) {
+        const uint64_t pc = pending.back();
+        pending.pop_back();
+        if (nodes.count(pc)) continue;
+        if (nodes.size() >= MAX_WALK) { loop.capped = true; continue; }
+        Node& node = nodes[pc];
+        scan(pc, node);
+        for (const Edge& edge : node.edges) pending.push_back(edge.target);
+    }
+    std::set<uint64_t> body{head_pc};
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (const auto& [pc, node] : nodes) {
+            if (body.count(pc)) continue;
+            for (const Edge& edge : node.edges)
+                if (body.count(edge.target)) { body.insert(pc); grew = true; break; }
+        }
+    }
+    for (uint64_t pc : body) {
+        loop.insts += nodes[pc].insts;
+        for (const Edge& edge : nodes[pc].edges) loop.backedges += edge.target == head_pc;
+    }
+    loop.blocks.assign(body.begin(), body.end());
+    if (!loop.backedges) return loop;
+    if (loop.blocks.size() > MAX_BLOCKS || loop.insts > MAX_INSTS) loop.capped = true;
+    // Inner cycles feed flow back, so relax until the shares settle.
+    std::map<uint64_t, double> flow;
+    for (unsigned round = 0; round < 256; ++round) {
+        std::map<uint64_t, double> next{{head_pc, 1}};
+        loop.coverage = 0;
+        for (uint64_t pc : body)
+            for (const Edge& edge : nodes[pc].edges) {
+                if (edge.target == head_pc) loop.coverage += flow[pc] * edge.weight;
+                else if (body.count(edge.target)) next[edge.target] += flow[pc] * edge.weight;
+            }
+        flow = std::move(next);
+    }
+    return loop;
+}
 
 Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
     Tier2Trace trace;

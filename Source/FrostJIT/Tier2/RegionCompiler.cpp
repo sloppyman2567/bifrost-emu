@@ -436,8 +436,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     };
     auto emit_trial_backedge = [&] {
         if (!tier2_sampling_compile_) return;
-        // Preserve the hot path's host flags and codegen flag state. The
-        // quota exit flushes loop-carried pins before returning to the timer.
+        // The hot path keeps its host flags without saving them (see
+        // emit_tier2_work_probe), and the codegen flag state is restored
+        // below. The quota exit flushes loop-carried pins before returning
+        // to the timer.
         const bool saved_host = flags_in_host_, saved_sub = flags_from_sub_;
         const uint16_t saved_dirty = dirty_host_regs_;
         int saved_regs[16]; memcpy(saved_regs, reg_vreg_, sizeof(saved_regs));
@@ -445,16 +447,16 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         std::vector<bool> saved_vdirty(vreg_dirty_, vreg_dirty_ + 4096);
         emit_push(RCX);
         emit_load(RCX, CPU_REG, offsetof(CPU, jit_tier2_trial));
-        emit_byte(0xE3); emit_byte(15); // inactive: skip flag save/quota check
-        emit_byte(0x9C);
-        emit_byte(0x83); emit_byte(0xAB);
-        emit_u32(offsetof(CPU, jit_tier2_trial_remaining)); emit_byte(1);
-        const size_t quota = emit_jcc_rel32_placeholder(4);
-        emit_byte(0x9D);
+        emit_byte(0xE3); emit_byte(18);    // jrcxz: inactive, skip the quota
+        emit_byte(0x8B); emit_byte(0x8B);  // mov ecx,[rbx+remaining]
+        emit_u32(offsetof(CPU, jit_tier2_trial_remaining));
+        emit_byte(0x8D); emit_byte(0x49); emit_byte(0xFF);  // lea ecx,[rcx-1]
+        emit_byte(0x89); emit_byte(0x8B);  // mov [rbx+remaining],ecx
+        emit_u32(offsetof(CPU, jit_tier2_trial_remaining));
+        emit_byte(0x67); emit_byte(0xE3); emit_byte(6);  // jecxz: quota spent
         emit_pop(RCX);
         const size_t hot = emit_jmp_rel32_placeholder();
-        const size_t cold = code_buf_used_;
-        emit_byte(0x9D); emit_pop(RCX);
+        emit_pop(RCX);
         materialize_flags_to_pstate();
         flush_all_vregs_keep();
         vec_cache_writeback_all_pinned(false);
@@ -466,7 +468,6 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX); emit_ret();
-        patch_jcc_rel32(quota, static_cast<int32_t>(cold - (quota + 6)));
         patch_jmp_rel32(hot, static_cast<int32_t>(code_buf_used_ - (hot + 5)));
         flags_in_host_ = saved_host; flags_from_sub_ = saved_sub;
         dirty_host_regs_ = saved_dirty;
@@ -512,7 +513,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         while (blk < nblk && i > rblocks[blk].term) blk++;
         const IRInst& inst = region_ir[i];
         cur_op_index_ = i;
-        if (i == rblocks[blk].start) emit_tier2_work_probe(rblocks[blk].pc, rblocks[blk].inst_count);
+        if (i == rblocks[blk].start) emit_tier2_work_probe(rblocks[blk].inst_count);
 
         if (i == rblocks[blk].term) {
             // ── Terminating conditional branch (manual) ─────────────
@@ -767,6 +768,42 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // jumps straight here, so the registers still hold the branch-era
     // values; the flush stores exactly those to cpu.regs[]/stack. Each cold
     // exit returns to the C dispatcher (ret) with RAX = the side-exit PC.
+    // Exit feedback stays in generated code: leaving through C++ and the
+    // dispatcher on every side exit cost a short loop more than the region
+    // saved. Mirrors tier2_region_feedback; ZF clear asks for the C++ path,
+    // which takes a slot from another region and retrains at the threshold.
+    // Sampling copies skip it: feedback ignores a running trial.
+    const bool native_feedback = tier2_current_monitor_ && !tier2_sampling_compile_;
+    size_t feedback_stub = 0;
+    if (native_feedback) {
+        const size_t slot = offsetof(CPU, jit_tier2_feedback) +
+            tier2_current_monitor_->slot * sizeof(CPU::Tier2FeedbackSlot);
+        const auto owner = static_cast<uint32_t>(slot + offsetof(CPU::Tier2FeedbackSlot, owner));
+        const auto credit = static_cast<uint32_t>(slot + offsetof(CPU::Tier2FeedbackSlot, credit));
+        const auto pressure = static_cast<uint32_t>(slot + offsetof(CPU::Tier2FeedbackSlot, pressure));
+        feedback_stub = code_buf_used_;
+        emit_mov_imm64(RAX, tier2_current_monitor_->identity);
+        emit_byte(0x48); emit_byte(0x39); emit_byte(0x83); emit_u32(owner);  // cmp [rbx+owner],rax
+        const size_t foreign = emit_jcc_rel32_placeholder(5);
+        emit_byte(0x83); emit_byte(0xBB); emit_u32(credit); emit_byte(0);    // cmp dword [rbx+credit],0
+        const size_t no_credit = emit_jcc_rel32_placeholder(4);
+        emit_byte(0xC7); emit_byte(0x83); emit_u32(credit); emit_u32(0);     // mov dword [rbx+credit],0
+        emit_byte(0x83); emit_byte(0xBB); emit_u32(pressure); emit_byte(0);  // cmp dword [rbx+pressure],0
+        const size_t settled = emit_jcc_rel32_placeholder(4);
+        emit_byte(0x83); emit_byte(0xAB); emit_u32(pressure); emit_byte(1);  // sub dword [rbx+pressure],1
+        const size_t done = emit_jmp_rel32_placeholder();
+        patch_jcc_rel32(no_credit, static_cast<int32_t>(code_buf_used_ - (no_credit + 6)));
+        emit_byte(0x83); emit_byte(0xBB); emit_u32(pressure); emit_byte(63); // cmp dword [rbx+pressure],63
+        const size_t threshold = emit_jcc_rel32_placeholder(3);
+        emit_byte(0x83); emit_byte(0x83); emit_u32(pressure); emit_byte(1);  // add dword [rbx+pressure],1
+        patch_jcc_rel32(settled, static_cast<int32_t>(code_buf_used_ - (settled + 6)));
+        patch_jmp_rel32(done, static_cast<int32_t>(code_buf_used_ - (done + 5)));
+        emit_byte(0x31); emit_byte(0xC0); emit_ret();                        // xor eax,eax: ZF set
+        for (size_t p : {foreign, threshold})
+            patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+        emit_mov_imm32_zext(RAX, 1);
+        emit_byte(0x85); emit_byte(0xC0); emit_ret();                        // test eax,eax: ZF clear
+    }
     std::vector<size_t> cold_off;
     cold_off.reserve(cold.size());
     for (const auto& c : cold) {
@@ -786,7 +823,19 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         materialize_flags_to_pstate();
         flush_all_vregs();
         emit_flush_all_pins();
-        if (tier2_current_monitor_ && c.side_pc != trace.head_pc) {
+        const bool feedback = native_feedback && c.side_pc != trace.head_pc;
+        size_t needs_cpp = 0;
+        if (feedback) {
+            emit_byte(0xE8);  // call feedback_stub
+            emit_u32(static_cast<uint32_t>(feedback_stub - (code_buf_used_ + 4)));
+            needs_cpp = emit_jcc_rel32_placeholder(5);
+        }
+        if (!emit_chainout_exit(c.side_pc)) {
+            emit_mov_imm_to_rax(c.side_pc);
+            emit_shared_exit_jmp();
+        }
+        if (feedback) {
+            patch_jcc_rel32(needs_cpp, static_cast<int32_t>(code_buf_used_ - (needs_cpp + 6)));
             emit_mov_imm_to_rax(c.side_pc);
             emit_store(CPU_REG, PC_OFF, RAX);
             emit_mov_reg(RDI, CPU_REG);
@@ -797,9 +846,6 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             emit_pop(R15); emit_pop(R14); emit_pop(R13);
             emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
             emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3); // tail jmp r11
-        } else if (!emit_chainout_exit(c.side_pc)) {
-            emit_mov_imm_to_rax(c.side_pc);
-            emit_shared_exit_jmp();
         }
     }
 

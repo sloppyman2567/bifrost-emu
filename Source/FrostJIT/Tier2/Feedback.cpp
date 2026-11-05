@@ -77,6 +77,16 @@ void FrostJIT::retire_tier2_region_locked(uint64_t pc) {
     victims.erase(std::unique(victims.begin(), victims.end()), victims.end());
     for (const auto& range : ranges)
         invalidate_tier2_profiles(range.first, range.first + range.second * 4ull);
+    // Retirement forgets each block's predecessors. Left alone, they reach
+    // these blocks through the dispatcher for good: 69x the dispatches on
+    // CoreMark once rejected regions retried a shorter path.
+    for (uint64_t victim : victims) {
+        const auto refs = back_refs_.find(victim);
+        if (refs != back_refs_.end())
+            tier2_rebuild_sources_.insert(tier2_rebuild_sources_.end(), refs->second.begin(), refs->second.end());
+    }
+    tier2_rebuild_queue_.insert(tier2_rebuild_queue_.end(), victims.begin(), victims.end());
+    tier2_settle_pending_.store(true, std::memory_order_release);
     retire_blocks_locked(victims);
 }
 }  // namespace arm64emu

@@ -693,7 +693,9 @@ int main(int argc, char** argv) {
         }
         // Repeated phase flips must keep exact results and eventually stop
         // speculative churn instead of compiling a new region indefinitely.
-        for (unsigned phase=0; phase<4; ++phase)
+        // Real timing decides the trials here, so the bounded retries end at
+        // a flip that varies with host load: allow them all, then require quiet.
+        for (unsigned phase=0; phase<16; ++phase)
             if (!adaptive_run(phase & 1,4000)) {
                 std::fputs("oscillating phase result mismatch\n",stderr); return 1;
             }

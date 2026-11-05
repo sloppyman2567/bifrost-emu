@@ -9,6 +9,7 @@
 #include <time.h>
 #include <algorithm>  // std::find
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>  // memcpy
 #include <vector>
@@ -78,7 +79,44 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                 counter->second->hits.store(0, std::memory_order_relaxed);
             return;
         }
+        // Entries over a lifetime say nothing about now: a game passes that bar
+        // on thousands of blocks, and trials for them filled the 32 MiB budget.
+        // Time a second window, and compile only heads doing real work per
+        // second. BIFROST_TIER2_HITS asks for a fixed count and skips this.
+        static const bool rate_gate = !getenv("BIFROST_TIER2_HITS");
+        if (rate_gate) {
+            const auto counter = hot_counter_sites_.find(site);
+            if (counter == hot_counter_sites_.end()) return;
+            HotCounter& hot = *counter->second;
+            const uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const uint64_t start = hot.window_start_ns;
+            hot.window_start_ns = now;
+            if (!start) { hot.hits.store(0, std::memory_order_relaxed); return; }
+            const double rate = double(tier2_hits_threshold()) * it->second.instr_count * 1e9 / double(now - start + 1);
+            // About 1% of what one host core runs. Arknights: 72,594 windows,
+            // 2,355 heads above this; region code fell from 33.5 to 3.7 MB.
+            constexpr double min_rate = 1e7;
+            if (dbg().tier2_trace_verbose)
+                std::fprintf(stderr, "[tier2] rate head=0x%llx insts_per_sec=%.0f\n", (unsigned long long)pc, rate);
+            if (rate < min_rate) {
+                if (++hot.slow_windows < 3) { hot.hits.store(0, std::memory_order_relaxed); return; }
+                it->second.tier2_hot_logged = true;
+                tier2_counter_disable(it->second.tier2_counter_off, it->second.tier2_counter_len);
+                tier2_settle_locked(pc);
+                return;
+            }
+        }
         Tier2Trace trace = collect_tier2_trace(emu, pc);
+        if (dbg().tier2_graph) {
+            const Tier2Loop loop = find_tier2_loop(emu, pc);
+            std::fprintf(stderr, "[tier2-graph] head=0x%llx blocks=%zu insts=%u backedges=%u coverage=%.3f capped=%d "
+                         "linear_survival=%.3f linear_blocks=%zu body=", (unsigned long long)pc, loop.blocks.size(),
+                         loop.insts, loop.backedges, loop.coverage, loop.capped, trace.path_probability,
+                         trace.blocks.size());
+            for (uint64_t block : loop.blocks) std::fprintf(stderr, "%llx,", (unsigned long long)block);
+            std::fprintf(stderr, "\n");
+        }
         // Samples lag the entry counter by one iteration. If a constituent
         // is still cold, retry at most three hotness windows before declining.
         if (!trace.fully_profiled && ++it->second.tier2_attempts < 3) {
@@ -201,11 +239,6 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             trial->sampling_cells = mt_active();
             trial->lo = trial_lo; trial->hi = trial_hi;
             trial->linear = trace.blocks.back().side_exits[0].first != trace.head_pc;
-            const auto& last = trace.blocks.back();
-            const auto& term = last.ir.insts.back();
-            trial->linear_exit = term.op == IROp::BRCOND_FALLTHRU
-                ? term.fallthru_params().target
-                : (last.follows_taken ? last.hot_successor : last.pc + last.ir.count * 4ull);
             trial->baseline_blocks = std::move(baseline_graph);
             trial->baseline_edges = old_source_edges;
             for (size_t k = old_edge_count; k < mt_edges_.size(); ++k)

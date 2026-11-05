@@ -630,6 +630,8 @@ public:
     // the running block. A code change forgets the decision, as it does the profile.
     std::set<uint64_t> tier2_settled_;
     std::vector<uint64_t> tier2_settle_queue_;
+    // Retired region blocks and the predecessors retirement forgot, to rebuild at a dispatch boundary.
+    std::vector<uint64_t> tier2_rebuild_queue_, tier2_rebuild_sources_;
     std::atomic<bool> tier2_settle_pending_{false};
     bool tier2_settling_ = false;  // compiler lock; blocks are retired and not yet back
     void tier2_settle_locked(uint64_t pc);
@@ -653,6 +655,9 @@ public:
     struct HotCounter {
         std::atomic<uint32_t> enabled{1}, hits{0};
         bool patchable = false;  // single-thread prologue: disabled by a jump over it
+        // Guest-work rate gate: when the current window began, and how many came up short.
+        uint64_t window_start_ns = 0;
+        unsigned slow_windows = 0;
     };
     static_assert(std::atomic<uint64_t>::is_always_lock_free);
     static_assert(std::atomic<uint32_t>::is_always_lock_free);
@@ -835,6 +840,9 @@ public:
     // hot-head fire site holds the exclusive lock). Implemented in
     // Tier2/TraceCollector.cpp.
     Tier2Trace collect_tier2_trace(Emulator& emu, uint64_t head_pc);
+    // The natural loop around a hot head, both sides of its branches, for graph regions.
+    struct Tier2Loop { std::vector<uint64_t> blocks; unsigned insts = 0, backedges = 0; double coverage = 0; bool capped = false; };
+    Tier2Loop find_tier2_loop(Emulator& emu, uint64_t head_pc);
     // Tier-2 region compilation (ROADMAP #14, Phase 1 step 3 / M1). Compiles
     // a collected trace as ONE x86 function with ONE region-wide register
     // allocation: the blocks' IR is vreg-remapped to a single space and
@@ -879,7 +887,7 @@ public:
     void tier2_region_feedback(CPU& cpu, void* monitor);
     uint64_t tier2_measure(CPU& cpu, Emulator& emu, void* trial);
 private:
-    void emit_tier2_work_probe(uint64_t pc, unsigned count);
+    void emit_tier2_work_probe(unsigned count);
     void finish_tier2_trial(Tier2Trial& trial, bool keep);
     void retire_tier2_region_locked(uint64_t pc);
     void redirect_tier2_head_locked(uint64_t pc);
@@ -1205,7 +1213,6 @@ private:
         uint64_t (*candidate_chain_sample)(CPU*, Emulator*) = nullptr;
         uint64_t lo = 0, hi = 0;
         bool linear = false;
-        uint64_t linear_exit = 0;
         std::vector<std::pair<uint64_t, uint64_t (*)(CPU*, Emulator*)>> baseline_blocks;
         std::vector<MtEdge*> baseline_edges, candidate_edges, sampling_edges;
         std::vector<std::pair<uint64_t, BlockEntry>> sampling_blocks;
@@ -1214,7 +1221,7 @@ private:
         bool sampling_revoked = false; // compiler lock only
         bool sampling_cells = false;  // copies compiled in MT: data cells, no instruction slots
         unsigned attempts = 0;
-        unsigned linear_entries = 0;
+        unsigned entries = 0;
         std::atomic<unsigned> decision{0}; // 0 trial, 1 keep, 2 reject
     };
     std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;

@@ -48,7 +48,7 @@ void FrostJIT::tier2_settle_locked(uint64_t pc) {
 // forgets them, and the dispatcher only relinks a broken fall-through edge: a
 // hot block left to that ran through dispatch on every entry, 4x slower.
 void FrostJIT::tier2_settle_queued(Emulator& emu) {
-    std::vector<uint64_t> victims, sources;
+    std::vector<uint64_t> victims, sources, rebuilt;
     {
         std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
         tier2_settle_pending_.store(false, std::memory_order_relaxed);
@@ -62,38 +62,55 @@ void FrostJIT::tier2_settle_queued(Emulator& emu) {
         tier2_settle_queue_.clear();
         tier2_settling_ = true;
         retire_blocks_locked(victims);
+        rebuilt.swap(tier2_rebuild_queue_);
+        sources.insert(sources.end(), tier2_rebuild_sources_.begin(), tier2_rebuild_sources_.end());
+        tier2_rebuild_sources_.clear();
+        for (uint64_t pc : rebuilt)
+            if (std::find(victims.begin(), victims.end(), pc) == victims.end() && !blocks_.count(pc))
+                victims.push_back(pc);
     }
     for (uint64_t pc : victims) {
-        BlockEntry entry;
-        translate_entry(emu, pc, entry);
+        // A retired region's code may have been unmapped since: nothing to rebuild.
+        try {
+            BlockEntry entry;
+            translate_entry(emu, pc, entry);
+        } catch (...) {}
     }
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     tier2_settling_ = false;
     sources.insert(sources.end(), victims.begin(), victims.end());
+    // Retirement dropped these predecessors from the index too. A relinked
+    // slot left out of it could not be unpatched by the next retirement, and
+    // would keep jumping into retired code.
+    auto track = [&](uint64_t target, uint64_t source) {
+        if (!target) return;
+        const auto refs = back_refs_.find(target);
+        if (refs == back_refs_.end() ||
+            std::find(refs->second.begin(), refs->second.end(), source) == refs->second.end())
+            add_back_ref(target, source);
+    };
     for (uint64_t pc : sources) {
         const auto block = blocks_.find(pc);
-        if (block != blocks_.end()) try_chain_block(pc, block->second);
+        if (block == blocks_.end()) continue;
+        try_chain_block(pc, block->second);
+        track(block->second.chain_target_pc, pc);
+        if (block->second.has_taken_chain_slot) track(block->second.taken_chain_target_pc, pc);
     }
     for (uint64_t pc : victims) chain_back_references(pc);
 }
 
-static uint64_t tier2_probe_hash(uint64_t pc) {
-    pc ^= pc >> 33; pc *= 0xff51afd7ed558ccdull;
-    pc ^= pc >> 33; pc *= 0xc4ceb9fe1a85ec53ull;
-    pc ^= pc >> 33;
-    return pc;
-}
-
 // Only private sampling copies carry probes. Public Tier-1 and selected
 // region code has no dormant guard, counter, or scratch-register save.
-void FrostJIT::emit_tier2_work_probe(uint64_t pc, unsigned count) {
+// A probe leaves the host flags alone without saving them: popfq costs more
+// than the loops being timed, and would decide the trial by itself.
+void FrostJIT::emit_tier2_work_probe(unsigned count) {
     if (!tier2_sampling_compile_) return;
-    emit_push(RAX); emit_byte(0x9C);
-    emit_byte(0x81); emit_byte(0x83);
-    emit_u32(offsetof(CPU, jit_tier2_trial_work)); emit_u32(count);
-    emit_mov_imm_to_rax(tier2_probe_hash(pc));
-    emit_byte(0x48); emit_byte(0x01); emit_byte(0x83);
-    emit_u32(offsetof(CPU, jit_tier2_trial_hash));
-    emit_byte(0x9D); emit_pop(RAX);
+    emit_push(RAX);
+    emit_byte(0x8B); emit_byte(0x83);  // mov eax,[rbx+work]
+    emit_u32(offsetof(CPU, jit_tier2_trial_work));
+    emit_byte(0x8D); emit_byte(0x80); emit_u32(count);  // lea eax,[rax+count]
+    emit_byte(0x89); emit_byte(0x83);  // mov [rbx+work],eax
+    emit_u32(offsetof(CPU, jit_tier2_trial_work));
+    emit_pop(RAX);
 }
 }  // namespace arm64emu

@@ -50,6 +50,7 @@ struct DebugFlags {
     bool regalloc_stats = false;  // BIFROST_REGALLOC_STATS — per-block spill/reload density
     bool tier2 = false; // BIFROST_TIER2=1 — opt in to experimental region promotion
     bool tier2_trace = false; // BIFROST_TIER2_TRACE — compiled candidates and timing decisions
+    bool tier2_graph = false; // BIFROST_TIER2_GRAPH — report the natural loop around each hot head
     bool tier2_trace_verbose = false; // BIFROST_TIER2_TRACE_VERBOSE — discovery and compiler details
     unsigned jit_superblock_limit = 8; // BIFROST_JIT_SUPERBLOCK_LIMIT=2..8
     bool no_chain = false; // BIFROST_NO_CHAIN — disable block/region edges
@@ -242,6 +243,7 @@ struct DebugFlags {
         };
         f.tier2 = toggle("BIFROST_TIER2", false);
         f.tier2_trace_verbose = env("BIFROST_TIER2_TRACE_VERBOSE");
+        f.tier2_graph = env("BIFROST_TIER2_GRAPH");
         f.tier2_trace = env("BIFROST_TIER2_TRACE") || f.tier2_trace_verbose;
         if (const char* value = std::getenv("BIFROST_JIT_SUPERBLOCK_LIMIT"))
             f.jit_superblock_limit = std::clamp(std::strtoul(value, nullptr, 10), 2UL, 8UL);

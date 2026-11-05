@@ -398,13 +398,12 @@ public:
     struct Tier2FeedbackSlot {
         uint64_t owner = 0;
         uint32_t pressure = 0, credit = 0;
-        uint64_t baseline_ns = 0, baseline_exit = 0;
+        uint64_t baseline_ns = 0;
         uint32_t baseline_work = 0, sample_quota = 256;
-        uint64_t baseline_hash = 0;
-        // Linear superblocks return to unrelated guest work between samples.
-        // Accumulate only time spent inside the private sampled path.
-        uint64_t window_ns = 0, window_hash = 0;
-        uint32_t window_work = 0, window_count = 0;
+        // Time and guest instructions pooled for the arm running now: visits
+        // to a head are short and uneven, so no one window can decide.
+        uint64_t window_ns = 0;
+        uint32_t window_work = 0;
     };
     static constexpr unsigned TIER2_FEEDBACK_SLOTS = 16;
     Tier2FeedbackSlot jit_tier2_feedback[TIER2_FEEDBACK_SLOTS]{};
@@ -414,7 +413,6 @@ public:
     uint64_t (*jit_tier2_trial_chain_fn)(CPU*, Emulator*) = nullptr;
     uint32_t jit_tier2_trial_remaining = 0;
     uint32_t jit_tier2_trial_work = 0;
-    uint64_t jit_tier2_trial_hash = 0;
 
     // ── PSTATE flag accessors ────────────────────────────────────────
     void set_flag_n(bool v) { if (v) pstate |= (1u<<31); else pstate &= ~(1u<<31); }

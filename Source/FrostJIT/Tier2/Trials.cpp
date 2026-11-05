@@ -34,19 +34,14 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
     if (slot.owner != monitor->identity) {
         slot = CPU::Tier2FeedbackSlot{};
         slot.owner = monitor->identity;
-        // Linear paths pay two CPU-clock reads per traversal. Start with
-        // enough guest work to qualify, then grow only when the measured
-        // baseline is below 10 us, instead of timing 256 visits unconditionally.
-        if (trial.linear)
-            slot.sample_quota = std::max(1u, (128u + trial.candidate_entry.instr_count - 1) /
-                static_cast<unsigned>(trial.candidate_entry.instr_count));
     }
     const bool candidate = slot.baseline_ns != 0;
     auto fn = candidate ? (trial.candidate_sample ? trial.candidate_sample : trial.candidate)
                         : (trial.baseline_sample ? trial.baseline_sample : trial.baseline.fn);
     // Never replay guest memory or restore architectural state: each arm runs
-    // once on the live workload. Matched work/exit signatures make samples
-    // comparable; CLOCK_THREAD_CPUTIME_ID excludes scheduler descheduling.
+    // once on the live workload, so the arms never see identical work: they
+    // are compared by time per guest instruction over pools of equal work.
+    // CLOCK_THREAD_CPUTIME_ID excludes scheduler descheduling.
     // Timed arms stay on their private sampling chains: unbind the indirect-
     // branch table so a BR/RET cannot leave the sampled graph mid-window.
     struct Reset {
@@ -65,7 +60,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         ? (trial.candidate_chain_sample ? trial.candidate_chain_sample : trial.candidate_chain)
         : (trial.baseline_chain_sample ? trial.baseline_chain_sample : trial.baseline.chain_entry);
     cpu.jit_tier2_trial_remaining = trial.linear ? 1 : slot.sample_quota;
-    cpu.jit_tier2_trial_work = cpu.jit_tier2_trial_hash = 0;
+    cpu.jit_tier2_trial_work = 0;
     const uint64_t start = thread_cpu_ns();
     for (unsigned dispatches = 0; dispatches < 2048; ++dispatches) {
         jit_grant_lease(cpu);
@@ -86,55 +81,41 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         if (!fn) break;
     }
     const uint64_t end = thread_cpu_ns();
-    uint64_t ns = end > start && start ? end - start : 0;
-    uint32_t work = cpu.jit_tier2_trial_work;
-    uint64_t hash = cpu.jit_tier2_trial_hash;
+    const uint64_t ns = end > start && start ? end - start : 0;
+    const uint32_t work = cpu.jit_tier2_trial_work;
     const uint64_t exit = cpu.pc;
+    const bool quota_spent = !cpu.jit_tier2_trial_remaining;
     cpu.jit_tier2_trial = nullptr;
     bool finish = false, keep = false;
     {
         std::lock_guard<std::mutex> sample_lock(trial.mutex);
         if (trial.decision.load(std::memory_order_relaxed)) return exit;
-        bool complete = !cpu.jit_tier2_trial_remaining && exit == monitor->head;
-        bool exhausted = false;
-        if (trial.linear) {
-            complete = false;
-            // A linear path cannot repeat inside one timed call without
-            // executing unrelated work or replaying side effects. Pool only
-            // completed live traversals; both arms pay identical timer/probe
-            // overhead. This is conservative for very short superblocks.
-            // Bound total timer calls even when CPU-local slots collide or
-            // complete, comparable windows never arrive. Unproven code stays
-            // in Tier-1; eight matched pairs are still required to keep it.
-            exhausted = ++trial.linear_entries >= 8192;
-            if (ns && work && cpu.running && exit == trial.linear_exit &&
-                monitor->enabled.load(std::memory_order_acquire)) {
-                slot.window_ns += ns;
-                slot.window_work += work;
-                slot.window_hash += hash;
-                if (++slot.window_count < slot.sample_quota && !exhausted) return exit;
-                complete = slot.window_count == slot.sample_quota;
-                ns = slot.window_ns; work = slot.window_work; hash = slot.window_hash;
-            }
-            slot.window_ns = slot.window_hash = 0;
-            slot.window_work = slot.window_count = 0;
+        // Loops leave after a few dozen iterations and paths take side exits,
+        // so a window ends wherever the workload does and counts towards its
+        // arm's pool. Bound total timer calls even when CPU-local slots
+        // collide or pools never fill: unproven code stays in Tier-1.
+        const bool exhausted = ++trial.entries >= 8192;
+        if (ns && work && cpu.running && monitor->enabled.load(std::memory_order_acquire)) {
+            slot.window_ns += ns;
+            slot.window_work += work;
         }
-        ++trial.attempts;
-        // A pair belongs to one vCPU. Reject short, different-path and
-        // different-work samples instead of comparing unrelated executions.
-        if (monitor->enabled.load(std::memory_order_acquire) && ns &&
-            (candidate || ns >= 10000) && complete && work >= 128) {
-            if (!candidate) {
-                slot.baseline_ns = ns; slot.baseline_exit = exit;
-                slot.baseline_work = work; slot.baseline_hash = hash;
-            } else if (slot.baseline_exit == exit && slot.baseline_work == work && slot.baseline_hash == hash) {
-                trial.ratios.push_back(double(ns) / double(slot.baseline_ns));
-                tier2_measured_pairs.fetch_add(1, std::memory_order_relaxed);
-            }
-        }
-        if (candidate) slot.baseline_ns = 0;
-        else if (ns && ns < 10000 && complete && slot.sample_quota < 4096)
+        if (!trial.linear && quota_spent && ns && ns < 10000 && slot.sample_quota < 4096)
             slot.sample_quota *= 2; // amortize timer cost on very fast loops
+        const uint32_t needed = candidate ? slot.baseline_work : 128;
+        if (slot.window_ns >= 10000 && slot.window_work >= needed) {
+            ++trial.attempts;
+            if (!candidate) {
+                slot.baseline_ns = slot.window_ns;
+                slot.baseline_work = slot.window_work;
+            } else {
+                trial.ratios.push_back(double(slot.window_ns) / slot.window_work /
+                                       (double(slot.baseline_ns) / slot.baseline_work));
+                tier2_measured_pairs.fetch_add(1, std::memory_order_relaxed);
+                slot.baseline_ns = 0;
+            }
+            slot.window_ns = 0;
+            slot.window_work = 0;
+        }
         if (trial.ratios.size() >= 8) {
             auto ratios = trial.ratios;
             std::sort(ratios.begin(), ratios.end());
@@ -145,7 +126,12 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
             if (tier2_trace_enabled())
                 fprintf(stderr, "[tier2] measured head=%llx pairs=%zu candidate/baseline=%.4f wins=%u keep=%d\n",
                     (unsigned long long)monitor->head, ratios.size(), median, wins, keep);
-        } else if (trial.attempts >= 128 || exhausted) finish = true; // insufficient proof keeps Tier-1
+        } else if (trial.attempts >= 128 || exhausted) {
+            finish = true; // insufficient proof keeps Tier-1
+            if (tier2_trace_enabled())
+                fprintf(stderr, "[tier2] undecided head=%llx pairs=%zu visits=%u\n",
+                    (unsigned long long)monitor->head, trial.ratios.size(), trial.entries);
+        }
         if (finish) trial.decision.store(keep ? 1 : 2, std::memory_order_release);
     }
     if (finish) finish_tier2_trial(trial, keep);

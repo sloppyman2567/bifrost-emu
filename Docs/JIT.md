@@ -1601,13 +1601,28 @@ A profile whose block was promoted or invalidated is dropped from the lookup
 table and its counters go unread; storage outlives published code. Monitored regions deposit a recovery credit
 in a CPU-local slot on completed hot paths. This is one flag-neutral store,
 including ST internal backedges; MT performs no shared atomic increment per
-iteration. A cold exit tail-calls feedback after flushing guest state and
-tearing down the generated frame. It consumes a recovery credit and reduces
-pressure, or increases pressure if no completed path intervened. Pressure of
-64 triggers retraining. This is a conservative recovery/miss heuristic, not
+iteration. A cold exit calls a stub shared by the region after flushing guest
+state. It consumes a recovery credit and reduces pressure, or increases
+pressure if no completed path intervened, then the exit chains to its target
+like any other. Only a slot owned by another region, or pressure reaching 64,
+tears down the frame and tail-calls `tier2_region_feedback` in C++, which
+retrains at 64. The stub and that function implement one rule and change
+together: going through C++ and the dispatcher on every side exit cost a short
+loop more than the region saved. This is a conservative recovery/miss heuristic, not
 an estimate of a cold-exit probability. Sixteen CPU-local slots bound metadata;
 colliding regions can delay detection by depositing extra credits or changing
 the slot's owner, but cannot add pressure to another region.
+
+Retiring a region also forgets its blocks' predecessors, which nothing
+retranslates. `retire_tier2_region_locked` records both, and the next dispatch
+boundary rebuilds the blocks with fresh counters, relinks the predecessors and
+returns them to `back_refs_` (`tier2_settle_queued`). Without the relink,
+CoreMark's dispatches rose 69 times; without the index entry, a later retirement
+could not unpatch the slot.
+
+`BIFROST_TIER2_GRAPH` reports, for each hot head, the natural loop around it:
+blocks that can return to the head along profiled edges, and the share of entries
+that do. It emits nothing, and is the survey for regions with internal branches.
 
 Retirement holds one compiler-lock critical section for version validation,
 exact victim selection and revocation. Victims come from `code_index_` and profiles from an ordered map, so a
@@ -1629,6 +1644,15 @@ CPUs. Empty cells return to dispatch until a replacement target is compiled.
 Admission requires at least two cached native Tier-1 blocks with exactly the
 trace's block boundaries, without calls or retained self-loop frames. Branch
 profiles choose candidate paths; code size no longer predicts execution payoff.
+A head that reaches its entry count is timed over a second window, and goes on
+only if it runs at least 10 million guest instructions per second through its
+block, about 1% of one host core. A head that misses three windows settles. Lifetime
+entries alone let thousands of a game's blocks through: in Arknights 7,664 heads
+filled the 32 MiB budget with 93% of trials rejected; with the gate it used 3.7 MB.
+A rate shows activity, not whether a region will win, and a head that settles
+stays out if it turns hot later. A fixed `BIFROST_TIER2_HITS` skips the gate, which
+is why `test_jit_tier2_rate.sh` runs without it.
+
 Each candidate enters a bounded A/B trial before permanent selection. The
 retained Tier-1 graph and candidate run alternate windows on one vCPU's live
 workload, without replaying memory writes or restoring architectural state.
@@ -1637,8 +1661,10 @@ Both arms execute private instrumented copies with identical work probes at
 matching guest block boundaries. Normal Tier-1 blocks and selected regions
 contain no work probes or inactive probe guards. The selected ST region also
 omits sampling quota checks on its internal backedges. CPU-local counters
-record guest instruction count and a 64-bit block fingerprint; probes preserve
-flags and scratch registers.
+record guest instruction count; probes preserve scratch registers and leave
+the host flags alone without saving them (`lea`, `jrcxz`). A `popfq` per block
+costs more than the loops being timed: with one in every probe, a region that
+was 1.58x faster in wall-clock time measured 1.2x slower.
 
 Private Tier-1 chains bind only to other blocks in their sampling graph and
 the trial's head gate. Private region exits use the same restricted bindings.
@@ -1653,17 +1679,24 @@ compilation and phase feedback inside the timed interval. A data-cell lease
 expiration at the head also counts as a completed iteration, so dispatcher
 resumptions cannot inflate the work.
 
-Windows initially contain 256 completed iterations. A short baseline window
-increases the CPU-local quota up to 4096 to amortize timing overhead. The
+A window runs up to 256 iterations, or one traversal of a linear path, and ends
+early wherever the workload leaves. Real loops leave after a few dozen
+iterations, so no window has to complete: each one adds its time and guest
+instructions to its arm's CPU-local pool. A window that spends its whole quota
+in under 10 us raises the quota, up to 4096, to amortize timing overhead. The
 clock is CLOCK_THREAD_CPUTIME_ID, which measures CPU time consumed by the
-calling host thread, excluding time spent descheduled. Only complete windows
-ending at the head are sampled. A baseline must consume at least 10 us; a
-candidate must match its vCPU's instruction count, fingerprint and exit PC.
-Eight comparable pairs must show a median candidate/baseline ratio below 0.97,
-with at least six pairs below 0.97, to select the region. Slower or noisy
+calling host thread, excluding time spent descheduled. A baseline pool closes
+at 10 us and 128 instructions; a candidate pool at 10 us and at least the
+baseline's instructions. A pair compares time per guest instruction.
+Eight pairs must show a median candidate/baseline ratio below 0.97,
+with at least six pairs below 0.97, to select the region. The arms run different
+live work, so a stretch of unusually cheap iterations can skew one pair: the
+median and the six-pair rule limit that, they do not rule it out. Windows also
+leave out what happens after an exit, so a candidate that leaves badly can pass
+here and still lose over the whole program. Slower or noisy
 candidates restore Tier-1; a measured loss can schedule a smaller prefix after
 fresh profiling, following the bounded size search described above. A trial
-with insufficient evidence after 128 attempts also restores Tier-1. Version
+with insufficient evidence after 128 pools or 8192 visits also restores Tier-1. Version
 checks and normal revocation protect
 in-flight references across mapping changes and ST-to-MT transition.
 
@@ -1720,9 +1753,10 @@ from all three conditional IR families, cold exits after promotion, stale
 profile invalidation, weak-path rejection, sustained phase changes in all three
 conditional families, and nested-call fault delivery.
 
-`bash Scripts/Testing/test_jit_tier2_measure.sh` verifies measured faster/slower decisions
-and rejection of mismatched work in ST/MT with ordinary/skip chaining. It also
-checks that MT publication changes no existing instruction bytes.
+`bash Scripts/Testing/test_jit_tier2_measure.sh` verifies measured faster/slower decisions,
+a verdict from visits that never reach the quota, and that an outside predecessor
+is chained and tracked again after retirement, in ST/MT with ordinary/skip chaining.
+It also checks that MT publication changes no existing instruction bytes.
 
 `bash Scripts/Testing/test_jit_tier2_feedback.sh` checks two regions sharing one page:
 retiring one preserves the other's exact cached function pointer. Isolated

@@ -872,7 +872,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Record the block body start offset (after prologue). Used for
     // self-loop chaining: the selfloop slot is patched to jmp here.
     block_body_start_off_ = code_buf_used_;
-    emit_tier2_work_probe(start_pc, ir_block.count);
+    emit_tier2_work_probe(ir_block.count);
     // ── Compute liveness: for each vreg, find the last op that uses it ──
     // This lets us free host regs of dead vregs immediately after their
     // last use, instead of keeping them cached until eviction. Without

@@ -20,6 +20,30 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Tier-2's A/B trial tells the truth, and CoreMark keeps regions (2026-11-04)
+
+The trial was the reason Tier-2 kept nothing, more than the code it was judging. Each probe saved flags with `popfq`, which
+costs more than the loops being timed: a three-block loop that runs 1.58 times faster as a region measured 1.2 times slower,
+and was thrown away. Loop windows also had to reach 256 iterations in a row, so CoreMark's loops, which leave after a few
+dozen, failed all 128 attempts and never got a verdict.
+
+Probes now leave the flags alone, and each arm pools time and guest instructions until a pair compares time per instruction.
+This replaces the exact work and fingerprint match, which variable trip counts could never pass. That loop now measures 0.70
+(its real ratio is 0.63), and CoreMark keeps regions for the first time. Regions kept in use exposed two costs: side exits
+went through C++ and the dispatcher (the bookkeeping now stays in generated code), and retiring a region left its
+predecessors unlinked for good (69 times the dispatches). Retired blocks are now rebuilt and relinked at a dispatch boundary.
+
+That also fixes a stale-chain bug from the settling change above: a relinked predecessor was missing from `back_refs_`, so a
+later retirement could not unpatch it and it kept jumping into retired code.
+
+With `BIFROST_TIER2=1`, CoreMark moves from about 5% slower than Tier-1 to level with it (24,610 against 24,150 iterations/s
+over five alternating runs, within noise), and the three-block loop runs about 1.5 times faster. Tier-2 stays opt-in: no
+title is faster with it yet. `BIFROST_TIER2_GRAPH` reports the natural loop around each hot head.
+
+Hot heads now have to show a rate, not just 1,000 lifetime entries. In Arknights that takes Tier-2 code from 33.5 MB (the
+whole budget) to 3.7 MB and compile time from 812 ms to 106 ms, with no measurable change in the game's pipeline use over
+one run each. Arknights spends about a third of its issue slots waiting on the frontend, against 10% for CoreMark.
+
 ### Tier-2 no longer taxes code it has finished with (2026-11-04)
 
 Hot counters and branch counters stayed in Tier-1 blocks for life, costing CoreMark 18% with `BIFROST_TIER2=1`. A decided block is now

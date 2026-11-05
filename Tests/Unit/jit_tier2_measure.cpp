@@ -1,3 +1,4 @@
+#include <algorithm>
 // Exercise real CPU-time decisions with controlled slowdowns, never fake timers.
 #include "System/Core/Emulator.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"
@@ -60,11 +61,13 @@ struct Tier2TestAccess {
     static void candidate_window(CPU& c,void* ptr) {
         auto* t=static_cast<FrostJIT::Tier2Trial*>(ptr);
         auto& slot=c.jit_tier2_feedback[t->monitor->slot];
-        slot.owner=t->monitor->identity; slot.baseline_ns=10000;
+        slot.owner=t->monitor->identity; slot.baseline_ns=10000; slot.baseline_work=128;
     }
-    static void mismatch(CPU& c,void* ptr) {
-        auto* t=static_cast<FrostJIT::Tier2Trial*>(ptr);
-        ++c.jit_tier2_feedback[t->monitor->slot].baseline_work;
+    // A retired block's predecessor must chain to its rebuilt translation.
+    static bool relinked(FrostJIT& j,uint64_t target,uint64_t source) {
+        const auto refs=j.back_refs_.find(target);
+        return refs!=j.back_refs_.end() &&
+            std::find(refs->second.begin(),refs->second.end(),source)!=refs->second.end();
     }
     static unsigned decision(void* ptr) { return static_cast<FrostJIT::Tier2Trial*>(ptr)->decision.load(); }
     static bool linear_window(CPU& c,void* ptr) {
@@ -96,7 +99,7 @@ struct Tier2TestAccess {
 };
 }
 constexpr uint64_t HEAD=0x10000,STOP=0x20000;
-static bool scenario(bool mt,bool keep,bool mismatch=false) {
+static bool scenario(bool mt,bool keep,bool uneven=false) {
     auto e=std::make_unique<Emulator>();
     e->mem().map_range(HEAD,4096); e->mem().mprotect_guest(HEAD,4096,7);
     const uint32_t code[]={0x91000421,0x14000001,0xd1000400,0xb5ffffa0,0xd65f03c0};
@@ -111,20 +114,25 @@ static bool scenario(bool mt,bool keep,bool mismatch=false) {
     const size_t prefix=j->code_buf_used();
     std::vector<uint8_t> bytes(j->code_buf(),j->code_buf()+prefix);
     CPU c; c.regs[30]=STOP; c.jit_stop_pc=STOP;
-    const unsigned runs=mismatch?128:16;
-    for(unsigned k=0;k<runs;++k) {
-        c.pc=HEAD; c.regs[0]=300; c.regs[1]=0;
+    // Uneven visits leave the loop long before the quota, as real loops do:
+    // they still have to reach a verdict, by time per guest instruction.
+    const unsigned runs=uneven?128:16;
+    for(unsigned k=0;k<runs && !Tier2TestAccess::decision(trial);++k) {
+        c.pc=HEAD; c.regs[0]=uneven?20+k%7:300; c.regs[1]=0;
         const auto want=c.regs[0];
         auto next=j->tier2_measure(c,*e,trial);
+        if(uneven) {
+            if(c.regs[1]!=want || c.regs[0] || c.jit_tier2_trial) return false;
+            continue;
+        }
         if(c.regs[1]!=256 || c.regs[0]!=want-256 || next!=HEAD || c.jit_tier2_trial) {
             std::fprintf(stderr,"bad trial execution pc=%llx n=%llu sum=%llu\n",(unsigned long long)next,
                 (unsigned long long)c.regs[0],(unsigned long long)c.regs[1]); return false;
         }
-        if(mismatch && k%2==0) Tier2TestAccess::mismatch(c,trial);
     }
-    const unsigned expected=keep&&!mismatch?1:2;
+    const unsigned expected=keep?1:2;
     if(Tier2TestAccess::decision(trial)!=expected ||
-        j->tier2_measured_pairs.load()!=(mismatch?0:8) ||
+        j->tier2_measured_pairs.load()!=8 ||
         j->tier2_measured_keeps.load()!=(expected==1?1:0) ||
         j->tier2_measured_rejections.load()!=(expected==2?1:0)) {
         std::fprintf(stderr,"wrong measured decision: got=%u pairs=%llu keeps=%llu rejects=%llu\n",
@@ -134,10 +142,9 @@ static bool scenario(bool mt,bool keep,bool mismatch=false) {
     }
     if(mt && std::memcmp(bytes.data(),j->code_buf(),prefix)) return false;
     c.pc=HEAD; c.regs[0]=300; c.regs[1]=0;
-    c.jit_tier2_trial_work=123; c.jit_tier2_trial_hash=456;
+    c.jit_tier2_trial_work=123;
     while(c.pc!=STOP) c.pc=j->run_block(c,*e);
-    return c.regs[1]==300 && c.regs[0]==0 &&
-        c.jit_tier2_trial_work==123 && c.jit_tier2_trial_hash==456;
+    return c.regs[1]==300 && c.regs[0]==0 && c.jit_tier2_trial_work==123;
 }
 // A cold exit must stop before its RET, even when that target is cached.
 // Transition also retires the private ST graph before another CPU can run.
@@ -202,7 +209,7 @@ static bool invalidated_trial() {
     while(fresh.pc!=STOP) fresh.pc=j->run_block(fresh,*e);
     return fresh.regs[1]==200;
 }
-static bool linear_scenario(bool mt,bool keep,bool mismatch=false,bool collisions=false) {
+static bool linear_scenario(bool mt,bool keep,bool collisions=false) {
     linear_measure=true;
     auto e=std::make_unique<Emulator>();
     e->mem().map_range(HEAD,4096); e->mem().mprotect_guest(HEAD,4096,7);
@@ -228,31 +235,30 @@ static bool linear_scenario(bool mt,bool keep,bool mismatch=false,bool collision
     unsigned visits=0;
     for(;visits<8192 && !Tier2TestAccess::decision(trial);++visits) {
         c.pc=HEAD; c.regs[1]=0; c.regs[30]=STOP; c.jit_stop_pc=STOP;
-        // A colliding owner between every visit prevents a pooled window
-        // from completing; the global timer-call budget must still terminate.
+        // A colliding owner between every visit prevents a pair from
+        // forming; the global attempt budget must still terminate.
         if(collisions) for(auto& slot:c.jit_tier2_feedback) slot.owner=0;
         if(j->tier2_measure(c,*e,trial)!=HEAD+64 || c.regs[1]!=8 || c.jit_tier2_trial)
             return false;
-        if(mismatch && visits%16==7) Tier2TestAccess::mismatch(c,trial);
     }
-    const unsigned expected=keep&&!mismatch&&!collisions ? 1 : 2;
+    const unsigned expected=keep&&!collisions ? 1 : 2;
     if(Tier2TestAccess::decision(trial)!=expected ||
-        j->tier2_measured_pairs.load()!=((mismatch||collisions) ? 0 : 8) ||
-        (!mismatch&&!collisions&&visits>128) ||
+        j->tier2_measured_pairs.load()!=(collisions ? 0 : 8) ||
+        (!collisions&&visits>128) ||
         (mt && std::memcmp(bytes.data(),j->code_buf(),prefix))) {
         std::fprintf(stderr,"linear timing decision mismatch: decision=%u expected=%u pairs=%llu\n",
             Tier2TestAccess::decision(trial),expected,(unsigned long long)j->tier2_measured_pairs.load());
         return false;
     }
-    if(!keep && !mismatch && !collisions && j->lookup_only(HEAD)) {
+    if(!keep && !collisions && j->lookup_only(HEAD)) {
         std::fputs("losing eight-block trial did not rearm a shorter candidate\n",stderr);
         return false;
     }
     c.pc=HEAD; c.regs[1]=0;
-    c.jit_tier2_trial_work=123; c.jit_tier2_trial_hash=456;
+    c.jit_tier2_trial_work=123;
     while(c.pc!=STOP) c.pc=j->run_block(c,*e);
     linear_measure=false;
-    return c.regs[1]==8 && c.jit_tier2_trial_work==123 && c.jit_tier2_trial_hash==456;
+    return c.regs[1]==8 && c.jit_tier2_trial_work==123;
 }
 
 // Real timing rejects 8 -> 4 -> 2, or selects the shorter winner. Retired
@@ -267,13 +273,23 @@ static bool shorter_candidates(bool mt,bool keep_four,bool exhaust=false,bool in
         code.push_back(0xb5000022); // cbnz x2,next (both paths continue; profiles still warm)
     }
     code.push_back(0xd65f03c0);
+    // A predecessor outside every region: nothing retranslates it, so only
+    // the rebuild after retirement can chain it to the head again.
+    const uint64_t outside=HEAD+code.size()*4;
+    code.push_back(0x14000000|((0u-static_cast<uint32_t>(code.size()))&0x3ffffff)); // b HEAD
     e->mem().write(HEAD,code.data(),code.size()*4); e->enable_jit();
     auto* j=e->jit(); if(mt) j->enter_multithreaded();
-    auto visit=[&]() {
-        CPU c; c.pc=HEAD; c.regs[30]=STOP; c.jit_stop_pc=STOP;
+    auto visit_from=[&](uint64_t pc) {
+        CPU c; c.pc=pc; c.regs[30]=STOP; c.jit_stop_pc=STOP;
         for(unsigned n=0;c.pc!=STOP && n<1000;++n) c.pc=j->run_block(c,*e);
         return c.pc==STOP && c.regs[1]==8;
     };
+    auto visit=[&]() { return visit_from(HEAD); };
+    if(!visit_from(outside) || !visit_from(outside)) return false;
+    if(!mt && !Tier2TestAccess::relinked(*j,HEAD,outside)) {
+        std::fputs("outside predecessor never chained to the head\n",stderr);
+        return false;
+    }
     for(unsigned size=8;size>=2;size/=2) {
         for(unsigned k=0;k<40;++k) if(!visit()) return false;
         void* trial=Tier2TestAccess::prepare(*j,HEAD);
@@ -321,6 +337,10 @@ static bool shorter_candidates(bool mt,bool keep_four,bool exhaust=false,bool in
         // The next visit translates fresh counters, without immediate retrial.
         const auto trials=Tier2TestAccess::trials(*j);
         if(!visit() || Tier2TestAccess::trials(*j)!=trials) return false;
+        if(!mt && !Tier2TestAccess::relinked(*j,HEAD,outside)) {
+            std::fputs("retired block lost its predecessor chain\n",stderr);
+            return false;
+        }
     }
     return false;
 }
@@ -328,8 +348,7 @@ int main(int argc,char**argv) {
     const bool mt=argc>1 && std::string(argv[1])=="mt";
     if(!cold_and_transition(mt)||!scenario(mt,true)||!scenario(mt,false)||!scenario(mt,true,true)||(mt&&!invalidated_trial())) return 1;
     if(!linear_scenario(mt,true)||!linear_scenario(mt,false)||!linear_scenario(mt,true,true)) return 1;
-    if(!linear_scenario(mt,true,false,true)) return 1;
     if(!shorter_candidates(mt,false)||!shorter_candidates(mt,true)||
        !shorter_candidates(mt,false,true)||!shorter_candidates(mt,false,false,true)) return 1;
-    std::puts("jit_tier2_measure: real timing keeps faster code, rejects slower/mismatched samples PASS");
+    std::puts("jit_tier2_measure: real timing keeps faster code, rejects slower code, decides uneven visits PASS");
 }

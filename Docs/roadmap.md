@@ -199,8 +199,9 @@ Open, in priority order:
 3. **Paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics.
 4. **Model guest state explicitly**, define recovery and helper contracts, then hand values between two regions and choose
    layouts by measured benefit (the five-stage plan in [the snapshot](archive/roadmap-2026-11-03.md#jit-codegen-retain-guest-state-across-hot-regions)).
-5. **Tier-2**: it does not take single-block loops, and taking them gave no gain on the kernels; make it worth enabling or
-   keep it opt-in.
+5. **Tier-2**: level with Tier-1 on CoreMark and about 1.5 times faster on a clean multi-block loop, now that its trial
+   measures correctly. It does not take single-block loops, which Tier-1 already keeps in registers. Next: measure real
+   Android titles, then regions with internal branches (`BIFROST_TIER2_GRAPH` surveys them). It stays opt-in until then.
 6. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone needs a confirmed native
