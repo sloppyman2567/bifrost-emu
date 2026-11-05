@@ -228,6 +228,8 @@ void FrostJIT::release_resources() {
     clear(tier2_trials_);
     clear(tier2_region_monitors_);
     clear(tier2_profiles_by_pc_);
+    clear(tier2_settled_);
+    clear(tier2_settle_queue_);
     clear(tier2_branch_profiles_);
     clear(tier2_retrains_);
     clear(tier2_block_limits_);

@@ -111,9 +111,15 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     profile_sections_active_ = dbg().cpu_profile;
     profile_body_begin_ = SIZE_MAX;
     profile_ranges_.clear();
-    // Regions keep guarded-access cold paths inline (Tier-1 only defers).
-    defer_guards_ = false;
+    // Guarded-access cold paths go after the region, as in Tier-1: inline they
+    // doubled its code, and one deferred tail per access is the shared stub's call.
     deferred_guards_.clear();
+    deferred_fp_steps_.clear();
+    defer_guards_ = true;
+    struct GuardScope {
+        bool& flag;
+        ~GuardScope() { flag = false; }
+    } guard_scope{defer_guards_};
     size_t block_start = code_buf_used_;
     // A region can be smaller than the preceding Tier-1 block. Clearing
     // only its own vregs leaves stale homes above region_max_vreg, then
@@ -894,6 +900,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         patch_jcc_rel32(last_jcc, static_cast<int32_t>(lback_off - (last_jcc + 6)));
     }
 
+    flush_deferred_guards();
+    flush_deferred_fp_steps();
+    defer_guards_ = false;
     // ── Publish the region ───────────────────────────────────────────
     write_allocation_profile(block_start, hot_end, cold_begin, true);
     note_profile_sections(block_start, hot_end, cold_begin);

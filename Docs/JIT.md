@@ -153,7 +153,7 @@ the block, which never run in normal execution. Each JIT now emits one copy befo
   proceed. The bound and flag rules are unchanged: only the location of the code moved.
 - **Fault exit.** The tail loads the guest PC into RAX and jumps to one stub that stores it, calls `jit_fault_step` and
   ends the frame. Vector and pinned-register commits stay in each tail, since they depend on its state.
-- **When the full form stays.** Tier-2 keeps inline guards. A persistent-cache recording keeps full tails, because a call
+- **When the full form stays.** A persistent-cache recording keeps full tails, because a call
   out of the block means nothing in another process, so a session with `--jit-disk-cache` does not get the smaller code
   in what it records. `BIFROST_FAULT_TRACE` also keeps them, because its exits pass their block's PC.
 - **The cost.** While the gate is closed (a registered, missing userfaultfd page, during an ART compaction), a guarded
@@ -1574,8 +1574,17 @@ incoming chains. The former dispatch/call-lookup promotion paths did not
 retain those ranges and have been removed. Self-loop iterations that bypass
 the generated entry still do not contribute hotness. Conditional exits count
 taken/fall-through outcomes with one `inc qword [profile+off]` (64-bit, no check)
-behind a `mov r11, imm64`. It stays in the block for life, promoted or not, and is not `lock`ed in MT: the counts only feed the bias
-heuristic, so an update lost to a race does no harm.
+behind a `mov r11, imm64`. It is not `lock`ed in MT: the counts only feed the bias heuristic, so an update lost to a race does no harm.
+
+Instrumentation lasts until a block is decided. Once promotion declines a head, or a trial ends either way, its blocks **settle**:
+the dispatcher retires them and retranslates them without the hot counter or branch counters, then relinks their predecessors, which
+retirement unlinks and forgets. The swap waits for the dispatcher because the decision is made inside the running block. Profiles
+stay, for regions that pass through a settled block, and a code change forgets the decision. Before this, instrumentation cost CoreMark
+22-29% of its cycles with no Tier-2 code running; the penalty is now about 3.4%, and Tier-2 still keeps no region there. Most of what is
+left is 16.5 million dispatches against 0.9 million with Tier-2 off; which edge stays unlinked is not known.
+A head that fires during the swap counts another window instead: the blocks it needs are briefly gone, and it would be rejected for good.
+
+Regions defer guarded-access cold paths and use the shared stubs, as Tier-1 does: a six-instruction region went from 745 to 477 bytes.
 
 Entry counts are `HotCounter`s outside the code buffer, in both modes. They used to sit in the 8 bytes before each
 single-thread block, and an `inc` on the line being executed is self-modifying code to the CPU: `bench_memcpy` with counters

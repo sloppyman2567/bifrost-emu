@@ -48,6 +48,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -623,6 +624,16 @@ public:
     void emit_tier2_edge_profile(bool taken);
     void invalidate_tier2_profiles(uint64_t lo, uint64_t hi);
     void clear_tier2_profiles();
+    // Instrumentation has no way out of a block: its hot counter and branch counters cost CoreMark 22-29% of its
+    // cycles for life. Once promotion has decided about a block it is retranslated without them. The compiler
+    // lock guards the set and queue; the swap waits for the dispatcher, because the decision is made inside
+    // the running block. A code change forgets the decision, as it does the profile.
+    std::set<uint64_t> tier2_settled_;
+    std::vector<uint64_t> tier2_settle_queue_;
+    std::atomic<bool> tier2_settle_pending_{false};
+    bool tier2_settling_ = false;  // compiler lock; blocks are retired and not yet back
+    void tier2_settle_locked(uint64_t pc);
+    void tier2_settle_queued(Emulator& emu);
     void retire_blocks_locked(const std::vector<uint64_t>& victims);
     struct Tier2RegionMonitor {
         std::atomic<uint32_t> enabled{1};
@@ -919,7 +930,7 @@ private:
     // tests inline. The software page checks and the recoverable fault exit
     // are emitted after the block (flush_deferred_guards) from the GPR/vector
     // cache state captured where the access diverts, so the fast path takes
-    // no branch. Tier-2 regions keep the inline layout (defer_guards_ false).
+    // no branch. Tier-2 regions use it too.
     struct GuardState {
         int reg_vreg[16];
         uint16_t dirty_mask;

@@ -52,6 +52,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             FrostJIT* current = emu.jit();
             if (current && current != this) return current->run_block(cpu, emu);
         }
+        if (__builtin_expect(tier2_settle_pending_.load(std::memory_order_acquire), 0)) tier2_settle_queued(emu);
     }
     bool debug_step = emu.debugger_poll(cpu);
     if (!cpu.running || (cpu.jit_call_depth && cpu.jit_dispatch_requested)) return cpu.pc;

@@ -20,6 +20,11 @@ there (guided provisioning, update/reinstall) remain in progress.
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
 
+### Tier-2 no longer taxes code it has finished with (2026-11-04)
+
+Hot counters and branch counters stayed in Tier-1 blocks for life, costing CoreMark 18% with `BIFROST_TIER2=1`. A decided block is now
+retranslated clean, which brings that to about 4%. Tier-2 stays opt-in and still does not beat Tier-1.
+
 ### A realm costs 750 MB less RAM, and cleans up after itself (2026-11-04)
 
 Each realm kept a 750 MB service root in `/tmp`, which is RAM on many systems, and never removed it. It now lives in

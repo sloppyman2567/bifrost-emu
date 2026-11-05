@@ -214,6 +214,7 @@ void FrostJIT::finish_tier2_trial(Tier2Trial& trial, bool keep) {
         head->second = trial.candidate_entry;
         for (auto* edge : trial.baseline_edges) { edge->live = false; edge->target.store(0, std::memory_order_release); }
         tier2_measured_keeps.fetch_add(1, std::memory_order_relaxed);
+        for (const auto& block : trial.baseline_blocks) tier2_settle_locked(block.first);
     } else {
         tier2_measured_rejections.fetch_add(1, std::memory_order_relaxed);
         const size_t count = trial.baseline_blocks.size();
@@ -230,6 +231,7 @@ void FrostJIT::finish_tier2_trial(Tier2Trial& trial, bool keep) {
             retire_tier2_region_locked(trial.monitor->head);
             return;
         }
+        for (const auto& block : trial.baseline_blocks) tier2_settle_locked(block.first);
         // Preserve the monitor on the restored baseline so in-flight trial
         // wrappers are revoked by subsequent mapping invalidation too.
         const auto dependencies = head->second.inlined_ranges_;

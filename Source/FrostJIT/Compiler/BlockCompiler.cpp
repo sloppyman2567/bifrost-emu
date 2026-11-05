@@ -673,7 +673,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Regions entered via a chain edge use the region's own chain-skip entry
     // (compile_tier2_region's chain_out); the unified 32 KB frame makes the
     // vreg-slot layouts compatible.
-    if (tier2_enabled() && !wex_enabled_ && !private_entry) {
+    if (tier2_enabled() && !wex_enabled_ && !private_entry && !tier2_settled_.count(start_pc)) {
         if (!ir_block.insts.empty()) {
             IROp last_op = ir_block.insts.back().op;
             if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||

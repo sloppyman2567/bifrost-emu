@@ -70,6 +70,14 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
         if (old_entry.tier2_hot_logged) {
             return;
         }
+        // A settling block is briefly missing: this head would be rejected for
+        // good over something that resolves itself. Count another window.
+        if (tier2_settling_) {
+            auto counter = hot_counter_sites_.find(site);
+            if (counter != hot_counter_sites_.end())
+                counter->second->hits.store(0, std::memory_order_relaxed);
+            return;
+        }
         Tier2Trace trace = collect_tier2_trace(emu, pc);
         // Samples lag the entry counter by one iteration. If a constituent
         // is still cold, retry at most three hotness windows before declining.
@@ -83,6 +91,12 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
         it->second.tier2_hot_logged = true;
         tier2_counter_disable(it->second.tier2_counter_off, it->second.tier2_counter_len);
         tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
+        // Every way out below but a started trial is the final answer for this
+        // head. A trial settles its blocks when it decides (finish_tier2_trial).
+        struct Settle {
+            FrostJIT& jit; uint64_t pc; bool decided = true;
+            ~Settle() { if (decided) jit.tier2_settle_locked(pc); }
+        } settle{*this, pc};
         // Require a likely complete path and actual boundary savings. MT
         // self-loops cannot retain pins/LICM across iterations and fuse no edges.
         if (!trace.fully_profiled || trace.path_probability < 0.75 ||
@@ -332,6 +346,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                 refresh_mt_edges(mt_edges_[k]->target_pc);
             if (mt_active()) mt_regions_published_.fetch_add(1, std::memory_order_relaxed);
             redirect_tier2_head_locked(pc);
+            settle.decided = false;
 
         }
     } catch (...) {
