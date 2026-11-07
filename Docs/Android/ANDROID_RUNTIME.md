@@ -26,6 +26,15 @@ service call.
 When a broker cannot start, the error says how it ended (killed by a signal, or status 127 for a dynamic-loader failure) and
 quotes the last lines of its `broker.log`; the same holds for the private broker of a launched app.
 
+A realm with no app attached ends by itself: after `ASGARD_REALM_IDLE_SECONDS` (default 600; `0` keeps the realm until
+`realm stop`) the broker stops its codec services and removes its socket, so an idle desktop holds no emulated runtimes.
+The next launch starts a fresh realm, which pays the services' start and a new copy of their root, so a launch within the
+grace period is the quick one. Only an app's Binder channels count as attached: control requests (`realm status`, a launch's
+probe) restart the clock but never hold the realm open, and the broker's own codec services are ignored (they are its
+children). The retired broker leaves its service root on disk until the next realm's sweep removes it. An `asgard.py` with an
+emulator built before this option starts the realm without it and says so. The broker logs `ASGARD_BROKER_IDLE_EXIT` to
+`<state>/.asgard/broker.log` when it ends.
+
 `--debug CHANNELS` (before the command, like `WINEDEBUG`) turns on trace output:
 `asgard.py --debug binder,futex run org.example.app`. Channels: `audio`, `binder`,
 `dynlink`, `fault`, `frame`, `futex`, `input`, `media`, `mmap`, `poll`,

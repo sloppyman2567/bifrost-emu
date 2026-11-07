@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """A broker that an upgrade left running: detected by its program, restarted when idle, refused when busy."""
+import io
 import os
 from pathlib import Path
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import asgard
@@ -189,6 +192,95 @@ class BrokerStartFailureTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("status 2", message)
         self.assertIn("socket path is too long", message)
+
+
+def process_running(pid):
+    """Alive and not a zombie (the broker is this test's child: it stays a zombie until reaped)."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def open_channel(path):
+    """Attach to the broker the way an app's /dev/binder open does: an OPEN request whose connection stays open."""
+    channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    channel.settimeout(5)
+    channel.connect(str(path))
+    body = struct.pack("<IIIi", 0, os.O_RDWR, 10000, os.getpid())
+    channel.sendall(asgard.HEADER.pack(asgard.MAGIC, asgard.VERSION, 1, len(body), 0, 0) + body)
+    magic, _, operation, size, _, _ = asgard.HEADER.unpack(asgard.receive(channel, asgard.HEADER.size))
+    reply = asgard.receive(channel, size)
+    assert (magic, operation) == (asgard.MAGIC, 1) and struct.unpack("<q", reply[:8])[0] == 0
+    return channel
+
+
+@unittest.skipUnless(EMU.is_file(), "needs a bifrost-emu build (BIFROST_EMU)")
+class RealmIdleTests(unittest.TestCase):
+    """A realm with no app attached ends after ASGARD_REALM_IDLE_SECONDS; the next launch starts a fresh one."""
+
+    def setUp(self):
+        self.state = Path(tempfile.mkdtemp(prefix="asgard-idle-")) / "state"
+        self.addCleanup(shutil.rmtree, self.state.parent, True)
+        self.addCleanup(lambda: asgard.stop_realm(self.state, force=True))
+
+    def start(self, idle):
+        with mock.patch.dict(os.environ, {"ASGARD_REALM_IDLE_SECONDS": str(idle)}):
+            status = asgard.ensure_broker(self.state, EMU)
+        return status, asgard.broker_pid(status["socket"])
+
+    def wait_until_gone(self, pid, seconds):
+        deadline = time.monotonic() + seconds
+        while process_running(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        return not process_running(pid)
+
+    def test_an_idle_realm_ends_and_the_next_launch_starts_another(self):
+        status, pid = self.start(2)
+        self.assertTrue(self.wait_until_gone(pid, 12), "the idle broker is still running")
+        self.assertFalse(Path(status["socket"]).exists(), "its socket was left behind")
+        again, new_pid = self.start(600)
+        self.assertEqual(again["state"], "running")
+        self.assertNotEqual(new_pid, pid)
+
+    def test_an_attached_app_keeps_the_realm_until_it_leaves(self):
+        status, pid = self.start(2)
+        channel = open_channel(status["socket"])
+        time.sleep(5)  # more than twice the idle time; no control request in between, which would restart the clock
+        self.assertTrue(process_running(pid), "the broker ended with an app attached")
+        channel.close()
+        self.assertTrue(self.wait_until_gone(pid, 12), "the broker stayed after the app left")
+
+    def test_a_control_request_restarts_the_clock(self):
+        status, pid = self.start(4)
+        for _ in range(4):
+            time.sleep(2)
+            self.assertEqual(asgard.broker_status(self.state)["state"], "running")
+        self.assertTrue(process_running(pid))
+
+    def test_zero_keeps_the_realm_until_it_is_stopped(self):
+        status, pid = self.start(0)
+        time.sleep(3)
+        self.assertTrue(process_running(pid))
+
+    def test_an_emulator_without_the_option_still_starts_a_realm(self):
+        wrapper = self.state.parent / "old-emulator"
+        wrapper.write_text(f'#!/bin/sh\nfor a in "$@"; do [ "$a" = --asgard-idle ] && exit 2; done\nexec {EMU} "$@"\n')
+        wrapper.chmod(0o755)
+        with mock.patch.dict(os.environ, {"ASGARD_REALM_IDLE_SECONDS": "600"}), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as note:
+            status = asgard.ensure_broker(self.state, wrapper)
+        self.assertEqual(status["state"], "running")
+        self.assertIn("predates the realm idle timeout", note.getvalue())
+
+    def test_a_bad_setting_is_refused(self):
+        for value in ("soon", "-1", "604801"):
+            with mock.patch.dict(os.environ, {"ASGARD_REALM_IDLE_SECONDS": value}):
+                with self.assertRaises(ValueError):
+                    asgard.realm_idle_seconds()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ASGARD_REALM_IDLE_SECONDS", None)
+            self.assertEqual(asgard.realm_idle_seconds(), asgard.REALM_IDLE_SECONDS)
 
 
 if __name__ == "__main__":

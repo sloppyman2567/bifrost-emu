@@ -8,6 +8,8 @@
 #include "System/Android/Media/HostDecoder.hpp"
 #include <filesystem>
 #include <array>
+#include <chrono>
+#include <sys/stat.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -348,12 +350,44 @@ struct Endpoint {
     std::mutex mutex;
     std::map<int, std::shared_ptr<CPU>> cpus;
 };
+int64_t steady_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+// Whether `pid` is a direct child of this process: the codec services the broker starts hold Binder channels of their
+// own, and those must not count as clients when deciding the realm is idle.
+bool child_of_broker(pid_t pid) {
+    char path[48];
+    std::snprintf(path, sizeof path, "/proc/%d/stat", static_cast<int>(pid));
+    FILE* file = std::fopen(path, "r");
+    if (!file) return false;
+    char text[512];
+    const size_t length = std::fread(text, 1, sizeof text - 1, file);
+    std::fclose(file);
+    text[length] = 0;
+    const char* after_name = std::strrchr(text, ')');
+    char state; int parent = 0;
+    return after_name && std::sscanf(after_name + 1, " %c %d", &state, &parent) == 2 && parent == ::getpid();
+}
 struct Broker {
     std::mutex mutex;
     std::map<Key, std::shared_ptr<Endpoint>> endpoints;
     std::array<std::shared_ptr<BinderDomain>, 3> domains;
     std::string path;
     std::atomic<unsigned> connections{0};
+    // Idle accounting. `services` counts the persistent Binder channels of the broker's own children; every other
+    // connection (an app's channels, a control request in flight) keeps the realm busy. `gate` orders an accept against
+    // the decision to retire, so a connection is never accepted and then lost.
+    std::atomic<unsigned> services{0};
+    std::atomic<int64_t> last_active_ms{steady_ms()};
+    std::mutex gate;
+    bool retiring = false;
+    dev_t socket_dev = 0; ino_t socket_ino = 0;  // the control socket's path, to unlink only our own
+    void touch() { last_active_ms.store(steady_ms()); }
+    // A successor may already have replaced the path; never remove its socket.
+    void unlink_if_ours() {
+        struct stat now;
+        if (::stat(path.c_str(), &now) == 0 && now.st_dev == socket_dev && now.st_ino == socket_ino) ::unlink(path.c_str());
+    }
     std::mutex media_mutex;
     std::shared_ptr<CodecServices> media;
     Broker(std::string path) : path(std::move(path)) {
@@ -416,7 +450,7 @@ struct Broker {
                     std::lock_guard<std::mutex> lock(media_mutex);
                     if (media) media->stop();
                     send_packet(fd, packet.header, output);
-                    ::unlink(path.c_str()); ::_exit(0);
+                    unlink_if_ours(); ::_exit(0);
                 }
                 send_packet(fd, packet.header, output);
                 return;
@@ -430,9 +464,13 @@ struct Broker {
                 Key key; if (::getrandom(key.data(), sizeof(key), 0) != sizeof(key)) return;
                 { std::lock_guard<std::mutex> lock(mutex); if (endpoints.size() >= 128) return; endpoints[key] = endpoint; }
                 packet.header.key = key; append(output, Result{0});
+                const bool own_service = child_of_broker(credentials.pid);
+                if (own_service) ++services;
                 if (send_packet(fd, packet.header, output)) {
                     char ignored; while (::recv(fd, &ignored, 1, 0) < 0 && errno == EINTR) {}
                 }
+                if (own_service) --services;
+                touch();
                 endpoint->node->disconnect();
                 { std::lock_guard<std::mutex> lock(mutex); endpoints.erase(key); }
                 return;
@@ -563,7 +601,7 @@ std::unique_ptr<Node> open_broker_binder(const std::string& path, const std::str
     }
     return std::make_unique<RemoteBinder>(path, reply.header.key, fd, flags);
 }
-int asgard_broker_main(const std::string& path) {
+int asgard_broker_main(const std::string& path, unsigned idle_seconds) {
     sockaddr_un address{}; address.sun_family = AF_UNIX;
     if (path.empty() || path.size() >= sizeof(address.sun_path)) { fprintf(stderr, "Asgard: socket path is too long\n"); return 2; }
     memcpy(address.sun_path, path.c_str(), path.size() + 1);
@@ -573,12 +611,38 @@ int asgard_broker_main(const std::string& path) {
     ::umask(saved);
     if (bound || ::listen(fd, 64)) { fprintf(stderr, "Asgard: %s: %s\n", path.c_str(), strerror(errno)); if (fd >= 0) ::close(fd); return 1; }
     auto broker = std::make_shared<Broker>(path);
+    { struct stat bound_path; if (::stat(path.c_str(), &bound_path) == 0) { broker->socket_dev = bound_path.st_dev; broker->socket_ino = bound_path.st_ino; } }
     printf("ASGARD_BROKER_READY %s\n", path.c_str()); fflush(stdout);
+    if (idle_seconds) {
+        // A realm with no app attached for `idle_seconds` ends: its codec services stop and its socket goes, so an idle
+        // desktop keeps no emulated runtimes. A later launch starts a fresh realm. Control requests and the codec
+        // services' own channels do not count as clients; any accept restarts the clock.
+        std::thread([broker, idle_seconds] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                {
+                    std::lock_guard<std::mutex> lock(broker->gate);
+                    if (broker->connections.load() > broker->services.load() ||
+                        steady_ms() - broker->last_active_ms.load() < static_cast<int64_t>(idle_seconds) * 1000) continue;
+                    broker->retiring = true;
+                }
+                printf("ASGARD_BROKER_IDLE_EXIT after %u s without an app\n", idle_seconds); fflush(stdout);
+                broker->unlink_if_ours();
+                { std::lock_guard<std::mutex> lock(broker->media_mutex); if (broker->media) broker->media->stop(); }
+                ::_exit(0);
+            }
+        }).detach();
+    }
     while (true) {
         int peer = ::accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
         if (peer < 0) { if (errno == EINTR) continue; break; }
-        if (broker->connections.fetch_add(1) >= 512) {
-            --broker->connections; ::close(peer); continue;
+        {
+            std::lock_guard<std::mutex> lock(broker->gate);
+            if (broker->retiring) { ::close(peer); continue; }
+            if (broker->connections.fetch_add(1) >= 512) {
+                --broker->connections; ::close(peer); continue;
+            }
+            broker->touch();
         }
         try {
             std::thread([broker, peer] {
@@ -591,6 +655,6 @@ int asgard_broker_main(const std::string& path) {
             --broker->connections; ::close(peer);
         }
     }
-    ::close(fd); ::unlink(path.c_str()); return 1;
+    ::close(fd); broker->unlink_if_ours(); return 1;
 }
 } // namespace arm64emu::yggdrasil

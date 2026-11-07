@@ -166,6 +166,14 @@ there (guided provisioning, update/reinstall) remain in progress.
   preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
   social preview setting.
 
+### Added (realm idle timeout)
+
+- An Asgard realm with no app attached ends after 10 minutes (`ASGARD_REALM_IDLE_SECONDS`, `0` to keep it): the broker stops its
+  codec services and removes its socket. Before, `asgard run` left a detached broker, with up to four runtime processes under it,
+  until `asgard realm stop`; two had run for 4.5 hours with no app. The next launch starts a fresh realm. Apps' Binder channels
+  keep the realm alive, control requests only restart the clock, and an older emulator is started without the option, with a
+  note. Checked with the real emulator and the Binder suite; a realm with media services attached is not tested.
+
 ### Changed (FP compares in the host flags)
 
 - `fcmp` and `fcmpe` feeding a conditional branch or an integer select leave their result in the host flags, as `SUBS` does, instead

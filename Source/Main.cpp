@@ -223,6 +223,7 @@ static void print_help(bool all) {
            "    --android-binder-broker SOCKET  join a shared guest Binder domain\n"
            "    --asgard-broker SOCKET  run Asgard's shared guest Binder broker\n"
            "    --asgard-service-parent PID  end with this parent process\n"
+           "    --asgard-idle SECONDS  with --asgard-broker: end after this long with no app attached (0: never)\n"
            "    --media-capabilities    probe native CPU/GPU decoders and print JSON\n"
            "    --window-stats-ui ...   the stats window's own process\n\n");
 }
@@ -365,10 +366,21 @@ int main(int argc, char** argv) {
         puts(arm64emu::yggdrasil::HostDecoder::capabilities_json().c_str());
         return 0;
     }
-    if ((argc == 3 || (argc == 5 && std::string(argv[3]) == "--asgard-service-parent"))
-            && std::string(argv[1]) == "--asgard-broker") {
-        if (argc == 5 && !bind_asgard_parent(argv[4])) return 2;
-        return arm64emu::yggdrasil::asgard_broker_main(argv[2]);
+    if (argc >= 3 && std::string(argv[1]) == "--asgard-broker") {
+        // --asgard-broker SOCKET [--asgard-service-parent PID] [--asgard-idle SECONDS]
+        unsigned idle = 0;
+        for (int i = 3; i < argc; i += 2) {
+            const std::string option = argv[i];
+            if (i + 1 >= argc) { fprintf(stderr, "bifrost-emu: %s needs a value\n", argv[i]); return 2; }
+            if (option == "--asgard-service-parent") { if (!bind_asgard_parent(argv[i + 1])) return 2; }
+            else if (option == "--asgard-idle") {
+                char* end = nullptr;
+                const long seconds = std::strtol(argv[i + 1], &end, 10);
+                if (!end || *end || seconds < 0 || seconds > 7 * 24 * 3600) { fprintf(stderr, "bifrost-emu: invalid --asgard-idle\n"); return 2; }
+                idle = static_cast<unsigned>(seconds);
+            } else { fprintf(stderr, "bifrost-emu: unknown broker option %s\n", argv[i]); return 2; }
+        }
+        return arm64emu::yggdrasil::asgard_broker_main(argv[2], idle);
     }
     if (argc == 3 && std::string(argv[1]) == "--window-stats-ui")
         return arm64emu::window_stats::ui_main(std::atoi(argv[2]));

@@ -311,6 +311,45 @@ def stop_realm(state, force=False):
     return value
 
 
+REALM_IDLE_SECONDS = 600
+
+
+def realm_idle_seconds():
+    """How long a realm broker waits with no app attached before it ends, with its codec services (ASGARD_REALM_IDLE_SECONDS;
+    0 keeps it until `realm stop`). The next launch then starts a fresh realm, which costs the services' start and a copy of their
+    root, so a few minutes of grace is the price of an idle desktop that holds no emulated runtimes."""
+    value = os.environ.get("ASGARD_REALM_IDLE_SECONDS")
+    if value is None:
+        return REALM_IDLE_SECONDS
+    try:
+        seconds = int(value)
+    except ValueError:
+        seconds = -1
+    if not 0 <= seconds <= 7 * 24 * 3600:
+        raise ValueError("ASGARD_REALM_IDLE_SECONDS must be a whole number of seconds from 0 (never) to 604800")
+    return seconds
+
+
+def launch_broker(state, emu, path, log_path, extra):
+    """Start a broker with `extra` options and wait for it to answer. Returns (status, None, log offset), or (None, exit
+    code, log offset) when it exited first; a broker that never answers is terminated and raises."""
+    with log_path.open("ab", buffering=0) as log:
+        start = log.tell()
+        child = subprocess.Popen([str(emu), "--asgard-broker", str(path), *extra],
+                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if child.poll() is not None:
+            return None, child.returncode, start
+        status = broker_status(state)
+        if status["state"] == "running":
+            return status, None, start
+        time.sleep(0.025)
+    child.terminate()
+    child.wait(timeout=5)
+    raise ValueError(f"Asgard broker did not become ready within 5 seconds:\n{log_tail(log_path, start)}")
+
+
 def ensure_broker(state, emu):
     directory = state / ".asgard"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -341,21 +380,16 @@ def ensure_broker(state, emu):
                 raise ValueError("Refusing to replace a foreign Asgard socket")
             path.unlink()
         log_path = directory / "broker.log"
-        with log_path.open("ab", buffering=0) as log:
-            start = log.tell()
-            child = subprocess.Popen([str(emu), "--asgard-broker", str(path)],
-                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if child.poll() is not None:
-                raise ValueError(f"Asgard broker {exit_description(child.returncode)}:\n{log_tail(log_path, start)}")
-            status = broker_status(state)
-            if status["state"] == "running":
-                return status
-            time.sleep(0.025)
-        child.terminate()
-        child.wait(timeout=5)
-        raise ValueError(f"Asgard broker did not become ready within 5 seconds:\n{log_tail(log_path, start)}")
+        idle = realm_idle_seconds()
+        status, code, start = launch_broker(state, emu, path, log_path, ["--asgard-idle", str(idle)] if idle else [])
+        if status is None and idle and code == 2:
+            # An emulator built before --asgard-idle exits with status 2 on it: start that one without the option.
+            print("This bifrost-emu predates the realm idle timeout; rebuild it to stop an idle realm "
+                  "(starting the realm without it)", file=sys.stderr, flush=True)
+            status, code, start = launch_broker(state, emu, path, log_path, [])
+        if status is None:
+            raise ValueError(f"Asgard broker {exit_description(code)}:\n{log_tail(log_path, start)}")
+        return status
 
 
 PACKAGE_FILES = (".apk", ".apkm", ".apks", ".xapk")

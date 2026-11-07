@@ -117,10 +117,11 @@ app exit leaves the library and the other apps usable.
   event, pause and stop the Activities as Android does, and measure idle CPU before and after.
 - Game windows have no fullscreen toggle and no remembered size or position: `--fullscreen` belongs to the library, which
   remembers only its own size and sort order. Decide whether each is a per-app setting.
-- Give the realm an idle policy. `asgard run` starts a detached broker that only `asgard realm stop` ends, and every service
-  child (WebView service and renderers, microG) is a whole emulated runtime of 350 to 450 MiB that idle-stops after 60 s
-  only without a service record or provider reference; in Battle Cats the WebView service stays alive for an untraced
-  reason. Stop the broker and its media root when the last client leaves, after a grace period, and trace that service.
+- Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested
+  with the real emulator, not with media services attached; the retired broker leaves its 750 MB service root until the next
+  sweep). Open: every service child (WebView service and renderers, microG) is a whole emulated runtime of 350 to 450 MiB
+  that idle-stops after 60 s only without a service record or provider reference; in Battle Cats the WebView service stays
+  alive for an untraced reason. Trace that service; remove the retired realm's service root when it ends.
 
 #### Measured so far (ads, WebView and windows)
 
