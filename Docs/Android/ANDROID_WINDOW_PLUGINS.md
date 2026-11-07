@@ -211,8 +211,9 @@ send it.
 
 The SDL3 backend reads the window's flags (`SDL_WINDOW_HIDDEN`, `_MINIMIZED`, `_OCCLUDED`) after each shown, hidden,
 minimised, restored, occluded or exposed event for its own window and reports the result when it differs from the last
-one. Reading the flags, not the event, keeps a burst such as hide-then-show consistent. X11 sends minimised and restored;
-xdg-shell never tells a client about minimising, so on Wayland the signal is a compositor suspending the window (SDL's
+one. Reading the flags, not the event, keeps a burst such as hide-then-show consistent. X11 sends minimised (with
+occluded, from the unmap or `_NET_WM_STATE`) and restored, and never reports a window merely covered by another one
+(SDL's X11 driver does not use `VisibilityNotify`); xdg-shell never tells a client about minimising, so on Wayland the signal is a compositor suspending the window (SDL's
 occluded, then exposed), which a compositor may or may not do when a window is minimised or on another workspace
 ([SDL's Wayland driver](https://github.com/libsdl-org/SDL/blob/main/src/video/wayland/SDL_waylandwindow.c): "we do not get
 minimize events from xdg-shell"; `XDG_TOPLEVEL_STATE_SUSPENDED` becomes `SDL_EVENT_WINDOW_OCCLUDED`). The guest side is in
