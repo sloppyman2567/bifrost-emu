@@ -112,6 +112,11 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   string; it falls back to the host Vulkan loader's device name, from one instance created on first use (empty when
   the host has no loader).
 
+### Changed (fault reports)
+
+- A fault at pc 0 (a call through a null function pointer) also prints the first sixteen slots of the table the call
+  went through (`ldr x9,[x19]; blr x9`), each named, so the missing entry is identified rather than guessed.
+
 ### Fixed (guest memory)
 
 - **A 16 GiB reservation failed with ENOMEM while most of a 512 GiB realm window was empty, and Zenless Zone Zero's

@@ -600,6 +600,23 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                 strncat(words, one, sizeof(words) - strlen(words) - 1);
             }
             fprintf(stderr, "[fault] tid=%d code before lr: %s\n", cpu.tid, words);
+            // `ldr x9,[x19]; blr x9` calls through the first slot of a table;
+            // name the neighbouring slots so the missing entry is identified
+            // rather than guessed.
+            fprintf(stderr, "[fault] tid=%d call table x19=0x%llx(%s)", cpu.tid,
+                    static_cast<unsigned long long>(cpu.regs[19]),
+                    describe_guest_address(emu, cpu.regs[19]).c_str());
+            for (int i = 0; i < 16; ++i) {
+                uint64_t slot = 0;
+                try {
+                    slot = emu.mem().load<uint64_t>(
+                        cpu.regs[19] + static_cast<uint64_t>(i) * 8);
+                } catch (...) { break; }
+                fprintf(stderr, " [%d]=0x%llx(%s)", i,
+                        static_cast<unsigned long long>(slot),
+                        describe_guest_address(emu, slot).c_str());
+            }
+            fprintf(stderr, "\n");
         }
     }
     const bool trace = signal_trace_enabled();
