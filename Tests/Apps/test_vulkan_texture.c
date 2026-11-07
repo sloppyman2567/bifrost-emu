@@ -1,12 +1,12 @@
-/* test_mambo_vulkan.c — MAMBO VULKAN TEST (2026-08-22).
+/* test_vulkan_texture.c — Vulkan texture and audio test.
  *
- * Opens a real SDL2 window through the thunks, renders Matikanetannhauser
- * (baked 256x256 RGBA texture, generated from Matikanetannhauser_(Race).webp
- * with alpha blending for webp transparency) as a textured quad through a
- * full Vulkan pipeline — window surface, swapchain, graphics pipeline,
- * combined-image-sampler descriptor, staging upload via
- * vkCmdCopyBufferToImage + pipeline barriers — and plays a mambo rhythm ONE
- * time through the ALSA audio-thunk arm (shared AudioEngine ring).
+ * Opens a real SDL2 window through the thunks, renders a photo (a baked
+ * 320x240 RGBA texture of a CC0 cat picture, see vulkan_texture_cat.h) as a
+ * textured quad covering the window through a full Vulkan pipeline — window surface, swapchain,
+ * graphics pipeline, combined-image-sampler descriptor, staging upload via
+ * vkCmdCopyBufferToImage + pipeline barriers — and plays a CC0 cat meow (see
+ * vulkan_texture_meow.h) ONE time through the ALSA audio-thunk arm (shared
+ * AudioEngine ring).
  *
  * NOTE: the texture is RGBA because 24-bit R8G8B8_UNORM image copies hard-
  * fault this RADV context even on the host (verified with a host-side repro;
@@ -15,7 +15,7 @@
  * Exit 0 = pass, 1 = fail, 77 = skip without DISPLAY/Vulkan/audio env.
  *
  * Build:
- *   make cross SRC=Tests/Apps/test_mambo_vulkan.c OUT=Tests/Apps/test_mambo_vulkan.elf \
+ *   make cross SRC=Tests/Apps/test_vulkan_texture.c OUT=Tests/Apps/test_vulkan_texture.elf \
  *     CROSS_EXTRA=-ITests/Apps/vulkan_headers/include
  */
 #include <stdio.h>
@@ -46,9 +46,9 @@ static int g_fail = 0;
     else { printf(" FAIL  %s\n", msg); g_fail++; } \
 } while (0)
 
-#include "mambo_tex.h"
-#include "mambo_audio.h"
-#include "test_mambo_spv.h"
+#include "vulkan_texture_cat.h"
+#include "vulkan_texture_meow.h"
+#include "test_vulkan_texture_spv.h"
 
 typedef int (*SDL_Init_t)(uint32_t);
 typedef void* (*SDL_CreateWindow_t)(const char*, int, int, int, int, uint32_t);
@@ -83,7 +83,7 @@ int main(void) {
         printf("SKIP: SDL video driver %s has no Vulkan surfaces\n", driver);
         return 77;
     }
-    void* win = SDL_CreateWindow("MAMBO! Matikanetannhauser",
+    void* win = SDL_CreateWindow("Bifrost Vulkan texture test",
                                  100, 100, 640, 480,
                                  0x00000002u /*SHOWN*/ | 0x00000004u /*RESIZABLE*/);
     CHECK(win != NULL, "SDL_CreateWindow");
@@ -129,7 +129,7 @@ int main(void) {
 
     VkApplicationInfo appInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "bifrost mambo",
+        .pApplicationName = "bifrost vulkan texture",
         .apiVersion = VK_API_VERSION_1_0,
     };
     VkInstanceCreateInfo ici = {
@@ -291,7 +291,7 @@ int main(void) {
     } while (0)
 
     /* ── Texture upload: staging buffer + RGBA image + barriers ───── */
-    const VkDeviceSize tex_bytes = MAMBO_TEX_W * MAMBO_TEX_H * 4;
+    const VkDeviceSize tex_bytes = VULKAN_TEXTURE_W * VULKAN_TEXTURE_H * 4;
     VkBufferCreateInfo bci = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = tex_bytes,
@@ -320,7 +320,7 @@ int main(void) {
     CHECK(r == VK_SUCCESS && mapped != NULL &&
           ((uintptr_t)mapped >> 32) == 0,
           "vkMapMemory bounce is a direct-window guest address");
-    if (r == VK_SUCCESS && mapped) memcpy(mapped, mambo_tex, tex_bytes);
+    if (r == VK_SUCCESS && mapped) memcpy(mapped, vulkan_texture_cat, tex_bytes);
     VkMappedMemoryRange frange = {
         .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
         .memory = stage_mem, .offset = 0, .size = VK_WHOLE_SIZE };
@@ -330,7 +330,7 @@ int main(void) {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = VK_IMAGE_TYPE_2D,
         .format = VK_FORMAT_R8G8B8A8_UNORM,
-        .extent = { MAMBO_TEX_W, MAMBO_TEX_H, 1 },
+        .extent = { VULKAN_TEXTURE_W, VULKAN_TEXTURE_H, 1 },
         .mipLevels = 1, .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -386,7 +386,7 @@ int main(void) {
     VkBufferImageCopy copy = {
         .bufferOffset = 0,
         .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-        .imageExtent = { MAMBO_TEX_W, MAMBO_TEX_H, 1 },
+        .imageExtent = { VULKAN_TEXTURE_W, VULKAN_TEXTURE_H, 1 },
     };
     vkCmdCopyBufferToImage(upcmd, stage_buf, tex_image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
@@ -518,11 +518,11 @@ int main(void) {
     /* ── Pipeline: quad verts (pos2 uv2), TRIANGLE_STRIP, alpha blend ── */
     VkShaderModuleCreateInfo smci = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = sizeof(kMamboVertSpv), .pCode = kMamboVertSpv };
+        .codeSize = sizeof(kVulkanTextureVertSpv), .pCode = kVulkanTextureVertSpv };
     VkShaderModule vs_mod = VK_NULL_HANDLE, fs_mod = VK_NULL_HANDLE;
     r = vkCreateShaderModule(device, &smci, NULL, &vs_mod);
     CHECK(r == VK_SUCCESS, "vertex shader module");
-    smci.pCode = kMamboFragSpv; smci.codeSize = sizeof(kMamboFragSpv);
+    smci.pCode = kVulkanTextureFragSpv; smci.codeSize = sizeof(kVulkanTextureFragSpv);
     r = vkCreateShaderModule(device, &smci, NULL, &fs_mod);
     CHECK(r == VK_SUCCESS, "fragment shader module");
 
@@ -607,12 +607,19 @@ int main(void) {
     CHECK(r == VK_SUCCESS, "vertex vkAllocateMemory");
     vkBindBufferMemory(device, vbuf, vmem, 0);
 
-    /* Vulkan NDC has y=-1 at screen TOP → v=0 pairs with y=-1. */
-    static const float quad[4][4] = {
-        { -0.45f, -1.0f, 0.0f, 0.0f },
-        {  0.45f, -1.0f, 1.0f, 0.0f },
-        { -0.45f,  1.0f, 0.0f, 1.0f },
-        {  0.45f,  1.0f, 1.0f, 1.0f },
+    /* The photo covers the whole window and keeps its proportions: the side
+     * that overflows is cropped (like CSS object-fit: cover). Vulkan NDC
+     * has y=-1 at screen TOP, so v=0 pairs with y=-1. vkCmdUpdateBuffer
+     * copies the data when recorded, so it may live on the stack. */
+    const float aspect = ((float)extent.width / (float)extent.height) /
+                         ((float)VULKAN_TEXTURE_W / (float)VULKAN_TEXTURE_H);
+    const float cu = aspect < 1.0f ? (1.0f - aspect) * 0.5f : 0.0f;
+    const float cv = aspect > 1.0f ? (1.0f - 1.0f / aspect) * 0.5f : 0.0f;
+    const float quad[4][4] = {
+        { -1.0f, -1.0f, cu,        cv },
+        {  1.0f, -1.0f, 1.0f - cu, cv },
+        { -1.0f,  1.0f, cu,        1.0f - cv },
+        {  1.0f,  1.0f, 1.0f - cu, 1.0f - cv },
     };
 
     VkCommandBufferAllocateInfo cbai2 = cbai;
@@ -621,10 +628,10 @@ int main(void) {
     r = vkAllocateCommandBuffers(device, &cbai2, cmds);
     CHECK(r == VK_SUCCESS, "per-image command buffers");
 
-    /* ── Mambo sound: ONE play through the ALSA arm ─────────────────
-     * Real decoded PCM from the source MP3 (see mambo_audio.h).       */
-    static const int16_t* mambo_pcm = kMamboPcm;
-    const size_t mambo_bytes = sizeof(kMamboPcm);
+    /* ── Meow: ONE play through the ALSA arm ──────────────────────────
+     * Recorded PCM, 44100 Hz stereo S16 (see vulkan_texture_meow.h).  */
+    static const int16_t* meow_pcm = kMeowPcm;
+    const size_t meow_bytes = sizeof(kMeowPcm);
 
     /* ── Frame loop: render until window closes (~4 s max) ────────── */
     int played = 0, frames = 0, loop_ok = 1;
@@ -674,7 +681,7 @@ int main(void) {
 
         frames++;
         if (frames == 2 && !played) {
-            /* ONE-TIME mambo playback through the ALSA subset arm. */
+            /* ONE-TIME meow playback through the ALSA subset arm. */
             uint64_t ha = (uint64_t)(uintptr_t)dlopen_bf("libasound.so.2", 2);
             typedef int (*open_t)(void**, const char*, int, int);
             typedef long (*writei_t)(void*, const void*, unsigned long);
@@ -697,8 +704,8 @@ int main(void) {
                     if (ch_f) ch_f(pcm_h, hp, 2);
                     if (rate_f) rate_f(pcm_h, hp, 44100, &dir);
                     /* small chunks so the engine ring never drops samples */
-                    size_t bytes = mambo_bytes;
-                    const uint8_t* p = (const uint8_t*)mambo_pcm;
+                    size_t bytes = meow_bytes;
+                    const uint8_t* p = (const uint8_t*)meow_pcm;
                     while (bytes > 0) {
                         size_t chunk = bytes > 16384 ? 16384 : bytes;
                         long w = wr(pcm_h, p, chunk / 4 /*frames*/);
@@ -708,8 +715,8 @@ int main(void) {
                     }
                     cl(pcm_h);
                     played = 1;
-                    printf("  OK  MAMBO played once (%zu bytes)\n",
-                           mambo_bytes);
+                    printf("  OK  meow played once (%zu bytes)\n",
+                           meow_bytes);
                 }
             }
         }
@@ -717,7 +724,7 @@ int main(void) {
     }
     printf("  ..  rendered %d textured-quad frames\n", frames);
     CHECK(loop_ok && frames >= 2, "textured-quad frame loop ran");
-    CHECK(played, "mambo sound played exactly once");
+    CHECK(played, "meow played exactly once");
 
     vkDeviceWaitIdle(device);
 
@@ -787,7 +794,7 @@ int main(void) {
     free(phys); free(qprops); free(formats); free(images);
     free(cviews); free(fbs); free(cmds);
 
-    printf(g_fail ? "MAMBO VULKAN TEST FAILED (%d)\n"
-                  : "MAMBO VULKAN TEST PASSED — ¡MAMBO!\n", g_fail);
+    printf(g_fail ? "VULKAN TEXTURE TEST FAILED (%d)\n"
+                  : "VULKAN TEXTURE TEST PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }

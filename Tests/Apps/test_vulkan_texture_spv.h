@@ -1,5 +1,5 @@
-// SPIR-V for test_mambo_vulkan.c textured quad (glslc). DO NOT EDIT.
-static const uint32_t kMamboVertSpv[187] = {
+// SPIR-V for test_vulkan_texture.c textured quad (glslc). DO NOT EDIT.
+static const uint32_t kVulkanTextureVertSpv[187] = {
 0x07230203u,0x00010000u,0x000d000bu,0x0000001fu,0x00000000u,0x00020011u,
 0x00000001u,0x0006000bu,0x00000001u,0x4c534c47u,0x6474732eu,0x3035342eu,
 0x00000000u,0x0003000eu,0x00000000u,0x00000001u,0x0009000fu,0x00000000u,
@@ -33,7 +33,7 @@ static const uint32_t kMamboVertSpv[187] = {
 0x00000013u,0x00000015u,0x0003003eu,0x0000001eu,0x0000001cu,0x000100fdu,
 0x00010038u,
 };
-static const uint32_t kMamboFragSpv[119] = {
+static const uint32_t kVulkanTextureFragSpv[119] = {
 0x07230203u,0x00010000u,0x000d000bu,0x00000014u,0x00000000u,0x00020011u,
 0x00000001u,0x0006000bu,0x00000001u,0x4c534c47u,0x6474732eu,0x3035342eu,
 0x00000000u,0x0003000eu,0x00000000u,0x00000001u,0x0007000fu,0x00000004u,

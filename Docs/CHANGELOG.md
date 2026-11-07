@@ -48,6 +48,15 @@ there (guided provisioning, update/reinstall) remain in progress.
   (`Tools/Site/google110aba91ba93c9ba.html`) is published beside the page. Pages has to be enabled with GitHub
   Actions as its source.
 
+### Changed (tests)
+
+- The Vulkan texture and audio test no longer ships third-party character art or an unlicensed sound clip: the
+  Matikanetannhauser image and the "Mambo" sound effect (`Assets/Mambo`, baked into `mambo_tex.h` and
+  `mambo_audio.h`) are removed. `test_mambo_vulkan` is now `test_vulkan_texture` (`run_tests.sh` entry
+  `vulkan_texture`): it draws a CC0 cat photo covering the whole window, cropped like `object-fit: cover` from the
+  swapchain's size, and plays a CC0 cat meow once through the ALSA arm. Both sources (Wikimedia Commons, CC0 1.0) are
+  named in `vulkan_texture_cat.h` and `vulkan_texture_meow.h`. The removed files remain in the repository's history.
+
 ### Fixed (system calls)
 
 - `ioctl(fd, FIOCLEX/FIONCLEX, NULL)` returned EFAULT: the terminal helper rejected every NULL argument before

@@ -716,10 +716,10 @@ INTEGRATION_TESTS=(
     # OpenSL ES synthetic-vtable object model (Enqueue + RegisterCallback).
     # Headless-safe.
     "android_audio|Tests/Apps/test_android_audio.elf||30|ALL PASS"
-    # MAMBO VULKAN TEST (2026-08-22): SDL2 window + Vulkan textured quad
-    # (Matikanetannhauser) + one-shot mambo sound via the ALSA arm. Needs
-    # DISPLAY + host Vulkan; exit 77 = skip without them.
-    "mambo_vulkan|Tests/Apps/test_mambo_vulkan.elf||40|MAMBO VULKAN TEST PASSED"
+    # SDL2 window + Vulkan textured quad (a CC0 cat photo) + a one-shot
+    # CC0 cat meow via the ALSA arm. Needs DISPLAY + host Vulkan;
+    # exit 77 = skip without them.
+    "vulkan_texture|Tests/Apps/test_vulkan_texture.elf||40|VULKAN TEXTURE TEST PASSED"
     # Wayland host bridge: real compositor connect + fd + flush +
     # roundtrip + dispatch_pending + disconnect. Needs WAYLAND_DISPLAY;
     # exit 77 = skip headless.

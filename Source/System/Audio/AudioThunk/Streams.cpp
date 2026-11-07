@@ -44,7 +44,7 @@ uint8_t AudioDispatch::fmt_size(uint32_t f) {
 }
 // Blocking write with bounded wait (ALSA writei / Pulse simple
 // semantics: the real calls BLOCK until all bytes are accepted, they
-// never report a short 0-with-data-pending — guests like the mambo
+// never report a short 0-with-data-pending — guests like the Vulkan texture
 // test treat w<=0 as fatal and stop feeding). Returns total BYTES
 // accepted (short only on budget expiry or dead stream). Frame
 // aligned: advances by whole accepted frames only.
