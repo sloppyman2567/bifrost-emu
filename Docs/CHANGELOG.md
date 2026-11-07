@@ -43,8 +43,9 @@ there (guided provisioning, update/reinstall) remain in progress.
   `.github/workflows/pages.yml` when one of them changes. It carries a description, canonical URL, link-preview tags,
   SoftwareApplication structured data and a sitemap, has light and dark themes and no JavaScript, and serves the
   screenshots as WebP (about 0.4 MB instead of 8.5 MB). The build refuses to publish when a playable or blocked app in
-  `compatibility.json` disagrees with the README table. A Search Console token can be supplied through the
-  `GOOGLE_SITE_VERIFICATION` repository variable. Pages has to be enabled with GitHub Actions as its source.
+  `compatibility.json` disagrees with the README table. Search Console's verification file
+  (`Tools/Site/google110aba91ba93c9ba.html`) is published beside the page. Pages has to be enabled with GitHub
+  Actions as its source.
 
 ### Fixed (system calls)
 

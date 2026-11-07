@@ -6,10 +6,10 @@ highlights, the "What runs" summary and table, and the screenshots; each table r
 status is checked against Scripts/Android/compatibility.json, and the build fails rather
 than publish a page that disagrees with it. Writes index.html, sitemap.xml (submitted in Search
 Console: a project page's robots.txt is not read, only the domain root's) and the screenshots
-(WebP, and a JPEG link preview; needs Pillow) to the output directory (default build/site).
+(WebP, and a JPEG link preview; needs Pillow) to the output directory (default build/site), with
+the Search Console verification files kept beside this script (google<token>.html, unchanged).
 
-Environment: SITE_URL (default from GITHUB_REPOSITORY, else the project's Pages address) and
-GOOGLE_SITE_VERIFICATION (a Search Console HTML-tag token, optional).
+Environment: SITE_URL (default from GITHUB_REPOSITORY, else the project's Pages address).
 """
 import argparse
 import datetime
@@ -172,9 +172,6 @@ def main():
     compat = json.loads((ROOT / "Scripts/Android/compatibility.json").read_text())
     version = re.search(r'VERSION\s*=\s*"([^"]+)"', (ROOT / "Include/Bifrost/Version.hpp").read_text()).group(1)
     url = site_url()
-    token = os.environ.get("GOOGLE_SITE_VERIFICATION", "").strip()
-    if token and not re.fullmatch(r"[A-Za-z0-9_-]{10,100}", token):
-        raise SystemExit("GOOGLE_SITE_VERIFICATION is not a Search Console token")
     if args.output.exists():
         shutil.rmtree(args.output)
     args.output.mkdir(parents=True)
@@ -189,10 +186,15 @@ def main():
     }, separators=(",", ":")).replace("</", "<\\/")
     page = string.Template((Path(__file__).with_name("page.html")).read_text()).substitute(
         description=html.escape(DESCRIPTION), url=url, repo=REPO, og_image=url + first_shot, json_ld=json_ld,
-        verification=f'<meta name="google-site-verification" content="{token}">' if token else "",
         version=html.escape(version), games=summary.group(1), playable=summary.group(3), checked=summary.group(2),
         summary=summary_html, features=features(readme), rows=rows, shots=shots)
     (args.output / "index.html").write_text(page)
+    # Search Console's HTML-file verification: served as downloaded, next to the page.
+    for verification in sorted(Path(__file__).parent.glob("google*.html")):
+        if not re.fullmatch(r"google[0-9a-f]{16}\.html", verification.name) or \
+                verification.read_text().strip() != f"google-site-verification: {verification.name}":
+            raise SystemExit(f"{verification.name} is not a Search Console verification file")
+        shutil.copyfile(verification, args.output / verification.name)
     today = datetime.date.today().isoformat()
     (args.output / "sitemap.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
