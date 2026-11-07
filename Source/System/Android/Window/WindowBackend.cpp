@@ -1434,12 +1434,20 @@ private:
     }
   }
   void show_cursor(float x, float y) {
-    const int32_t w = fixed_w_ ? fixed_w_ : width_, h = fixed_h_ ? fixed_h_ : height_;
+    const int32_t w = cursor_.width() > 0 ? cursor_.width() : (fixed_w_ ? fixed_w_ : width_);
+    const int32_t h = cursor_.height() > 0 ? cursor_.height() : (fixed_h_ ? fixed_h_ : height_);
     const int size = std::clamp(std::min(w, h) / 22, 24, 64);  // app pixels: about as tall as an arrow on a phone
     if (size != cursor_icon_size_) { cursor_icon_ = pad_cursor_bitmap(size); cursor_icon_size_ = size; cursor_icon_x_ = -1; }
     const int ix = int(x), iy = int(y);
     if (cursor_visible_ && ix == cursor_icon_x_ && iy == cursor_icon_y_) return;
-    if (show_popup(kCursorLayer, ix, iy, size, size, cursor_icon_.data()) == 0) {
+    // The picture's top left is the pointer, so near the right or bottom edge the layer would hang outside the panel and the
+    // compositor would draw it outside the window: show only the part that fits.
+    const int visible_w = std::min(size, w - ix), visible_h = std::min(size, h - iy);
+    if (visible_w <= 0 || visible_h <= 0) return;
+    const std::vector<uint32_t> cropped = visible_w < size || visible_h < size
+        ? pad_cursor_crop(cursor_icon_, size, visible_w, visible_h) : std::vector<uint32_t>();
+    const uint32_t *pixels = cropped.empty() ? cursor_icon_.data() : cropped.data();
+    if (show_popup(kCursorLayer, ix, iy, visible_w, visible_h, pixels) == 0) {
       cursor_visible_ = true; cursor_icon_x_ = ix; cursor_icon_y_ = iy;
     }
   }

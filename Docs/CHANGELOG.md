@@ -38,6 +38,9 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Added (touch cursor for gamepads)
 
+- Fixed: at the right or bottom edge of the window the cursor's arrow hung out of it, a transparent bulge, because its layer
+  extends from the pointer by its own size; the picture is now cropped to the part inside the panel.
+
 - A gamepad can drive a touch pointer for apps that only take touch, for pads that have no trackpad (a Steam Controller's trackpads
   already act as a mouse). Start and Select pressed together turn it on and off; the left stick moves it (the triggers slow and
   speed it), A is a touch and X a second finger, and an arrow drawn in code follows it above the game. B, the d-pad, Y, the

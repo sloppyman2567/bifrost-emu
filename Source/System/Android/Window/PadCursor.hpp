@@ -43,6 +43,8 @@ public:
   bool active() const { return active_; }
   float x() const { return x_; }
   float y() const { return y_; }
+  int width() const { return w_; }
+  int height() const { return h_; }
 
   // The panel the pointer lives in, in app pixels. The first call puts the pointer in the middle.
   void set_bounds(int width, int height) {
@@ -185,6 +187,16 @@ inline std::vector<uint32_t> pad_cursor_bitmap(int size) {
       pixels[size_t(y) * size + x] = (alpha << 24) | (grey << 16) | (grey << 8) | grey;
     }
   return pixels;
+}
+
+// The top left `width` x `height` pixels of a `size` x `size` picture: the part of the arrow that fits in the panel when the
+// pointer is near its right or bottom edge. A layer larger than that would hang outside the window, which a compositor draws.
+inline std::vector<uint32_t> pad_cursor_crop(const std::vector<uint32_t> &bitmap, int size, int width, int height) {
+  width = std::clamp(width, 0, size); height = std::clamp(height, 0, size);
+  std::vector<uint32_t> out(size_t(width) * height);
+  for (int y = 0; y < height; ++y)
+    std::copy_n(bitmap.begin() + size_t(y) * size, width, out.begin() + size_t(y) * width);
+  return out;
 }
 
 }  // namespace frost

@@ -1520,7 +1520,9 @@ right doubles it), A is the primary finger and X a second one that stays where i
 app's panel (a fixed-size app's panel, else the window's pixels). The events are the ones a mouse makes (`kMouseFinger` and
 `kMouseSecondFinger`, hover when no finger is down, a drag while A is held), so the app sees ordinary touch. The picture is
 drawn in code (`pad_cursor_bitmap`: a white arrow with a dark outline) into a popup layer above the game, mapped through the
-same letterbox fit, and goes away after four seconds without movement. B, the d-pad, Y, the shoulders and the right stick
+same letterbox fit, and goes away after four seconds without movement. Its top left is the pointer, so near the right or bottom
+edge the picture is cropped to the part inside the panel (`pad_cursor_crop`): a whole-size layer there would hang outside the
+window, and the compositor draws it. B, the d-pad, Y, the shoulders and the right stick
 still reach the game. The first of Start and Select pressed has already gone to the game, so a chord takes it back (the game
 is sent its release) and the rest of both presses is the cursor's; turning the cursor on also releases A and X and centres the
 left stick and the triggers for the game, and turning it off lifts any finger that is down. `make test-android-sdl-backend`

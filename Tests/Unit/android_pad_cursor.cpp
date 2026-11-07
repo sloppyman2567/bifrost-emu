@@ -169,6 +169,17 @@ int main() {
       assert((pixels[size_t(2) * size + 2] >> 24) > 200);                 // just inside the tip
     }
   }
+  // Near the right or bottom edge only the part of the arrow inside the panel is shown, not a layer that hangs outside the window.
+  {
+    const std::vector<uint32_t> pixels = frost::pad_cursor_bitmap(32);
+    const std::vector<uint32_t> corner = frost::pad_cursor_crop(pixels, 32, 10, 7);
+    assert(corner.size() == 70);
+    for (int y = 0; y < 7; ++y)
+      for (int x = 0; x < 10; ++x) assert(corner[size_t(y) * 10 + x] == pixels[size_t(y) * 32 + x]);
+    assert(frost::pad_cursor_crop(pixels, 32, 32, 32) == pixels);       // fits: unchanged
+    assert(frost::pad_cursor_crop(pixels, 32, 99, 99) == pixels);       // never larger than the picture
+    assert(frost::pad_cursor_crop(pixels, 32, 0, 5).empty());
+  }
   std::puts("android_pad_cursor: PASS");
   return 0;
 }
