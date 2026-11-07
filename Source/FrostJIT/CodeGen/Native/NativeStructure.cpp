@@ -45,7 +45,7 @@ uint64_t native_structure(Emulator* emu, CPU* cpu, uint64_t bits) {
         }
         if(p.post) {
             // Read the writeback operand before changing an aliased base.
-            uint64_t offset=p.offset_reg==31?total:(p.offset_reg==30?0:cpu->regs[p.offset_reg]);
+            uint64_t offset=p.offset_reg==31?total:cpu->regs[p.offset_reg];
             if(p.base==31) cpu->sp=base+offset; else cpu->regs[p.base]=base+offset;
         }
         cpu->pc+=4;

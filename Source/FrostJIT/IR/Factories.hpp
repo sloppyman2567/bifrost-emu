@@ -172,6 +172,9 @@ inline IRInst IRInst::make_arith(uint16_t dest, uint16_t src1, uint16_t src2,
 inline SimdArithParams IRInst::arith_params() const {
     return SimdArithParams{static_cast<uint8_t>(imm), width, (flags_op & 1) != 0};
 }
+inline IRInst IRInst::make_struct_mem(uint16_t base, const NativeStructureParams& p, uint64_t arm_pc) {
+    IRInst i{}; i.op = IROp::SIMD_STRUCT_MEM; i.src1 = base; i.imm = p.pack(); i.arm_pc = arm_pc; return i;
+}
 // Bitwise logical: ONLY subop varies (imm); width/cond/flags_op are
 // always 0. The factory hardcodes the constants.
 inline IRInst IRInst::make_native_structure(const NativeStructureParams& p, uint64_t arm_pc) {

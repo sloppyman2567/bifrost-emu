@@ -97,7 +97,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     if (d.post_indexed) {
                         uint64_t off = 0;
                         if (d.rm == 31) off = (uint64_t)d.simd_count * esize;
-                        else if (d.rm == 30) off = 0;
                         else off = cpu.regs[d.rm];
                         if (d.rn == 31) cpu.sp = base + off;
                         else cpu.regs[d.rn] = base + off;
@@ -200,12 +199,11 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 }
                 // Post-index writeback for the single-structure form:
-                // immediate offset = esize (Rm==0b11111), #0 (Rm==0b11110),
-                // or the value in register Xm.
+                // immediate offset = nregs*esize (Rm==0b11111), or the
+                // value in register Xm (any of X0-X30, including X30).
                 if (d.post_indexed) {
                     uint64_t off = 0;
                     if (d.rm == 31) off = (uint64_t)d.simd_count * esize;
-                    else if (d.rm == 30) off = 0;
                     else off = cpu.regs[d.rm];
                     if (d.rn == 31) cpu.sp = base + off;
                     else cpu.regs[d.rn] = base + off;
@@ -252,12 +250,11 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
             }
             // Post-index writeback for the multi-structure form: immediate
-            // offset = nregs*total_bytes (Rm==0b11111), #0 (Rm==0b11110), or
-            // the value in register Xm.
+            // offset = nregs*total_bytes (Rm==0b11111), or the value in
+            // register Xm (any of X0-X30, including X30).
             if (d.post_indexed) {
                 uint64_t off = 0;
                 if (d.rm == 31) off = (uint64_t)nregs * (uint64_t)total_bytes;
-                else if (d.rm == 30) off = 0;
                 else off = cpu.regs[d.rm];
                 if (d.rn == 31) cpu.sp = base + off;
                 else cpu.regs[d.rn] = base + off;

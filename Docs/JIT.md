@@ -16,6 +16,52 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## LD2-LD4 and ST2-ST4 inside the block (2026-11-07)
+
+Multiple-structure NEON loads and stores (`ld4 {v0.4s-v3.4s}`, `st2`, ...) used to be `SIMD_NATIVE_STRUCT`: a C++ helper
+(`native_structure`) that ended the block, so every one cost a dispatch and a generic loop. Clang emits them to move array-of-structure
+data (float4 positions and quaternions, RGBA pixels, stereo samples) in and out of registers. On a reconstructed engine-shaped
+kernel set (below) a quaternion blend spent 74% of its samples in the emulator's own C++ (`native_structure` 39%, `run_block` 20%)
+and a 4-bone skinning loop 27% in `native_structure` and 15% in `run_block`, at 96 and 52 host instructions per guest instruction.
+
+`SIMD_STRUCT_MEM` replaces the helper for LD2-LD4 and ST2-ST4 of every element size and both vector widths. The translator emits
+it when the register list does not wrap past V31 and the arrangement is valid (not `.1D`); the post-index base update follows as
+ordinary IR, so the op writes no GPR. One software guard covers the whole span (`n` x 16 or 8 bytes) and steps the guest
+instruction on any failure, so the loads cannot fault and no vector register changes before every byte is read. The emitter
+(`CodeGen/FloatSIMD/SIMD/Structure.cpp`) loads the chunks and shuffles in registers: `LD2`/`ST2` are one unpack or `shufps`
+(plus a `pshufb` mask for 8- and 16-bit elements), `LD4`/`ST4` a 4x4 transpose of 32-bit lanes after a per-register grouping
+mask, 64-bit arrangements two unpacks, and `LD3`/`ST3` plus any other combination a generic `pshufb` gather or scatter (a mask,
+a shuffle and an OR per output and chunk, so tens of host instructions; correct, not tuned or measured). The op uses XMM0-2 and XMM12-15 only and tells the vector allocator so
+(`vec_inst_effects`, clobber set 0xF007), so a loop's pinned vectors, which fill XMM3 upward, usually stay in registers. Tier-2
+stops at the op. The single-lane forms (`ld1 {v.s}[i]`), the replicate forms other than `LD1R {Vt.T}`, `.1D` and wrapping lists
+still use the helper.
+
+`Tests/Unit/jit_neon_struct.c` builds every combination as a real instruction word at run time (LD2-LD4 and ST2-ST4, every
+element size, both widths, register lists at three positions including V28-V31, no writeback, immediate and register post-index
+by X2 and X30, SP as the base) and compares the registers, memory and moved base with a reference model written independently
+of the JIT and the helper. The model itself passes under QEMU (1699 checks). It also covers a span ending exactly at a page end
+(must succeed) and one byte past it (must fault with the PC at the instruction and the base unmoved), vectors live across the
+op in loops, scalar FP around it, twelve live accumulators around an LD4 and an ST4, and a load/store round trip. It passes with
+the JIT, with `--no-jit` and under `BIFROST_JIT_VERIFY` (the fault section is skipped there: `verify_jit.sh` passes `no-fault`
+and then runs the full fixture in a normal pass). `make verify` passed (103 differential fixtures, 11 threaded oracle runs).
+
+A post-index register offset of X30 had been treated as `#0` in the interpreter, the helper and the translator's plain `LD1`/`ST1`;
+only `Rm` = 31 selects the immediate form. QEMU agrees with the fix, and `jit_neon_struct` fails on the old code (130 checks).
+
+Measured here (2026-11-07, Ryzen 7 5800X3D, a game running, one core pinned, minimum of 40 frames, interleaved runs), on
+nine kernels I wrote to resemble engine code, one source built by clang 22 for AArch64 and for x86-64-v3 (no AVX-512), checksums
+identical to the native build: times native before and after, skinning 45.8 to 11.2, anim 22.7 to 4.2, the other seven within
+noise of their old values (particles 3.6, audiomix 6.1, matmul 2.1, cull 34, collide 11.5, hash 5.5, vm 0.87); geometric mean 7.63
+to 5.38. This is not the earlier throwaway corpus, so it does not continue the 4.15x figure of 2026-11-03, and it is no
+measurement of a game. Split a kernel's ratio into guest instructions over native instructions (the compiler: cull's AArch64
+loop is 4.5 times the instructions of the x86 build, which vectorized across planes) and host instructions per guest instruction
+(the JIT: 5 to 15 for these kernels, 52 and 96 before this change). The first part is not the JIT's to fix. Skinning is still
+14.5 host instructions per guest instruction after the change, and the scalar FP loops pay the block-boundary cost of
+[the vector cache](#planned-codegen-retaining-guest-state-across-regions).
+
+Tried and dropped: writing a cached single-precision result with one `insertps xd, xmm, 0x0E` instead of `pxor`/`movss`/`movaps`.
+It was 5% faster on the audio mixer and 14% slower on cull (34.2 to 39.8 times native), with the rest unchanged.
+
 ## Growing indirect-branch tables and shared block exits (2026-11-03)
 
 Each thread's IBL table (`FrostJIT::IblTable`) starts at `IBL_MIN_ENTRIES` (1,024) and quadruples up to `IBL_MAX_ENTRIES` (65,536) once it

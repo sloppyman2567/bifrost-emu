@@ -275,6 +275,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                 case IROp::ATOMIC:
                 case IROp::SIMD_LD16:
                 case IROp::SIMD_ST16:
+                case IROp::SIMD_STRUCT_MEM:
                     uses_window = true;
                     break;
                 case IROp::LDXR_FAST:

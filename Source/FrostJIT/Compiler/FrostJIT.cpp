@@ -214,6 +214,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         VectorEffects effects;
         if (vec_inst_effects(inst, effects)) {
             if (effects.memory_operands) {
+                // A guard that fails commits state and steps the instruction; with the cache switched off
+                // below it would not publish the dirty pinned vectors. Emit it first, cache still active.
+                if (inst.op == IROp::SIMD_STRUCT_MEM) {
+                    emit_memory_guard(inst);
+                    struct_guard_emitted_ = true;
+                }
                 for (int i = 0; i < vec_pinned_count_; ++i) {
                     const int v = vec_pinned_[i], xmm = vec_cache_[v];
                     const bool clobbered = (effects.xmm_clobbers >> xmm) & 1;

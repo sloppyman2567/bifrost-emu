@@ -162,6 +162,17 @@ bool FrostJIT::vec_inst_effects(const IRInst& inst, VectorEffects& effects) cons
         effects.xmm_clobbers = native_simd_inlinable(word) ? 0x003f : 0xffff;
         return true;
     }
+    if (inst.op == IROp::SIMD_STRUCT_MEM) {
+        // LD2-LD4 / ST2-ST4 read or write v_lo/v_hi directly and use only XMM0-2 and XMM12-15
+        // (compile_simd_structure_), which the allocator fills last.
+        const NativeStructureParams params = inst.native_structure_params();
+        for (unsigned i = 0; i < params.count; ++i) {
+            if (params.load) write(params.first + i); else read(params.first + i);
+        }
+        effects.memory_operands = true;
+        effects.xmm_clobbers = 0xF007;
+        return true;
+    }
     effects.scalar = true;
     switch (inst.op) {
         case IROp::FP_BINOP: case IROp::FP_CSEL:

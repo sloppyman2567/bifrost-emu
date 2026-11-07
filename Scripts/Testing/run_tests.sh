@@ -281,6 +281,7 @@ UNIT_TESTS=(
     "simd_unary_fp|Tests/Unit/jit_simd_unary_fp.elf||5|simd_unary_fp: ALL PASS"
     "simd_fp_indexed|Tests/Unit/jit_simd_fp_indexed.elf||5|simd_fp_indexed: ALL PASS"
     "jit_ld1r|Tests/Unit/jit_ld1r.elf||5|jit_ld1r: ALL PASS"
+    "jit_neon_struct|Tests/Unit/jit_neon_struct.elf||15|jit_neon_struct: ALL PASS"
     "round_away|Tests/Unit/jit_round_away.elf||5|round_away: ALL PASS"
     "doom_gap|Tests/Unit/jit_doom_gap.elf||10|doom_gap: ALL PASS"
     # An exec'd fork child drops the parent's memory instead of copying it (host /proc measurement).

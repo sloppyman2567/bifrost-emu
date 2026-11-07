@@ -153,6 +153,7 @@ uint8_t FrostJIT::profile_op_kind(IROp op) {
     case IROp::LOAD_REG: case IROp::STORE_REG:
         return PROF_STATE;
     case IROp::LOAD_MEM: case IROp::STORE_MEM: case IROp::SIMD_LDST: case IROp::SIMD_LD16: case IROp::SIMD_ST16:
+    case IROp::SIMD_STRUCT_MEM:
     case IROp::MEMORY_BARRIER: case IROp::CLEAR_EXCLUSIVE: case IROp::ATOMIC: case IROp::LDXR_FAST: case IROp::STXR_FAST:
     case IROp::STLR_FAST:
         return PROF_MEMORY;

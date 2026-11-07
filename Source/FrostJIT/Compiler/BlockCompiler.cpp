@@ -683,7 +683,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 for (const auto& inst : ir_block.insts) {
                     if (inst.op == IROp::SVC || inst.op == IROp::BR ||
                         inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
-                        inst.op == IROp::CALL_INTERP || inst.op == IROp::SIMD_NATIVE_STRUCT) {
+                        inst.op == IROp::CALL_INTERP || inst.op == IROp::SIMD_NATIVE_STRUCT ||
+                        inst.op == IROp::SIMD_STRUCT_MEM) {
                         tier2_head_eligible = false;
                         break;
                     }
@@ -772,6 +773,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 case IROp::ATOMIC:
                 case IROp::SIMD_LD16:
                 case IROp::SIMD_ST16:
+                case IROp::SIMD_STRUCT_MEM:
                     uses_window = true;
                     break;
                 case IROp::LDXR_FAST:

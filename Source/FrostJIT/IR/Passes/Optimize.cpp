@@ -125,6 +125,7 @@ static bool is_pure(IROp op) {
         case IROp::SIMD_ADDP: case IROp::SIMD_XTN:       // write v_lo/v_hi
         case IROp::SIMD_TBL: case IROp::SIMD_INS:        // write v_lo/v_hi
         case IROp::SIMD_PERMUTE:                         // write v_lo/v_hi
+        case IROp::SIMD_STRUCT_MEM:                      // read/write v_lo/v_hi and memory
         case IROp::SIMD_PAIRMIN:                         // write v_lo/v_hi
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
         // (they read flags or branch) — never DCE.
@@ -325,6 +326,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 last_store_to.clear();
             } else if (inst.op == IROp::LOAD_MEM || inst.op == IROp::STORE_MEM ||
                        inst.op == IROp::SIMD_LD16 || inst.op == IROp::SIMD_ST16 ||
+                       inst.op == IROp::SIMD_STRUCT_MEM ||
                        inst.op == IROp::ATOMIC || inst.op == IROp::LDXR_FAST ||
                        inst.op == IROp::STXR_FAST ||
                        inst.op == IROp::STLR_FAST) {
@@ -1087,6 +1089,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::SIMD_SMOV: return "SIMD_SMOV";
                     case IROp::SIMD_NATIVE_EXTRA: return "SIMD_NATIVE_EXTRA";
                     case IROp::SIMD_NATIVE_STRUCT: return "SIMD_NATIVE_STRUCT";
+                    case IROp::SIMD_STRUCT_MEM: return "SIMD_STRUCT_MEM";
                     case IROp::SIMD_SATADDSUB: return "SIMD_SATADDSUB";
                     case IROp::SIMD_LD16: return "SIMD_LD16";
                     case IROp::SIMD_ST16: return "SIMD_ST16";

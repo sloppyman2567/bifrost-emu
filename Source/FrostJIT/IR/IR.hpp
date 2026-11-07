@@ -135,6 +135,9 @@ enum class IROp : uint8_t {
     SIMD_LOGICAL,  // v_lo[dest],v_hi[dest] = src1 OP src2
                    // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
     SIMD_NATIVE_STRUCT, // structured vector memory helper, terminates block
+    SIMD_STRUCT_MEM, // LD2-LD4/ST2-ST4 multiple structures, native, does not end the block:
+                     // src1 = base address vreg, imm = NativeStructureParams (first register,
+                     // count, element size, q, load). Post-index writeback is separate IR.
     SIMD_NATIVE_EXTRA, // dedicated compiled SIMD helper (no interpreter dispatch)
     SIMD_SCALAR_DUP, // SimdScalarDupParams: copy one lane, clear remaining bits
     SIMD_DUP,      // v_lo[dest] = v_hi[dest] = src1 (broadcast 64-bit)
@@ -508,6 +511,7 @@ struct IRInst {
                              const struct SimdArithParams& p, uint64_t arm_pc);
     struct SimdArithParams arith_params() const;
     static IRInst make_native_structure(const NativeStructureParams&, uint64_t arm_pc);
+    static IRInst make_struct_mem(uint16_t base, const NativeStructureParams&, uint64_t arm_pc);
     NativeStructureParams native_structure_params() const { return NativeStructureParams::unpack(imm); }
     static IRInst make_native_simd(uint32_t opcode, uint64_t arm_pc);
     uint32_t native_simd_opcode() const { return static_cast<uint32_t>(imm); }

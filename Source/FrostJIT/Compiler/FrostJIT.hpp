@@ -935,6 +935,7 @@ private:
     std::atomic<size_t> fault_site_count_{0};
     size_t fault_site_constructed_ = 0;
     size_t memory_fault_stub_ = 0; // current IR op, zero when software-only
+    bool struct_guard_emitted_ = false; // SIMD_STRUCT_MEM's guard was emitted ahead of the cache switch-off
     bool compile_guarded_mem(const IRInst& inst);
     bool compile_guarded_vec16(const IRInst& inst);
     void emit_memory_fault_exit(const IRInst& inst, bool recoverable);
@@ -1929,6 +1930,7 @@ private:
     bool compile_simd_floating_point_(const IRInst& inst);
     bool compile_simd_moves_(const IRInst& inst);
     bool compile_simd_memory_(const IRInst& inst);
+    bool compile_simd_structure_(const IRInst& inst);  // SIMD_STRUCT_MEM: LD2-LD4 / ST2-ST4
     bool compile_simd_shifts_(const IRInst& inst);
     bool compile_simd_elements_(const IRInst& inst);
     bool compile_simd_widening_(const IRInst& inst);

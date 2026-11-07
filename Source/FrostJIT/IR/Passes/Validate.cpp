@@ -43,6 +43,15 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                 }
                 break;
             }
+            case IROp::SIMD_STRUCT_MEM: {
+                auto p=inst.native_structure_params();
+                if ((p.size!=1 && p.size!=2 && p.size!=4 && p.size!=8) || (p.size==8 && !p.q) ||
+                    p.structure<2 || p.structure>4 || p.count!=p.structure || p.single || p.replicate ||
+                    p.first+p.count>32) {
+                    std::fprintf(out,"[ir-validate] invalid structure memory descriptor\n"); ok=false;
+                }
+                break;
+            }
             case IROp::SIMD_NATIVE_EXTRA:
                 if (classify_native_simd(inst.native_simd_opcode()) == NativeSimdKind::None) {
                     std::fprintf(out, "[ir-validate] invalid native SIMD encoding\n");

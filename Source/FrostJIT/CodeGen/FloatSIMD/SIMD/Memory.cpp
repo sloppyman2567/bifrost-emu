@@ -13,6 +13,8 @@ void jit_store_mem16_slow(arm64emu::Emulator* emu, arm64emu::CPU* cpu, uint64_t 
 namespace arm64emu {
 bool FrostJIT::compile_simd_memory_(const IRInst& inst) {
     switch (inst.op) {
+        case IROp::SIMD_STRUCT_MEM:
+            return compile_simd_structure_(inst);
         case IROp::SIMD_LDST: {
             // width=1 (load): src1=lo vreg, src2=hi vreg → v_lo[dest], v_hi[dest]
             // width=0 (store): v_lo[dest] → src1 vreg, v_hi[dest] → src2 vreg

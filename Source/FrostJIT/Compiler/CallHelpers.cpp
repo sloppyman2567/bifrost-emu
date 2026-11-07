@@ -18,6 +18,10 @@ namespace arm64emu {
 // It never rejoins the block or enters a patched chain with handler state.
 void FrostJIT::emit_memory_guard(const IRInst& inst) {
     memory_fault_stub_ = 0;
+    if (inst.op == IROp::SIMD_STRUCT_MEM && struct_guard_emitted_) {  // already emitted by compile_ir_inst
+        struct_guard_emitted_ = false;
+        return;
+    }
     if (!guest_memory_) return;
     uint16_t address;
     uint64_t offset = 0;
@@ -45,6 +49,15 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
             address = inst.src1; offset = p.offset;
             size = 16 * (p.count ? p.count : 1);
             access = Memory::GUEST_PROT_WRITE;
+            break;
+        }
+        case IROp::SIMD_STRUCT_MEM: {
+            // The whole span is checked before any vector register changes; a failure steps the
+            // guest instruction, which also performs the post-index update.
+            const auto p = inst.native_structure_params();
+            address = inst.src1; offset = 0;
+            size = p.count * (p.q ? 16u : 8u);
+            access = p.load ? Memory::GUEST_PROT_READ : Memory::GUEST_PROT_WRITE;
             break;
         }
         case IROp::ATOMIC:

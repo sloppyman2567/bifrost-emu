@@ -166,6 +166,21 @@ there (guided provisioning, update/reinstall) remain in progress.
   preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
   social preview setting.
 
+### Added (NEON structure loads and stores in the block)
+
+- `LD2`-`LD4` and `ST2`-`ST4` (multiple structures, every element size and both widths) are native `SIMD_STRUCT_MEM` ops that stay
+  inside the block, replacing a C++ helper that ended it and ran a generic loop. Clang emits them for array-of-structure data (float4
+  positions and quaternions, RGBA pixels, stereo samples). On a reconstructed engine-shaped kernel set, a quaternion blend went from
+  22.7 to 4.2 times a native AVX2 build and 4-bone skinning from 45.8 to 11.2; the other seven kernels did not move. `LD3`/`ST3`
+  use a correct but untuned gather. Lane and replicate forms, `.1D` and register lists past V31 keep the helper; Tier-2 stops at
+  the op. Checked by `jit_neon_struct` (1699 checks against a reference model, which also passes under QEMU), `--no-jit`,
+  `BIFROST_JIT_VERIFY` and `make verify`; measured on this machine only, with a game running. [Details](JIT.md#ld2-ld4-and-st2-st4-inside-the-block-2026-11-07).
+
+### Fixed (post-index by X30)
+
+- A post-index register offset of X30 on `LD1`-`LD4`/`ST1`-`ST4` (multiple structures and single lanes) moved the base by zero in the
+  interpreter, in the helper and in the JIT's plain `LD1`/`ST1`; only `Rm` = 31 selects the immediate. QEMU agrees with the fix.
+
 ### Fixed (broker start failures)
 
 - A broker that could not start was reported as "Asgard Binder broker did not start" (a launched app's private broker) or

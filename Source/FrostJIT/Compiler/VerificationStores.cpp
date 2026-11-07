@@ -121,6 +121,9 @@ void FrostJIT::record_verification_stores(const IRBlock& ir_block, uint64_t star
                     // store_infos verifier — flag for the MEMFULL full-diff.
                     if (!has_call_like) entry.has_unresolved_store = true;
                 }
+            } else if (inst.op == IROp::SIMD_STRUCT_MEM && !inst.native_structure_params().load) {
+                // ST2-ST4: an interleaved footprint no StoreInfo describes; leave it to the MEMFULL diff.
+                if (!has_call_like) entry.has_unresolved_store = true;
             } else if (inst.op == IROp::SIMD_ST16) {
                 // 16-byte vector store (LDR/STR Q, LDP/STP Q, LD1/ST1).
                 // Track it like STORE_MEM so the verify save/restore +

@@ -82,6 +82,23 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         return true;
                     }
                 }
+                // LD2-LD4 / ST2-ST4 multiple structures stay in the block: one guard over the whole
+                // span (any failure steps the guest instruction), a native de-interleave or
+                // interleave, then the post-index base update as ordinary IR. A register list that
+                // wraps past V31 and the .1D arrangement (undefined) keep the helper.
+                if(!p.single && p.structure>=2 && p.structure<=4 && p.count==p.structure &&
+                   unsigned(p.first)+p.count<=32 && (p.q || p.size<8)) {
+                    const uint16_t base=load_arm_reg(block,d.rn,true);
+                    block.insts.push_back(IRInst::make_struct_mem(base,p,cur_pc));
+                    if(p.post) {
+                        const unsigned total=p.count*(p.q?16u:8u);
+                        const uint16_t off=d.rm==31 ? load_imm(block,total) : load_arm_reg(block,d.rm);
+                        const uint16_t nb=g_alloc.alloc();
+                        block.insts.push_back(IRInst::make(IROp::ADD,nb,base,off));
+                        store_arm_reg(block,d.rn,nb,true);
+                    }
+                    return true;
+                }
                 block.insts.push_back(IRInst::make_native_structure(p,cur_pc));
                 return true;
             }
@@ -776,14 +793,12 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit_ld16(block, d.rt, base, Ld16Params{d.simd_count, 0}, cur_pc);
             }
             // Post-index writeback: Xn += nregs*vec_bytes (Rm==0b11111),
-            // += 0 (Rm==0b11110), or += Xm.
+            // or += Xm (any of X0-X30).
             if (d.post_indexed) {
                 uint16_t offv = 0;
                 if (d.rm == 31) {
                     offv = load_imm(block,
                         (uint64_t)d.simd_count * (is_64bit ? 8u : 16u));
-                } else if (d.rm == 30) {
-                    offv = load_imm(block, 0);
                 } else {
                     offv = load_arm_reg(block, d.rm);
                 }
@@ -822,14 +837,12 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit_st16(block, base, d.rt, St16Params{d.simd_count, false, 0}, cur_pc);
             }
             // Post-index writeback: Xn += nregs*vec_bytes (Rm==0b11111),
-            // += 0 (Rm==0b11110), or += Xm.
+            // or += Xm (any of X0-X30).
             if (d.post_indexed) {
                 uint16_t offv = 0;
                 if (d.rm == 31) {
                     offv = load_imm(block,
                         (uint64_t)d.simd_count * (is_64bit ? 8u : 16u));
-                } else if (d.rm == 30) {
-                    offv = load_imm(block, 0);
                 } else {
                     offv = load_arm_reg(block, d.rm);
                 }

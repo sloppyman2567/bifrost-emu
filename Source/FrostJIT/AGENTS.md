@@ -66,6 +66,14 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   upper-half element is read from memory, never from the XMM.
 - Vector FMLA/FMLS by element are `SIMD_FP_FMA` with a lane (`fp_decode::vector_fp_fma_by_element`,
   checked before the native SIMD table). Single-register LD1R is `LOAD_MEM` + `SIMD_DUP`.
+- `SIMD_STRUCT_MEM` is LD2-LD4/ST2-ST4 (multiple structures) and does not end the block, unlike the `SIMD_NATIVE_STRUCT`
+  helper that still serves lane and replicate forms, `.1D` and register lists that wrap past V31. The translator emits the
+  post-index base update as separate IR after it, so the op itself never writes a GPR. Its guard covers the whole span with
+  software checks and steps the guest instruction on any failure, and `compile_ir_inst` emits it before the vector cache is
+  switched off (`struct_guard_emitted_`): the fault exit publishes dirty pinned vectors only while the cache is active.
+  `compile_simd_structure_` uses XMM0-2 and XMM12-15 only; `vec_inst_effects` declares that clobber set (0xF007) and the
+  registers read or written, so change them together. Tier-2 stops at the op. A post-index `Rm` is any of X0-X30 and only 31
+  selects the immediate: the interpreter, the helper and the translator agree, and `jit_neon_struct` checks X30.
 - A single LD16/ST16 in Tier-1 is `compile_guarded_vec16`. Its 16-byte page checks stay in its own
   tail: the shared cold stubs exist for widths up to 8 (`flush_deferred_guards` checks `g.width`).
 - Block growth past the cap is only for loops (`selfloop_extent`, at most twice the cap); its look-ahead
