@@ -8,6 +8,7 @@ namespace frost {
 struct AndroidWindowBinding { uint64_t window = 0; void *display = nullptr; };
 using AndroidWindowEvent = bifrost_android_window_event_v2;
 using AndroidWindowText = bifrost_android_window_text_v2;
+using AndroidWindowGamepad = bifrost_android_window_gamepad_v2;
 // Host-only window lifecycle. The backend owns its window and input source.
 // Calls run on the display thread. No guest CPU/Memory access or SDL objects.
 class AndroidWindowBackend {
@@ -43,6 +44,8 @@ public:
   // window pixels. Key events are unaffected.
   virtual int set_text_input(bool, int32_t, int32_t, int32_t, int32_t) { return -ENOTSUP; }
   virtual int poll_text(AndroidWindowText &text) { text = {}; return 0; }
+  // Gamepads: each BIFROST_WINDOW_GAMEPAD event has one payload here (see the plugin ABI).
+  virtual int poll_gamepad(AndroidWindowGamepad &pad) { pad = {}; return 0; }
   virtual void set_visible(bool) {}
   virtual int set_task_visible(bool) { return -ENOTSUP; }
   // The pointer shape over the window, a BIFROST_WINDOW_CURSOR_* value (-EINVAL for any other).

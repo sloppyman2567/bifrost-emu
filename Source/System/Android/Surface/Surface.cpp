@@ -146,13 +146,29 @@ int AndroidSurfaceManager::set_window_identity(const std::string& title, const u
     return 0;
 }
 
+static int64_t monotonic_ns();
+
 void AndroidSurfaceManager::close_host_window() {
-    std::lock_guard<std::mutex> lock(surface_mu_);
-    arm64emu::window_stats::forget(window_backend_.get());
-    for (auto& [handle, surface] : surfaces_)
-        if (surface.backend) surface.backend->close();
-    window_backend_->close();
-    window_open_ = false;
+    {
+        std::lock_guard<std::mutex> lock(surface_mu_);
+        arm64emu::window_stats::forget(window_backend_.get());
+        for (auto& [handle, surface] : surfaces_)
+            if (surface.backend) surface.backend->close();
+        window_backend_->close();
+        window_open_ = false;
+    }
+    // The closed window's gamepads are gone for the app; a reopened window adds them again.
+    std::lock_guard<std::mutex> lk(mu_);
+    const int64_t now = monotonic_ns();
+    for (const Gamepad& pad : gamepads_) {
+        InputEvent ev{};
+        ev.type = EVENT_TYPE_DEVICE;
+        ev.device_id = pad.device_id;
+        ev.down_time_ns = ev.event_time_ns = now;
+        if (pending_.size() >= 256) pending_.pop_front();
+        pending_.push_back(ev);
+    }
+    gamepads_.clear();
 }
 
 int AndroidSurfaceManager::handle_host_resize(int32_t width, int32_t height) {
@@ -794,6 +810,11 @@ static constexpr int32_t SRC_KEYBOARD    = 0x00000301;
 static constexpr int32_t SRC_TOUCHSCREEN = 0x00001002;
 static constexpr int32_t SRC_GAMEPAD     = 0x00000401;
 static constexpr int32_t SRC_MOUSE       = 0x00002002;
+static constexpr int32_t SRC_JOYSTICK    = 0x01000010;
+static constexpr int32_t SRC_CLASS_JOYSTICK = 0x00000010;
+// A gamepad's buttons: InputReader's keyboard mapper source for a device with
+// gamepad buttons, KEYBOARD|GAMEPAD (EventHub classes it KEYBOARD too).
+static constexpr int32_t SRC_GAMEPAD_KEYS = 0x00000501;
 
 void AndroidSurfaceManager::queue_attach_looper(uint64_t queue,
                                                 uint64_t looper, int ident,
@@ -811,9 +832,10 @@ void AndroidSurfaceManager::queue_detach_looper(uint64_t queue) {
 }
 
 int AndroidSurfaceManager::queue_get_event(uint64_t queue,
-                                           uint64_t* out_event) {
+                                           uint64_t* out_event, bool managed) {
     if (!is_queue(queue)) return -9;   // -EBADF
     std::lock_guard<std::mutex> lk(mu_);
+    while (!managed && !pending_.empty() && pending_.front().type == EVENT_TYPE_DEVICE) pending_.pop_front();
     if (pending_.empty()) return -11;  // -EWOULDBLOCK
     InputEvent ev = pending_.front();
     pending_.pop_front();
@@ -899,6 +921,27 @@ uint32_t AndroidSurfaceManager::event_text(uint64_t h, uint32_t& kind, char* out
     return ev->text_length;
 }
 
+bool AndroidSurfaceManager::event_axes(uint64_t h, float* out) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const InputEvent* ev = find_event(h);
+    if (!ev || ev->type != IE_TYPE_MOTION || !(ev->source & SRC_CLASS_JOYSTICK)) return false;
+    std::memcpy(out, ev->axes, sizeof(ev->axes));
+    return true;
+}
+
+int32_t AndroidSurfaceManager::event_device(uint64_t h, int32_t& vendor, int32_t& product,
+                                            int32_t& controller, char* name) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const InputEvent* ev = find_event(h);
+    name[0] = '\0';
+    if (!ev || ev->type != EVENT_TYPE_DEVICE) return -1;
+    vendor = ev->vendor_id;
+    product = ev->product_id;
+    controller = ev->controller_number;
+    std::memcpy(name, ev->text, ev->text_length + 1);
+    return static_cast<int32_t>(ev->text_length);
+}
+
 int AndroidSurfaceManager::set_fixed_window(int32_t width, int32_t height) {
     if (!window_open_) return -ENODEV;
     return window_backend_->set_fixed_size(width, height);
@@ -954,6 +997,21 @@ ANDROID_EVENT_GETTER_IDX(motion_touch_minor, p.size * 36.0f, float)
 
 float AndroidSurfaceManager::motion_axis_value(uint64_t h, int axis,
                                                size_t idx) {
+    float axes[BIFROST_GAMEPAD_AXIS_COUNT];
+    if (event_axes(h, axes)) {
+        // AMOTION_EVENT_AXIS_* ids of a gamepad's axes (android/input.h).
+        switch (axis) {
+        case 0: return axes[BIFROST_GAMEPAD_AXIS_X];
+        case 1: return axes[BIFROST_GAMEPAD_AXIS_Y];
+        case 11: return axes[BIFROST_GAMEPAD_AXIS_Z];
+        case 14: return axes[BIFROST_GAMEPAD_AXIS_RZ];
+        case 15: return axes[BIFROST_GAMEPAD_AXIS_HAT_X];
+        case 16: return axes[BIFROST_GAMEPAD_AXIS_HAT_Y];
+        case 17: return axes[BIFROST_GAMEPAD_AXIS_LTRIGGER];
+        case 18: return axes[BIFROST_GAMEPAD_AXIS_RTRIGGER];
+        default: return 0;
+        }
+    }
     switch (axis) {
     case 0: return motion_x(h, idx);
     case 1: return motion_y(h, idx);
@@ -1062,6 +1120,22 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
     } else if (e.type == BIFROST_WINDOW_POINTER) {
         ev.type = IE_TYPE_MOTION;
         ev.source = SRC_TOUCHSCREEN;
+    } else if (e.type == BIFROST_WINDOW_GAMEPAD) {
+        AndroidWindowGamepad pad{};
+        if (window_backend_->poll_gamepad(pad) != 1) return;
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!translate_gamepad_(pad, ev)) return;
+        ev.down_time_ns = ev.event_time_ns = e.time_ms * 1000000;
+        // Axis changes batch like Android's moves: a still undelivered motion of the same pad takes the new state,
+        // so a stick never crowds buttons out of the queue.
+        if (ev.type == IE_TYPE_MOTION && !pending_.empty() && pending_.back().type == IE_TYPE_MOTION &&
+            pending_.back().source == SRC_JOYSTICK && pending_.back().device_id == ev.device_id) {
+            pending_.back() = ev;
+            return;
+        }
+        if (pending_.size() >= 256) pending_.pop_front();
+        pending_.push_back(ev);
+        return;
     } else if (e.type == BIFROST_WINDOW_TEXT) {
         AndroidWindowText text{};
         if (window_backend_->poll_text(text) != 1) return;
@@ -1081,6 +1155,56 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
     ev.event_time_ns = time_ns;
     if (pending_.size() >= 256) pending_.pop_front();
     pending_.push_back(ev);
+}
+
+bool AndroidSurfaceManager::translate_gamepad_(const AndroidWindowGamepad& pad, InputEvent& ev) {
+    auto it = std::find_if(gamepads_.begin(), gamepads_.end(),
+                           [&](const Gamepad& g) { return g.key == pad.device; });
+    if (pad.kind == BIFROST_GAMEPAD_ADDED) {
+        if (it != gamepads_.end()) return false;
+        Gamepad added;
+        added.key = pad.device;
+        added.device_id = next_gamepad_id_++;
+        added.controller = 1;
+        while (std::any_of(gamepads_.begin(), gamepads_.end(),
+                           [&](const Gamepad& g) { return g.controller == added.controller; }))
+            ++added.controller;
+        gamepads_.push_back(added);
+        ev.type = EVENT_TYPE_DEVICE;
+        ev.action = 1;
+        ev.device_id = added.device_id;
+        ev.vendor_id = static_cast<int32_t>(pad.vendor & 0xffff);
+        ev.product_id = static_cast<int32_t>(pad.product & 0xffff);
+        ev.controller_number = added.controller;
+        ev.text_length = static_cast<uint32_t>(strnlen(pad.name, sizeof(pad.name) - 1));
+        std::memcpy(ev.text, pad.name, ev.text_length);
+        return true;
+    }
+    if (it == gamepads_.end()) return false;
+    ev.device_id = it->device_id;
+    if (pad.kind == BIFROST_GAMEPAD_REMOVED) {
+        gamepads_.erase(it);
+        ev.type = EVENT_TYPE_DEVICE;
+        ev.action = 0;
+        return true;
+    }
+    if (pad.kind == BIFROST_GAMEPAD_BUTTON) {
+        ev.type = IE_TYPE_KEY;
+        ev.source = SRC_GAMEPAD_KEYS;
+        ev.action = pad.action;
+        ev.key_code = pad.key_code;
+        return true;
+    }
+    if (pad.kind != BIFROST_GAMEPAD_AXES) return false;
+    std::copy(std::begin(pad.axes), std::end(pad.axes), it->axes);
+    // JoystickInputMapper: one pointer whose coordinates are the axes, X and Y at its position.
+    ev.type = IE_TYPE_MOTION;
+    ev.source = SRC_JOYSTICK;
+    ev.action = ACT_MOVE;
+    ev.pointer_count = 1;
+    ev.pointers[0] = TouchPointer{pad.axes[BIFROST_GAMEPAD_AXIS_X], pad.axes[BIFROST_GAMEPAD_AXIS_Y], 0.0f, 0.0f, 0};
+    std::copy(std::begin(pad.axes), std::end(pad.axes), ev.axes);
+    return true;
 }
 
 bool AndroidSurfaceManager::translate_touch_(const AndroidWindowEvent& e, int64_t time_ns,

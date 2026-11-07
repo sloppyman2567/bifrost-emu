@@ -157,7 +157,9 @@ leaks or stale handles.
 
 - Verify relative mouse, axes, pointer capture, sensitivity and focus/fullscreen transitions; resolve vkQuake's texture
   issues.
-- Gamepads: discovery, hotplug, mappings, dead zones, triggers, rumble and per-game profiles.
+- Gamepads: Android apps get host pads with hotplug and an Xbox 360 mapping (SDL3 backend, `FrameworkGamepads`),
+  checked in fakes and the framework; a pad has registered in Subway Surfers but no game is confirmed played with one.
+  Still open: rumble, back paddles, per-game profiles and remapping, and pads for Linux guests' own input paths.
 - Android touch, multitouch, keys and controller events; desktop-to-touch mappings stay configurable. Wheel/pinch zoom
   gestures and app pointer icons exist but are untried in live games.
 - Keyboard layouts, held keys, text input and pause/menu transitions without stuck or duplicated events.

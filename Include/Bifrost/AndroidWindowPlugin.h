@@ -19,7 +19,10 @@ enum bifrost_android_window_event_type {
     BIFROST_WINDOW_KEY = 3, BIFROST_WINDOW_POINTER = 4,
     /* Only after set_text_input(active=1): one text payload is ready for
      * poll_text, in order with the surrounding key and pointer events. */
-    BIFROST_WINDOW_TEXT = 5
+    BIFROST_WINDOW_TEXT = 5,
+    /* Only from a plugin with poll_gamepad: one gamepad payload is ready for
+     * poll_gamepad, in order with the surrounding events. */
+    BIFROST_WINDOW_GAMEPAD = 6
 };
 enum bifrost_android_window_text_kind {
     BIFROST_WINDOW_TEXT_COMMIT = 1,   /* text the editor keeps (replaces any composition) */
@@ -43,6 +46,33 @@ enum bifrost_android_window_cursor {
     BIFROST_WINDOW_CURSOR_NWSE_RESIZE = 11,
     BIFROST_WINDOW_CURSOR_COUNT = 12
 };
+/* Gamepads in Android terms (an Xbox 360 pad's Vendor_045e_Product_028e.kl,
+ * android-15.0.0_r1): face, shoulder, stick, Start/Select/Mode buttons are
+ * BUTTON_* key codes; sticks, triggers and the d-pad are axes. */
+enum bifrost_android_window_gamepad_kind {
+    BIFROST_GAMEPAD_ADDED = 1,   /* device connected: name, vendor, product */
+    BIFROST_GAMEPAD_REMOVED = 2, /* device gone; its device key may be reused */
+    BIFROST_GAMEPAD_BUTTON = 3,  /* key_code pressed (action 0) or released (1) */
+    BIFROST_GAMEPAD_AXES = 4     /* the device's whole axis state after a change */
+};
+/* Axis slots: X/Y the left stick, Z/RZ the right stick (-1..1, up and left
+ * negative); triggers 0..1; HAT_X/HAT_Y the d-pad (-1, 0 or 1). */
+enum bifrost_android_window_gamepad_axis {
+    BIFROST_GAMEPAD_AXIS_X = 0, BIFROST_GAMEPAD_AXIS_Y = 1,
+    BIFROST_GAMEPAD_AXIS_Z = 2, BIFROST_GAMEPAD_AXIS_RZ = 3,
+    BIFROST_GAMEPAD_AXIS_LTRIGGER = 4, BIFROST_GAMEPAD_AXIS_RTRIGGER = 5,
+    BIFROST_GAMEPAD_AXIS_HAT_X = 6, BIFROST_GAMEPAD_AXIS_HAT_Y = 7,
+    BIFROST_GAMEPAD_AXIS_COUNT = 8
+};
+#define BIFROST_WINDOW_GAMEPAD_NAME_MAX 127u
+typedef struct bifrost_android_window_gamepad_v2 {
+    uint32_t kind;   /* bifrost_android_window_gamepad_kind */
+    uint32_t device; /* opaque nonzero key, stable while the device is connected */
+    int32_t key_code, action; /* BUTTON: Android KEYCODE_BUTTON_*, 0 down / 1 up */
+    uint32_t vendor, product; /* ADDED: USB ids, 0 when unknown */
+    float axes[BIFROST_GAMEPAD_AXIS_COUNT];          /* AXES */
+    char name[BIFROST_WINDOW_GAMEPAD_NAME_MAX + 1u]; /* ADDED: UTF-8, NUL-terminated */
+} bifrost_android_window_gamepad_v2;
 typedef struct bifrost_android_window_text_v2 {
     uint32_t kind;   /* bifrost_android_window_text_kind */
     uint32_t length; /* UTF-8 bytes in utf8, at most BIFROST_WINDOW_TEXT_MAX */
@@ -105,6 +135,12 @@ typedef struct bifrost_android_window_plugin_v2 {
      * bifrost_android_window_cursor value (anything else is -EINVAL). The host
      * sends it only when the shape changes. 0=success, negative errno=failure. */
     int32_t (*set_cursor)(void *instance, int32_t cursor);
+    /* Optional. Nonblocking; 1=payload, 0=none, negative errno=failure.
+     * Called once per BIFROST_WINDOW_GAMEPAD event. A connected device is
+     * ADDED before its first BUTTON or AXES; while the window has no focus the
+     * plugin reports nothing for it, and releases held buttons and centers
+     * axes when focus goes. */
+    int32_t (*poll_gamepad)(void *instance, bifrost_android_window_gamepad_v2 *out);
 } bifrost_android_window_plugin_v2;
 /* Smallest valid v2 descriptor: every required callback, no optional ones. */
 #define BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE \

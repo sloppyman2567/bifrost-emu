@@ -106,6 +106,22 @@ public:
     return 1;
   }
 
+  int poll_gamepad(AndroidWindowGamepad &pad) override {
+    pad = {};
+    if (!api_.poll_gamepad) return 0;
+    int32_t result = api_.poll_gamepad(instance_, &pad);
+    if (result != 1) { pad = {}; return status(result); }
+    bool bad = pad.device == 0 || pad.kind < BIFROST_GAMEPAD_ADDED || pad.kind > BIFROST_GAMEPAD_AXES;
+    if (pad.kind == BIFROST_GAMEPAD_ADDED)
+      bad |= std::memchr(pad.name, '\0', sizeof(pad.name)) == nullptr;
+    if (pad.kind == BIFROST_GAMEPAD_BUTTON)
+      bad |= pad.key_code <= 0 || (pad.action != 0 && pad.action != 1);
+    if (pad.kind == BIFROST_GAMEPAD_AXES)
+      for (float value : pad.axes) bad |= !std::isfinite(value) || value < -1.0f || value > 1.0f;
+    if (bad) { pad = {}; return -EPROTO; }
+    return 1;
+  }
+
   int poll(AndroidWindowEvent &event) override {
     event = {};
     int32_t result = api_.poll(instance_, &event);
@@ -119,8 +135,9 @@ public:
       // TEXT is only legal after the host started text input on a plugin that
       // can hand over the payload.
       const bool bad_text = event.type == BIFROST_WINDOW_TEXT && (!text_input_ || !api_.poll_text);
-      if (event.type < BIFROST_WINDOW_CLOSE || event.type > BIFROST_WINDOW_TEXT ||
-          event.time_ms < 0 || bad_key || bad_pointer || bad_text ||
+      const bool bad_gamepad = event.type == BIFROST_WINDOW_GAMEPAD && !api_.poll_gamepad;
+      if (event.type < BIFROST_WINDOW_CLOSE || event.type > BIFROST_WINDOW_GAMEPAD ||
+          event.time_ms < 0 || bad_key || bad_pointer || bad_text || bad_gamepad ||
           (event.type == BIFROST_WINDOW_RESIZE && (event.width <= 0 || event.height <= 0))) {
         event = {};
         return -EPROTO;

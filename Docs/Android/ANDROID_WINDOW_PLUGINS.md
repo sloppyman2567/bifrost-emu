@@ -179,6 +179,29 @@ a hidden pointer again and frees its cursors before SDL quits. An app's own bitm
 interface. The managed launcher's side is in
 [pointer icons](ANDROID_RUNTIME.md#pointer-icons-2026-10-28).
 
+### Gamepads (2026-11-06)
+
+V2 descriptors may append `poll_gamepad(instance, out)` after `set_cursor`. A plugin reports a
+`BIFROST_WINDOW_GAMEPAD` event, in order with its other events, and the host then takes exactly one
+`bifrost_android_window_gamepad_v2` payload: `ADDED` (USB vendor/product and a NUL-terminated name), `REMOVED`,
+`BUTTON` (an Android `KEYCODE_BUTTON_*`, action 0 down or 1 up) or `AXES` (the device's whole axis state). The
+`device` key is opaque, nonzero and stable while the pad is connected. Payloads use Android's terms for an Xbox 360
+pad (`Vendor_045e_Product_028e.kl`, `android-15.0.0_r1`): the axis slots are X/Y (left stick), Z/RZ (right stick),
+the two triggers (0..1) and HAT_X/HAT_Y (the d-pad, -1, 0 or 1); sticks are -1..1 with up and left negative. The host
+answers a `GAMEPAD` event from a plugin without the callback, a zero device, an unknown kind, a bad button action or
+key, an axis outside -1..1 and an unterminated name with `-EPROTO`.
+
+The SDL3 backend initializes `SDL_INIT_GAMEPAD` after the window (optional: without it the window still works),
+opens each pad on `SDL_EVENT_GAMEPAD_ADDED` (SDL sends one for every pad already connected) and maps SDL's positional
+buttons to the Xbox key codes: south A, east B, west X, north Y, shoulders L1/R1, stick clicks THUMBL/THUMBR,
+Start, Back as SELECT and Guide as MODE. The d-pad becomes the hat axes (the last press of a direction wins, its
+release recenters); paddles, touchpads and misc buttons have no Xbox 360 counterpart and are dropped. SDL reports
+pads only while the window has focus (`SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS` defaults to off), so losing focus
+releases held buttons and centers the axes. Using a pad hides the pointer like Steam does (a button, a d-pad
+press, or a stick or trigger past half way, so a resting stick's drift does not); mouse motion over the window shows
+it again, and a pointer the app hid through `set_cursor` stays hidden. The guest side is in
+[gamepads](ANDROID_RUNTIME.md#gamepads-2026-11-06).
+
 ## Validation and reproduction
 
 Completed checks:

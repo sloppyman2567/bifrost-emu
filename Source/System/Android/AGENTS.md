@@ -148,8 +148,16 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - Window backends report one pointer per event under an opaque `pointer_id`
   key. `AndroidSurfaceManager` alone owns gesture state and assigns Android
   pointer ids and `POINTER_DOWN/UP` actions. The 55-word op-3 record is
-  shared by `HostCalls/Android.cpp`, `activity_window.c` and
-  `ManagedLauncher`; change all three together.
+  shared by `HostCalls/Android.cpp`, `activity_window.c`, `ManagedLauncher`
+  and `FrameworkGamepads` (joystick axes in words 20..27, device records);
+  change them together.
+- Gamepads: backends report Android terms (`poll_gamepad`, an append-only plugin field; Xbox 360 key codes, the d-pad
+  as hat axes); `AndroidSurfaceManager` owns device ids and controller numbers; `FrameworkGamepads` owns the
+  `InputDevice`s, InputManager's listener, `Generic.kcm` fallbacks and the synthetic d-pad. Keep the ABI enums, the
+  SDL mapping, the op-3 words and `FrameworkGamepads` together. Regenerate `FrameworkKeyLayout.java` (both tables)
+  with `generate-key-layout.py`. Nothing in `ManagedLauncher`'s static initialization may need the main Looper. Run
+  `make test-android-sdl-backend`, `make test-android-window-plugin` and `MANAGED_GAMEPADS_OK`
+  (`ManagedServiceBatch`).
 - Wheel, trackpad pinch and middle-drag input become synthetic two-finger gestures in `Window/WheelGestures`
   (SDL-free; the SDL3 backend queues its events ahead of newer ones). Fingers never stay down: they lift on idle,
   button press, focus loss and close. Test with `make test-android-wheel-gestures` and

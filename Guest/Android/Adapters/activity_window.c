@@ -191,8 +191,9 @@ static void release_surface(void *window) {
 // ActivityProbe's JNI bridge to the managed-window ops of Bifrost's private
 // Android syscall 0x100E. Op 2 opens the host window and prepares this
 // thread's adapter looper; op 3 pumps host events and returns 55 words (up to
-// eight touch pointers, or a text payload: kind in word 4, UTF-8 length in
-// word 13, bytes from word 14).
+// eight touch pointers, a joystick's axes in words 20..27, or a text or gamepad
+// device payload: kind or action in word 4, UTF-8 length in word 13, bytes from
+// word 14).
 
 static long bifrost_window(long op, long a, long b) {
     register long x0 __asm__("x0") = op;

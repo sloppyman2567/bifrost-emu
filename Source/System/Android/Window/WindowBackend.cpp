@@ -46,7 +46,8 @@ namespace {
   X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) \
   X(StartTextInput) X(StopTextInput) X(SetTextInputArea) X(PeepEvents) \
   X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio) X(GetModState) \
-  X(CreateSystemCursor) X(SetCursor) X(DestroyCursor) X(ShowCursor) X(HideCursor)
+  X(CreateSystemCursor) X(SetCursor) X(DestroyCursor) X(ShowCursor) X(HideCursor) \
+  X(OpenGamepad) X(CloseGamepad) X(GetGamepadName) X(GetGamepadVendor) X(GetGamepadProduct)
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -147,6 +148,29 @@ private:
   uint32_t compositor_version_ = 1;
   int32_t dest_w_ = -1, dest_h_ = -1, buffer_scale_ = 1;
 };
+// An SDL gamepad button as Android reports it for an Xbox 360 pad
+// (Vendor_045e_Product_028e.kl, android-15.0.0_r1); 0 for the d-pad, which is
+// the HAT axes there, and for buttons such a pad does not have (paddles, misc).
+int android_gamepad_key(int button) {
+  switch (button) {
+  case SDL_GAMEPAD_BUTTON_SOUTH: return 96;           // KEYCODE_BUTTON_A
+  case SDL_GAMEPAD_BUTTON_EAST: return 97;            // KEYCODE_BUTTON_B
+  case SDL_GAMEPAD_BUTTON_WEST: return 99;            // KEYCODE_BUTTON_X
+  case SDL_GAMEPAD_BUTTON_NORTH: return 100;          // KEYCODE_BUTTON_Y
+  case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return 102;  // KEYCODE_BUTTON_L1
+  case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return 103; // KEYCODE_BUTTON_R1
+  case SDL_GAMEPAD_BUTTON_LEFT_STICK: return 106;     // KEYCODE_BUTTON_THUMBL
+  case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return 107;    // KEYCODE_BUTTON_THUMBR
+  case SDL_GAMEPAD_BUTTON_START: return 108;          // KEYCODE_BUTTON_START
+  case SDL_GAMEPAD_BUTTON_BACK: return 109;           // KEYCODE_BUTTON_SELECT
+  case SDL_GAMEPAD_BUTTON_GUIDE: return 110;          // KEYCODE_BUTTON_MODE
+  default: return 0;
+  }
+}
+// SDL axis values (sticks -32768..32767, triggers 0..32767) in Android's ranges.
+float android_gamepad_axis(int16_t value) {
+  return std::max(-1.0f, static_cast<float>(value) / 32767.0f);
+}
 // Android keycodes; SDL scancodes never cross the plugin ABI.
 int android_key(SDL_Scancode key) {
   if (key >= SDL_SCANCODE_A && key <= SDL_SCANCODE_Z) return 29 + key - SDL_SCANCODE_A;
@@ -628,7 +652,7 @@ public:
       if (!shape) return fail("CreateSystemCursor");
     }
     if (!sdl_.SetCursor(shape)) return fail("SetCursor");
-    if (cursor_hidden_ && !sdl_.ShowCursor()) return fail("ShowCursor");
+    if (cursor_hidden_ && !pad_hid_cursor_ && !sdl_.ShowCursor()) return fail("ShowCursor");
     cursor_hidden_ = false;
     return 0;
 #else
@@ -794,6 +818,9 @@ public:
     if (!update_ratio(width_, height_)) { close(); return fail("window size query"); }
     panel_long_ = std::max(width, height); panel_short_ = std::min(width, height);
     if (fit_new_window(width, height)) update_ratio(width_, height_);
+    // Gamepads are optional: SDL reports the connected ones as added events.
+    gamepads_ready_ = sdl_.InitSubSystem(SDL_INIT_GAMEPAD);
+    if (!gamepads_ready_) std::fprintf(stderr, "[android-window] no gamepads: %s\n", sdl_.GetError());
     return 0;
 #else
     return -ENOSYS;
@@ -807,11 +834,16 @@ public:
     mouse_fingers_ = 0;
     gestures_ = {};
     pending_.clear();
+    for (Pad &pad : pads_) sdl_.CloseGamepad(pad.handle);
+    pads_.clear();
+    gamepad_.clear();
+    if (gamepads_ready_) sdl_.QuitSubSystem(SDL_INIT_GAMEPAD);
+    gamepads_ready_ = false;
     if (window_) {
       // Leave the pointer as the desktop had it, and free the cursors before SDL quits (quitting
       // frees SDL's own list, so a later DestroyCursor would be a second free).
-      if (cursor_hidden_) sdl_.ShowCursor();
-      cursor_hidden_ = false;
+      if (cursor_hidden_ || pad_hid_cursor_) sdl_.ShowCursor();
+      cursor_hidden_ = pad_hid_cursor_ = false;
       for (SDL_Cursor *&shape : cursors_) {
         if (shape) sdl_.DestroyCursor(shape);
         shape = nullptr;
@@ -967,6 +999,17 @@ public:
     return 0;
 #endif
   }
+  int poll_gamepad(AndroidWindowGamepad &pad) override {
+    pad = {};
+#if defined(BIFROST_USE_SDL3)
+    if (gamepad_.empty()) return 0;
+    pad = gamepad_.front();
+    gamepad_.pop_front();
+    return 1;
+#else
+    return 0;
+#endif
+  }
   int poll(AndroidWindowEvent &out) override {
     out = {};
 #if defined(BIFROST_USE_SDL3)
@@ -1043,6 +1086,11 @@ private:
       if (e.type == SDL_EVENT_QUIT) { out.type = BIFROST_WINDOW_CLOSE; return 1; }
       if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == id) {
         out.type = BIFROST_WINDOW_CLOSE; return 1;
+      }
+      if (gamepad_event(e, id, out.time_ms)) {
+        if (pending_.empty()) continue;
+        out = {};
+        return 0;
       }
       if (gesture_event(e, id, out.time_ms)) {
         if (pending_.empty()) continue;
@@ -1163,6 +1211,138 @@ private:
     app_x = (x * static_cast<float>(pixel_w) / logical_w - g_fit.x.load()) / g_fit.scale.load();
     app_y = (y * static_cast<float>(pixel_h) / logical_h - g_fit.y.load()) / g_fit.scale.load();
     return true;
+  }
+  // Gamepad events become payloads for poll_gamepad, each announced by a GAMEPAD event queued in pending_.
+  // True when the event was used up here. Losing focus releases held buttons and centers axes (Android
+  // cancels a focused window's keys; SDL stops reporting the pads) and goes on to the other handlers.
+  bool gamepad_event(const SDL_Event &e, SDL_WindowID id, int64_t time_ms) {
+    auto announce = [&](const AndroidWindowGamepad &payload) {
+      gamepad_.push_back(payload);
+      AndroidWindowEvent event{};
+      event.type = BIFROST_WINDOW_GAMEPAD;
+      event.time_ms = time_ms;
+      pending_.push_back(event);
+    };
+    auto axes = [&](const Pad &pad) {
+      AndroidWindowGamepad payload{};
+      payload.kind = BIFROST_GAMEPAD_AXES;
+      payload.device = pad.device;
+      std::copy(std::begin(pad.axes), std::end(pad.axes), payload.axes);
+      announce(payload);
+    };
+    auto find = [&](SDL_JoystickID which) {
+      return std::find_if(pads_.begin(), pads_.end(), [&](const Pad &pad) { return pad.device == which; });
+    };
+    // Playing with a pad hides the pointer, as Steam does; the mouse brings it back. An app's own
+    // hidden pointer (set_cursor) stays hidden either way.
+    auto pad_used = [&]() {
+      if (pad_hid_cursor_ || cursor_hidden_) return;
+      if (sdl_.HideCursor()) pad_hid_cursor_ = true;
+    };
+    switch (e.type) {
+    case SDL_EVENT_MOUSE_MOTION:
+      if (pad_hid_cursor_ && e.motion.windowID == id && e.motion.which != SDL_TOUCH_MOUSEID) {
+        pad_hid_cursor_ = false;
+        if (!cursor_hidden_) sdl_.ShowCursor();
+      }
+      return false;
+    case SDL_EVENT_GAMEPAD_ADDED: {
+      if (find(e.gdevice.which) != pads_.end()) return true;
+      SDL_Gamepad *handle = sdl_.OpenGamepad(e.gdevice.which);
+      if (!handle) return true;
+      pads_.push_back(Pad{handle, e.gdevice.which, {}, 0});
+      AndroidWindowGamepad payload{};
+      payload.kind = BIFROST_GAMEPAD_ADDED;
+      payload.device = e.gdevice.which;
+      payload.vendor = sdl_.GetGamepadVendor(handle);
+      payload.product = sdl_.GetGamepadProduct(handle);
+      const char *name = sdl_.GetGamepadName(handle);
+      std::snprintf(payload.name, sizeof(payload.name), "%s", name ? name : "Gamepad");
+      announce(payload);
+      return true;
+    }
+    case SDL_EVENT_GAMEPAD_REMOVED: {
+      auto pad = find(e.gdevice.which);
+      if (pad == pads_.end()) return true;
+      sdl_.CloseGamepad(pad->handle);
+      pads_.erase(pad);
+      AndroidWindowGamepad payload{};
+      payload.kind = BIFROST_GAMEPAD_REMOVED;
+      payload.device = e.gdevice.which;
+      announce(payload);
+      return true;
+    }
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+      auto pad = find(e.gbutton.which);
+      if (pad == pads_.end()) return true;
+      const int hat = e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_LEFT || e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT
+          ? BIFROST_GAMEPAD_AXIS_HAT_X
+          : e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_UP || e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_DOWN
+          ? BIFROST_GAMEPAD_AXIS_HAT_Y : -1;
+      if (hat >= 0) {
+        // A hat axis is one direction or the other: the last press wins, its release recenters.
+        const bool negative = e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_LEFT ||
+                              e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_UP;
+        const float direction = negative ? -1.0f : 1.0f;
+        if (e.gbutton.down) { pad->axes[hat] = direction; pad_used(); }
+        else if (pad->axes[hat] == direction) pad->axes[hat] = 0.0f;
+        else return true;
+        axes(*pad);
+        return true;
+      }
+      const int key = android_gamepad_key(e.gbutton.button);
+      if (!key) return true;
+      const uint32_t bit = 1u << e.gbutton.button;
+      if (e.gbutton.down == ((pad->held & bit) != 0)) return true;
+      pad->held ^= bit;
+      if (e.gbutton.down) pad_used();
+      AndroidWindowGamepad payload{};
+      payload.kind = BIFROST_GAMEPAD_BUTTON;
+      payload.device = pad->device;
+      payload.key_code = key;
+      payload.action = e.gbutton.down ? 0 : 1;
+      announce(payload);
+      return true;
+    }
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+      auto pad = find(e.gaxis.which);
+      static const int kSlots[] = {
+          BIFROST_GAMEPAD_AXIS_X, BIFROST_GAMEPAD_AXIS_Y, BIFROST_GAMEPAD_AXIS_Z, BIFROST_GAMEPAD_AXIS_RZ,
+          BIFROST_GAMEPAD_AXIS_LTRIGGER, BIFROST_GAMEPAD_AXIS_RTRIGGER};  // SDL_GamepadAxis order
+      if (pad == pads_.end() || e.gaxis.axis >= std::size(kSlots)) return true;
+      const float value = android_gamepad_axis(e.gaxis.value);
+      float &slot = pad->axes[kSlots[e.gaxis.axis]];
+      if (slot == value) return true;
+      slot = value;
+      // Past half way, like ViewRootImpl's d-pad threshold: a resting stick's drift is not play.
+      if (std::fabs(value) >= 0.5f) pad_used();
+      axes(*pad);
+      return true;
+    }
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+      if (e.window.windowID != id) return false;
+      for (Pad &pad : pads_) {
+        for (int button = 0; pad.held; ++button) {
+          const uint32_t bit = 1u << button;
+          if (!(pad.held & bit)) continue;
+          pad.held &= ~bit;
+          AndroidWindowGamepad payload{};
+          payload.kind = BIFROST_GAMEPAD_BUTTON;
+          payload.device = pad.device;
+          payload.key_code = android_gamepad_key(button);
+          payload.action = 1;
+          announce(payload);
+        }
+        if (std::any_of(std::begin(pad.axes), std::end(pad.axes), [](float v) { return v != 0.0f; })) {
+          std::fill(std::begin(pad.axes), std::end(pad.axes), 0.0f);
+          axes(pad);
+        }
+      }
+      return false;
+    default:
+      return false;
+    }
   }
   // Mouse wheel, trackpad pinch and middle-button drag as two-finger touch gestures (WheelGestures), queued in
   // pending_. True when the event was used up here; a button press only lifts the fingers and goes on.
@@ -1304,6 +1484,13 @@ private:
   WheelGestures gestures_;
   std::deque<AndroidWindowEvent> pending_;
   std::vector<WheelEvent> gesture_out_;
+  // Open gamepads, keyed by SDL's instance id (never reused while SDL runs), with the axis state an AXES
+  // payload carries and the held buttons (bit per SDL_GamepadButton) a focus loss releases.
+  struct Pad { SDL_Gamepad *handle; SDL_JoystickID device; float axes[BIFROST_GAMEPAD_AXIS_COUNT]; uint32_t held; };
+  bool gamepads_ready_ = false;
+  bool pad_hid_cursor_ = false;  // the pointer is hidden because a pad is in use
+  std::vector<Pad> pads_;
+  std::deque<AndroidWindowGamepad> gamepad_;
   float cursor_x_ = 0, cursor_y_ = 0;  // last cursor position in app pixels
   // Desktop text input (set_text_input). Payloads wait here for poll_text;
   // text_reports_ counts TEXT events still owed beyond the one just returned.

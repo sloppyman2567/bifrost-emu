@@ -365,6 +365,94 @@ public final class ManagedServiceBatch {
         hover.recycle();
         System.out.println("MANAGED_CURSORS_OK");
     }
+    // Host gamepads (FrameworkGamepads): a device record reaches InputManager's listener as (id, generation) pairs
+    // and becomes an Xbox-style InputDevice; unhandled buttons fall back through Generic.kcm (B is BACK, X is DEL,
+    // MODE's HOME is withheld); a joystick record carries the axes; an unhandled hat moves the d-pad focus and a
+    // handled motion cancels the synthetic key.
+    private static void gamepads() throws Exception {
+        FrameworkGamepads pads = new FrameworkGamepads();
+        List<int[]> changes = new ArrayList<>();
+        Class<?> listenerType = Class.forName("android.hardware.input.IInputDevicesChangedListener");
+        Object listener = java.lang.reflect.Proxy.newProxyInstance(listenerType.getClassLoader(),
+                new Class<?>[] {listenerType}, (proxy, method, args) -> {
+                    if (method.getName().equals("onInputDevicesChanged")) changes.add((int[]) args[0]);
+                    return null;
+                });
+        pads.register(listener);
+        long[] device = new long[55];
+        device[0] = 0x101; device[4] = 1; device[6] = 2; device[7] = 0x045e; device[8] = 0x028e; device[9] = 1;
+        device[13] = 3; device[14] = 'P' | 'a' << 8 | 'd' << 16;
+        pads.deviceEvent(device, -1);
+        check(changes.size() == 1 && Arrays.equals(changes.get(0), new int[] {-1, 0, 2, 1}),
+                "device change pairs: " + (changes.isEmpty() ? "none" : Arrays.toString(changes.get(0))));
+        check(Arrays.equals(pads.deviceIds(-1), new int[] {-1, 2}), "gamepad missing from the device ids");
+        android.view.InputDevice pad = pads.device(2);
+        check(pad != null && pad.getName().equals("Pad") && pad.getVendorId() == 0x045e && pad.getProductId() == 0x028e
+                && pad.getControllerNumber() == 1 && pad.isExternal() && !pad.isVirtual(), "gamepad identity");
+        check(pad.supportsSource(android.view.InputDevice.SOURCE_GAMEPAD)
+                && pad.supportsSource(android.view.InputDevice.SOURCE_JOYSTICK)
+                && pad.getKeyboardType() == android.view.InputDevice.KEYBOARD_TYPE_NON_ALPHABETIC, "gamepad sources");
+        android.view.InputDevice.MotionRange z = pad.getMotionRange(MotionEvent.AXIS_Z,
+                android.view.InputDevice.SOURCE_JOYSTICK);
+        android.view.InputDevice.MotionRange trigger = pad.getMotionRange(MotionEvent.AXIS_LTRIGGER,
+                android.view.InputDevice.SOURCE_JOYSTICK);
+        check(z != null && z.getMin() == -1f && z.getMax() == 1f && Math.abs(z.getFlat() - 0.125f) < 0.001f
+                && trigger != null && trigger.getMin() == 0f && trigger.getFlat() == 0f, "gamepad motion ranges");
+        check(pads.device(3) == null, "an unknown id has a device");
+        final int keys = android.view.InputDevice.SOURCE_KEYBOARD | android.view.InputDevice.SOURCE_GAMEPAD;
+        List<android.view.KeyEvent> sent = new ArrayList<>();
+        FrameworkGamepads.KeyTarget unhandled = event -> { sent.add(event); return false; };
+        FrameworkGamepads.KeyTarget handled = event -> { sent.add(event); return true; };
+        java.util.function.BiConsumer<Integer, FrameworkGamepads.KeyTarget> press = (code, target) -> {
+            try {
+                pads.key(new android.view.KeyEvent(1, 1, android.view.KeyEvent.ACTION_DOWN, code, 0, 0, 2, 0, 0, keys), target);
+                pads.key(new android.view.KeyEvent(1, 2, android.view.KeyEvent.ACTION_UP, code, 0, 0, 2, 0, 0, keys), target);
+            } catch (Exception error) { throw new RuntimeException(error); }
+        };
+        java.util.function.Function<List<android.view.KeyEvent>, String> codes = list -> {
+            StringBuilder text = new StringBuilder();
+            for (android.view.KeyEvent event : list)
+                text.append(android.view.KeyEvent.keyCodeToString(event.getKeyCode())).append(event.getAction() == 0 ? "+" : "-")
+                        .append((event.getFlags() & android.view.KeyEvent.FLAG_FALLBACK) != 0 ? "f " : " ");
+            return text.toString().trim();
+        };
+        press.accept(android.view.KeyEvent.KEYCODE_BUTTON_B, unhandled);
+        check(codes.apply(sent).equals("KEYCODE_BUTTON_B+ KEYCODE_BACK+f KEYCODE_BUTTON_B- KEYCODE_BACK-f"),
+                "B fallback: " + codes.apply(sent));
+        sent.clear();
+        press.accept(android.view.KeyEvent.KEYCODE_BUTTON_X, unhandled);
+        check(codes.apply(sent).equals("KEYCODE_BUTTON_X+ KEYCODE_DEL+f KEYCODE_BUTTON_X- KEYCODE_DEL-f"),
+                "X fallback (Generic.kcm): " + codes.apply(sent));
+        sent.clear();
+        press.accept(android.view.KeyEvent.KEYCODE_BUTTON_A, handled);
+        check(codes.apply(sent).equals("KEYCODE_BUTTON_A+ KEYCODE_BUTTON_A-"), "a handled A fell back: " + codes.apply(sent));
+        sent.clear();
+        press.accept(android.view.KeyEvent.KEYCODE_BUTTON_MODE, unhandled);
+        check(codes.apply(sent).equals("KEYCODE_BUTTON_MODE+ KEYCODE_BUTTON_MODE-"), "MODE became HOME: " + codes.apply(sent));
+        sent.clear();
+        long[] axes = new long[55];
+        axes[0] = 2; axes[5] = android.view.InputDevice.SOURCE_JOYSTICK; axes[6] = 2; axes[11] = axes[12] = 5000000; axes[13] = 1;
+        axes[20 + 2] = Float.floatToIntBits(0.5f);   // Z
+        axes[20 + 6] = Float.floatToIntBits(-1f);    // HAT_X
+        MotionEvent left = FrameworkGamepads.motion(axes);
+        check(left.getSource() == android.view.InputDevice.SOURCE_JOYSTICK && left.getDeviceId() == 2
+                && left.getAxisValue(MotionEvent.AXIS_Z) == 0.5f && left.getAxisValue(MotionEvent.AXIS_HAT_X) == -1f
+                && left.getAxisValue(MotionEvent.AXIS_X) == 0f && left.getEventTime() == 5, "joystick axes");
+        pads.joystick(left, false, unhandled, () -> true);
+        axes[20 + 6] = Float.floatToIntBits(0f);
+        MotionEvent centered = FrameworkGamepads.motion(axes);
+        pads.joystick(centered, false, unhandled, () -> true);
+        pads.joystick(left, false, unhandled, () -> true);
+        pads.joystick(centered, true, unhandled, () -> true);  // handled: the held synthetic key is canceled
+        check(codes.apply(sent).equals("KEYCODE_DPAD_LEFT+f KEYCODE_DPAD_LEFT-f KEYCODE_DPAD_LEFT+f KEYCODE_DPAD_LEFT-f")
+                && (sent.get(3).getFlags() & android.view.KeyEvent.FLAG_CANCELED) != 0, "synthetic d-pad: " + codes.apply(sent));
+        left.recycle(); centered.recycle();
+        device[4] = 0;
+        pads.deviceEvent(device, -1);
+        check(changes.size() == 2 && Arrays.equals(changes.get(1), new int[] {-1, 0}) && pads.device(2) == null,
+                "gamepad removal");
+        System.out.println("MANAGED_GAMEPADS_OK");
+    }
     // PackageManager.queryBroadcastReceivers (IPackageManager.queryIntentReceivers): an explicit component of
     // the batch package, an implicit intent no manifest filter matches, and components that do not exist.
     private static void receivers(Context context) {
@@ -1842,6 +1930,7 @@ public final class ManagedServiceBatch {
         try {
         usersAndIdle(context);
         cursors(context);
+        gamepads();
         receivers(context);
         sharedLibraries();
         deviceConfiguration(context);

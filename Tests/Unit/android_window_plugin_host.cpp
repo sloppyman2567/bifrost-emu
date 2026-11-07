@@ -200,6 +200,70 @@ int main(int argc, char **argv) {
     CHECK(plain && plain->set_text_input(true, 0, 0, 1, 1) == -ENOTSUP);
     CHECK(plain->poll_text(payload) == 0);
   }
+  // Gamepads through the manager: Android device ids from 2 and controller numbers from 1 (the lowest free one),
+  // buttons as KEYBOARD|GAMEPAD keys, consecutive axis changes batched into one joystick motion, a payload for a
+  // device never added dropped, and closing the window removing what is left, which native queues never see.
+  {
+    mode("gamepad");
+    frost::AndroidSurfaceManager manager(frost::load_android_window_backend(argv[1], error));
+    CHECK(manager.open_host_window());
+    for (int i = 0; i < 4; ++i) manager.pump_host_events(nullptr);
+    const uint64_t queue = manager.input_queue_handle();
+    const int32_t device_type = frost::AndroidSurfaceManager::EVENT_TYPE_DEVICE;
+    uint64_t input = 0;
+    auto device = [&](int32_t action, int32_t id, int32_t controller, const char *name) {
+      if (manager.queue_get_event(queue, &input, true) != 0) return false;
+      int32_t vendor = -1, product = -1, number = -1;
+      char text[BIFROST_WINDOW_TEXT_MAX + 1];
+      const int32_t length = manager.event_device(input, vendor, product, number, text);
+      const bool ok = manager.event_type(input) == device_type && manager.motion_action(input) == action &&
+                      manager.event_device_id(input) == id && (action == 0 || (number == controller &&
+                      std::string(text) == name && length == int32_t(std::string(name).size())));
+      manager.queue_finish_event(queue, input);
+      return ok;
+    };
+    auto key = [&](int32_t action) {
+      if (manager.queue_get_event(queue, &input, true) != 0) return false;
+      const bool ok = manager.event_type(input) == 1 && manager.event_source(input) == 0x501 &&
+                      manager.event_device_id(input) == 2 && manager.key_code(input) == 96 &&
+                      manager.key_action(input) == action;
+      manager.queue_finish_event(queue, input);
+      return ok;
+    };
+    CHECK(device(1, 2, 1, "Fixture Pad"));
+    CHECK(key(0));
+    CHECK(manager.queue_get_event(queue, &input, true) == 0);
+    float axes[BIFROST_GAMEPAD_AXIS_COUNT];
+    CHECK(manager.event_type(input) == 2 && manager.event_source(input) == 0x01000010 &&
+          manager.event_device_id(input) == 2 && manager.motion_action(input) == 2 &&
+          manager.motion_pointer_count(input) == 1 && manager.event_axes(input, axes));
+    CHECK(axes[BIFROST_GAMEPAD_AXIS_X] == 0.75f && manager.motion_x(input, 0) == 0.75f);
+    CHECK(manager.motion_axis_value(input, 1, 0) == -0.25f && manager.motion_axis_value(input, 15, 0) == -1.0f);
+    CHECK(manager.motion_axis_value(input, 17, 0) == 1.0f && manager.motion_axis_value(input, 18, 0) == 0.0f);
+    manager.queue_finish_event(queue, input);
+    CHECK(key(1));
+    CHECK(device(1, 3, 2, "Second"));
+    CHECK(device(0, 2, 0, ""));
+    CHECK(device(1, 4, 1, "Third"));
+    CHECK(manager.queue_get_event(queue, &input, true) != 0);
+    manager.close_host_window();
+    CHECK(manager.queue_get_event(queue, &input) != 0);  // two removals, dropped for a native queue
+    CHECK(manager.queue_get_event(queue, &input, true) != 0);
+  }
+  {
+    // An axis out of range is a protocol error; a plugin without poll_gamepad may not report gamepads.
+    mode("gamepad-bad-axis");
+    auto pads = frost::load_android_window_backend(argv[1], error);
+    CHECK(pads && pads->open("pads", 64, 64) == 0);
+    frost::AndroidWindowGamepad payload{};
+    CHECK(pads->poll(event) == 1 && event.type == BIFROST_WINDOW_GAMEPAD);
+    CHECK(pads->poll_gamepad(payload) == -EPROTO && payload.kind == 0);
+    mode("no-gamepad");
+    auto old_pads = frost::load_android_window_backend(argv[1], error);
+    CHECK(old_pads && old_pads->open("old", 64, 64) == 0);
+    CHECK(old_pads->poll(event) == -EPROTO && event.type == 0);
+    CHECK(old_pads->poll_gamepad(payload) == 0);
+  }
   // An original-size v2 descriptor still loads; its trailing fields are ignored.
   mode("old-size");
   auto old = frost::load_android_window_backend(argv[1], error);

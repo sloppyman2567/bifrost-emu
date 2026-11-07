@@ -36,7 +36,7 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/Fra
                     "Framework/FrameworkPackages.java", "Framework/FrameworkConnectivity.java",
                     "Framework/FrameworkServiceRuntime.java", "Framework/FrameworkTrace.java",
                     "Framework/FrameworkDisplay.java", "Framework/FrameworkInputMethod.java",
-                    "Framework/FrameworkKeyboard.java", "Framework/FrameworkKeyLayout.java",
+                    "Framework/FrameworkKeyboard.java", "Framework/FrameworkKeyLayout.java", "Framework/FrameworkGamepads.java",
                     "Framework/FrameworkProcessRuntime.java", "Framework/FrameworkJobs.java",
                     "Framework/FrameworkContent.java", "Framework/FrameworkNativeServices.java",
                     "Framework/FrameworkWindows.java", "Framework/FrameworkActivities.java", "Framework/FrameworkRemoteActivities.java", "Framework/FrameworkLinks.java",

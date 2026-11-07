@@ -207,6 +207,8 @@ public final class ManagedLauncher {
     }
 
     private static InputDevice virtualKeyboard;
+    // Host gamepads: InputManager's devices beside the virtual keyboard, and their input.
+    private static final FrameworkGamepads gamepads = new FrameworkGamepads();
     // The virtual keyboard EventHub always creates (id -1, classes
     // KEYBOARD|ALPHAKEY|DPAD, name "Virtual"): KeyCharacterMap.load falls
     // back to it, and Unity's render thread loads it during startup. Its map
@@ -710,13 +712,13 @@ public final class ManagedLauncher {
                 // DeviceConfig holds no velocity-tracker override, as on a
                 // fresh device; the client falls back to its default strategy.
                 case "getVelocityTrackerStrategy": return null;
-                // The device set never changes, so the listener never fires.
-                case "registerInputDevicesChangedListener": return null;
+                // Host gamepads come and go; the virtual keyboard always stays.
+                case "registerInputDevicesChangedListener": gamepads.register(a[0]); return null;
                 case "getInputDeviceIds":
-                    return new int[] {KeyCharacterMap.VIRTUAL_KEYBOARD};
+                    return gamepads.deviceIds(KeyCharacterMap.VIRTUAL_KEYBOARD);
                 case "getInputDevice":
                     return ((Integer) a[0]) == KeyCharacterMap.VIRTUAL_KEYBOARD
-                            ? virtualKeyboardDevice() : null;
+                            ? virtualKeyboardDevice() : gamepads.device((Integer) a[0]);
                 default: throw unsupported("input", method);
             }
         });
@@ -1557,11 +1559,19 @@ public final class ManagedLauncher {
             if (e[4] == 1) inputMethod.commit(text); else inputMethod.compose(text);
             return;
         }
+        FrameworkGamepads.KeyTarget keys = key -> windows.dispatchKey(key) || activity.dispatchKeyEvent(key);
         if (e[0] == 1) {  // AINPUT_EVENT_TYPE_KEY
             KeyEvent event = new KeyEvent(e[11] / ms, e[12] / ms, (int) e[4],
                     (int) e[8], (int) e[10], (int) e[7], (int) e[6], (int) e[9],
                     (int) e[19], (int) e[5]);
-            if (!windows.dispatchKey(event)) activity.dispatchKeyEvent(event);
+            // A host gamepad's button (enter_key's BUTTON_A is a plain gamepad-source key of device 1).
+            if (e[5] == (InputDevice.SOURCE_KEYBOARD | InputDevice.SOURCE_GAMEPAD) && e[6] > 1) gamepads.key(event, keys);
+            else keys.dispatch(event);
+        } else if (e[0] == 2 && (e[5] & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {  // a gamepad's axes
+            MotionEvent event = FrameworkGamepads.motion(e);
+            boolean handled = activity.dispatchGenericMotionEvent(event);
+            gamepads.joystick(event, handled, keys, activity::hasWindowFocus);
+            event.recycle();
         } else if (e[0] == 2) {  // AINPUT_EVENT_TYPE_MOTION
             // Pointer 0 is at words 14..18, pointer i > 0 at 15 + 5i: x, y,
             // pressure, size, id.
@@ -1831,7 +1841,9 @@ public final class ManagedLauncher {
                             }
                         }
                         if (event[0] == 0) break;
-                        if (!activities.isBackground()) dispatch(root, event);
+                        // A gamepad connected or removed while the task is hidden still changes the device list.
+                        if (event[0] == 0x101) gamepads.deviceEvent(event, KeyCharacterMap.VIRTUAL_KEYBOARD);
+                        else if (!activities.isBackground()) dispatch(root, event);
                     }
                     activities.update();
                     activities.pollTask();

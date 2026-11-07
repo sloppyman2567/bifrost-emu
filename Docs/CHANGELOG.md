@@ -14,13 +14,27 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 can save, real GPU fences for WebView, cheaper guest memory barriers, and a series of Tier-1 JIT changes (shared cold paths,
 tighter exits and flags, native scalar and vector FP by element and LD1R, loop bodies kept in one block, lighter Q-register
 accesses). It also gives Android apps a Vulkan device through a guest HAL over the host thunk, with placed memory maps and
-deep-marshalled Vulkan structs, records Zenless Zone Zero and Doki Doki Literature Club as playable, and fixes the CI-only
-test failures. It is the first beta label, not a completed beta scope: the [v2.0 goals](roadmap.md) and the beta.1 items still open
+deep-marshalled Vulkan structs, gamepads for Android apps, records Zenless Zone Zero and Doki Doki Literature Club as
+playable, and fixes the CI-only test failures. It is the first beta label, not a completed beta scope: the [v2.0 goals](roadmap.md) and the beta.1 items still open
 there (guided provisioning, update/reinstall) remain in progress.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
+
+### Added (gamepads)
+
+- Android apps see host gamepads as Android 15 does an Xbox 360 pad. The SDL3 window opens SDL's gamepads with
+  hotplug and reports them through a new optional plugin callback, `poll_gamepad` (`BIFROST_WINDOW_GAMEPAD`
+  events): `KEYCODE_BUTTON_*` keys, sticks X/Y and Z/RZ, triggers and the d-pad as hat axes, released and centered
+  when the window loses focus. Each pad gets an Android device id and controller number; buttons arrive as
+  `KEYBOARD|GAMEPAD` keys and axes as `SOURCE_JOYSTICK` motion (batched, with `AMotionEvent_getAxisValue`).
+  The managed launcher lists each pad in InputManager with an `InputDevice` (sources, `Generic.kcm`, motion ranges),
+  notifies InputManager's listener on connection and removal, falls back through `Generic.kcm` for unhandled buttons
+  (B is Back), repeats held buttons and turns unhandled stick and hat motion into d-pad keys like
+  `ViewRootImpl.SyntheticJoystickHandler`. `generate-key-layout.py` now also generates `Generic.kcm`'s table.
+  Using a pad hides the pointer until the mouse moves, as Steam does. A Steam Controller registers in Subway Surfers;
+  no game is yet confirmed played with a pad. Rumble, back paddles and remapping are not implemented.
 
 ### Fixed (system calls)
 

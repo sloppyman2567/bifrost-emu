@@ -2,6 +2,8 @@
 // KeyCharacterMap.load falls back to this device for every device id, so its type
 // decides how a key reaches a text field: FULL gives TextKeyListener its QWERTY
 // listener (Backspace, Delete and arrows edit) and KeyEvent.getUnicodeChar a character.
+// A gamepad's map is Generic.kcm, whose fallbacks (B is BACK, A DPAD_CENTER) apply to
+// the buttons an app leaves unhandled.
 import android.os.Parcel;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
@@ -10,7 +12,6 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
 final class FrameworkKeyboard {
-    private static final String LOAD_FILE = "/system/usr/keychars/Virtual.kcm";
 
     // A .kcm key label is the AKEYCODE_ name without its prefix; keyCodeFromString
     // reads the native label table only for the KEYCODE_ spelling.
@@ -23,11 +24,20 @@ final class FrameworkKeyboard {
     // libinput's KeyCharacterMap::writeToParcel (android-15.0.0_r1) in the native
     // Parcel encoding: the file name as a padded C string, then 32-bit words.
     static KeyCharacterMap characterMap() {
+        return characterMap("/system/usr/keychars/Virtual.kcm", FrameworkKeyLayout.TYPE, FrameworkKeyLayout.KEYS);
+    }
+
+    static KeyCharacterMap gamepadCharacterMap() {
+        return characterMap("/system/usr/keychars/Generic.kcm", FrameworkKeyLayout.GAMEPAD_TYPE,
+                FrameworkKeyLayout.GAMEPAD_KEYS);
+    }
+
+    private static KeyCharacterMap characterMap(String loadFile, int type, String[] keys) {
         ByteBuffer out = ByteBuffer.allocate(1 << 17).order(ByteOrder.LITTLE_ENDIAN);
-        byte[] name = LOAD_FILE.getBytes(StandardCharsets.UTF_8);
+        byte[] name = loadFile.getBytes(StandardCharsets.UTF_8);
         out.put(name).put(new byte[((name.length + 4) & ~3) - name.length]);
-        out.putInt(FrameworkKeyLayout.TYPE).putInt(0).putInt(FrameworkKeyLayout.KEYS.length);
-        for (String row : FrameworkKeyLayout.KEYS) {
+        out.putInt(type).putInt(0).putInt(keys.length);
+        for (String row : keys) {
             String[] parts = row.split(" \\| ");
             String[] key = parts[0].split(" ");
             out.putInt(keyCode(key[0])).putInt(Integer.parseInt(key[1])).putInt(Integer.parseInt(key[2]));

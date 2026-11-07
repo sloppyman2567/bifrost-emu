@@ -310,7 +310,9 @@ public:
     // AInputQueue_getEvent: pops the next queued event into a free slot
     // and writes its handle to *out_event. Returns 0 on success, a
     // negative errno-style value when the queue is empty.
-    int queue_get_event(uint64_t queue, uint64_t* out_event);
+    // `managed` is the managed launcher's op 3, which also takes the private
+    // device events; AInputQueue callers never receive them.
+    int queue_get_event(uint64_t queue, uint64_t* out_event, bool managed = false);
     // AInputQueue_preDispatchEvent: 0 = not consumed.
     int queue_pre_dispatch(uint64_t queue, uint64_t event);
     // AInputQueue_finishEvent.
@@ -344,10 +346,18 @@ public:
         uint32_t text_kind = 0;
         uint32_t text_length = 0;
         char text[BIFROST_WINDOW_TEXT_MAX + 1] = {};
+        // Joystick motion: the gamepad's axes (BIFROST_GAMEPAD_AXIS_* slots).
+        float axes[BIFROST_GAMEPAD_AXIS_COUNT] = {};
+        // EVENT_TYPE_DEVICE: action 1 added / 0 removed, the USB ids and the controller
+        // number; the name is the text payload.
+        int32_t vendor_id = 0, product_id = 0, controller_number = 0;
     };
     // Private (not an AINPUT_EVENT_TYPE_*): only the managed launcher starts text
     // input, so native activities never see it.
     static constexpr int32_t EVENT_TYPE_TEXT = 0x100;
+    // Private: a gamepad connected or removed, for the managed launcher's InputManager. Native activities
+    // (AInputQueue) never see it; they learn of devices through the Java InputManager like on Android.
+    static constexpr int32_t EVENT_TYPE_DEVICE = 0x101;
 
  private:
     AndroidSurfaceManager();
@@ -383,6 +393,11 @@ public:
     // The text event's kind and UTF-8 payload (NUL-terminated, `out` holds
     // BIFROST_WINDOW_TEXT_MAX + 1 bytes); returns its length, 0 if not a text event.
     uint32_t event_text(uint64_t h, uint32_t& kind, char* out);
+    // A joystick motion's axes (BIFROST_GAMEPAD_AXIS_COUNT values); false for any other event.
+    bool event_axes(uint64_t h, float* out);
+    // A device event's USB ids, controller number and name (NUL-terminated, `name` holds
+    // BIFROST_WINDOW_TEXT_MAX + 1 bytes); returns the name's length, -1 if not a device event.
+    int32_t event_device(uint64_t h, int32_t& vendor, int32_t& product, int32_t& controller, char* name);
 
     // ── Host event pump (driver loop calls this every few ms) ──────────
     // Drains SDL events on the proxy window: translates mouse/touch/
@@ -410,6 +425,9 @@ public:
     // Applies one host pointer to the current gesture and fills ev with
     // every active pointer, as InputReader does. Requires mu_; false drops it.
     bool translate_touch_(const AndroidWindowEvent& e, int64_t time_ns, InputEvent& ev);
+    // Applies one gamepad payload to the registry and fills ev with its Android event. Requires mu_;
+    // false drops it (a payload for an unknown device, or a repeated add).
+    bool translate_gamepad_(const AndroidWindowGamepad& pad, InputEvent& ev);
 
     bool window_open_ = false;
     // Pointers of the current gesture in ascending Android id order; key is
@@ -420,6 +438,16 @@ public:
     };
     std::vector<ActiveTouch> touches_;
     int64_t pointer_down_time_ns_ = 0;
+    // Connected gamepads, keyed by the backend's device key. Android ids count up from 2 and are never
+    // reused (1 is the window's keyboard and touchscreen); controller numbers take the lowest free one
+    // from 1, as InputReader assigns them. Guarded by mu_.
+    struct Gamepad {
+        uint32_t key = 0;
+        int32_t device_id = 0, controller = 0;
+        float axes[BIFROST_GAMEPAD_AXIS_COUNT] = {};
+    };
+    std::vector<Gamepad> gamepads_;
+    int32_t next_gamepad_id_ = 2;
     std::unique_ptr<AndroidWindowBackend> window_backend_;
     struct Surface {
         uint64_t identity = 0;

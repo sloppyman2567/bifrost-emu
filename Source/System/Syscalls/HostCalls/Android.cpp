@@ -51,7 +51,7 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 data[1] = manager.quit_requested();
                 data[2] = manager.width(); data[3] = manager.height();
                 uint64_t event = 0;
-                if (!manager.queue_get_event(manager.input_queue_handle(), &event)) {
+                if (!manager.queue_get_event(manager.input_queue_handle(), &event, true)) {
                     data[0] = manager.event_type(event);
                     data[5] = manager.event_source(event);
                     data[6] = manager.event_device_id(event);
@@ -67,6 +67,19 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                         data[12] = manager.key_event_time(event);
                         data[13] = length;
                         std::memcpy(&data[14], text, length);
+                    } else if (data[0] == static_cast<uint64_t>(frost::AndroidSurfaceManager::EVENT_TYPE_DEVICE)) {
+                        // A gamepad connected (word 4 = 1) or removed (0), its device id in
+                        // word 6: USB vendor and product in 7 and 8, controller number in 9,
+                        // the time in 11 and 12, the name's length in 13 and bytes from 14.
+                        char name[BIFROST_WINDOW_TEXT_MAX + 1];
+                        int32_t vendor = 0, product = 0, controller = 0;
+                        const int32_t length = manager.event_device(event, vendor, product, controller, name);
+                        data[4] = manager.motion_action(event);
+                        data[7] = vendor; data[8] = product; data[9] = controller;
+                        data[11] = manager.motion_down_time(event);
+                        data[12] = manager.motion_event_time(event);
+                        data[13] = std::max(length, 0);
+                        if (length > 0) std::memcpy(&data[14], name, length);
                     } else if (data[0] == 1) {
                         data[4] = manager.key_action(event);
                         data[7] = manager.key_meta_state(event);
@@ -94,6 +107,14 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                             }
                             data[base + 4] = manager.motion_pointer_id(event, p);
                         }
+                        // A joystick motion has one pointer; its axes follow in words
+                        // 20..27 (BIFROST_GAMEPAD_AXIS_* order).
+                        float axes[BIFROST_GAMEPAD_AXIS_COUNT];
+                        if (manager.event_axes(event, axes))
+                            for (unsigned i = 0; i < BIFROST_GAMEPAD_AXIS_COUNT; ++i) {
+                                uint32_t bits; std::memcpy(&bits, &axes[i], sizeof(bits));
+                                data[20 + i] = bits;
+                            }
                     }
                     manager.queue_finish_event(manager.input_queue_handle(), event);
                 }

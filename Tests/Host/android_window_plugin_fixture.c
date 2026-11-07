@@ -24,6 +24,22 @@ struct state {
     unsigned step;            /* next "text-input" script step */
     int64_t text_start_ms;
     const struct text_step *payload;  /* owed to the next poll_text */
+    unsigned pad_step;        /* next "gamepad" script step */
+    int pad_owed;             /* a payload is owed to poll_gamepad */
+};
+/* "gamepad" script, one payload per poll: a pad that presses A and moves its stick twice in a row (one batched
+ * motion), a payload for a device never added, a second pad, the first one leaving and a third taking its
+ * controller number. */
+static const bifrost_android_window_gamepad_v2 pad_script[] = {
+    {BIFROST_GAMEPAD_ADDED, 5, 0, 0, 0x045e, 0x028e, {0}, "Fixture Pad"},
+    {BIFROST_GAMEPAD_BUTTON, 5, 96, 0, 0, 0, {0}, ""},
+    {BIFROST_GAMEPAD_AXES, 5, 0, 0, 0, 0, {0.5f, -0.25f, 0, 0, 0, 0, 0, 0}, ""},
+    {BIFROST_GAMEPAD_AXES, 5, 0, 0, 0, 0, {0.75f, -0.25f, 0, 0, 1.0f, 0, -1.0f, 0}, ""},
+    {BIFROST_GAMEPAD_BUTTON, 5, 96, 1, 0, 0, {0}, ""},
+    {BIFROST_GAMEPAD_BUTTON, 9, 96, 0, 0, 0, {0}, ""},
+    {BIFROST_GAMEPAD_ADDED, 6, 0, 0, 0, 0, {0}, "Second"},
+    {BIFROST_GAMEPAD_REMOVED, 5, 0, 0, 0, 0, {0}, ""},
+    {BIFROST_GAMEPAD_ADDED, 7, 0, 0, 0, 0, {0}, "Third"},
 };
 /* "text-input" script, one step per 100 ms once the host starts text input:
  * a commit, a composition replaced by a commit, a key (Backspace) and a commit. */
@@ -108,9 +124,26 @@ static int32_t poll_text(void *instance, bifrost_android_window_text_v2 *out) {
     s->payload = NULL;
     return 1;
 }
+static int32_t poll_gamepad(void *instance, bifrost_android_window_gamepad_v2 *out) {
+    struct state *s = instance;
+    *out = (bifrost_android_window_gamepad_v2){0};
+    if (!s->pad_owed) return 0;
+    s->pad_owed = 0;
+    *out = pad_script[s->pad_step - 1];
+    if (mode("gamepad-bad-axis")) { out->kind = BIFROST_GAMEPAD_AXES; out->axes[0] = 2.0f; }
+    return 1;
+}
 static int32_t poll_window(void *instance, bifrost_android_window_event_v2 *out) {
     struct state *s = instance;
     *out = (bifrost_android_window_event_v2){0};
+    if (mode("gamepad") || mode("gamepad-bad-axis") || mode("no-gamepad")) {
+        if (s->pad_step >= sizeof(pad_script) / sizeof(pad_script[0])) return 0;
+        s->pad_step++;
+        s->pad_owed = 1;
+        out->type = BIFROST_WINDOW_GAMEPAD;
+        out->time_ms = now_ms();
+        return 1;
+    }
     /* TEXT before the host started text input is a protocol error. */
     if (mode("text-unsolicited")) { out->type = BIFROST_WINDOW_TEXT; return 1; }
     if (text_mode()) {
@@ -189,7 +222,9 @@ const bifrost_android_window_plugin_v2 *bifrost_android_window_plugin_get_api(ui
     if (host_abi != BIFROST_ANDROID_WINDOW_ABI_V2 || mode("null-api")) return NULL;
     api = (bifrost_android_window_plugin_v2){2, sizeof(api), "c-fixture",
         create, destroy, open_window, close_window, resize, binding, poll_window,
-        show_popup, remove_popup, set_text_input, poll_text, set_task_visible, set_cursor};
+        show_popup, remove_popup, set_text_input, poll_text, set_task_visible, set_cursor, poll_gamepad};
+    // Everything but gamepads (before poll_gamepad was appended).
+    if (mode("no-gamepad")) api.struct_size = offsetof(bifrost_android_window_plugin_v2, poll_gamepad);
     // A descriptor from before the optional popup callbacks were appended.
     if (mode("old-size")) api.struct_size = BIFROST_ANDROID_WINDOW_PLUGIN_V2_MIN_SIZE;
     // Popups but no text input (before those callbacks were appended).

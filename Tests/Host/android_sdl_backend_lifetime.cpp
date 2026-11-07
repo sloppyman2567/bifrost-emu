@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
 #include <unistd.h>
 #include <SDL3/SDL.h>
 
@@ -120,10 +121,11 @@ int main() {
   first->close(); first.reset();
 #endif
   // Opening keeps the requested desktop size: no host resize follows creation.
-  CHECK(contents(log) == "video-init\nwindow-create\nvideo-init\nwindow-create\nwindow-icon\nload\ncreate\ncreate\ndestroy\nwindow-destroy\nvideo-quit\n");
+  CHECK(contents(log) == "video-init\nwindow-create\ngamepad-init\nvideo-init\nwindow-create\ngamepad-init\nwindow-icon\nload\n"
+                       "create\ncreate\ndestroy\ngamepad-quit\nwindow-destroy\nvideo-quit\n");
   CHECK(second->resize(320, 240, false) == 0);
   second.reset();
-  CHECK(contents(log).find("resize\ndestroy\nunload\nwindow-destroy\nvideo-quit\n") != std::string::npos);
+  CHECK(contents(log).find("resize\ndestroy\nunload\ngamepad-quit\nwindow-destroy\nvideo-quit\n") != std::string::npos);
   // Wrapper failure can recover; its helper reference must not leak.
   std::ofstream(log, std::ios::trunc).close();
   first = frost::make_sdl_android_window_backend();
@@ -135,7 +137,7 @@ int main() {
   unsetenv("BIFROST_TEST_WL_CREATE_FAIL");
   CHECK(first->binding().window != 0);
   first.reset();
-  CHECK(contents(log).find("create\ndestroy\nunload\nwindow-destroy\nvideo-quit\n") != std::string::npos);
+  CHECK(contents(log).find("create\ndestroy\nunload\ngamepad-quit\nwindow-destroy\nvideo-quit\n") != std::string::npos);
   // Stress repeated window, wrapper, subsystem and module teardown.
   first = frost::make_sdl_android_window_backend();
   CHECK(first->open("orientation", 800, 600) == 0);
@@ -206,14 +208,94 @@ int main() {
     shapes.reset();
     CHECK(contents(log) == "cursor-create " + pointer + "\ncursor-set " + pointer + "\ncursor-set " + pointer +
                            "\ncursor-hide\ncursor-create " + text + "\ncursor-set " + text + "\ncursor-show\n"
-                           "cursor-destroy " + text + "\ncursor-destroy " + pointer + "\nwindow-destroy\nvideo-quit\n");
+                           "gamepad-quit\ncursor-destroy " + text + "\ncursor-destroy " + pointer + "\nwindow-destroy\nvideo-quit\n");
     // Closing while hidden leaves the pointer visible, with no cursor of ours to free.
     auto hidden = frost::make_sdl_android_window_backend();
     CHECK(hidden->open("hidden", 800, 600) == 0);
     std::ofstream(log, std::ios::trunc).close();
     CHECK(hidden->set_cursor(BIFROST_WINDOW_CURSOR_HIDDEN) == 0);
     hidden.reset();
-    CHECK(contents(log) == "cursor-hide\ncursor-show\nwindow-destroy\nvideo-quit\n");
+    CHECK(contents(log) == "cursor-hide\ngamepad-quit\ncursor-show\nwindow-destroy\nvideo-quit\n");
+  }
+  // Gamepads: hotplug, buttons as Android KEYCODE_BUTTON_*, the d-pad as hat axes (last press wins), stick and
+  // trigger values in Android's ranges, repeats and unknown devices dropped, and a focus loss releasing what is held.
+  {
+    auto pads = frost::make_sdl_android_window_backend();
+    CHECK(pads->open("pads", 800, 600) == 0);
+    std::ofstream(log, std::ios::trunc).close();
+    setenv("BIFROST_TEST_SDL_EVENT", "pad:added,added,unknown-down,a-down,a-down,a-up,paddle-down,left-down,"
+                                     "right-down,left-up,right-up,leftx:-32768,leftx:-32768,lt:32767,a-down,"
+                                     "focus-lost,removed", 1);
+    std::vector<frost::AndroidWindowGamepad> got;
+    for (int polls = 0; polls < 64; ++polls) {
+      frost::AndroidWindowEvent e{};
+      if (pads->poll(e) != 1) continue;
+      CHECK(e.type == BIFROST_WINDOW_GAMEPAD && e.time_ms >= 0);
+      frost::AndroidWindowGamepad pad{};
+      CHECK(pads->poll_gamepad(pad) == 1 && pad.device == 7);
+      got.push_back(pad);
+    }
+    frost::AndroidWindowGamepad none{};
+    CHECK(pads->poll_gamepad(none) == 0);
+    auto button = [&](size_t i, int key, int action) {
+      return i < got.size() && got[i].kind == BIFROST_GAMEPAD_BUTTON && got[i].key_code == key && got[i].action == action;
+    };
+    auto axes = [&](size_t i, float x, float trigger, float hat_x) {
+      return i < got.size() && got[i].kind == BIFROST_GAMEPAD_AXES && got[i].axes[BIFROST_GAMEPAD_AXIS_X] == x &&
+             got[i].axes[BIFROST_GAMEPAD_AXIS_LTRIGGER] == trigger && got[i].axes[BIFROST_GAMEPAD_AXIS_HAT_X] == hat_x;
+    };
+    CHECK(got.size() == 12);
+    CHECK(got[0].kind == BIFROST_GAMEPAD_ADDED && std::string(got[0].name) == "Fake Pad" &&
+          got[0].vendor == 0x28de && got[0].product == 0x1304);
+    CHECK(button(1, 96, 0) && button(2, 96, 1));
+    CHECK(axes(3, 0, 0, -1) && axes(4, 0, 0, 1) && axes(5, 0, 0, 0));
+    CHECK(axes(6, -1, 0, 0) && axes(7, -1, 1, 0) && button(8, 96, 0));
+    CHECK(button(9, 96, 1) && axes(10, 0, 0, 0) && got[11].kind == BIFROST_GAMEPAD_REMOVED);
+    unsetenv("BIFROST_TEST_SDL_EVENT");
+    pads.reset();
+    // The first press hid the pointer; closing shows it again.
+    CHECK(contents(log) == "gamepad-open 7\ncursor-hide\ngamepad-close 7\ngamepad-quit\ncursor-show\nwindow-destroy\n"
+                           "video-quit\n");
+    // Pointer and pad: a press hides it, the mouse shows it, a resting stick's drift leaves it, a full push hides
+    // it again; an app's own hidden pointer stays hidden when the mouse moves, and an app shape after the pad hid
+    // the pointer does not show it.
+    auto pointer = frost::make_sdl_android_window_backend();
+    CHECK(pointer->open("pointer", 800, 600) == 0);
+    std::ofstream(log, std::ios::trunc).close();
+    auto drain = [&]() {
+      for (int polls = 0; polls < 32; ++polls) {
+        frost::AndroidWindowEvent e{};
+        frost::AndroidWindowGamepad pad{};
+        if (pointer->poll(e) == 1 && e.type == BIFROST_WINDOW_GAMEPAD) pointer->poll_gamepad(pad);
+      }
+    };
+    setenv("BIFROST_TEST_SDL_EVENT", "pad:added,a-down,a-up,mouse-move,leftx:-8000,leftx:-32768,mouse-move", 1);
+    drain();
+    CHECK(contents(log) == "gamepad-open 7\ncursor-hide\ncursor-show\ncursor-hide\ncursor-show\n");
+    std::ofstream(log, std::ios::trunc).close();
+    CHECK(pointer->set_cursor(BIFROST_WINDOW_CURSOR_HIDDEN) == 0);
+    setenv("BIFROST_TEST_SDL_EVENT", "pad:a-down,a-up,mouse-move", 1);
+    drain();
+    CHECK(pointer->set_cursor(BIFROST_WINDOW_CURSOR_POINTER) == 0);  // shows the app's pointer again
+    setenv("BIFROST_TEST_SDL_EVENT", "pad:a-down,a-up", 1);
+    drain();
+    CHECK(pointer->set_cursor(BIFROST_WINDOW_CURSOR_TEXT) == 0);     // still hidden for the pad
+    unsetenv("BIFROST_TEST_SDL_EVENT");
+    pointer.reset();
+    CHECK(contents(log) == "cursor-hide\ncursor-create " + std::to_string(SDL_SYSTEM_CURSOR_POINTER) + "\ncursor-set " +
+                           std::to_string(SDL_SYSTEM_CURSOR_POINTER) + "\ncursor-show\ncursor-hide\ncursor-create " +
+                           std::to_string(SDL_SYSTEM_CURSOR_TEXT) + "\ncursor-set " + std::to_string(SDL_SYSTEM_CURSOR_TEXT) +
+                           "\ngamepad-close 7\ngamepad-quit\ncursor-show\ncursor-destroy " +
+                           std::to_string(SDL_SYSTEM_CURSOR_TEXT) + "\ncursor-destroy " +
+                           std::to_string(SDL_SYSTEM_CURSOR_POINTER) + "\nwindow-destroy\nvideo-quit\n");
+    // Without gamepad support the window still opens and closes normally.
+    setenv("BIFROST_TEST_SDL_GAMEPAD_FAIL", "1", 1);
+    auto plain = frost::make_sdl_android_window_backend();
+    std::ofstream(log, std::ios::trunc).close();
+    CHECK(plain->open("no pads", 800, 600) == 0);
+    plain.reset();
+    unsetenv("BIFROST_TEST_SDL_GAMEPAD_FAIL");
+    CHECK(contents(log) == "video-init\nwindow-create\nwindow-destroy\nvideo-quit\n");
   }
   for (int i = 0; i < 256; ++i) {
     first = frost::make_sdl_android_window_backend();

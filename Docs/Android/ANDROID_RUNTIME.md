@@ -1448,7 +1448,8 @@ other device id) now has Android 15's `Virtual.kcm`: type `FULL`, US QWERTY with
 shift, caps lock and alt behaviors. It used to be an empty map (type unknown),
 so `TextKeyListener` chose its `NullKeyListener` and physical Backspace, Delete
 and arrows did nothing in an `EditText`, and `KeyEvent.getUnicodeChar()` was
-always 0. `Tools/Android/generate-key-layout.py` parses the pinned file with the
+always 0. `Tools/Android/generate-key-layout.py` parses the pinned file (and
+`Generic.kcm`, a gamepad's map: see [gamepads](#gamepads-2026-11-06)) with the
 rules of libinput's `KeyCharacterMap` parser into `FrameworkKeyLayout.java`
 (`--check` verifies it; regenerate rather than edit), and `FrameworkKeyboard`
 writes the native parcel the framework reads. `BIFROST_TEXT_SCRIPT` pushes
@@ -1493,6 +1494,51 @@ refused shape, a framework error) turns the feature off and logs `APP_CURSOR_UNA
 checks the mapping and the send-on-change behaviour through a real `View` and `PointerIcon`s
 (`MANAGED_CURSORS_OK`); the SDL3 backend is checked against a fake SDL3 that logs each cursor call. Not checked: a
 game that sets a pointer icon, or a live window.
+
+### Gamepads (2026-11-06)
+
+Host pads ([plugin `poll_gamepad`](ANDROID_WINDOW_PLUGINS.md#gamepads-2026-11-06)) reach apps as an Android 15
+device does with an Xbox 360 pad. `AndroidSurfaceManager` gives each pad an Android device id counting up from 2
+(never reused; 1 is the window's keyboard and touchscreen) and the lowest free controller number from 1, as
+InputReader assigns them. Buttons are key events with InputReader's keyboard-mapper source for such a device,
+`KEYBOARD|GAMEPAD` (`0x501`: EventHub classes a device with gamepad buttons `KEYBOARD` too, `EventHub.cpp` and
+reader `InputDevice.cpp`, `android-15.0.0_r1`). Axis changes are `SOURCE_JOYSTICK` `ACTION_MOVE` events with one
+pointer whose coordinates are the axes; a still undelivered motion of the same pad takes the newer state, so a stick
+never crowds buttons out of the queue. Native activities read them through `AInputQueue`, and
+`AMotionEvent_getAxisValue` answers the pad's axis ids (X, Y, Z, RZ, HAT_X/Y, LTRIGGER, RTRIGGER). Connections and
+removals are a private device record (event type `0x101`) that only the managed launcher's op 3 takes; closing the
+window removes the pads it had.
+
+The op-3 record carries a joystick motion's axes in words 20..27 and a device record as action (word 4), device id
+(6), USB vendor and product (7, 8), controller number (9) and the name (length in 13, bytes from 14).
+`FrameworkGamepads` is the device side the launcher otherwise lacks, read from `android-15.0.0_r1`:
+
+- `IInputManager.getInputDeviceIds`/`getInputDevice` list each pad beside the virtual keyboard, and
+  `registerInputDevicesChangedListener` keeps `InputManagerGlobal`'s listener, which hears the (id, generation)
+  pairs on every connection and removal, even while the task is hidden.
+- Each pad's `InputDevice` (hidden `InputDevice.Builder`, reached by reflection) is external, has sources
+  `KEYBOARD|GAMEPAD|JOYSTICK`, keyboard type `NON_ALPHABETIC`, generation 1, a SHA-1 descriptor and the key character
+  map of `Generic.kcm` (`FrameworkKeyLayout.GAMEPAD_KEYS`, generated with the virtual keyboard's table). Its motion
+  ranges are JoystickInputMapper's normalized ones: sticks -1..1 with the key layout's `flat 4096` (0.125), triggers
+  0..1, hats -1..1.
+- A button the app leaves unhandled falls back through that map like `InputDispatcher`
+  (`afterKeyEventLockedInterruptable`): B sends `BACK`, A, Start and the stick clicks `DPAD_CENTER`, X `DEL`, Y `SPACE`,
+  Select `MENU`, each with `FLAG_FALLBACK`, released with its button. Mode's `HOME` is withheld: it would leave the app
+  on a device and only confuses the Activity here. Held buttons repeat at `ViewConfiguration`'s key repeat timeout and
+  delay, as `InputDispatcher` repeats trusted keys.
+- A joystick motion goes to `Activity.dispatchGenericMotionEvent`. When nothing handles it, `ViewRootImpl`'s
+  `SyntheticJoystickHandler` is reproduced: the left stick and the hat past ±0.5 send d-pad keys with `FLAG_FALLBACK`,
+  repeating while held and focused; a handled motion cancels a synthetic key still held (`FLAG_CANCELED`).
+
+Checked: the fake SDL3 (`make test-android-sdl-backend`: mapping, hat, ranges, repeats, unknown devices, focus loss,
+the pointer hidden by a pad and shown by the mouse), the plugin path through `AndroidSurfaceManager`
+(`make test-android-window-plugin`: ids, controller numbers, batching, axis getters, the native queue never seeing
+device records, protocol errors), and `FrameworkGamepads` in the real framework (`MANAGED_GAMEPADS_OK` in
+`ManagedServiceBatch`, both engines: listener pairs, the `InputDevice`, Generic fallbacks, joystick axes, synthetic
+d-pad and cancel). Observed: SDL3 sees a Steam Controller (Valve `28de:1304`) with Steam running, and Subway Surfers
+3.70.3 registered it (`APP_GAMEPAD_ADDED 2 Steam Controller`). Not established: that any game is played with a pad.
+Not implemented: rumble (`InputDevice` vibrators), back paddles, per-game remapping, joystick motion for popup
+windows, and pads in an app that never opens its window.
 
 ### Input methods (October 11, 2026)
 

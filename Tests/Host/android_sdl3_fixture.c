@@ -45,8 +45,35 @@ static void record(const char *event) {
     FILE *file = path ? fopen(path, "a") : NULL;
     if (file) { fprintf(file, "%s\n", event); fclose(file); }
 }
-bool SDL_InitSubSystem(SDL_InitFlags flags) { (void)flags; record("video-init"); return true; }
-void SDL_QuitSubSystem(SDL_InitFlags flags) { (void)flags; record("video-quit"); }
+bool SDL_InitSubSystem(SDL_InitFlags flags) {
+    if (flags & SDL_INIT_GAMEPAD) {
+        if (getenv("BIFROST_TEST_SDL_GAMEPAD_FAIL")) return false;
+        record("gamepad-init");
+        return true;
+    }
+    record("video-init");
+    return true;
+}
+void SDL_QuitSubSystem(SDL_InitFlags flags) { record(flags & SDL_INIT_GAMEPAD ? "gamepad-quit" : "video-quit"); }
+/* One fake pad; open and close are logged with its instance id. */
+struct fake_gamepad { SDL_JoystickID id; };
+SDL_Gamepad *SDL_OpenGamepad(SDL_JoystickID id) {
+    char line[48];
+    struct fake_gamepad *pad = malloc(sizeof(*pad));
+    pad->id = id;
+    snprintf(line, sizeof(line), "gamepad-open %u", (unsigned)id);
+    record(line);
+    return (SDL_Gamepad *)pad;
+}
+void SDL_CloseGamepad(SDL_Gamepad *gamepad) {
+    char line[48];
+    snprintf(line, sizeof(line), "gamepad-close %u", (unsigned)((struct fake_gamepad *)gamepad)->id);
+    record(line);
+    free(gamepad);
+}
+const char *SDL_GetGamepadName(SDL_Gamepad *gamepad) { (void)gamepad; return "Fake Pad"; }
+Uint16 SDL_GetGamepadVendor(SDL_Gamepad *gamepad) { (void)gamepad; return 0x28de; }
+Uint16 SDL_GetGamepadProduct(SDL_Gamepad *gamepad) { (void)gamepad; return 0x1304; }
 bool SDL_SetHint(const char *name, const char *value) { (void)name; (void)value; return true; }
 const char *SDL_GetError(void) { return "injected SDL3 failure"; }
 /* System cursors: each call is logged with the SDL cursor id, so a test sees exactly what the backend asked for. */
@@ -153,11 +180,64 @@ bool SDL_GetWindowSizeInPixels(SDL_Window *window, int *width, int *height) {
 /* One-shot events for the wheel gestures: a mode "wheel#2" is delivered once, then nothing until it changes.
    The cursor is at (400, 300) in a 800x600 window. */
 static char delivered_mode[64];
+/* "pad:a,b,c" plays its comma-separated gamepad events once each, in order (pad 7 unless noted). */
+static char pad_script[512];
+static size_t pad_next;
+static bool pad_event(const char *script, SDL_Event *event) {
+    if (strcmp(script, pad_script)) { snprintf(pad_script, sizeof(pad_script), "%s", script); pad_next = 0; }
+    const char *at = pad_script + 4;
+    for (size_t i = 0; i < pad_next && at; ++i) { at = strchr(at, ','); if (at) ++at; }
+    if (!at || !*at) return false;
+    ++pad_next;
+    char token[32];
+    size_t length = strcspn(at, ",");
+    snprintf(token, sizeof(token), "%.*s", (int)length, at);
+    static const struct { const char *name; SDL_GamepadButton button; } buttons[] = {
+        {"a", SDL_GAMEPAD_BUTTON_SOUTH}, {"guide", SDL_GAMEPAD_BUTTON_GUIDE},
+        {"paddle", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1}, {"left", SDL_GAMEPAD_BUTTON_DPAD_LEFT},
+        {"right", SDL_GAMEPAD_BUTTON_DPAD_RIGHT}, {"unknown", SDL_GAMEPAD_BUTTON_SOUTH},
+    };
+    static const struct { const char *name; SDL_GamepadAxis axis; } axes[] = {
+        {"leftx", SDL_GAMEPAD_AXIS_LEFTX}, {"lefty", SDL_GAMEPAD_AXIS_LEFTY}, {"lt", SDL_GAMEPAD_AXIS_LEFT_TRIGGER},
+    };
+    if (!strcmp(token, "added") || !strcmp(token, "removed")) {
+        event->type = token[0] == 'a' ? SDL_EVENT_GAMEPAD_ADDED : SDL_EVENT_GAMEPAD_REMOVED;
+        event->gdevice.which = 7;
+        return true;
+    }
+    if (!strcmp(token, "mouse-move")) {
+        event->type = SDL_EVENT_MOUSE_MOTION; event->motion.windowID = 1;
+        event->motion.x = 410; event->motion.y = 310;
+        return true;
+    }
+    if (!strcmp(token, "focus-lost")) {
+        event->type = SDL_EVENT_WINDOW_FOCUS_LOST; event->window.windowID = 1;
+        return true;
+    }
+    for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i) {
+        size_t name = strlen(buttons[i].name);
+        if (strncmp(token, buttons[i].name, name) || token[name] != '-') continue;
+        event->type = !strcmp(token + name, "-down") ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
+        event->gbutton.which = !strcmp(buttons[i].name, "unknown") ? 99 : 7;
+        event->gbutton.button = (Uint8)buttons[i].button;
+        event->gbutton.down = event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+        return true;
+    }
+    for (size_t i = 0; i < sizeof(axes) / sizeof(axes[0]); ++i) {
+        size_t name = strlen(axes[i].name);
+        if (strncmp(token, axes[i].name, name) || token[name] != ':') continue;
+        event->type = SDL_EVENT_GAMEPAD_AXIS_MOTION; event->gaxis.which = 7;
+        event->gaxis.axis = (Uint8)axes[i].axis; event->gaxis.value = (Sint16)atoi(token + name + 1);
+        return true;
+    }
+    return false;
+}
 bool SDL_PollEvent(SDL_Event *event) {
     const char *mode = getenv("BIFROST_TEST_SDL_EVENT");
     if (!mode) return false;
     memset(event, 0, sizeof(*event));
     event->common.timestamp = 123000000;
+    if (!strncmp(mode, "pad:", 4)) return pad_event(mode, event);
     if (!strncmp(mode, "gesture-", 8)) {
         if (!strcmp(mode, delivered_mode)) return false;
         snprintf(delivered_mode, sizeof(delivered_mode), "%s", mode);
