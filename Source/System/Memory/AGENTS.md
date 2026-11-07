@@ -56,12 +56,21 @@ State shared between them goes in `MemoryInternal.hpp`.
   profiles retain their separate zero-page behavior.
 - Allocation reuses freed holes while respecting live mappings and tracked
   aliases. `brk` rounds to page boundaries and must not collide with mmap storage.
+- Unhinted mappings above `LOW_REGION_SIZE` come from `high_next_`, which only moves
+  up, and every hinted or fixed mapping above it pushes it past itself; the space it
+  skips is in neither `free_ranges_` nor reach of the bump. When it cannot fit a
+  request, `mmap_alloc` takes the first hole `find_gap_locked` finds in `vmas_` and
+  zeroes it as a reused range. A 512 GiB realm window must still place Chromium's
+  16 GiB PartitionAlloc reservation (its absence aborted Zenless Zone Zero's WebView).
+  Keep that fallback, and never hand out a range that overlaps a live mapping.
 - `allocations_` is an ordered map of disjoint ranges; munmap and MAP_FIXED find
   overlaps with `allocation_overlaps_locked` (one predecessor plus a forward
   walk), not a full scan. Every insertion must keep ranges disjoint: evict
   (fixed), refuse (no-replace) or take free/bump space.
 - Relevant regressions: `test_shared_alias`, `test_madv_remove`,
-  `test_userfaultfd`, `test_mem_guard`, `test_lse_inline` (store replay);
+  `test_userfaultfd`, `test_mem_guard`, `test_lse_inline` (store replay),
+  `memory_high_gap` (a 16 GiB reservation in a 512 GiB window whose cursor a hinted
+  mapping pushed to the top; host `Memory` test, JIT run only);
   rebuild fixtures before comparing modes.
   Known concurrent C++ copy versus mprotect/unmap limitations are documented in
   [the JIT guide](../../../Docs/JIT.md); do not claim native JIT recovery covers them.

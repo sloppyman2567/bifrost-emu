@@ -25,6 +25,9 @@ each category's count when it starts, and `--filter REGEX` runs only the tests w
 dynamic runs are not selected; missing guest fixtures and unavailable display or SDL support appear as skips, never as passes.
 Since that count, `jit_ld1r` and the uncached FP registers category added three runs in each mode; without a rootfs the suite
 was 353 runs with the JIT and 337 with `--no-jit` (16 skips) on 2026-11-03. The fully provisioned total was not re-run.
+On 2026-11-06, in a tree that adds `memory_high_gap` (a host `Memory` test for a 16 GiB reservation in a 512 GiB window,
+JIT run only), `--strict` ran 365 tests with the JIT, all passing and none skipped, and 337 with `--no-jit`, all passing, with
+28 JIT-only tests not selected there (15 in the 2026-11-01 count).
 
 ### Persistent JIT cache (2026-10-26)
 

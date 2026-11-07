@@ -8,6 +8,24 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
+## [Unreleased]
+
+### Fixed (guest memory)
+
+- **A 16 GiB reservation failed with ENOMEM while most of a 512 GiB realm window was empty, and Zenless Zone Zero's
+  WebView aborted.** Unhinted mappings above 4 GiB came from one cursor that only moves up, and a hinted or fixed mapping
+  above it moves it past that mapping. The space it skipped was in neither the free ranges nor reach of the cursor. By
+  the time the WebView loaded, a replay of the mmap trace showed about 35 GiB live and the cursor about 7 GiB below the
+  window's top, with a 366 GiB hole beneath it. Chromium's PartitionAlloc on Android arm64 uses a 30-bit address hint
+  mask (`AslrMask(30)`, checked against its source), so its 8 GiB-aligned hints repeat and collide; it falls back to a
+  16 GiB reservation, got ENOMEM, and aborted with a `brk` (SIGTRAP at `libwebviewchromium.so+0x3f3fc68`, the same pc in
+  all ten tombstones that had a backtrace; every stock run died within about a minute). `Memory::mmap_alloc` now takes
+  the first hole in the mapping index (`find_gap_locked`) when the cursor cannot fit a request; the hole is zeroed like
+  any reused range. `memory_high_gap` places a mapping near the top of a 512 GiB `Memory`, then asks for 16 GiB, 2 GiB
+  and a freed hole again; it fails without the change and passes with it. One Zenless Zone Zero session ran 44 minutes
+  afterwards with no failed reservation and no WebView crash. That is one session, not a pass rate, and which hinted
+  mapping first moved the cursor was not identified.
+
 ## [2.0.0-beta.1] — app keystore, WebView fences and a faster JIT (2026-11-03)
 
 **2.0.0-beta.1** collects the changes made after 2.0.0-alpha.3 (2026-11-01): an Android Keystore so apps such as PolyTrack

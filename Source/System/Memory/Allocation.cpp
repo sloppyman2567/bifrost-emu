@@ -83,8 +83,22 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve,
             // unhinted maps) allocation continues from the high cursor.
             if (base + aligned_size > LOW_REGION_SIZE) {
                 base = std::max<uint64_t>(LOW_REGION_SIZE, high_next_);
-                if (aligned_size > window_size_ - base) return 0;
-                high_next_ = base + aligned_size;
+                if (base >= window_size_ || aligned_size > window_size_ - base) {
+                    // The cursor only moves up, and every hinted or fixed
+                    // mapping above it pushes it past that mapping, so the
+                    // space it skipped is in neither free_ranges_ nor reach
+                    // of the bump. A 512 GiB realm window with an ART or
+                    // linker mapping near its top has no room left above the
+                    // cursor while most of the window is empty, and Chromium's
+                    // 16 GiB PartitionAlloc fallback fails. Take the first
+                    // hole in the mapping index instead, as the kernel would.
+                    // The hole may hold a previous owner's pages: reuse zeroes.
+                    base = find_gap_locked(LOW_REGION_SIZE, window_size_, aligned_size);
+                    if (!base) return 0;
+                    reused = true;
+                } else {
+                    high_next_ = base + aligned_size;
+                }
             }
         }
     } else {
