@@ -1247,10 +1247,19 @@ run_test() {
         PASS_COUNT=$((PASS_COUNT + 1))
     fi
 
-    # Verbose: show output
+    # Verbose: the start of the output. A long failure also shows the later lines that name a
+    # failure or an error and its last lines, where a test reports what went wrong; the first
+    # 20 lines alone hid the failing check of long tests in CI logs.
     if [ "$VERBOSE" = "1" ] || [ "$status" = "FAIL" ]; then
+        local output_lines
+        output_lines=$(echo "$output" | wc -l)
         echo "$output" | head -20 | sed 's/^/      /'
-        if [ "$(echo "$output" | wc -l)" -gt 20 ]; then
+        if [ "$output_lines" -gt 20 ] && [ "$status" = "FAIL" ]; then
+            echo "      ... (later lines naming a failure or error, then the end)"
+            echo "$output" | tail -n +21 | head -n -10 | grep -E -i 'fail|error|assert|abort' | head -20 | sed 's/^/      /'
+            echo "      ..."
+            echo "$output" | tail -n +21 | tail -10 | sed 's/^/      /'
+        elif [ "$output_lines" -gt 20 ]; then
             echo "      ... (truncated)"
         fi
     fi

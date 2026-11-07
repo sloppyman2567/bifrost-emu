@@ -58,6 +58,14 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Changed (tests)
 
+- The scheduled full-suite run passes its rootfs stage again: on 2026-11-07, with `test_start_page` no longer writing
+  the runner's real config (8def9a9d), 373 of 376 passed (208 of 370 on 2026-11-02). Of the three left,
+  `jit_mt_publication` and `jit_profiler` built the headless library inside their timeouts on a job that had built the
+  SDL/GL one: the host harnesses that link `libbifrost.a` now build the configuration under test
+  (`Scripts/Testing/host_library.sh`, from `BIFROST_EMU`). The third, `vulkan`, fails only on the runner's llvmpipe
+  device and its failing check was cut off: a failing test now shows the later lines that name a failure or an error and
+  its last lines, not only its first 20.
+
 - The Vulkan texture and audio test no longer ships third-party character art or an unlicensed sound clip: the
   Matikanetannhauser image and the "Mambo" sound effect (`Assets/Mambo`, baked into `mambo_tex.h` and
   `mambo_audio.h`) are removed. `test_mambo_vulkan` is now `test_vulkan_texture` (`run_tests.sh` entry

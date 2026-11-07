@@ -146,8 +146,10 @@ intentionally optional; each such omission is printed as a skip. Exit 77
 remains an environment skip for display/driver tests, SDL tests in a build
 without host SDL2, and host scripts whose fetched fixtures or toolchains are
 absent; a missing emulator stays a failure. JIT-only cases remain skipped
-under `--no-jit`. Host harnesses that link `libbifrost.a` use the headless
-library (`release-sdl0-gl0`), which CI's build step has already compiled. CI uses strict mode so fixture compilation
+under `--no-jit`. Host harnesses that link `libbifrost.a` build and link the library of the
+configuration under test (`Scripts/Testing/host_library.sh`: the build directory of `BIFROST_EMU`,
+headless when run by hand), which the job has already compiled. A failing test's output shows its first
+20 lines, the later lines that name a failure or an error, and its last 10. CI uses strict mode so fixture compilation
 failures cannot silently reduce test coverage.
 
 For repeated performance runs, use `Scripts/Bench/run_benchmarks.py`. It performs
