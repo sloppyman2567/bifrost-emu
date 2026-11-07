@@ -273,7 +273,8 @@ static bool check_selfloops() {
                                            : (kind == 4 ? 0x20000000 : 0xa0000000);
             // A finished loop leaves through its exit edge, a forward edge that carries no poll:
             // the chain ends at the return block or runs on through it to the host stop.
-            const bool pc_ok = finished ? cpu.pc == stop || cpu.pc == head + 16 : cpu.pc == head;
+            const uint64_t ret_block = head + 4 * (loops[kind].size() - 1);  // kind 3's loop is a word longer
+            const bool pc_ok = finished ? cpu.pc == stop || cpu.pc == ret_block : cpu.pc == head;
             double lo, hi;
             std::memcpy(&lo, &cpu.v_lo[0], 8); std::memcpy(&hi, &cpu.v_hi[0], 8);
             // The JIT's own preemption ticker can end a mode 0 run early too.
@@ -374,17 +375,26 @@ int main() {
         unsigned dispatches = 0;
         while (cpu.pc != stop && ++dispatches < 10000)
             cpu.pc = j->run_block(cpu, *e);
-        if (cpu.pc != stop || cpu.regs[0] != 20000ull * 19999 / 2 + 3 * 20000)
+        if (cpu.pc != stop || cpu.regs[0] != 20000ull * 19999 / 2 + 3 * 20000) {
+            std::fprintf(stderr, "worker run: pc=0x%llx x0=%llu after %u dispatches\n", (unsigned long long)cpu.pc,
+                         (unsigned long long)cpu.regs[0], dispatches);
             ++failures;
+        }
+    };
+    auto unchanged = [&](const char* when) {
+        if (!std::memcmp(before.data(), j->code_buf(), prefix)) return;
+        std::fprintf(stderr, "published bytes changed %s\n", when);
+        ++failures;
     };
     std::vector<std::thread> threads;
     for (unsigned k = 0; k < 8; ++k) threads.emplace_back(run);
     for (auto& t : threads) t.join();
-    if (!j->tier2_regions.load() || std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
+    if (!j->tier2_regions.load()) { std::fputs("no Tier-2 region was published by the workers\n", stderr); ++failures; }
+    unchanged("after the workers");
     j->invalidate_range(body, 24); // must revoke a region whose head is on another page
-    if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
+    unchanged("after invalidate_range");
     run();
-    if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
+    unchanged("after the rerun");
     CPU bounded;
     bounded.pc = entry; bounded.regs[0] = 1000000000000ull;
     bounded.regs[30] = stop; bounded.jit_stop_pc = stop;
@@ -397,7 +407,7 @@ int main() {
         ++failures;
     }
     j->invalidate_all();
-    if (std::memcmp(before.data(), j->code_buf(), prefix)) ++failures;
+    unchanged("after invalidate_all");
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
     if (!check_signal_return(false) || !check_signal_return(true) || !check_ibl_revocation() || !check_selfloops() ||
         !check_entry_order_loops(false) || !check_entry_order_loops(true) || !check_forward_chains()) {

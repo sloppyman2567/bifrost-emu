@@ -87,6 +87,13 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Changed (tests)
 
+- `jit_mt_publication` names the check that failed (a worker's result, no Tier-2 region published, or which
+  published bytes changed); CI had reported only `MT publication: 1 failures`. Its self-loop check also expected every
+  loop to return at `head + 16`, but kind 3 (FADD/CBNZ) is a word longer, so a run that finished before the ticker
+  interrupted it failed: it did once in 40 runs on two starved cores, and not in 140 after the fix. The CI failure
+  of 2026-11-07 (run 42347801011, first layout) did not reproduce in 140 starved runs on gcc 15 and gcc 13, so its cause is
+  unknown until the next failure prints its message.
+
 - The scheduled full-suite run passes its rootfs stage again: on 2026-11-07, with `test_start_page` no longer writing
   the runner's real config (8def9a9d), 373 of 376 passed (208 of 370 on 2026-11-02). Of the three left,
   `jit_mt_publication` and `jit_profiler` built the headless library inside their timeouts on a job that had built the
