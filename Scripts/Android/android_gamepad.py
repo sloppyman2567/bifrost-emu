@@ -249,10 +249,16 @@ def connect(window, application, backend):
             (window_.focusPreviousChild if action == "up" else window_.focusNextChild)(); return
         for name in keys_for(action, where, application.activeModalWidget() is not None): press(name, widget)
 
+    def in_front():
+        """Whether one of this application's windows has the user's attention: a popup menu or a dialog that has just
+        opened counts, since Qt can report no active window while one of them has the focus."""
+        return (application.activeWindow() is not None or application.activePopupWidget() is not None
+                or application.activeModalWidget() is not None)
+
     def tick():
         # PyQt aborts the whole process on an exception in a slot: a failing pad must not take the library with it.
         try:
-            if application.activeWindow() is None:
+            if not in_front():
                 reader.reset(); timer.setInterval(IDLE_INTERVAL); return
             for action in reader.poll(): handle(action)
             timer.setInterval(ACTIVE_INTERVAL if reader.connected else SEARCH_INTERVAL)

@@ -1236,7 +1236,8 @@ class LauncherLibraryTests(unittest.TestCase):
         window = self.pad_window(layout="big")
         window.apps[0]["launcher"] = "managed_activity"
         dialog = self.settings_dialog(window)
-        self.assertTrue(dialog.windowState() & Qt.WindowState.WindowFullScreen)
+        self.assertFalse(dialog.windowState() & Qt.WindowState.WindowFullScreen)        # a panel: the library stays in view
+        self.assertTrue(dialog.width() < window.width() and dialog.height() < window.height())
         self.assertEqual(self.row(), "Show FPS, load and temperatures")                 # the first row has the focus
         self.press(window, pads.DPAD_DOWN)
         self.assertEqual(self.row(), "Back key")                                         # the dimmed "Stats layout" is skipped

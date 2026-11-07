@@ -539,7 +539,8 @@ def settings_dialog(window, app, settings):
             """The gamepad layout of this dialog: one large row per setting over the same widgets, changed with the d-pad.
             Nothing here needs a keyboard or a mouse; the desktop widgets stay, hidden, as the model that saves."""
             for widget in (intro, tabs, buttons): widget.hide()
-            self.setWindowState(Qt.WindowState.WindowFullScreen)
+            # A panel over the library, which stays in view behind it, not a screen of its own.
+            self.resize(min(1000, round(window.width() * 0.82)), round(window.height() * 0.9))
             heading = QLabel(app["label"]); font = heading.font(); font.setPointSizeF(font.pointSizeF() * 1.5); font.setBold(True)
             heading.setFont(font); layout = self.layout(); layout.insertWidget(0, heading)
             self.pad_rows = []

@@ -48,7 +48,7 @@ there (guided provisioning, update/reinstall) remain in progress.
   screen. Only the window in front reacts, so a game reading the same pad does not also act on the library; a failing pad is
   switched off instead of aborting the library; `BIFROST_NO_GAMEPAD=1` turns it off. Built and tested with a fake pad on
   Qt's offscreen platform; not tried with a real pad, Game Mode or gamescope.
-- An app's settings are a console-style page in the gamepad layout: full screen, one large row per setting, Left and Right
+- An app's settings are a console-style page in the gamepad layout: a large panel over the library (not a screen of its own), one large row per setting, Left and Right
   change the value (no popup lists), A toggles, Y restores defaults, Start saves, B cancels, a hint bar names the buttons, and
   rows that do not apply are dimmed and skipped. It sits over the dialog's own widgets, so saving and validation are unchanged,
   and leaves out the device-property table, which needs a keyboard. The desktop dialog also takes the pad (Up and Down walk

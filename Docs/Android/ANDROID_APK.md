@@ -362,7 +362,8 @@ quits the library), **Y** opens the card's menu, **X** changes the sort order, *
 dialog) and **Start** opens a library menu with Install APK, Google account, sort, the layout, full screen and Quit. In a dialog
 Up and Down walk the focus order. Face buttons are named as the pad names them (A or Cross), by position: the bottom one confirms.
 
-In the gamepad layout an app's settings are a full-screen page of large rows, one per setting, over the same widgets the desktop
+In the gamepad layout an app's settings are a large panel over the library (82% of its width, 90% of its height, the library in view
+behind it) of large rows, one per setting, over the same widgets the desktop
 dialog uses (so saving and validation are the same): Up and Down move between rows, **Left and Right change the value** (a choice
 steps through its options and wraps; A steps on too), A switches an On/Off row, **Y** restores the defaults, **Start** saves and
 **B** cancels, and the rows at the bottom (Clear data, Uninstall, Restore defaults, Save, Cancel) act on A. A row whose setting
