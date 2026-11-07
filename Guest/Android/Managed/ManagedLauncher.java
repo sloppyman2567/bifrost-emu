@@ -716,6 +716,11 @@ public final class ManagedLauncher {
                 case "registerInputDevicesChangedListener": gamepads.register(a[0]); return null;
                 case "getInputDeviceIds":
                     return gamepads.deviceIds(KeyCharacterMap.VIRTUAL_KEYBOARD);
+                // A WebView (an ad) asks every gamepad which buttons it has; an exception here killed the app.
+                case "hasKeys":
+                    return gamepads.hasKeys((Integer) a[0], (int[]) a[2], (boolean[]) a[3], KeyCharacterMap.VIRTUAL_KEYBOARD);
+                // No device here can vibrate; a gamepad's rumble code asks.
+                case "getVibratorIds": return new int[0];
                 case "getInputDevice":
                     return ((Integer) a[0]) == KeyCharacterMap.VIRTUAL_KEYBOARD
                             ? virtualKeyboardDevice() : gamepads.device((Integer) a[0]);

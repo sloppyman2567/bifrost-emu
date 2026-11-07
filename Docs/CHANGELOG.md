@@ -38,6 +38,14 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Added (touch cursor for gamepads)
 
+- Fixed: an app with a WebView (an ad in Geometry Dash Lite) died with `UnsupportedOperationException: input.hasKeys` while a
+  gamepad was connected. On its first hover event Chromium's gamepad list asks every gamepad `InputDevice` which buttons it has,
+  and the managed launcher's `input` service did not implement `hasKeys`. It now answers from the pad's real buttons (the
+  Xbox-style set; the triggers are axes only), for the virtual keyboard every key but the gamepad buttons, and nothing for a device
+  that does not exist, and answers `getVibratorIds` with an empty list for the rumble code that asks next. Found in the maintainer's
+  Geometry Dash Lite log; the launcher and `ManagedServiceBatch` compile, and the batch test now checks `hasKeys`, but it needs the
+  framework build to run and neither it nor a real ad was run.
+
 - Fixed: at the right or bottom edge of the window the cursor's arrow hung out of it, a transparent bulge, because its layer
   extends from the pointer by its own size; the picture is now cropped to the part inside the panel.
 

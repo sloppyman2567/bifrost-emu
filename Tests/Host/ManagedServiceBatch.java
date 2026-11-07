@@ -399,6 +399,19 @@ public final class ManagedServiceBatch {
         check(z != null && z.getMin() == -1f && z.getMax() == 1f && Math.abs(z.getFlat() - 0.125f) < 0.001f
                 && trigger != null && trigger.getMin() == 0f && trigger.getFlat() == 0f, "gamepad motion ranges");
         check(pads.device(3) == null, "an unknown id has a device");
+        // IInputManager.hasKeys, which Chromium's gamepad list asks of each pad: the pad's buttons, not a keyboard's keys, and
+        // nothing for a device that does not exist.
+        final int[] asked = {android.view.KeyEvent.KEYCODE_BUTTON_A, android.view.KeyEvent.KEYCODE_BUTTON_START,
+                android.view.KeyEvent.KEYCODE_DPAD_UP, android.view.KeyEvent.KEYCODE_BUTTON_L2,
+                android.view.KeyEvent.KEYCODE_A, android.view.KeyEvent.KEYCODE_ENTER};
+        boolean[] padHas = new boolean[asked.length], keyboardHas = new boolean[asked.length], nobodyHas = new boolean[asked.length];
+        check(pads.hasKeys(2, asked, padHas, -1) && Arrays.equals(padHas, new boolean[] {true, true, true, false, false, false}),
+                "gamepad hasKeys: " + Arrays.toString(padHas));
+        check(pads.hasKeys(-1, asked, keyboardHas, -1)
+                && Arrays.equals(keyboardHas, new boolean[] {false, false, true, true, true, true}),
+                "keyboard hasKeys: " + Arrays.toString(keyboardHas));
+        check(!pads.hasKeys(9, asked, nobodyHas, -1) && Arrays.equals(nobodyHas, new boolean[asked.length]),
+                "an unknown device has keys");
         final int keys = android.view.InputDevice.SOURCE_KEYBOARD | android.view.InputDevice.SOURCE_GAMEPAD;
         List<android.view.KeyEvent> sent = new ArrayList<>();
         FrameworkGamepads.KeyTarget unhandled = event -> { sent.add(event); return false; };

@@ -54,6 +54,28 @@ final class FrameworkGamepads {
         return ids;
     }
 
+    // The keys a pad reports (Vendor_045e_Product_028e.kl: the triggers are axes only). IInputManager.hasKeys answers from this:
+    // Chromium's WebView, in an ad, lists the gamepads on its first hover event and asks each which buttons it has, and an
+    // exception out of that kills the app.
+    private static final int[] PAD_KEYS = {KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT,
+            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BUTTON_X,
+            KeyEvent.KEYCODE_BUTTON_Y, KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_BUTTON_THUMBL,
+            KeyEvent.KEYCODE_BUTTON_THUMBR, KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_SELECT,
+            KeyEvent.KEYCODE_BUTTON_MODE};
+
+    // IInputManager.hasKeys: `exists[i]` says whether the device has key `keyCodes[i]`. False for a device that does not exist
+    // (nothing is written then), as InputManagerService answers. The virtual keyboard has every key except the gamepad buttons.
+    synchronized boolean hasKeys(int id, int[] keyCodes, boolean[] exists, int virtualKeyboard) {
+        final boolean keyboard = id == virtualKeyboard;
+        if (!keyboard && !pads.containsKey(id)) return false;
+        for (int i = 0; i < keyCodes.length && i < exists.length; i++) {
+            boolean pad = false;
+            for (int key : PAD_KEYS) pad |= key == keyCodes[i];
+            exists[i] = keyboard ? keyCodes[i] > 0 && !KeyEvent.isGamepadButton(keyCodes[i]) : pad;
+        }
+        return true;
+    }
+
     synchronized InputDevice device(int id) throws Exception {
         Pad pad = pads.get(id);
         if (pad == null) return null;

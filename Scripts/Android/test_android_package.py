@@ -445,6 +445,16 @@ class LauncherArgumentTests(unittest.TestCase):
             run("--window-stats")
             self.assertEqual(calls[-1], ["--window-stats"])
 
+    def test_the_input_service_answers_what_a_webview_asks_every_gamepad(self):
+        """An ad's Chromium WebView calls InputDevice.hasKeys on each gamepad at its first hover event; an unsupported call out
+        of the input service threw there and killed Geometry Dash Lite (`UnsupportedOperationException: input.hasKeys`)."""
+        launcher = (ROOT / "Guest/Android/Managed/ManagedLauncher.java").read_text()
+        service = launcher[launcher.index('services.register("input"'):launcher.index('services.register("game"')]
+        for method in ("hasKeys", "getVibratorIds", "getInputDeviceIds", "getInputDevice"):
+            self.assertIn(f'case "{method}"', service)
+        gamepads = (ROOT / "Guest/Android/Managed/Framework/FrameworkGamepads.java").read_text()
+        self.assertIn("synchronized boolean hasKeys(int id, int[] keyCodes, boolean[] exists, int virtualKeyboard)", gamepads)
+
     def test_the_window_setting_keeps_the_apps_shape_by_default_and_reaches_the_guest(self):
         import android_managed
         from android_settings import KEYS, launch_changes, parse
