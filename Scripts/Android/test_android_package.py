@@ -1781,6 +1781,32 @@ class LauncherLibraryTests(unittest.TestCase):
             finally:
                 stop_launcher(launcher)
 
+    def test_closing_the_launcher_with_a_poll_in_flight_does_not_abort_it(self):
+        """The library polls `asgard list` through a QProcess owned by its window. Closing while one ran destroyed it mid-signal:
+        its `finished` slot read the QProcess being deleted, the RuntimeError escaped a slot, and PyQt aborted (SIGABRT)."""
+        import signal
+        from android_launcher import activate_existing
+        state = self.root / "inflight-state"; state.mkdir()
+        slow = self.root / "slow-children"; slow.mkdir()
+        # Only the `list` children are slow, so the poll started at startup is still running when the launcher is interrupted.
+        (slow / "sitecustomize.py").write_text("import sys, time\nif 'list' in sys.argv[1:]: time.sleep(8)\n")
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen", HOME=str(self.root), PYTHONPATH=str(slow))
+        with (self.root / "inflight.log").open("w") as log:
+            launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
+                                         "--state-root", str(state), "launcher"], stdout=log, stderr=subprocess.STDOUT, env=env,
+                                         start_new_session=True)
+            try:
+                deadline = time.monotonic() + 30
+                while not activate_existing(state):
+                    if launcher.poll() is not None or time.monotonic() >= deadline:
+                        self.fail("Offscreen Asgard launcher did not start: " + (self.root / "inflight.log").read_text()[-2000:])
+                    time.sleep(0.1)
+                time.sleep(1)  # the poll the window starts when it appears is now running
+                os.kill(launcher.pid, signal.SIGINT)
+                self.assertEqual(launcher.wait(timeout=20), 0, (self.root / "inflight.log").read_text()[-2000:])
+            finally:
+                stop_launcher(launcher)
+
     def test_asgard_launcher_command_is_one_process(self):
         """asgard.py replaces itself with the command it runs: signalling the pid that was started must stop the launcher."""
         from android_launcher import activate_existing

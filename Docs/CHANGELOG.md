@@ -166,6 +166,17 @@ there (guided provisioning, update/reinstall) remain in progress.
   preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
   social preview setting.
 
+### Fixed (closing the launcher aborted it)
+
+- Closing the Asgard library window (or ending it with Ctrl-C) killed it with SIGABRT whenever a poll was in flight, which is most
+  of the time while the window is active: the library lists its apps every 1.5 s through a `QProcess` owned by the window, and
+  Python's teardown destroyed that process while it ran. Its `finished` slot then read a QProcess already being deleted
+  (`RuntimeError: wrapped C/C++ object of type QProcess has been deleted`), and PyQt aborts on an exception inside a slot. Six
+  such crashes are recorded in the system journal for 2026-11-07. The window now ends its commands before Qt destroys them,
+  on close and on any quit: their signals are cut first, they get two seconds to finish, then they are killed. A new test runs
+  the real launcher offscreen with a slow poll in flight and interrupts it (it fails on the old code with SIGABRT).
+  An installed Asgard (`/usr/local/share/bifrost/asgard`) keeps the crash until it is reinstalled.
+
 ### Added (realm idle timeout)
 
 - An Asgard realm with no app attached ends after 10 minutes (`ASGARD_REALM_IDLE_SECONDS`, `0` to keep it): the broker stops its

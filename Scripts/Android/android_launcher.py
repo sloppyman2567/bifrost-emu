@@ -1637,7 +1637,26 @@ def build(state, application, settings=None, pads=None):
 
         def closeEvent(self, event):
             self.settings.setValue("geometry", self.saveGeometry())
+            self.stop_jobs()
             super().closeEvent(event)
+
+        def stop_jobs(self, grace=2.0):
+            """End the commands this window started, before Qt destroys them. A QProcess destroyed while it runs emits
+            `finished` from its own destructor, and the slot then reads a QProcess that is already being deleted: the
+            RuntimeError is unhandled inside a slot, so PyQt aborts the process (SIGABRT) on every close that finds a
+            poll in flight. The signals are cut first, so no slot runs against a half-destroyed window; the commands get
+            `grace` seconds to finish (a launch hands its session over) and are killed after that."""
+            jobs = list(self.jobs)
+            self.jobs.clear()
+            for process in jobs:
+                for signal in (process.finished, process.errorOccurred):
+                    try: signal.disconnect()
+                    except (TypeError, RuntimeError): pass
+            deadline = time.monotonic() + grace
+            for process in jobs:
+                if process.state() == QProcess.ProcessState.NotRunning: continue
+                if not process.waitForFinished(max(1, int((deadline - time.monotonic()) * 1000))):
+                    process.kill(); process.waitForFinished(2000)
 
         def tick(self):
             """Poll the library, less often when nothing is happening and not at all when minimized."""
@@ -2003,4 +2022,7 @@ def show(state, fullscreen=False):
             timer.timeout.connect(client.abort); timer.start(1000)
             receive()
     server.newConnection.connect(activate)
+    # Any way out of the event loop (the window closing, Ctrl-C asking it to quit) ends the window's commands while their
+    # objects are still alive; Python's teardown destroys them otherwise, mid-signal.
+    application.aboutToQuit.connect(window.stop_jobs)
     return application.exec()
