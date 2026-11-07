@@ -50,16 +50,18 @@
     },
     "com.ubisoft.hungrysharkworld": {
       "name": "Hungry Shark World",
-      "status": "runs",
-      "checked": "2026-10",
-      "evidence": "A 358 s session with ads and taps on the game's links, run by hand (Docs/TESTS.md); gameplay is not confirmed.",
+      "tested_version": "8.2.6",
+      "status": "playable",
+      "checked": "2026-11-06",
+      "evidence": "The maintainer reports stable gameplay (2026-11-06); no screenshots or further detail are recorded. Earlier, a 358 s session with ads and taps on the game's links was run by hand (Docs/TESTS.md).",
       "notes": ["Rewarded video ads had no fill from Google Mobile Ads before the ad-SDK gaps were closed; not re-checked.", "Play Games sign-in does not complete: after the Google window, Google answers games/v1/players/me with HTTP 404 and microG reports SIGN_IN_REQUIRED (2026-10-21)."]
     },
     "com.fgol.HungrySharkEvolution": {
       "name": "Hungry Shark Evolution",
-      "status": "runs",
-      "checked": "2026-10",
-      "evidence": "A 180 s session reached its window, surface and popups without framework-service exceptions (Docs/TESTS.md); gameplay is not confirmed."
+      "tested_version": "14.5.0",
+      "status": "playable",
+      "checked": "2026-11-06",
+      "evidence": "The maintainer reports stable gameplay (2026-11-06); no screenshots or further detail are recorded. Earlier, a 180 s session reached its window, surface and popups without framework-service exceptions (Docs/TESTS.md)."
     },
     "com.roblox.client": {
       "name": "Roblox",

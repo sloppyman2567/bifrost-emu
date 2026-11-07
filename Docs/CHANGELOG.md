@@ -179,6 +179,9 @@ there (guided provisioning, update/reinstall) remain in progress.
   before. Each carries its known defects: Zenless Zone Zero's very low-resolution textures, heavy lag and a progress bar
   that freezes while the window is maximized, and Doki Doki Literature Club's corrupted audio and graphics that break when
   the window is resized. The causes are not established.
+- Hungry Shark Evolution 14.5.0 and Hungry Shark World 8.2.6 are playable on the maintainer's report of stable gameplay
+  (2026-11-06), with no capture; both only ran bounded sessions before. The badge reads 15 playable of 19. Hungry Shark
+  World's Play Games sign-in still does not complete.
 
 ### Apps get their own network security config (2026-11-05)
 
