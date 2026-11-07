@@ -25,8 +25,9 @@ The aim is an Android game that behaves like any other window on a Linux desktop
 2. **The window behaves:** tiling, resizing, fullscreen and a remembered size, and an app that takes the window's new shape
    (Activity relaunch on a configuration change).
 3. **Input works** from the mouse, the keyboard, a pad, and a pad-driven pointer for apps that only take touch.
-4. **It does not hitch**, ads included. Measure before fixing: whether the lag is in the ad, in the game while the ad loads or
-   when it closes decides whether the fix is rendering, the JIT or the WebView process, and none of it has been measured.
+4. **It does not hitch**, ads included. Measure before fixing. The session logs already say where the main thread stalls
+   ([measured so far](#measured-so-far-ads-webview-and-windows)): WebView's first start is the commonest, then cold app and SDK
+   code and other WebView work. What no log shows is frame pacing while an ad is up, which needs a frame-time record.
 5. **It starts quickly and stays small:** the persistent JIT cache and the memory breakdown.
 
 Not the focus: games behind attestation or anti-cheat, and compatibility sweeps with no concrete game to fix (see
@@ -104,8 +105,33 @@ app exit leaves the library and the other apps usable.
 - Relaunch an Activity when a host resize changes its configuration, so an app such as YouTube takes the window's portrait
   or landscape shape; today only `onConfigurationChanged` is called, and the per-app Window setting's "Keep the app's shape"
   scales a game instead.
-- Measure ad lag before choosing a fix: an ad-heavy session with the window-stats overlay on, split into the ad showing, the
-  game while the ad loads, and closing it.
+- Measure frame pacing around ads before choosing a rendering fix: an ad-heavy session with the window-stats overlay on and an
+  opt-in frame-time log (not written yet), split into the ad showing, the game while the ad loads, and closing it. The
+  stall data below covers only main-thread blocks of about 1.5 s or more.
+- Move WebView's first start off the critical path: the UI thread waits in `startBrowserProcessesSync` the first time an ad
+  opens a WebView (53 episodes, median 1.7 s). Creating a hidden WebView during the loading screen is untried; the stall
+  log shows whether the median drops.
+- Tell the app about its window. The window plugin has six events (close, resize, key, pointer, text, gamepad); minimise,
+  hide, occlude and focus loss are traced and not delivered, so a minimised game keeps running at full speed. Task
+  visibility exists in the guest, but only the library's supervisor drives it. Add an append-only visibility and focus
+  event, pause and stop the Activities as Android does, and measure idle CPU before and after.
+- Game windows have no fullscreen toggle and no remembered size or position: `--fullscreen` belongs to the library, which
+  remembers only its own size and sort order. Decide whether each is a per-app setting.
+- Give the realm an idle policy. `asgard run` starts a detached broker that only `asgard realm stop` ends, and every service
+  child (WebView service and renderers, microG) is a whole emulated runtime of 350 to 450 MiB that idle-stops after 60 s
+  only without a service record or provider reference; in Battle Cats the WebView service stays alive for an untraced
+  reason. Stop the broker and its media root when the last client leaves, after a grace period, and trace that service.
+
+#### Measured so far (ads, WebView and windows)
+
+From 135 session logs of ten installed apps (2026-10-24 to 11-07), read on 2026-11-07. `APP_MAIN_STALL` reports a main-thread
+block of about 1.5 s or more once a second, so reports are merged into episodes (430 reports were 146 episodes; one 50 s
+hang was 56 reports). By cause: WebView first start 53 episodes (median 1.7 s, p90 4.6 s, worst 11.7 s), cold app and SDK
+code 40 (median 1.7 s), other WebView and Chromium work 32 (median 2.6 s). The two longest were Geometry Dash Lite's
+`InputDevice.hasKeys` crash, where the ad SDKs' uncaught-exception handlers held the main thread for 45 s (fixed in
+`f69bc8bd`), and one 50 s hardware-frame hang on 10-25. Only three sessions follow that fix, so the current state is thin.
+Seven of the eight installed games scanned bundle the same mediation stack of about ten ad networks; Oddmar has none. The
+logs are in `<state>/<package>/managed/sessions/*/stdout*.log`.
 
 Acceptance: a supported SDK test creative loads, displays, accepts input, closes and returns to the game without losing
 input or audio; rewarded tests deliver the SDK's real completion callback once; no-fill, cancellation, network failure and
@@ -235,18 +261,34 @@ target); compact scalar memory guards; shared cold stubs; native scalar and vect
 to twice the block cap; lighter Q-register accesses. On a set of engine-shaped kernels the JIT went from 5.8× to 4.2× the
 time of a native AVX2 build ([details](JIT.md)).
 
+Also done on 2026-11-07, measured on a different, reconstructed kernel set (one clang source built for AArch64 and for
+x86-64-v3, one pinned core, a game running; not a game): `LD2`-`LD4`/`ST2`-`ST4` native inside the block (a quaternion blend
+22.7× to 4.2× native, 4-bone skinning 45.8× to 11.2×); scalar FP NaN steps emitted after the block (the profiled loop's
+executed code spans 29% fewer cache lines); `fcmp` feeding a branch or integer select left in the host flags (cull 33.9× to
+27.1×, collide 11.4× to 8.1×). The set's geometric mean went from 7.63× to about 4.96×. A kernel's ratio is guest
+instructions over native instructions (the compiler: cull's AArch64 loop has 4.5 times the x86 build's instructions) times
+host instructions per guest instruction (the JIT: 5 to 15 here); only the second is the JIT's to fix. L1 miss counters did
+not move beyond noise, and CoreMark's last-level misses are fixed startup and translation costs
+([details](JIT.md#fp-compares-in-the-host-flags-and-where-last-level-misses-come-from-2026-11-07)).
+
 Open, in priority order:
 
 1. **Per-instruction overhead in scalar FP loops** (an audio mixer kernel is still 9.9× native): one-instruction scalar FP
-   result writes, `v_hi` zeroing once per block instead of per op, out-of-line scalar NaN steps, and Z-only flag consumers
-   testing the result instead of packing NZCV.
+   result writes, `v_hi` zeroing once per block instead of per op, and the register copies and preloads around each block.
+   Sampled hot blocks spend their time on `pxor`, `movsd`, `mov` and the NaN-check branch, not on the arithmetic (`vfmadd`
+   is 2%); one guest `fmadd` is about 8 host instructions. `insertps` for the result write was slower on cull (rejected),
+   and a lazy-flag `fcmp` feeding `fcsel` was slower on a clamp loop, so measure each change on a branchy and a predictable
+   kernel.
 2. **Deferred guest-register stores within a block**, so temporaries are not written to `cpu.regs` and read back.
 3. **Paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics.
 4. **Model guest state explicitly**, define recovery and helper contracts, then hand values between two regions and choose
    layouts by measured benefit (the five-stage plan in [the snapshot](archive/roadmap-2026-11-03.md#jit-codegen-retain-guest-state-across-hot-regions)).
 5. **Tier-2**: level with Tier-1 on CoreMark and about 1.5 times faster on a clean multi-block loop, now that its trial
-   measures correctly. It does not take single-block loops, which Tier-1 already keeps in registers. Next: measure real
-   Android titles, then regions with internal branches (`BIFROST_TIER2_GRAPH` surveys them). It stays opt-in until then.
+   measures correctly. It does not take single-block loops, which Tier-1 already keeps in registers. Loops with early-out
+   branches (a culling loop: nine blocks, a linear trace that survives 33% of the time) are declined, because promotion
+   judges the linear fall-through trace and the loop graph is only a diagnostic; the superblock limit is 8 blocks. Next:
+   measure real Android titles, then regions with internal branches (`BIFROST_TIER2_GRAPH` surveys them). It stays opt-in
+   until then.
 6. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the
