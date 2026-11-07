@@ -1852,7 +1852,7 @@ public final class ManagedLauncher {
                         if (event[0] == 0) break;
                         // A gamepad connected or removed while the task is hidden still changes the device list.
                         if (event[0] == 0x101) gamepads.deviceEvent(event, KeyCharacterMap.VIRTUAL_KEYBOARD);
-                        else if (event[0] == 0x102) activities.windowVisible(event[4] != 0);
+                        else if (event[0] == 0x102) activities.windowVisible(event[4] != 0, event[12]);
                         else if (!activities.isBackground()) dispatch(root, event);
                     }
                     activities.update();

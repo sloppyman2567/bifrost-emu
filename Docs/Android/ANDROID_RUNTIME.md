@@ -2362,6 +2362,14 @@ taskbar, and the library's own hide and show come back as the same state and cha
 supervisor (`task_state`) only when there is one, so an app run directly (`bifrost-emu app.apk`) also stops and resumes.
 While the task is in the background the launcher drops input events and keeps reading device and visibility events.
 
+Latency: KWin sets a window suspended only once it is no longer visible to the compositor, and a minimising window stays
+visible while an effect animates it (`WindowItem::computeVisibility` counts `m_forceVisibleByMinimizeCount`, which the minimise
+effects raise through `EffectWindowVisibleRef`; `WindowItem::updateVisibility` then calls `setSuspended`; KWin master of
+2026-11-07), so on KWin the pause starts after the minimise animation and nothing here can shorten that. The part that is ours
+is logged once per change: `APP_WINDOW_VISIBILITY visible=… queued_ms=… change_ms=… report_ms=…` (host event to the launcher's
+loop; stopping or resuming the Activities, where a game's `onPause` waits for its render thread; the supervisor report).
+Observed on one KDE desktop: a minimised Geometry Dash Lite stops and restarts, but takes about a second by the user's report.
+
 Checked: the surface manager's queue and the plugin's validation (`make test-android-window-plugin`), the SDL3 backend's
 state changes on X11-style and Wayland-style sequences against a fake SDL (`make test-android-sdl-backend`), and the Java
 building with the managed launcher. Not checked: a real minimise on a real compositor, a game's CPU use while stopped, and

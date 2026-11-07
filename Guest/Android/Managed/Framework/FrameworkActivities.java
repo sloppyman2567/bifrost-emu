@@ -109,9 +109,20 @@ final class FrameworkActivities {
 
     // The host window was minimised, hidden, covered or shown by the desktop: stop or resume like the library's
     // request does, without asking the window to change again.
-    void windowVisible(boolean visible) throws Exception {
+    // `eventNanos` is when the host saw the change (System.nanoTime's clock). The line it prints, only when the state
+    // changed, separates our delay from the desktop's: queued_ms from the host event to here, change_ms to stop or resume
+    // the Activities, report_ms for telling the supervisor. What came before the event (the compositor) is not in it.
+    void windowVisible(boolean visible, long eventNanos) throws Exception {
+        boolean before = background;
+        long start = System.nanoTime();
         taskVisible(visible, false);
+        if (background == before) return;
+        long end = System.nanoTime();
+        System.out.println("APP_WINDOW_VISIBILITY visible=" + visible
+                + " queued_ms=" + (eventNanos > 0 ? (start - eventNanos) / 1000000 : -1)
+                + " change_ms=" + (transitionNanos - start) / 1000000 + " report_ms=" + (end - transitionNanos) / 1000000);
     }
+    private long transitionNanos;
 
     private void taskVisible(boolean visible) throws Exception {
         taskVisible(visible, true);
@@ -135,6 +146,7 @@ final class FrameworkActivities {
                 resume(record.activity);
             for (Record each : revealed) setVisible(each.activity, true);
         }
+        transitionNanos = System.nanoTime();
         // A window's own minimise or restore also reaches an app run without the library's supervisor.
         if (System.getenv("ASGARD_PROCESS_TOKEN") != null)
             FrameworkProcessRuntime.host(new org.json.JSONObject().put("operation", "task_state")
