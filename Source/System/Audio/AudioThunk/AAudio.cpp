@@ -220,7 +220,12 @@ std::optional<int64_t> AudioDispatch::aaudio() {
         std::unique_lock<std::mutex> pmu(I.pump_mu);
         const uint64_t h = 0xAA100000ull + ++I.next_aa_stream_;
         auto& s = I.aa_streams_[h];
-        s.fmt = (b.fmt == 2) ? PCM_FMT_F32 : PCM_FMT_S16;   // AAUDIO_FORMAT_FLOAT=2, I16=1
+        // AAUDIO_FORMAT_FLOAT=2, I16=1. UNSPECIFIED (0) is the framework's
+        // choice; FLOAT is the safe pick because a producer that leaves it
+        // unset (Wwise: Zenless Zone Zero) writes float samples. Choosing I16
+        // there made the app write 32-bit samples into a 16-bit-sized callback
+        // buffer, past its mapping (SIGSEGV in memcpy, 2026-11-06).
+        s.fmt = (b.fmt == 1) ? PCM_FMT_S16 : PCM_FMT_F32;
         s.size = (s.fmt == PCM_FMT_F32) ? 4 : 2;
         s.ch   = channels > 0 ? (uint8_t)channels : 2;
         s.rate = b.rate > 0 ? (uint32_t)b.rate : 48000;
@@ -247,7 +252,11 @@ std::optional<int64_t> AudioDispatch::aaudio() {
         s.paused = true;  // AAudio callbacks start only after requestStart.
         wr64(I, out, h);
         if (s.cb_fn) {
-            s.bounce_bytes = (size_t)s.frames_per_cb * s.ch * s.size;
+            // Size the callback buffer for 32-bit samples even on an I16
+            // stream: a producer that misreads the format then writes past the
+            // mapping, and the callback runs on a guest thread where that is a
+            // hard SIGSEGV. The engine still consumes s.size bytes per sample.
+            s.bounce_bytes = (size_t)s.frames_per_cb * s.ch * 4;
             s.bounce = I.mem->mmap_alloc(s.bounce_bytes);
             if (!s.bounce) { I.aa_streams_.erase(h); tr(-ENOMEM); return -ENOMEM; }
             // The callback worker owns callback-mode execution. Inline

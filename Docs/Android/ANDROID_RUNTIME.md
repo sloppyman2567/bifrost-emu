@@ -2636,6 +2636,12 @@ garbage collected, not at the client's release.
 
 #### Managed OpenSL ES (2026-10-13)
 
+- **AAudio stream format and callback buffer.** A stream opened without a format
+  (`AAUDIO_FORMAT_UNSPECIFIED`) is FLOAT here, which matches producers that leave
+  it unset and write float samples (Wwise in Zenless Zone Zero); a requested I16
+  stream stays I16. The guest callback buffer is sized for 32-bit samples even on
+  an I16 stream, so a producer writing wider samples cannot run off its mapping —
+  that overflow was the SIGSEGV in `memcpy` one page past the bounce (2026-11-06).
 The image's real `libOpenSLES.so` (wilhelm) plays through AudioTrack, so
 `createTrack` fails without AudioFlinger and player Realize returns
 `SL_RESULT_CONTENT_UNSUPPORTED`; Azur Lane's CRIWARE then reports

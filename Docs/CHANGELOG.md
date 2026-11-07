@@ -33,6 +33,13 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   (about 0.8 fps, not limited by the JIT). `android_loader_host` checks tagged loads, stores, pairs, Q stores, LSE and
   LL/SC against the interpreter, and its stale `clone_for_fork` check now uses a host fork.
 
+### Fixed (audio)
+
+- An AAudio stream opened without a format (`AAUDIO_FORMAT_UNSPECIFIED`) is FLOAT, which matches producers that leave
+  it unset and write float samples (Wwise in Zenless Zone Zero); a requested I16 stream stays I16. The guest callback
+  buffer is sized for 32-bit samples even on an I16 stream, so a producer that writes wider samples cannot run off its
+  mapping: that overflow was a SIGSEGV in `memcpy` one page past the bounce (2026-11-06).
+
 ### Fixed (guest memory)
 
 - **A 16 GiB reservation failed with ENOMEM while most of a 512 GiB realm window was empty, and Zenless Zone Zero's
