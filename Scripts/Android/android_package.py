@@ -412,6 +412,13 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                     for remote, value in runtime_module.FILE_HASHES.items():
                         if digest(root / "apex/com.android.runtime" / remote) != value:
                             raise ValueError("Installed runtime was modified")
+                    # An update brings this build's adapters. Files that still match the
+                    # adapters recorded at the earlier install are that earlier Bifrost's,
+                    # unmodified, and are replaced (a Bifrost update rebuilds them, so
+                    # refusing would leave every installed app unable to update); anything
+                    # else was changed in the app root and is refused.
+                    recorded = (previous or {}).get("adapters", {}).get("files", {})
+                    upgrades = []
                     for filename, value in adapter_metadata["files"].items():
                         target = (
                             root
@@ -422,10 +429,23 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                             )
                             / filename
                         )
-                        if digest(target) != value:
-                            raise ValueError(
-                                "Installed adapters differ; create a fresh app state"
-                            )
+                        current = digest(target) if target.is_file() and not target.is_symlink() else None
+                        if current == value:
+                            continue
+                        if (current is not None and current == recorded.get(filename)) or \
+                                (current is None and not target.is_symlink() and filename not in recorded):
+                            upgrades.append((filename, target))
+                            continue
+                        raise ValueError(
+                            "Installed adapters were modified; create a fresh app state"
+                        )
+                    for filename, target in upgrades:
+                        replacement = target.with_name("." + target.name + ".update")
+                        shutil.copy2(adapters / filename, replacement)
+                        if digest(replacement) != adapter_metadata["files"][filename]:
+                            replacement.unlink()
+                            raise ValueError("Runtime adapter changed while it was being installed")
+                        replacement.replace(target)
                 guest_code = "/data/app/" + name + "-" + identity
                 destination = root / guest_code.lstrip("/")
                 if destination.exists():

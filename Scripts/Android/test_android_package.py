@@ -3266,6 +3266,38 @@ class PackageTests(unittest.TestCase):
         )
         self.assertEqual(original["version_code"], "1")
 
+    def test_update_replaces_an_earlier_bifrosts_adapters_and_refuses_modified_ones(self):
+        # An app installed by an earlier Bifrost holds that build's adapters, recorded in its
+        # package.json; an update brings this build's and keeps the app's data.
+        state = self.work / "adapter-update-state"
+        self.install(self.bundle, state)
+        app = state / "org.bifrost.fixture"
+        manifest = app / "package.json"
+        metadata = json.loads(manifest.read_text())
+        names = sorted(metadata["adapters"]["files"])
+        changed, added = names[0], names[-1]
+        def adapter_path(name):
+            return app / "rootfs" / ("system/bin" if name == "bifrost-native" else "system/lib64") / name
+        adapter_path(changed).write_bytes(b"an earlier build's adapter")
+        metadata["adapters"]["files"][changed] = package.digest(adapter_path(changed))
+        adapter_path(added).unlink()
+        del metadata["adapters"]["files"][added]
+        manifest.write_text(json.dumps(metadata))
+        save = app / "rootfs/data/user/0/org.bifrost.fixture/files/progress"
+        save.parent.mkdir(parents=True, exist_ok=True)
+        save.write_text("kept")
+        updated = self.install(self.bundle, state)
+        current = json.loads((self.adapters / "adapters.json").read_text())["files"]
+        for name in (changed, added):
+            self.assertEqual(package.digest(adapter_path(name)), current[name])
+            self.assertEqual(updated["adapters"]["files"][name], current[name])
+        self.assertEqual(save.read_text(), "kept")
+        # Changed after install, matching neither the record nor this build: refused, untouched.
+        adapter_path(changed).write_bytes(b"edited in place")
+        with self.assertRaisesRegex(ValueError, "Installed adapters were modified"):
+            self.install(self.bundle, state)
+        self.assertEqual(adapter_path(changed).read_bytes(), b"edited in place")
+
     def test_signer_identity_upgrade_and_code_integrity(self):
         state = self.work / "identity-state"
         self.install(self.bundle, state)

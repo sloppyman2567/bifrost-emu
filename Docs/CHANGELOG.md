@@ -56,6 +56,15 @@ there (guided provisioning, update/reinstall) remain in progress.
   preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
   social preview setting.
 
+### Fixed (app updates)
+
+- Updating an app installed by an earlier Bifrost failed with "Installed adapters differ; create a fresh app state":
+  the install compared the app root's runtime adapters with this build's, and a Bifrost update rebuilds them, so every
+  installed app needed its data wiped to update (Umamusume 1.35.2 to 1.35.3 on 2026-11-07). An update now replaces
+  adapters that still match the hashes recorded at the earlier install with this build's, and refuses only files that
+  match neither, as a modified app root. App data and settings stay. A package test
+  (`test_update_replaces_an_earlier_bifrosts_adapters_and_refuses_modified_ones`) covers both and fails on the old code.
+
 ### Changed (tests)
 
 - The scheduled full-suite run passes its rootfs stage again: on 2026-11-07, with `test_start_page` no longer writing

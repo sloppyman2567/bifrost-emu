@@ -149,6 +149,9 @@ once more, which records it. A changed or different file, or an app installed
 from another file with the same package id, takes the full install path, which
 verifies signatures and the version, as `asgard.py install FILE` always does.
 Upgrades and identical-version reinstalls retain app data and saved settings.
+They also bring this build's runtime adapters into the app's root: files that still
+match the adapters recorded at the earlier install (an earlier Bifrost's, unmodified)
+are replaced, and any other change to them is refused as a modified app root.
 An older version requires an explicit downgrade option:
 
 ```bash
