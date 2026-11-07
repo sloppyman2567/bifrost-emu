@@ -133,7 +133,7 @@ class Sdl3Backend:
         for name, result, arguments in (
                 ("SDL_Init", boolean, [ctypes.c_uint32]), ("SDL_GetError", ctypes.c_char_p, []),
                 ("SDL_SetHint", boolean, [ctypes.c_char_p, ctypes.c_char_p]),
-                ("SDL_PumpEvents", void, []), ("SDL_UpdateGamepads", void, []),
+                ("SDL_PumpEvents", void, []), ("SDL_UpdateGamepads", void, []), ("SDL_Quit", void, []),
                 ("SDL_GetGamepads", ctypes.POINTER(ctypes.c_uint32), [ctypes.POINTER(ctypes.c_int)]),
                 ("SDL_free", void, [pointer]), ("SDL_OpenGamepad", pointer, [ctypes.c_uint32]),
                 ("SDL_CloseGamepad", void, [pointer]), ("SDL_GetGamepadName", ctypes.c_char_p, [pointer]),
@@ -149,8 +149,17 @@ class Sdl3Backend:
             raise OSError((library.SDL_GetError() or b"SDL_Init failed").decode(errors="replace"))
         self.open = {}  # joystick id -> SDL_Gamepad
 
+    def close(self):
+        """Shut SDL3 down. Without this the process aborts (SIGABRT) when it ends: SDL's input threads outlive the interpreter."""
+        sdl, self.sdl = self.sdl, None
+        if sdl is None: return
+        for handle in self.open.values(): sdl.SDL_CloseGamepad(handle)
+        self.open.clear()
+        sdl.SDL_Quit()
+
     def read(self):
         sdl = self.sdl
+        if sdl is None: return []
         sdl.SDL_PumpEvents(); sdl.SDL_UpdateGamepads()
         count = ctypes.c_int(0)
         listed = sdl.SDL_GetGamepads(ctypes.byref(count))
@@ -182,6 +191,13 @@ def in_game_mode(environment=None):
 
 
 STATUS = {"reason": ""}  # why open_backend() returned None
+TRACE = os.environ.get("BIFROST_GAMEPAD_DEBUG") == "1"
+
+
+def trace(*parts):
+    """With BIFROST_GAMEPAD_DEBUG=1, say on stderr what the library does with the pad, step by step."""
+    if TRACE:
+        print("gamepad:", *parts, file=sys.stderr, flush=True)
 
 
 def open_backend():
@@ -220,6 +236,7 @@ def connect(window, application, backend):
              "Ctrl+Tab": (key.Key_Tab, Qt.KeyboardModifier.ControlModifier),
              "Ctrl+Backtab": (key.Key_Backtab, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)}
     reader, timer, shown = PadReader(backend), QTimer(window), [None]   # shown: the pad name the window was last told of
+    front = [None]                                                       # whether a window was in front at the last tick
 
     def kind(widget, action):
         if widget is not None and widget.objectName() == "card": return "card"
@@ -240,15 +257,18 @@ def connect(window, application, backend):
             application.sendEvent(widget, QKeyEvent(event, code, modifiers))
 
     def handle(action):
-        if window.pad_action(action): return
+        if window.pad_action(action):
+            trace(action, "-> taken by the library window"); return
         popup = application.activePopupWidget()
         modal = application.activeModalWidget()
         # A dialog may give Start and Y their own meaning (the gamepad settings page: save, restore defaults).
         hook = {"options": "pad_options", "menu": "pad_menu"}.get(action)
         if modal is not None and popup is None and hook and hasattr(modal, hook):
+            trace(action, "-> taken by the dialog (" + type(modal).__name__ + ")")
             getattr(modal, hook)(); return
         widget = (popup.focusWidget() or popup) if popup else (application.focusWidget() or application.activeWindow())
-        if widget is None: return
+        if widget is None:
+            trace(action, "-> nothing has the focus"); return
         # Whatever is in a popup (a combo box's list, a menu) takes the arrows and Return itself.
         where = "menu" if popup else kind(widget, action)
         if where == "edge" and action in ("up", "down"):
@@ -256,7 +276,9 @@ def connect(window, application, backend):
             # focus chain is what gets out.
             window_ = application.activeWindow() or widget
             (window_.focusPreviousChild if action == "up" else window_.focusNextChild)(); return
-        for name in keys_for(action, where, application.activeModalWidget() is not None): press(name, widget)
+        keys = keys_for(action, where, application.activeModalWidget() is not None)
+        trace(action, "-> keys", keys or "none", "to", type(widget).__name__, "(" + where + ")")
+        for name in keys: press(name, widget)
 
     def in_front():
         """Whether one of this application's windows has the user's attention: a popup menu or a dialog that has just
@@ -268,9 +290,14 @@ def connect(window, application, backend):
         # PyQt aborts the whole process on an exception in a slot: a failing pad must not take the library with it.
         try:
             if not in_front():
+                if front[0] is not False: trace("no window of this application is in front: ignoring the pad")
+                front[0] = False
                 reader.reset(); timer.setInterval(IDLE_INTERVAL); return
+            if front[0] is not True: trace("a window is in front: reading the pad")
+            front[0] = True
             for action in reader.poll(): handle(action)
             if reader.name != shown[0]:
+                trace("controller:", reader.name or "none")
                 shown[0] = reader.name
                 if hasattr(window, "pad_status"): window.pad_status(reader.name)
             timer.setInterval(ACTIVE_INTERVAL if reader.connected else SEARCH_INTERVAL)
@@ -280,6 +307,8 @@ def connect(window, application, backend):
             timer.stop()
 
     timer.timeout.connect(tick); timer.start(SEARCH_INTERVAL)
+    close = getattr(backend, "close", None)
+    if close: application.aboutToQuit.connect(close)
     window.pad_reader, window.pad_tick, window.pad_timer = reader, tick, timer
     return reader
 
@@ -351,6 +380,8 @@ def main():
     except KeyboardInterrupt:
         print()
         return 0
+    finally:
+        backend.close()
 
 
 if __name__ == "__main__":

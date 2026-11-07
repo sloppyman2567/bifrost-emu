@@ -396,7 +396,9 @@ To see whether the library sees a controller, look beside the app count in its h
 connected" while one is in use. If gamepad control is off, `asgard launcher` says why on stderr (SDL3 missing, no gamepad support,
 the opt-out). `python3 Scripts/Android/android_gamepad.py` is a live diagnostic: it lists the controllers SDL3 finds and prints
 each button or stick change and the library action it makes, so it shows which step fails (no controller found, a controller
-whose presses never arrive, or presses that do arrive).
+whose presses never arrive, or presses that do arrive). `BIFROST_GAMEPAD_DEBUG=1 asgard launcher` traces, on stderr, what the running
+library does with each press: the window being in front or not, the action, and whether the library, a dialog or a key press on
+the focused widget took it. Ctrl-C ends the library cleanly.
 On SteamOS, add the launcher as a non-Steam game and give it a **gamepad** controller layout: Steam's default for such
 shortcuts is keyboard and mouse, and the library then sees no pad at all. This was built and tested with a fake pad on Qt's
 offscreen platform only; it has not been tried with a real pad, Game Mode or gamescope.

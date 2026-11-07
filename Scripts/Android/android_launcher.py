@@ -1808,6 +1808,11 @@ def show(state, fullscreen=False):
     except ImportError as error:
         raise ValueError("The desktop launcher requires PyQt6; the CLI works without it") from error
     application = QApplication.instance() or QApplication([sys.argv[0]])
+    # Ctrl-C ends the event loop. Left alone, KeyboardInterrupt is raised inside whichever timer slot runs, and PyQt aborts the
+    # process (SIGABRT) on an exception in a slot. The timers keep Python running, so the handler runs promptly; it asks the
+    # event loop to quit, so a Ctrl-C that arrives before the loop has started is not lost or acted on half way through startup.
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: QTimer.singleShot(0, application.quit))
     directory = state / '.asgard'
     directory.mkdir(parents=True, exist_ok=True)
     server = QLocalServer(application)

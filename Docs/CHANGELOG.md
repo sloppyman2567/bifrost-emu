@@ -50,6 +50,12 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Added (library gamepad control)
 
+- Ctrl-C in `asgard launcher` ended it with SIGABRT: the interrupt was raised inside a timer slot, and PyQt aborts on an exception
+  in a slot. The library now handles SIGINT by asking its event loop to quit, also when it arrives before the loop has started,
+  and shuts SDL3 down when the application quits. `BIFROST_GAMEPAD_DEBUG=1` traces what the library does with each press.
+  The maintainer's Steam Controller, run through `android_gamepad.py`, produced the right action for every button and both
+  sticks, so the reader is sound; why the running library did not react is still being traced.
+
 - The pad's Select/View button opens the focused app's last session (the details drawer with what the log shows), which
   could only be reached with a mouse or touch in the gamepad layout, where the card's history button is hidden; the hint
   bar offers it when the app has a recorded session or an error, and a notice says when it has none.

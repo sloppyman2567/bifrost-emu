@@ -1550,6 +1550,27 @@ class LauncherLibraryTests(unittest.TestCase):
                 stop_launcher(launcher)
 
 
+    def test_ctrl_c_ends_the_launcher_cleanly_instead_of_aborting_it(self):
+        """KeyboardInterrupt raised inside a timer slot made PyQt abort the process (SIGABRT) when Ctrl-C was pressed."""
+        import signal
+        from android_launcher import activate_existing
+        state = self.root / "interrupt-state"; state.mkdir()
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen", HOME=str(self.root))
+        with (self.root / "interrupt.log").open("w") as log:
+            launcher = subprocess.Popen([sys.executable, str(ROOT / "Scripts/Android/asgard.py"),
+                                         "--state-root", str(state), "launcher"], stdout=log, stderr=subprocess.STDOUT, env=env,
+                                         start_new_session=True)
+            try:
+                deadline = time.monotonic() + 20
+                while not activate_existing(state):
+                    if launcher.poll() is not None or time.monotonic() >= deadline:
+                        self.fail("Offscreen Asgard launcher did not start: " + (self.root / "interrupt.log").read_text()[-2000:])
+                    time.sleep(0.1)
+                os.kill(launcher.pid, signal.SIGINT)
+                self.assertEqual(launcher.wait(timeout=15), 0, (self.root / "interrupt.log").read_text()[-2000:])
+            finally:
+                stop_launcher(launcher)
+
     def test_asgard_launcher_command_is_one_process(self):
         """asgard.py replaces itself with the command it runs: signalling the pid that was started must stop the launcher."""
         from android_launcher import activate_existing

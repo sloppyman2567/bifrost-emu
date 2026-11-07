@@ -140,6 +140,13 @@ class BackendTests(unittest.TestCase):
         with patch.object(pads, "find_sdl3", return_value=None):
             self.assertIsNone(pads.open_backend())
 
+    def test_a_real_backend_shuts_sdl_down_and_reads_nothing_afterwards(self):
+        backend = pads.open_backend()
+        if backend is None: self.skipTest("SDL3 is not available: " + pads.STATUS["reason"])
+        backend.read()
+        backend.close(); backend.close()                  # safe to repeat
+        self.assertEqual(backend.read(), [])
+
     def test_a_missing_sdl3_says_why(self):
         with patch.object(pads, "find_sdl3", return_value=None):
             pads.open_backend()
