@@ -16,6 +16,21 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Scalar FP cold steps after the block (2026-11-07)
+
+Every scalar FP operation had its ARM-semantic step (the NaN path: commit, single-step the interpreter, reload the vector cache)
+emitted inline right after it, with the hot path jumping over it. That step is a few hundred bytes, so hot code was spread thinly
+over many cache lines and every FP operation carried a taken `jmp`. `emit_fp_cold_tail` now defers the step to the end of the
+block with the register layout captured at that point, as the vector guards already did, and the hot path falls through.
+
+Measured here (2026-11-07, same method as below): in the nine-kernel set's cull loop the seven hot blocks, which occupy 342 cache
+lines and 21 KB, now execute from 84 distinct lines instead of 118 (samples can miss a line, so these are lower bounds). Running all
+nine kernels as one frame, L1 instruction misses fell from 260k to 207k and host instructions by 2%; time, cycles and the
+per-kernel ratios did not change, because none of these workloads is bound by L1: the cull loop's hot code is about 5 KB. The
+counter `ic_fetch_stall.ic_stall_any` rose from 1.36 to 1.66 billion cycles over the same runs and I have not explained it. Total
+emitted bytes are unchanged (the steps moved, they did not shrink), so code-cache size is not affected. Whether a larger
+workload gains in time is untested: Zenless Zone Zero was not available.
+
 ## LD2-LD4 and ST2-ST4 inside the block (2026-11-07)
 
 Multiple-structure NEON loads and stores (`ld4 {v0.4s-v3.4s}`, `st2`, ...) used to be `SIMD_NATIVE_STRUCT`: a C++ helper

@@ -257,6 +257,7 @@ void FrostJIT::finish_simd_fp_guard(SimdFpGuard guard) {
 void FrostJIT::flush_deferred_fp_steps() {
     for (auto& step : deferred_fp_steps_) {
         patch_jcc_rel32(step.branch, static_cast<int32_t>(code_buf_used_ - (step.branch + 6)));
+        if (step.extra) patch_jcc_rel32(step.extra, static_cast<int32_t>(code_buf_used_ - (step.extra + 6)));
         swap_guard_state(step.state);
         emit_fp_interp_step(step.inst);
         const size_t back = emit_jmp_rel32_placeholder();
@@ -266,9 +267,18 @@ void FrostJIT::flush_deferred_fp_steps() {
     deferred_fp_steps_.clear();
 }
 // Scalar FP: each `cold_sites` JCC was taken before the result's commit,
-// which the caller has just emitted. Hot code jumps past the ARM-semantic
-// step; the cold sites land on it and rejoin after the commit.
+// which the caller has just emitted. The cold sites land on the ARM-semantic
+// step and rejoin after the commit. Tier-1 and Tier-2 emit the step after the
+// block with the layout captured here, as the vector guards do, so the hot
+// path falls through with no jump over it; otherwise hot code jumps past it.
 void FrostJIT::emit_fp_cold_tail(const IRInst& inst, std::initializer_list<size_t> cold_sites) {
+    if (defer_guards_ && cold_sites.size() >= 1 && cold_sites.size() <= 2) {
+        auto site = cold_sites.begin();
+        DeferredFpStep step{inst, *site, code_buf_used_, capture_guard_state()};
+        if (cold_sites.size() == 2) step.extra = *(site + 1);
+        deferred_fp_steps_.push_back(std::move(step));
+        return;
+    }
     const size_t done = emit_jmp_rel32_placeholder();
     for (size_t site : cold_sites)
         patch_jcc_rel32(site, static_cast<int32_t>(code_buf_used_ - (site + 6)));

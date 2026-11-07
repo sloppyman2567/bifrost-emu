@@ -984,6 +984,7 @@ private:
         IRInst inst;
         size_t branch, resume;
         GuardState state;
+        size_t extra = 0;  // a second branch to the same step (scalar min/max), 0 when unused
     };
     std::vector<DeferredFpStep> deferred_fp_steps_;
     GuardState capture_guard_state() const;

@@ -166,6 +166,13 @@ there (guided provisioning, update/reinstall) remain in progress.
   preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
   social preview setting.
 
+### Changed (scalar FP cold steps after the block)
+
+- The ARM-semantic NaN step of every scalar FP operation is emitted after the block, as the vector guards already were, so the hot
+  path no longer jumps over a few hundred bytes of cold code per operation. In a profiled loop the executed code spans 29% fewer
+  cache lines, and L1 instruction misses fell 20% on a multi-kernel frame; run time did not change on any workload measured here, and
+  total emitted bytes are unchanged. [Details](JIT.md#scalar-fp-cold-steps-after-the-block-2026-11-07).
+
 ### Added (NEON structure loads and stores in the block)
 
 - `LD2`-`LD4` and `ST2`-`ST4` (multiple structures, every element size and both widths) are native `SIMD_STRUCT_MEM` ops that stay
