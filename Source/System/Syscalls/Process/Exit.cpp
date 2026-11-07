@@ -16,6 +16,19 @@ int64_t syscall_exit(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0];
     switch (num) {
         case 93: { // exit — exit current thread (not whole process)
+            // A host-fork child whose forking thread is still its only task:
+            // exit(2) ends the process here, and ordinary C++ teardown would
+            // close inherited host connections whose worker threads fork did
+            // not copy. Audio::close() then waits in SDL's PipeWire backend
+            // for its loop thread, which does not exist in this process, so
+            // the child never exits and the parent's wait4 never returns
+            // (Zenless Zone Zero's WebView load, 2026-11-06). Let the kernel
+            // reclaim the child, as exit_group does.
+            if (emu.host_fork_child() && emu.has_only_calling_thread()) {
+                emu.debugger().exited(cpu, static_cast<int>(a0), 0, true);
+                PersistentCache::flush_all();  // _exit skips the atexit flush
+                ::_exit(static_cast<int>(a0));
+            }
             emu.debugger().exited(cpu, static_cast<int>(a0));
             // exit(2) ends only the calling thread. As in the kernel's mm_release, thread_entry then clears
             // clear_child_tid and wakes it, and that is the one word a joiner may wait on. Write nothing to the TLS

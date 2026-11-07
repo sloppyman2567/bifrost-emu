@@ -63,7 +63,7 @@ runs, uses (comm table, futex shards, thread lists, guest descriptor table, POSI
 child, but a read/write lock copies its queue of waiting writers and must be re-initialized there
 (`Memory::reset_mutex_in_fork_child`); the child also drops the inherited JIT. Add any new process-wide lock that
 guest syscalls take to that set. The exclusive monitor's bucket spinlocks are too many to take: the child clears any it
-copied held (`ExclusiveMonitor::unlock_all_in_fork_child`). `test_fork_lock_contention` and `test_fork_exec_memory` cover it. A real host-fork child's `exit_group`
+copied held (`ExclusiveMonitor::unlock_all_in_fork_child`). `test_fork_lock_contention` and `test_fork_exec_memory` cover it. A real host-fork child's process-ending exit (`exit_group`, or `exit` from its only thread)
 uses kernel termination without host resource teardown; track that ownership
 separately from `CPU::is_fork_process`, which Binder-realm apps also use for PID
 identity. The parent's display/audio connections must survive child exit.

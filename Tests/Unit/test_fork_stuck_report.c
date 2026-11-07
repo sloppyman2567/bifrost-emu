@@ -3,6 +3,7 @@
 //   stuck: the child blocks forever (as a child waiting for a thread that does not exist in it would);
 //          the parent kills it after a few seconds.
 //   exec:  the child execs this program in --child mode, which exits at once.
+//   exit:  the child exits without execing (syscall 93 from its only thread).
 #define _GNU_SOURCE
 #include <signal.h>
 #include <stdio.h>
@@ -14,8 +15,10 @@
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--child")) return 0;
     const int stuck = argc > 1 && !strcmp(argv[1], "stuck");
+    const int exit_child = argc > 1 && !strcmp(argv[1], "exit");
     pid_t child = fork();
     if (child == 0) {
+        if (exit_child) _exit(0);
         if (stuck) for (;;) pause();
         char *args[] = {argv[0], "--child", 0};
         execv(argv[0], args);

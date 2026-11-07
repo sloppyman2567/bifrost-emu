@@ -452,6 +452,15 @@ public:
         }
     }
     void decrement_alive_threads() { alive_threads_.fetch_sub(1); }
+    // True when no thread other than the caller exists in this process: no
+    // guest pthread (alive_threads_ counts those the guest created) and no
+    // SDL thread. In a fork child this is the forking thread until the guest
+    // creates another, so exit(2) from it ends the process.
+    bool has_only_calling_thread() {
+        if (alive_threads_.load(std::memory_order_relaxed) != 0) return false;
+        std::lock_guard<std::mutex> g(sdl_threads_mu_);
+        return sdl_threads_.empty();
+    }
     // Per-thread lookup (for tgkill, etc.)
     // Return a shared_ptr to the target CPU so a concurrent
     // kill_other_threads()/reap cannot free it while the caller uses it.

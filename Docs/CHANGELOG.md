@@ -18,6 +18,16 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   address". The two requests now set and clear the guest descriptor's close-on-exec flag for every fd type, and an
   unhandled argument-free request is ENOTTY. `test_fcntl_owner` covers it and passes natively on the host kernel.
 
+### Fixed
+
+- **A fork child that exited without `exec` could leave its parent waiting forever.** `exit` (93) only ended the
+  calling guest thread, so a host-fork child whose forking thread was its only task fell through to normal C++
+  teardown. `Audio::close()` then waited in SDL's PipeWire backend (`pw_thread_loop_stop`) for a loop thread that
+  fork does not copy, so the child never terminated and the parent's `wait4` never returned. Zenless Zone Zero froze
+  this way: its main thread was inside WebView's `System.loadLibrary`, waiting on such a child after the SDK's fork.
+  A child with no other guest or SDL thread now takes the same `_exit` path as `exit_group`
+  (`has_only_calling_thread`); `test_fork_stuck_report` covers a child that exits instead of execing.
+
 ### Fixed (guest memory)
 
 - **A 16 GiB reservation failed with ENOMEM while most of a 512 GiB realm window was empty, and Zenless Zone Zero's
