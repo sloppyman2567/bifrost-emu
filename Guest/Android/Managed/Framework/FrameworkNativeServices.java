@@ -459,8 +459,8 @@ final class FrameworkNativeServices {
     static final class SurfaceComposer extends Binder {
         static final String DESCRIPTOR = "android.gui.ISurfaceComposer";
         static final int CREATE_DISPLAY_EVENT_CONNECTION = 2, GET_PHYSICAL_DISPLAY_IDS = 6,
-                GET_STATIC_DISPLAY_INFO = 12, GET_DYNAMIC_DISPLAY_INFO_FROM_ID = 13,
-                GET_COMPOSITION_PREFERENCE = 33;
+                GET_DISPLAY_STATS = 10, GET_STATIC_DISPLAY_INFO = 12,
+                GET_DYNAMIC_DISPLAY_INFO_FROM_ID = 13, GET_COMPOSITION_PREFERENCE = 33;
         private static final int DISPLAY_MODE_ID = 1;  // Display.Mode id in FrameworkDisplay
         private static final int DATASPACE_V0_SRGB = 142671872, PIXEL_FORMAT_RGBA_8888 = 1;
         private final FrameworkDisplay display;
@@ -535,6 +535,22 @@ final class FrameworkNativeServices {
                     || code == GET_DYNAMIC_DISPLAY_INFO_FROM_ID || code == GET_COMPOSITION_PREFERENCE) {
                 data.enforceInterface(DESCRIPTOR);
                 displayQuery(code, data, reply);
+                return true;
+            }
+            if (code == GET_DISPLAY_STATS) {
+                // Unity asks libgui for the refresh cycle duration while it
+                // sets up its surface; libgui reads it from here. The token is
+                // @nullable and this display is the only one, so any handle
+                // (including none) is this display. DisplayStatInfo is two
+                // nsecs_t fields (AOSP 15 DisplayStatInfo.aidl).
+                data.enforceInterface(DESCRIPTOR);
+                data.readStrongBinder();
+                data.enforceNoDataAvail();
+                reply.writeNoException();
+                int start = begin(reply);
+                reply.writeLong(System.nanoTime());
+                reply.writeLong(DISPLAY_PERIOD_NS);
+                end(reply, start);
                 return true;
             }
             if (code != CREATE_DISPLAY_EVENT_CONNECTION) return FrameworkServices.unknownTransaction(DESCRIPTOR, code, super.onTransact(code, data, reply, flags));

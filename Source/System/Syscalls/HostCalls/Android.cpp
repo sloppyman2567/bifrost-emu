@@ -291,6 +291,50 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(manager.present_pixels(handle, r[1], r[2], w, h, argb.data()));
                 } catch (const EmuError&) { ret_host(-EFAULT); }
             }
+            else if (cpu.regs[0] == 26) { // Acquired RGBA_8888 image (a GPU producer's buffer): swizzle and present.
+                // A Vulkan/GL producer hands the loader RGBA_8888 gralloc buffers. Doing
+                // the swizzle here keeps a 1600x900 frame off the guest UI thread, where
+                // the per-pixel loop cost about 150 ms.
+                try {
+                    int64_t r[17]; emu.mem().read(cpu.regs[1], r, sizeof(r));
+                    // window, x, y, region w/h, layer w/h, region left/top, crop l/t/w/h,
+                    // plane address, plane size, row stride, pixel stride.
+                    const int64_t w = r[3], h = r[4];
+                    if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || r[5] <= 0 || r[5] > 16384 ||
+                            r[6] <= 0 || r[6] > 16384 || r[1] < -65536 || r[1] > 65536 ||
+                            r[2] < -65536 || r[2] > 65536 || r[15] <= 0 || r[16] != 4) {
+                        ret_host(-EINVAL); return 0;
+                    }
+                    const int64_t left = r[7], top = r[8], crop_left = r[9], crop_top = r[10];
+                    const int64_t crop_w = r[11], crop_h = r[12], size = r[14];
+                    if (left < crop_left || top < crop_top || left + w > crop_left + crop_w ||
+                            top + h > crop_top + crop_h || size <= 0 || size > (1LL << 30)) {
+                        ret_host(-EINVAL); return 0;
+                    }
+                    // The last byte this conversion samples must be inside the plane.
+                    const int64_t last = (top + h - crop_top - 1) * r[15] +
+                                         (left + w - crop_left - 1) * r[16] + 4;
+                    if (last > size) { ret_host(-EINVAL); return 0; }
+                    uint64_t handle = manager.surface_handle(r[0]);
+                    if (!handle) { ret_host(-ENODEV); return 0; }
+                    const uint8_t* source = emu.mem().guest_to_host_ptr(
+                            static_cast<uint64_t>(r[13]), Memory::GUEST_PROT_READ, static_cast<size_t>(size));
+                    if (!source) { ret_host(-EFAULT); return 0; }
+                    static thread_local std::vector<uint32_t> argb;
+                    argb.resize(static_cast<size_t>(w * h));
+                    for (int64_t row = 0; row < h; ++row) {
+                        const uint8_t* in = source + (top + row - crop_top) * r[15] +
+                                                    (left - crop_left) * r[16];
+                        uint32_t* out = argb.data() + row * w;
+                        for (int64_t col = 0; col < w; ++col, in += 4)
+                            out[col] = (static_cast<uint32_t>(in[3]) << 24) |
+                                       (static_cast<uint32_t>(in[0]) << 16) |
+                                       (static_cast<uint32_t>(in[1]) << 8) |
+                                       static_cast<uint32_t>(in[2]);
+                    }
+                    ret_host(manager.present_pixels(handle, r[1], r[2], w, h, argb.data()));
+                } catch (const EmuError&) { ret_host(-EFAULT); }
+            }
             else ret_host(-EINVAL);
             return 0;
         }

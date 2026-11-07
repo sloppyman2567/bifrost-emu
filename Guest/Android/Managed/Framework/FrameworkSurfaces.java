@@ -44,14 +44,16 @@ final class FrameworkSurfaces {
         final SurfaceView view;
         final Object owner;  // the framework window holding the view
         final Handler thread;  // the window's ViewRootImpl handler, kept past detach
-        final long window;
-        final ImageReader reader;
+        long window;       // replaced when the reader is re-armed for a new format
+        ImageReader reader;
         int width, height, format;  // guarded by FrameworkSurfaces
         int x = Integer.MIN_VALUE, y = Integer.MIN_VALUE;
         // The part of the view that shows, in view pixels (getGlobalVisibleRect: clipped by every ancestor and the
         // window); empty when scrolled out. Frames convert and present only this part.
         int clipLeft, clipTop, clipRight, clipBottom;
         boolean cpu;  // frames arrive through the ImageReader (a video), not a native window
+        boolean gpu;  // producer's buffers are not CPU-lockable: nothing can be shown
+        boolean rearmed;  // the reader was rebuilt once for the producer's real format
         boolean closed;
         Entry(SurfaceView view, Object owner, long window, ImageReader reader) {
             this.view = view; this.owner = owner; this.window = window; this.reader = reader;
@@ -71,6 +73,10 @@ final class FrameworkSurfaces {
     private final Map<SurfaceView, Entry> entries = new IdentityHashMap<>();
     private boolean stopped;  // ViewRootImpl.setWindowStopped: no surface is created again
     private static native int present(long window, int x, int y, int width, int height, int[] argb);
+    // Op 26: a GPU producer's RGBA_8888 plane; the host swizzles the visible region and presents it.
+    private static native int presentRgba(long window, int x, int y, int width, int height,
+            int layerWidth, int layerHeight, int left, int top, int cropLeft, int cropTop,
+            int cropWidth, int cropHeight, ByteBuffer pixels, int rowStride, int pixelStride);
     // Op 25: the visible region of a width x height layer from a YUV_420_888 image's planes, converted by the host.
     private static native int presentYuv(long window, int x, int y, int width, int height, int layerWidth, int layerHeight,
             int left, int top, int cropLeft, int cropTop, int cropWidth, int cropHeight, ByteBuffer yPlane, ByteBuffer uPlane,
@@ -221,7 +227,15 @@ final class FrameworkSurfaces {
                 // Keep the pinned framework's real BufferQueue, GraphicBuffer
                 // ownership and acquire/release fences. A host token cannot
                 // stand in for android::Surface in MediaCodec or the NDK.
-                ImageReader reader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 3);
+                // The queue must be configured for what its producer writes:
+                // a Vulkan/GL surface (Unity) hands the loader RGBA_8888
+                // gralloc buffers, a codec writes YUV. The holder's requested
+                // format is the only signal available before the first frame,
+                // and only a video view asks for YUV. A mismatch here throws in
+                // nativeImageSetup on the frame thread, which killed the app.
+                int layerFormat = format == ImageFormat.YUV_420_888 || format == ImageFormat.NV21
+                        ? ImageFormat.YUV_420_888 : PixelFormat.RGBA_8888;
+                ImageReader reader = ImageReader.newInstance(width, height, layerFormat, 3);
                 Surface target = view.getHolder().getSurface();
                 long window;
                 try {
@@ -296,6 +310,19 @@ final class FrameworkSurfaces {
         if (crop.width() <= 0 || crop.height() <= 0 || width <= 0 || height <= 0 || regionWidth <= 0 || regionHeight <= 0
                 || regionWidth > 4096 || regionHeight > 4096)
             throw new IllegalArgumentException("Surface image dimensions");
+        if (image.getFormat() == PixelFormat.RGBA_8888) {
+            // A GPU producer: Unity's Vulkan HAL hands the loader RGBA_8888
+            // gralloc buffers, which reach this window's queue. The plane goes
+            // to the host, which swizzles the visible region and presents it:
+            // packing the int[] here cost about 150 ms per 1600x900 frame on the
+            // UI thread, the largest measured cost of the video path.
+            Image.Plane plane = image.getPlanes()[0];
+            ByteBuffer pixels = plane.getBuffer();
+            if (!pixels.isDirect()) throw new UnsupportedOperationException("Surface image plane is not a direct buffer");
+            return presentRgba(window, x, y, regionWidth, regionHeight, width, height, left, top,
+                    crop.left, crop.top, crop.width(), crop.height(), pixels,
+                    plane.getRowStride(), plane.getPixelStride());
+        }
         Image.Plane[] planes = image.getPlanes();
         if (image.getFormat() != ImageFormat.YUV_420_888 || planes.length != 3)
             throw new UnsupportedOperationException("Surface image format: " + image.getFormat());
@@ -334,7 +361,81 @@ final class FrameworkSurfaces {
             long presented = System.nanoTime();
             if (result != 0 && result != -11) throw new IllegalStateException("Surface presentation: " + result);
             note(acquired - start, presented - acquired, (long) w * h);
+        } catch (UnsupportedOperationException error) {
+            // A producer whose format does not match this queue: acquire
+            // throws, and an uncaught exception on the frame thread previously
+            // killed the process. The queue is created for the holder's
+            // format (see update), so this is a last-resort guard: log once
+            // and stop consuming rather than take the app down.
+            if (entry.rearmed) {
+                synchronized (this) {
+                    if (entry.closed) return;
+                    entry.gpu = true;
+                    entry.reader.setOnImageAvailableListener(null, frames());
+                }
+                System.out.println("APP_SURFACE_UNREADABLE " + error.getMessage());
+                return;
+            }
+            entry.rearmed = true;
+            if (!rearm(entry, producerFormat(error.getMessage()))) {
+                synchronized (this) {
+                    if (entry.closed) return;
+                    entry.gpu = true;
+                    entry.reader.setOnImageAvailableListener(null, frames());
+                }
+                System.out.println("APP_SURFACE_UNREADABLE " + error.getMessage());
+            }
         }
+    }
+
+    // The producer's format from ImageReader's own message: "The producer
+    // output buffer format 0x1 doesn't match ...". 0 when it cannot be read.
+    private static int producerFormat(String message) {
+        if (message == null) return 0;
+        int at = message.indexOf("format 0x");
+        if (at < 0) return 0;
+        int start = at + 9, end = start;
+        while (end < message.length() && Character.digit(message.charAt(end), 16) >= 0) end++;
+        if (end == start) return 0;
+        try { return Integer.parseInt(message.substring(start, end), 16); }
+        catch (NumberFormatException error) { return 0; }
+    }
+
+    // Replace an entry's reader with one configured for `format`, keeping the
+    // same window: the SurfaceView's Surface is re-pointed at the new queue and
+    // the host window is rebuilt for it. Runs on the frame thread.
+    private boolean rearm(Entry entry, int format) {
+        if (format <= 0) return false;
+        ImageReader reader;
+        try { reader = ImageReader.newInstance(entry.width, entry.height, format, 3); }
+        catch (RuntimeException error) { return false; }
+        Surface target = entry.view.getHolder().getSurface();
+        long window;
+        try {
+            Surface.class.getMethod("transferFrom", Surface.class).invoke(target, reader.getSurface());
+            window = host.prepare(target, !PixelFormat.formatHasAlpha(entry.format));
+        } catch (Exception error) {
+            reader.close();
+            return false;
+        }
+        if (window <= 0) { reader.close(); return false; }
+        ImageReader old;
+        long oldWindow;
+        synchronized (this) {
+            if (entry.closed) { host.release(window); reader.close(); return false; }
+            old = entry.reader;
+            oldWindow = entry.window;
+            entry.reader = reader;
+            entry.window = window;
+            entry.gpu = false;
+            entry.cpu = false;
+            reader.setOnImageAvailableListener(available -> consume(entry), frames());
+        }
+        old.setOnImageAvailableListener(null, frames());
+        old.close();
+        host.release(oldWindow);
+        System.out.println("APP_SURFACE_REARM format=" + format);
+        return true;
     }
 
     // One APP_SURFACE_FRAMES line per 10 s while video frames are shown: how many, how long each stage took on average

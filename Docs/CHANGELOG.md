@@ -89,6 +89,16 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   [ANDROID_RUNTIME.md](Android/ANDROID_RUNTIME.md); the roadmap's "no Android Vulkan HAL" gap is replaced by the
   zero-copy item.
 
+### Fixed (GPU surfaces)
+
+- A GPU producer's surface no longer takes the app down. The `ImageReader` behind a `SurfaceView` was always created
+  as YUV, so Unity's RGBA_8888 gralloc buffers made `acquireLatestImage` throw on the frame thread and killed the
+  process. The queue now follows the holder's requested format; a mismatch is logged once (`APP_SURFACE_UNREADABLE`) and
+  that surface stops consuming. The RGBA plane goes to the host (op 26), which swizzles the visible region and presents
+  it: packing the `int[]` in the guest cost about 150 ms for 1600x900 per frame, and the host path measures 1.5 to
+  3.2 ms. The `GET_DISPLAY_STATS` display-service call is answered, because Unity asks libgui for the refresh cycle
+  while it sets up its surface.
+
 ### Fixed (audio)
 
 - An AAudio stream opened without a format (`AAUDIO_FORMAT_UNSPECIFIED`) is FLOAT, which matches producers that leave

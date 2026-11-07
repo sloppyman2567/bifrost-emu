@@ -359,6 +359,21 @@ JNIEXPORT jint JNICALL Java_FrameworkSurfaces_present(JNIEnv *env, jclass type, 
     (*env)->ReleasePrimitiveArrayCritical(env, pixels, argb, JNI_ABORT);
     return result;
 }
+// A GPU producer's RGBA_8888 plane goes to the host, which swizzles the visible
+// region and presents it (op 26). One call per frame, no int[] crosses the guest.
+JNIEXPORT jint JNICALL Java_FrameworkSurfaces_presentRgba(JNIEnv *env, jclass type, jlong window,
+        jint x, jint y, jint width, jint height, jint layerWidth, jint layerHeight,
+        jint left, jint top, jint cropLeft, jint cropTop, jint cropWidth, jint cropHeight,
+        jobject pixels, jint rowStride, jint pixelStride) {
+    (void)type;
+    if (!pixels) return -22;
+    char *base = (*env)->GetDirectBufferAddress(env, pixels);
+    jlong capacity = (*env)->GetDirectBufferCapacity(env, pixels);
+    if (!base || capacity <= 0) return -22;
+    int64_t record[17] = {window, x, y, width, height, layerWidth, layerHeight, left, top,
+            cropLeft, cropTop, cropWidth, cropHeight, (intptr_t)base, capacity, rowStride, pixelStride};
+    return (jint)bifrost_window(26, (long)record, 0);
+}
 // A video frame: the image's three planes (direct buffers) go to the host, which converts the visible region of the
 // layer to ARGB and presents it (op 25). One call per frame, no pixel array crosses the guest.
 JNIEXPORT jint JNICALL Java_FrameworkSurfaces_presentYuv(JNIEnv *env, jclass type, jlong window, jint x, jint y,

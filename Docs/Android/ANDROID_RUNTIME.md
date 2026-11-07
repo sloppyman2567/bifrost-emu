@@ -950,8 +950,21 @@ decoded on the host; there are no Java or JNI codec substitutes.
   native adapter returns real `ANativeWindow`s. `bifrost_surface_prepare`
   binds a managed window to a separate host surface below the framework
   windows; the GraphicThunk EGL path resolves that alias to its host
-  backing. SDR YUV is converted to ARGB on the Java UI thread (matrix and
+  backing.  SDR YUV is converted to ARGB on the Java UI thread (matrix and
   range from the dataspace, crop, stride). HDR is reported unsupported.
+  **Queue format follows the producer.** The queue's `ImageReader` is
+  created for the holder's requested format: `YUV_420_888` for a video view
+  (a YUV/NV21 request) and `RGBA_8888` otherwise. A GPU producer — Unity's
+  Vulkan HAL hands the loader RGBA_8888 gralloc buffers — then matches the
+  queue, and `FrameworkSurfaces` converts the visible region of each image to
+  ARGB (producer row and pixel stride, not `width * 4`) and presents it.
+  Creating every queue as YUV made `acquireLatestImage` throw on the frame
+  thread and killed the process; a mismatch is now logged once as
+  `APP_SURFACE_UNREADABLE` and that surface stops consuming rather than taking the
+  app down. The plane itself goes to the host (op 26), which swizzles the
+  visible region and presents it: packing the `int[]` in the guest cost about
+  150 ms for 1600×900 per frame, while the host path measures 1.5–3.2 ms and
+  leaves the frame rate guest-render-bound.
   Binding seeds the host surface with the BufferQueue's creation dimensions;
   subsequent SurfaceView geometry controls its size. For an aliased native
   window, `ANativeWindow_getWidth/Height` report that host surface size,
