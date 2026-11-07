@@ -1535,8 +1535,9 @@ the pointer hidden by a pad and shown by the mouse), the plugin path through `An
 (`make test-android-window-plugin`: ids, controller numbers, batching, axis getters, the native queue never seeing
 device records, protocol errors), and `FrameworkGamepads` in the real framework (`MANAGED_GAMEPADS_OK` in
 `ManagedServiceBatch`, both engines: listener pairs, the `InputDevice`, Generic fallbacks, joystick axes, synthetic
-d-pad and cancel). Observed: SDL3 sees a Steam Controller (Valve `28de:1304`) with Steam running, and Subway Surfers
-3.70.3 registered it (`APP_GAMEPAD_ADDED 2 Steam Controller`). Not established: that any game is played with a pad.
+d-pad and cancel). Observed: SDL3 sees the 2026 Steam Controller (Valve `28de:1304`, through its USB puck) with Steam running, and Subway Surfers
+3.70.3 registered it (`APP_GAMEPAD_ADDED 2 Steam Controller`) and is played with it (maintainer's report, 2026-11-06).
+Other games are not tried with a pad.
 Not implemented: rumble (`InputDevice` vibrators), back paddles, per-game remapping, joystick motion for popup
 windows, and pads in an app that never opens its window.
 

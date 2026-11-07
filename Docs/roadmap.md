@@ -158,7 +158,7 @@ leaks or stale handles.
 - Verify relative mouse, axes, pointer capture, sensitivity and focus/fullscreen transitions; resolve vkQuake's texture
   issues.
 - Gamepads: Android apps get host pads with hotplug and an Xbox 360 mapping (SDL3 backend, `FrameworkGamepads`),
-  checked in fakes and the framework; a pad has registered in Subway Surfers but no game is confirmed played with one.
+  checked in fakes and the framework; Subway Surfers is played with the 2026 Steam Controller (maintainer's report).
   Still open: rumble, back paddles, per-game profiles and remapping, and pads for Linux guests' own input paths.
 - Android touch, multitouch, keys and controller events; desktop-to-touch mappings stay configurable. Wheel/pinch zoom
   gestures and app pointer icons exist but are untried in live games.

@@ -33,8 +33,8 @@ there (guided provisioning, update/reinstall) remain in progress.
   notifies InputManager's listener on connection and removal, falls back through `Generic.kcm` for unhandled buttons
   (B is Back), repeats held buttons and turns unhandled stick and hat motion into d-pad keys like
   `ViewRootImpl.SyntheticJoystickHandler`. `generate-key-layout.py` now also generates `Generic.kcm`'s table.
-  Using a pad hides the pointer until the mouse moves, as Steam does. A Steam Controller registers in Subway Surfers;
-  no game is yet confirmed played with a pad. Rumble, back paddles and remapping are not implemented.
+  Using a pad hides the pointer until the mouse moves, as Steam does. The maintainer plays Subway Surfers with the 2026
+  Steam Controller (2026-11-06). Rumble, back paddles and remapping are not implemented.
 
 ### Fixed (system calls)
 
