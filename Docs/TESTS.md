@@ -88,7 +88,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Android/test_android_adapter_exports.py # the built managed libGLESv2.so exports every core ES 2.0-3.2 command and libandroid.so exports ASurfaceControl_createFromWindow (an app library's missing import fails its whole dlopen)
 ./Scripts/Android/test_android_gamepad.py     # the library's gamepad control: pad states to actions, repeat, stick, keys per widget (offline)
 ./Scripts/Android/test_download_progress.py    # asgard-setup's download progress lines (terminal and piped), and resumable fetch against a local HTTP server
-./Scripts/Android/test_asgard_stale_broker.py  # a broker an upgrade left running: restarted when idle, refused when busy; realm stop --force
+./Scripts/Android/test_asgard_stale_broker.py  # a broker an upgrade left running: restarted when idle, refused when busy; realm stop --force; a broker that cannot start reports its exit and output (both start paths)
 ./Scripts/Android/test_asgard_process_host.py   # service children carry --asgard-service-parent and die with a killed supervisor (real emulator, plus a control)
 make test-shader-index-conversion               # the int() rewrite glCompileShader retries a rejected ES 3.x source with; gles_uint_index (run_tests.sh) checks it through the thunk on the host driver
 make test-android-wheel-gestures               # wheel/pinch/middle-drag as two-finger gestures (SDL-free); test-android-sdl-backend checks them through the backend

@@ -23,6 +23,9 @@ A broker that an upgrade left running (its program was replaced by a different b
 the protocol number can match while the Binder behavior no longer does, and a new app then fails on its first
 service call.
 
+When a broker cannot start, the error says how it ended (killed by a signal, or status 127 for a dynamic-loader failure) and
+quotes the last lines of its `broker.log`; the same holds for the private broker of a launched app.
+
 `--debug CHANNELS` (before the command, like `WINEDEBUG`) turns on trace output:
 `asgard.py --debug binder,futex run org.example.app`. Channels: `audio`, `binder`,
 `dynlink`, `fault`, `frame`, `futex`, `input`, `media`, `mmap`, `poll`,

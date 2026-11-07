@@ -137,5 +137,59 @@ class StaleBrokerTests(unittest.TestCase):
         self.assertIn("realm accepts start, status, stop [--force] or restart [--force]", bad.stderr)
 
 
+class BrokerStartFailureTests(unittest.TestCase):
+    """A broker that cannot start says how it ended and what it printed, on both start paths (the realm's
+    `ensure_broker` and a launched app's private broker in `ProcessHost`), instead of a bare 'did not start'."""
+
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="asgard-start-fail-"))
+        self.addCleanup(shutil.rmtree, self.directory, True)
+
+    def fake_emulator(self, body):
+        path = self.directory / "emulator"
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+        return path
+
+    def test_descriptions_name_the_loader_and_signals(self):
+        self.assertIn("127", asgard.exit_description(127))
+        self.assertIn("loader", asgard.exit_description(127))
+        self.assertEqual(asgard.exit_description(-signal.SIGKILL), "was killed by SIGKILL")
+        self.assertEqual(asgard.exit_description(1), "exited with status 1")
+
+    def test_log_tail_is_only_this_starts_output(self):
+        log = self.directory / "broker.log"
+        log.write_text("an earlier start\n")
+        start = log.stat().st_size
+        with log.open("a") as stream:
+            stream.write("".join(f"line {number}\n" for number in range(40)))
+        tail = asgard.log_tail(log, start).splitlines()
+        self.assertEqual((len(tail), tail[0], tail[-1]), (15, "  line 25", "  line 39"))
+        self.assertIn("no output", asgard.log_tail(log, log.stat().st_size))
+
+    def test_realm_broker_failure_carries_the_loader_message(self):
+        emulator = self.fake_emulator("echo 'error while loading shared libraries: libgone.so.1: cannot open' >&2\nexit 127\n")
+        with self.assertRaises(ValueError) as caught:
+            asgard.ensure_broker(self.directory / "state", emulator)
+        message = str(caught.exception)
+        self.assertIn("status 127", message)
+        self.assertIn("libgone.so.1", message)
+
+    def test_realm_broker_killed_by_a_signal_says_so(self):
+        emulator = self.fake_emulator("kill -KILL $$\n")
+        with self.assertRaises(ValueError) as caught:
+            asgard.ensure_broker(self.directory / "state", emulator)
+        self.assertIn("killed by SIGKILL", str(caught.exception))
+
+    def test_private_broker_failure_carries_the_message_too(self):
+        import android_processes
+        emulator = self.fake_emulator("echo 'Asgard: socket path is too long' >&2\nexit 2\n")
+        with self.assertRaises(RuntimeError) as caught:
+            android_processes.ProcessHost(self.directory / "root", emulator, [], {}, None, self.directory / "logs")
+        message = str(caught.exception)
+        self.assertIn("status 2", message)
+        self.assertIn("socket path is too long", message)
+
+
 if __name__ == "__main__":
     unittest.main()

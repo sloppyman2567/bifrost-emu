@@ -166,6 +166,15 @@ there (guided provisioning, update/reinstall) remain in progress.
   preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
   social preview setting.
 
+### Fixed (broker start failures)
+
+- A broker that could not start was reported as "Asgard Binder broker did not start" (a launched app's private broker) or
+  "exited with status N; see broker.log" (the realm broker), so a failure on a machine other than the maintainer's, such as
+  a Steam Deck in Game Mode, could not be diagnosed from the message. Both paths now say how the broker ended (a signal by
+  name, status 127 as the dynamic loader failing before `main`) and print the last 15 lines it wrote in that start. The 5 s
+  readiness limit is unchanged: the broker is ready in about 25 ms here, also with an empty environment (observed on this
+  machine only). This does not fix a Steam Deck failure; it makes the cause readable.
+
 ### Fixed (app updates)
 
 - Updating an app installed by an earlier Bifrost failed with "Installed adapters differ; create a fresh app state":

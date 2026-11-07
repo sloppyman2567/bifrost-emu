@@ -20,6 +20,31 @@ OPEN_INTERVAL = 1.0
 SAME_LINK_WINDOW = 30.0
 
 
+def exit_description(code):
+    """How a process ended, naming what the number usually means: 127 is the dynamic loader failing before main,
+    a negative number is a signal (something outside killed it)."""
+    if code < 0:
+        try:
+            return f"was killed by {signal.Signals(-code).name}"
+        except ValueError:
+            return f"was killed by signal {-code}"
+    if code == 127:
+        return "exited with status 127 (the dynamic loader could not start it: a missing or incompatible library)"
+    return f"exited with status {code}"
+
+
+def log_tail(path, start=0, lines=15):
+    """The last `lines` lines this start wrote to the broker log (from byte `start`), indented for an error message."""
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(start)
+            text = stream.read().decode("utf-8", "replace")
+    except OSError:
+        return f"  (cannot read {path})"
+    tail = text.rstrip().splitlines()[-lines:]
+    return "\n".join("  " + line for line in tail) if tail else f"  (no output; full log: {path})"
+
+
 def home_command(arguments):
     """Parse the supported am start intent; leave unresolved intents as errors."""
     if not isinstance(arguments, list) or not arguments or len(arguments) > 64 \
@@ -96,7 +121,9 @@ class ProcessHost:
             self.socket = self.emu_args[self.emu_args.index('--android-binder-broker') + 1]
         else:
             self.socket = str(Path(self.temporary.name) / 'binder')
-            self.broker_log = (self.logs / 'broker.log').open('ab')
+            log_path = self.logs / 'broker.log'
+            self.broker_log = log_path.open('ab')
+            start = self.broker_log.tell()
             self.broker = subprocess.Popen([self.emu, '--asgard-broker', self.socket,
                                            '--asgard-service-parent', str(os.getpid())],
                                           stdout=self.broker_log, stderr=subprocess.STDOUT,
@@ -104,8 +131,11 @@ class ProcessHost:
             deadline = time.monotonic() + 5
             while not Path(self.socket).exists():
                 if self.broker.poll() is not None or time.monotonic() > deadline:
+                    reason = ('Asgard Binder broker ' + exit_description(self.broker.returncode)
+                              if self.broker.returncode is not None else
+                              'Asgard Binder broker did not open ' + self.socket + ' within 5 seconds')
                     self.close()
-                    raise RuntimeError('Asgard Binder broker did not start')
+                    raise RuntimeError(reason + ':\n' + log_tail(log_path, start))
                 time.sleep(.02)
         if media_mask is not None:
             from asgard import ROOT, ensure_media

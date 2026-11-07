@@ -19,6 +19,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 from android_preflight import EXIT_UNSUPPORTED_ABI
+from android_processes import exit_description, log_tail
 import android_paths
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -339,20 +340,22 @@ def ensure_broker(state, emu):
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
                 raise ValueError("Refusing to replace a foreign Asgard socket")
             path.unlink()
-        with (directory / "broker.log").open("ab", buffering=0) as log:
+        log_path = directory / "broker.log"
+        with log_path.open("ab", buffering=0) as log:
+            start = log.tell()
             child = subprocess.Popen([str(emu), "--asgard-broker", str(path)],
                                      stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if child.poll() is not None:
-                raise ValueError(f"Asgard broker exited with status {child.returncode}; see {directory / 'broker.log'}")
+                raise ValueError(f"Asgard broker {exit_description(child.returncode)}:\n{log_tail(log_path, start)}")
             status = broker_status(state)
             if status["state"] == "running":
                 return status
             time.sleep(0.025)
         child.terminate()
         child.wait(timeout=5)
-        raise ValueError("Asgard broker did not become ready")
+        raise ValueError(f"Asgard broker did not become ready within 5 seconds:\n{log_tail(log_path, start)}")
 
 
 PACKAGE_FILES = (".apk", ".apkm", ".apks", ".xapk")
