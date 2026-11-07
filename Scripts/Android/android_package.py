@@ -41,10 +41,11 @@ RESERVED = {
     "libz.so",
     "libmediandk.so",
 }
-# The input snapshot stays at 2 GiB (asgard.MAX_PACKAGE_BYTES mirrors it); Play asset packs can
-# expand past that once their APK members are unpacked.
-MAX_TOTAL = 2 * 1024 * 1024 * 1024
-MAX_EXPANDED_TOTAL = 4 * 1024 * 1024 * 1024
+# The input snapshot is capped at 4 GiB (asgard.MAX_PACKAGE_BYTES mirrors it); Play asset packs can
+# expand past that once their APK members are unpacked, up to twice that in all
+# (preflight.MAX_ARCHIVE_BYTES bounds each archive's uncompressed size to the same amount).
+MAX_TOTAL = 4 * 1024 * 1024 * 1024
+MAX_EXPANDED_TOTAL = 2 * MAX_TOTAL
 
 
 def digest(path):
@@ -63,12 +64,12 @@ def snapshot_input(source, destination):
         if not stat.S_ISREG(info.st_mode):
             raise ValueError("Package input must be a regular file")
         if info.st_size > MAX_TOTAL:
-            raise ValueError("Package input exceeds 2 GiB")
+            raise ValueError("Package input exceeds 4 GiB")
         copied = 0
         for data in iter(lambda: incoming.read(1024 * 1024), b""):
             copied += len(data)
             if copied > MAX_TOTAL:
-                raise ValueError("Package input exceeds 2 GiB")
+                raise ValueError("Package input exceeds 4 GiB")
             output.write(data)
 
 
@@ -264,7 +265,7 @@ def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None,
                     entries = regular_archive(archive)
                     budget += sum(x.file_size for x in entries)
                 if budget > MAX_EXPANDED_TOTAL:
-                    raise ValueError("APK set exceeds 4 GiB uncompressed")
+                    raise ValueError("APK set exceeds 8 GiB uncompressed")
                 current = signers(path, apksigner)
                 if certificates is None:
                     certificates = current

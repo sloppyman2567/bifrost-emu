@@ -17,7 +17,10 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 MAX_APK_BYTES = 1024 * 1024 * 1024
-MAX_ARCHIVE_BYTES = 2 * MAX_APK_BYTES
+# The most one archive may expand to (android_package.MAX_EXPANDED_TOTAL is the same amount across a whole APK set).
+MAX_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
+# One APK is a ZIP32 archive on Android (no ZIP64), so a bundle member that is an APK cannot reach 4 GiB.
+MAX_NESTED_APK_BYTES = 4 * 1024 * 1024 * 1024 - 1
 MAX_MEMBERS = 100000
 
 
@@ -34,7 +37,7 @@ def check_zip(archive):
     if len(entries) > MAX_MEMBERS or len({x.filename for x in entries}) != len(entries):
         raise ValueError("Archive has excessive or duplicate entries")
     if sum(x.file_size for x in entries) > MAX_ARCHIVE_BYTES:
-        raise ValueError("Archive exceeds the 2 GiB uncompressed inspection limit")
+        raise ValueError("Archive exceeds the 8 GiB uncompressed inspection limit")
     return entries
 
 
@@ -54,9 +57,9 @@ def apk_paths(path, directory):
             # A bundle's members are already bounded together by check_zip.
             # Play asset packs can exceed 1 GiB on their own (Arknights
             # 37.7.41's Unity data pack is 1,024.1 MiB), so a nested APK is
-            # bounded by the archive limit rather than MAX_APK_BYTES.
-            if item.file_size > MAX_ARCHIVE_BYTES:
-                raise ValueError("Nested APK exceeds the 2 GiB inspection limit")
+            # bounded by the ZIP32 size of an APK rather than MAX_APK_BYTES.
+            if item.file_size > MAX_NESTED_APK_BYTES:
+                raise ValueError("Nested APK exceeds the 4 GiB limit of an APK")
             output = directory / f"package-{index}.apk"
             with archive.open(item) as source, output.open("wb") as destination:
                 shutil.copyfileobj(source, destination)

@@ -166,6 +166,12 @@ there (guided provisioning, update/reinstall) remain in progress.
   preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
   social preview setting.
 
+### Changed (larger packages)
+
+- The installer takes packages up to 4 GiB (it was 2 GiB), and an APK set may expand to 8 GiB (it was 4 GiB). A single APK inside
+  a bundle must stay below 4 GiB, the limit of a ZIP32 archive. Not exercised with a package that large; the existing limit
+  tests pass.
+
 ### Fixed (closing the launcher aborted it)
 
 - Closing the Asgard library window (or ending it with Ctrl-C) killed it with SIGABRT whenever a poll was in flight, which is most

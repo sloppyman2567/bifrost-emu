@@ -546,9 +546,10 @@ The installer snapshots the bounded input, checks archive paths/member types,
 verifies every APK with [official apksigner](https://developer.android.com/tools/apksigner),
 and requires matching signer certificates, package/version identities and split
 dependencies. It rejects duplicate/conflicting native providers and attempts
-to replace runtime or adapter libraries. Input is capped at 2 GiB and the
-aggregate expanded APK size at 4 GiB, so Play asset packs that unpack past
-the input limit still install. Updates require the same signer identity and cannot
+to replace runtime or adapter libraries. Input is capped at 4 GiB and the
+aggregate expanded APK size at 8 GiB, so Play asset packs that unpack past
+the input limit still install; one APK inside a bundle stays below 4 GiB, the size of a ZIP32
+archive, which is all Android reads. Updates require the same signer identity and cannot
 downgrade; certificate-rotation lineages are not implemented. With APK
 Signature Scheme v3.1 key rotation, apksigner labels each signer with an SDK
 range; the installer records the signer whose range covers API 35, the one

@@ -393,7 +393,7 @@ def ensure_broker(state, emu):
 
 
 PACKAGE_FILES = (".apk", ".apkm", ".apks", ".xapk")
-MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024  # android_package.MAX_TOTAL: larger files fail to install
+MAX_PACKAGE_BYTES = 4 * 1024 * 1024 * 1024  # android_package.MAX_TOTAL: larger files fail to install
 # Debug channels, like WINEDEBUG: each turns on trace switches that Source/System/Core/DebugFlags.hpp
 # reads when it is present. Only logging switches belong here, never ones that change execution.
 DEBUG_CHANNELS = {
