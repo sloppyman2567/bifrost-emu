@@ -2336,6 +2336,13 @@ black at the side. Observed with a probe of the real backend on this KWin/Waylan
   the backend ended with instead of assuming a swap. The panel's pixel dimensions do not follow the window: a
   maximized 21:9 window shows the 16:9 panel pillarboxed by the fit (`g_fit`), never cut off.
 
+The window of a fixed-size app is not aspect-locked (2026-11-07). It used to be (`SDL_SetWindowAspectRatio` to the panel's
+shape), and a compositor cannot tile a window with a locked aspect ratio: SpongeBob (`APP_WINDOW_FIXED`) could not be put on the
+left or right half or in a corner, only maximized or left at its opening size. The fit above already centres the panel in any
+shape, the app is told the panel's size and not the window's, and touch is mapped back through the fit, so nothing needs the lock.
+A resizable app that asks for an orientation (`setRequestedOrientation`) is still locked to that shape, since its display follows
+the window.
+
 `make test-android-sdl-backend` covers the clamp and the rotations with a fake SDL3 whose
 `BIFROST_TEST_SDL_WORK_AREA` clamps new windows. Roblox's menu surface now matches its window (2460x1384); a game
 in landscape was not run.

@@ -38,6 +38,12 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Added (per-app Window setting)
 
+- Fixed: a fixed-size Android app (SpongeBob, Roblox, Battle Cats: `resizeableActivity=false`) could not be snapped to the left or
+  right half of the screen or to a corner, only maximized or left at its opening size, and a corner snap broke it. Its host window
+  was locked to the panel's aspect ratio, which a compositor cannot tile. The window now takes any shape and the existing fit
+  centres the panel in it. A resizable app that asks for an orientation is still locked to that shape. The backend host test
+  checks both, with a fake SDL3; not tried on a real desktop.
+
 - A per-app `window_mode` setting: `resizable` (the default, today's behaviour) or `keep`, which gives the app a fixed panel of
   the shape it opened at, scaled to the host window and pillarboxed, as Android does for `resizeableActivity=false` (the path
   Roblox and Battle Cats already take). It is for games that declare nothing and draw wrongly in a window of another shape.

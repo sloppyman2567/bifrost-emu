@@ -196,7 +196,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   answer it with an empty success.
 - A new host window is fitted once at `open` (`fit_new_window`: the compositor clamps it to the work area and changes
   its shape; the clamp is the work area limit). A fixed-size app's rotation takes the panel's shape within that limit
-  and keeps its pixel dimensions whatever the user does to the window; never derive them from the window. Apps
+  and keeps its pixel dimensions whatever the user does to the window; never derive them from the window. A
+  fixed-size app's window is never aspect-locked (a locked window cannot be tiled to a half or a corner): the fit
+  centres the panel in any shape; only a resizable app that requests an orientation is locked. Apps
   declaring no orientation open landscape. `make test-android-sdl-backend` covers it.
 - Play windows open in desktop units; the Android display is the window's
   native pixel buffer and density (op 11); windowConfiguration max bounds are

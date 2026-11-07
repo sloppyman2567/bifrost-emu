@@ -700,10 +700,11 @@ public:
     if (!window_) return -ENODEV;
     if (w <= 0 || h <= 0) return -EINVAL;
     fixed_w_ = w; fixed_h_ = h;
-    // The window keeps the app's aspect ratio, so the primary surface (scaled by SDL to the
-    // window) and the layers (scaled by the fit) agree and nothing is stretched unevenly.
-    const float aspect = float(w) / float(h);
-    if (!sdl_.SetWindowAspectRatio(window_, aspect, aspect)) return fail("window aspect ratio");
+    // The window is free to take any shape: a compositor tiles it to a half or a corner, and a locked aspect ratio forbids
+    // those sizes (a game could then only be maximized or left at its opening size). Nothing is stretched: every layer is
+    // scaled by one factor and centred (g_fit, refreshed by update_ratio on each size change), the app is told its panel's
+    // size, not the window's, and touch is mapped back through the same fit. Clear any lock an earlier call set.
+    sdl_.SetWindowAspectRatio(window_, 0.0f, 0.0f);
     int32_t pixel_w, pixel_h;
     update_ratio(pixel_w, pixel_h);
     return 0;
@@ -718,7 +719,7 @@ public:
     if (axis < 0 || axis > 2) return -EINVAL;
     int32_t w = fixed_w_ ? fixed_w_ : width_;
     int32_t h = fixed_h_ ? fixed_h_ : height_;
-    const float previous = fixed_w_ || orientation_axis_ ? float(w) / float(h) : 0.0f;
+    const float previous = !fixed_w_ && orientation_axis_ ? float(w) / float(h) : 0.0f;   // the lock now in force
     if (axis && ((axis == 2) != (w > h))) std::swap(w, h);
     // A fixed-size app is the virtual panel: rotated, it has the panel's own shape (the size it opened at, in desktop
     // units) limited by the work area the open clamp revealed, not the current pixels swapped (which shrink with
@@ -730,10 +731,11 @@ public:
       w = std::max<int32_t>(1, int32_t(std::lround(std::lround(panel_w * shrink) * ratio)));
       h = std::max<int32_t>(1, int32_t(std::lround(std::lround(panel_h * shrink) * ratio)));
     }
-    // Preserve the virtual panel's aspect when the compositor fits a rotated
-    // window onto a shorter desktop. Releasing a resizable app restores free resizing.
-    const float aspect = axis || fixed_w_ ? float(w) / float(h) : 0.0f;
-    if (!sdl_.SetWindowAspectRatio(window_, aspect, aspect)) return fail("window orientation");
+    // A resizable app that asks for an orientation keeps its window in that shape, also when the compositor fits a rotated
+    // window onto a shorter desktop; releasing the request restores free resizing. A fixed-size app is the virtual panel:
+    // its window takes any shape and the fit centres the panel in it, so there is no lock to snap or tile against.
+    const float aspect = axis && !fixed_w_ ? float(w) / float(h) : 0.0f;
+    if (!sdl_.SetWindowAspectRatio(window_, aspect, aspect) && aspect > 0.0f) return fail("window orientation");
     if (!axis) { orientation_axis_ = 0; return 0; }
     int error = resize(w, h, true);
     if (error) {

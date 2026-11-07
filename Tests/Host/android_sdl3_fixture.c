@@ -165,7 +165,8 @@ bool SDL_SetWindowSize(SDL_Window *window, int width, int height) {
 }
 bool SDL_SyncWindow(SDL_Window *window) { (void)window; return true; }
 bool SDL_SetWindowAspectRatio(SDL_Window *window, float minimum, float maximum) {
-    (void)window; (void)minimum; (void)maximum;
+    (void)window; (void)maximum;
+    record(minimum > 0.0f ? "aspect-lock" : "aspect-free");
     return getenv("BIFROST_TEST_SDL_ASPECT_FAIL") == NULL;
 }
 bool SDL_GetWindowSize(SDL_Window *window, int *width, int *height) {

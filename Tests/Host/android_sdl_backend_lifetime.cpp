@@ -147,9 +147,28 @@ int main() {
   CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1200 && pixel_h == 1600);
   CHECK(first->set_orientation(2) == 0);
   CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1600 && pixel_h == 1200);
+  // A fixed-size app's window is never aspect-locked: a compositor could not tile it to a half or a corner, so the game
+  // could only be maximized or kept at its opening size. The fit centres the panel in whatever shape the window takes.
+  CHECK(contents(log).find("aspect-lock") == std::string::npos);
+  CHECK(contents(log).find("aspect-free") != std::string::npos);
   setenv("BIFROST_TEST_SDL_ASPECT_FAIL", "1", 1);
-  CHECK(first->set_orientation(1) < 0);
-  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 1600 && pixel_h == 1200);
+  CHECK(first->set_orientation(1) == 0);                     // nothing to lock, so a failing lock call cannot fail it
+  unsetenv("BIFROST_TEST_SDL_ASPECT_FAIL");
+  CHECK(first->set_orientation(0) == 0);
+  first.reset();
+  // A resizable app that asks for an orientation still keeps its window in that shape, and an error setting the lock fails
+  // the request and leaves the window as it was.
+  std::ofstream(log, std::ios::trunc).close();
+  first = frost::make_sdl_android_window_backend();
+  CHECK(first->open("resizable orientation", 800, 600) == 0);
+  int32_t open_w = 0, open_h = 0;
+  CHECK(first->pixel_size(open_w, open_h) && open_w > open_h);
+  CHECK(first->set_orientation(1) == 0);
+  CHECK(contents(log).find("aspect-lock") != std::string::npos);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == open_h && pixel_h == open_w);   // turned to portrait
+  setenv("BIFROST_TEST_SDL_ASPECT_FAIL", "1", 1);
+  CHECK(first->set_orientation(2) < 0);
+  CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == open_h && pixel_h == open_w);   // left as it was
   unsetenv("BIFROST_TEST_SDL_ASPECT_FAIL");
   CHECK(first->set_orientation(0) == 0);
   first.reset();
