@@ -391,11 +391,19 @@ class LauncherArgumentTests(unittest.TestCase):
             native = dict(app, launcher="native_activity")
             self.assertNotIn("--trace-apk", launch_request(native, trace=True))
             # Saved choices apply to every launch, below the command line and the environment.
+            # The window's remembered size is kept beside the settings, whatever they are, unless the environment names one.
+            window_state = str(root / "launcher-window.txt")
             self.assertEqual(apply_to_launch(root, ["--timeout", "5"], {}),
                              (["--timeout", "5", "--no-window-stats"],
-                              {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_OFFLINE": "1"}))
+                              {"BIFROST_ANDROID_BACK_KEY": "f2", "BIFROST_ANDROID_OFFLINE": "1",
+                               "BIFROST_ANDROID_WINDOW_STATE": window_state}))
             self.assertEqual(apply_to_launch(root, ["--window-stats-title"], {"BIFROST_ANDROID_OFFLINE": "0"}),
-                             (["--window-stats-title"], {"BIFROST_ANDROID_BACK_KEY": "f2"}))
+                             (["--window-stats-title"], {"BIFROST_ANDROID_BACK_KEY": "f2",
+                                                         "BIFROST_ANDROID_WINDOW_STATE": window_state}))
+            self.assertNotIn("BIFROST_ANDROID_WINDOW_STATE",
+                             apply_to_launch(root, [], {"BIFROST_ANDROID_WINDOW_STATE": "/elsewhere"})[1])
+            self.assertEqual(apply_to_launch(root / "other", [], {})[1],
+                             {"BIFROST_ANDROID_WINDOW_STATE": str(root / "other/launcher-window.txt")})
 
     def test_start_hands_saved_settings_to_the_session_process(self):
         import json

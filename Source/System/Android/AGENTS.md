@@ -76,6 +76,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `FrameworkActivities.windowVisible` stops or resumes the Activities without asking the window to hide or show again
   (a minimised window must stay in the taskbar). It must work with no supervisor: `task_state` is reported only when
   `ASGARD_PROCESS_TOKEN` is set, because an exception in the launcher's loop ends the app.
+- F11 in a game window is the host's fullscreen key: the SDL3 backend takes the press, repeat and release, so it never
+  reaches an app. The window's remembered size (`BIFROST_ANDROID_WINDOW_STATE`, `Window/RememberedSize.hpp`) is applied as
+  a resize after the app has set up its window, never as the opening size (a fixed-size app's panel comes from the opening
+  size), and is not saved for a fullscreen, maximised, minimised or hidden window. Keep position and fullscreen out of it.
 - `media_session` (`FrameworkMediaSessions`) has no sessions and accepts only
   `dispatchMediaKeyEvent`; WebView forwards unhandled keys to it.
 - App processes register their code and profile paths with ART

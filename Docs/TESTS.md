@@ -98,6 +98,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 make test-shader-index-conversion               # the int() rewrite glCompileShader retries a rejected ES 3.x source with; gles_uint_index (run_tests.sh) checks it through the thunk on the host driver
 make test-android-wheel-gestures               # wheel/pinch/middle-drag as two-finger gestures (SDL-free); test-android-sdl-backend checks them through the backend
 make test-android-pad-cursor                   # the gamepad touch cursor (SDL-free): Start+Select chord, modes, stick, fingers, edge crop; test-android-sdl-backend plays it through the backend
+make test-android-window-size                  # the remembered window size file (SDL-free): load/store, damaged files, fitting to the room; test-android-sdl-backend restores and saves it through the backend
 ./Scripts/Testing/test_window_stats.sh         # window stats modes, overlay and sensors (SDL probes open windows unless SDL_VIDEODRIVER=offscreen; exit 77 without host SDL2)
 ./Scripts/Testing/test_rootfs_profile.sh   # named rootfs profiles: install, list, select, errors, uninstall (exit 77 without the fetched toolchains)
 ./Scripts/Testing/test_setup_rootfs.sh     # bifrost-emu --setup-rootfs installs, uninstalls, runs a packaged installer from the cache and reports a missing one

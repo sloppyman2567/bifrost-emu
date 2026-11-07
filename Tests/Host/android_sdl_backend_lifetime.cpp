@@ -398,6 +398,94 @@ int main() {
     unsetenv("BIFROST_TEST_SDL_GAMEPAD_FAIL");
     CHECK(contents(log) == "video-init\nwindow-create\nwindow-destroy\nvideo-quit\n");
   }
+  // F11 toggles fullscreen and never reaches the app, pressed, held or released; leaving it brings the window back.
+  {
+    auto fs = frost::make_sdl_android_window_backend();
+    CHECK(fs->open("fullscreen", 800, 600) == 0);
+    std::ofstream(log, std::ios::trunc).close();
+    frost::AndroidWindowEvent ev{};
+    auto key = [&](const char *mode) { setenv("BIFROST_TEST_SDL_EVENT", mode, 1); return fs->poll(ev); };
+    CHECK(key("once:f11-down#1") == 0 && ev.type == 0);
+    CHECK(key("once:f11-repeat#2") == 0 && key("once:f11-up#3") == 0);
+    CHECK(contents(log) == "fullscreen-on\n");
+    CHECK(key("once:f11-down#4") == 0 && contents(log) == "fullscreen-on\nfullscreen-off\n");
+    unsetenv("BIFROST_TEST_SDL_EVENT");
+    fs.reset();
+  }
+  // The remembered size. It is applied once, after the app has set its window up, as a resize (never a different opening
+  // size); held inside the display; fitted to the shape of an app that asked for an orientation; and saved on close unless
+  // the window has no size of its own.
+  {
+    char directory[] = "/tmp/bifrost-window-state-XXXXXX";
+    CHECK(mkdtemp(directory));
+    const std::string state = std::string(directory) + "/launcher-window.txt";
+    setenv("BIFROST_ANDROID_WINDOW_STATE", state.c_str(), 1);
+    auto remember = [&](const char *text) { std::ofstream(state, std::ios::trunc) << text; };
+    frost::AndroidWindowEvent ev{};
+    int32_t w = 0, h = 0;
+    // No file: the window stays as asked, and closing writes what it has (desktop units: the 2x display halves pixels).
+    unlink(state.c_str());
+    auto win = frost::make_sdl_android_window_backend();
+    CHECK(win->open("remembered", 800, 600) == 0);
+    CHECK(win->poll(ev) == 0 && win->pixel_size(w, h) && w == 1600 && h == 1200);
+    CHECK(win->resize(1000, 800, true) == 0);
+    win->close();
+    CHECK(contents(state.c_str()) == "500 400\n");
+    // A remembered size is applied on the first poll only.
+    remember("1000 700\n");
+    CHECK(win->open("remembered", 800, 600) == 0);
+    CHECK(win->pixel_size(w, h) && w == 1600 && h == 1200);   // opening is unchanged
+    CHECK(win->poll(ev) == 0 && win->pixel_size(w, h) && w == 2000 && h == 1400);
+    CHECK(win->resize(1200, 1000, true) == 0 && win->poll(ev) == 0);
+    CHECK(win->pixel_size(w, h) && w == 1200 && h == 1000);   // not applied again
+    win->close();
+    CHECK(contents(state.c_str()) == "600 500\n");
+    // Held inside the display (1920x1080), whatever display the size was saved on.
+    remember("3000 2000\n");
+    CHECK(win->open("remembered", 800, 600) == 0 && win->poll(ev) == 0);
+    CHECK(win->pixel_size(w, h) && w == 3840 && h == 2160);
+    win->close();
+    // A damaged file is ignored.
+    remember("wide\n");
+    CHECK(win->open("remembered", 800, 600) == 0 && win->poll(ev) == 0);
+    CHECK(win->pixel_size(w, h) && w == 1600 && h == 1200);
+    win->close();
+    // A window with no size of its own keeps the earlier one: fullscreen, maximised, minimised or hidden.
+    for (const char *flags : {"fullscreen", "maximized", "minimized", "hidden"}) {
+      remember("640 480\n");
+      CHECK(win->open("remembered", 800, 600) == 0 && win->poll(ev) == 0);
+      win->resize(1000, 800, true);
+      setenv("BIFROST_TEST_SDL_WINDOW_FLAGS", flags, 1);
+      win->close();
+      unsetenv("BIFROST_TEST_SDL_WINDOW_FLAGS");
+      CHECK(contents(state.c_str()) == "640 480\n");
+    }
+    // An app that asked for an orientation keeps its shape: the largest window of that shape inside the remembered size.
+    remember("1000 1000\n");
+    CHECK(win->open("remembered", 800, 600) == 0);
+    CHECK(win->set_orientation(1) == 0);                    // portrait: 600x800 desktop units
+    CHECK(win->poll(ev) == 0 && win->pixel_size(w, h) && w == 1500 && h == 2000);
+    win->close();
+    // A fixed-size app's window takes any shape the user kept.
+    remember("1000 500\n");
+    CHECK(win->open("remembered", 800, 600) == 0);
+    CHECK(win->set_fixed_size(1600, 1200) == 0);
+    arm64emu::window_stats::WindowInfo shape;
+    CHECK(win->poll(ev) == 0 && win->window_info(shape) && shape.w == 2000 && shape.h == 1000);
+    CHECK(win->pixel_size(w, h) && w == 1600 && h == 1200);   // the app's panel is what it was
+    win->close();
+    // Without the variable nothing is read or written.
+    unsetenv("BIFROST_ANDROID_WINDOW_STATE");
+    remember("640 480\n");
+    CHECK(win->open("remembered", 800, 600) == 0 && win->poll(ev) == 0);
+    CHECK(win->pixel_size(w, h) && w == 1600 && h == 1200);
+    win->resize(1000, 800, true);
+    win->close();
+    CHECK(contents(state.c_str()) == "640 480\n");
+    unlink(state.c_str());
+    unlink((state + ".tmp").c_str());
+    rmdir(directory);
+  }
   for (int i = 0; i < 256; ++i) {
     first = frost::make_sdl_android_window_backend();
     CHECK(first->open("stress", 800, 600) == 0 && first->binding().window);

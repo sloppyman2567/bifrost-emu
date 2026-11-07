@@ -117,8 +117,10 @@ app exit leaves the library and the other apps usable.
   checked against a fake SDL, not on a real compositor. Open: whether KWin and other Wayland compositors suspend a
   minimised window (without that, a minimised game on Wayland keeps running), focus loss (traced, not delivered, and
   Android keeps an unfocused app resumed), and idle CPU of a stopped game before and after.
-- Game windows have no fullscreen toggle and no remembered size or position: `--fullscreen` belongs to the library, which
-  remembers only its own size and sort order. Decide whether each is a per-app setting.
+- Game windows: F11 toggles fullscreen and the size is remembered per app, with no setting for either (done in the tree,
+  unreleased, checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME.md#fullscreen-and-remembered-size-2026-11-07)).
+  Position and fullscreen are deliberately not remembered (a Wayland client cannot place its window). Open: a real
+  compositor check, including whether the window visibly resizes once at launch. `--fullscreen` still belongs to the library.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested
   with the real emulator, not with media services attached; the retired broker leaves its 750 MB service root until the next
   sweep). Open: every service child (WebView service and renderers, microG) is a whole emulated runtime of 350 to 450 MiB

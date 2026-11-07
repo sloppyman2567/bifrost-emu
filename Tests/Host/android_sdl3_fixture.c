@@ -13,7 +13,16 @@ bool SDL_SetWindowTitle(SDL_Window *window, const char *title) {
 bool SDL_GetWindowPosition(SDL_Window *window, int *x, int *y) {
     (void)window; *x = 0; *y = 0; return true;
 }
-/* BIFROST_TEST_SDL_WINDOW_FLAGS lists the state flags the window has: minimized, hidden, occluded. */
+static void record(const char *event);
+static bool fake_fullscreen;
+bool SDL_SetWindowFullscreen(SDL_Window *window, bool fullscreen) {
+    (void)window;
+    fake_fullscreen = fullscreen;
+    record(fullscreen ? "fullscreen-on" : "fullscreen-off");
+    return true;
+}
+/* BIFROST_TEST_SDL_WINDOW_FLAGS lists the state flags the window has: minimized, hidden, occluded, maximized, fullscreen
+   (also what SDL_SetWindowFullscreen set). */
 SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) {
     (void)window;
     const char *state = getenv("BIFROST_TEST_SDL_WINDOW_FLAGS");
@@ -21,6 +30,8 @@ SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) {
     if (state && strstr(state, "minimized")) flags |= SDL_WINDOW_MINIMIZED;
     if (state && strstr(state, "hidden")) flags |= SDL_WINDOW_HIDDEN;
     if (state && strstr(state, "occluded")) flags |= SDL_WINDOW_OCCLUDED;
+    if (state && strstr(state, "maximized")) flags |= SDL_WINDOW_MAXIMIZED;
+    if (fake_fullscreen || (state && strstr(state, "fullscreen"))) flags |= SDL_WINDOW_FULLSCREEN;
     return flags;
 }
 SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window *window) { return window ? 1 : 0; }
@@ -249,6 +260,17 @@ bool SDL_PollEvent(SDL_Event *event) {
     memset(event, 0, sizeof(*event));
     event->common.timestamp = 123000000;
     if (!strncmp(mode, "pad:", 4)) return pad_event(mode, event);
+    /* once:NAME#N is delivered a single time, until the mode changes (the number tells repeats apart). */
+    if (!strncmp(mode, "once:", 5)) {
+        if (!strcmp(mode, delivered_mode)) return false;
+        snprintf(delivered_mode, sizeof(delivered_mode), "%s", mode);
+        const bool up = !strncmp(mode + 5, "f11-up", 6);
+        if (strncmp(mode + 5, "f11", 3)) return false;
+        event->type = up ? SDL_EVENT_KEY_UP : SDL_EVENT_KEY_DOWN; event->key.windowID = 1;
+        event->key.scancode = SDL_SCANCODE_F11; event->key.raw = 68;
+        event->key.repeat = !strncmp(mode + 5, "f11-repeat", 10);
+        return true;
+    }
     /* window:NAME is a state event of the window itself, window-other:NAME of another one. */
     if (!strncmp(mode, "window:", 7) || !strncmp(mode, "window-other:", 13)) {
         static const struct { const char *name; SDL_EventType type; } names[] = {

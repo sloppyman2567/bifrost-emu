@@ -2368,6 +2368,34 @@ building with the managed launcher. Not checked: a real minimise on a real compo
 whether KWin and other Wayland compositors suspend a minimised window at all. If one does not, a minimised game on it keeps
 running as before.
 
+### Fullscreen and remembered size (2026-11-07)
+
+**F11** in a game window toggles fullscreen (`SDL_SetWindowFullscreen`, the desktop-sized borderless mode), the usual key of
+Linux games and browsers. The SDL3 backend takes both the press and the release and drops key repeats, so the app never
+sees `KEYCODE_F11`; the compositor's answer arrives as an ordinary size change, so a resizable app is told its new size, a
+fixed-size app's panel is fitted into the screen, and leaving fullscreen returns the windowed size. Back-key choices
+(`F1`, `F2`, `F12`) are unaffected.
+
+The window's size is remembered per app. The session environment names a file beside the app's settings
+(`BIFROST_ANDROID_WINDOW_STATE`, `launcher-window.txt`, set by `android_settings.apply_to_launch` unless the environment
+already names one) holding one line, `WIDTH HEIGHT` in desktop units (`Window/RememberedSize.hpp`, SDL-free, tested by
+`make test-android-window-size`). The backend writes it when the window closes, unless the window is fullscreen, maximised,
+minimised or hidden (it has no size of its own then, so the earlier one stays), and ignores a missing or damaged file.
+
+It is applied on the first poll after the window is open, as a resize, never as a different size to open at: the app has by
+then fixed its shape (a fixed-size app's panel, an orientation), and a different opening size would change a fixed-size app's
+panel. So a resizable app is told a new window size as if the user had dragged it; a fixed-size app's panel stays and is fitted
+into the remembered shape; an app that asked for an orientation keeps its shape and takes the largest window of it inside the
+remembered size. The size is held inside the display, and a missing, damaged or out-of-range file leaves the window as
+asked. Position is not remembered: a Wayland client cannot place its window, and an X11-only position would differ between
+desktops. Fullscreen is not remembered either, so a game never opens full screen unexpectedly.
+
+Checked: the file contract and fitting (`make test-android-window-size`), and the backend against a fake SDL
+(`make test-android-sdl-backend`): F11 toggling, never reaching the app, restore once, clamping to the display, orientation
+fit, a fixed-size app's panel unchanged, saving skipped for the four states, and no file without the variable. Not checked:
+a real compositor (whether a `SetWindowSize` right after opening is honoured on KWin or GNOME, whether an app visibly resizes
+once at launch, and how fullscreen behaves with an orientation lock or on several monitors), or a game.
+
 ### Window shape (2026-10-28)
 
 Roblox opened as a near-square 1440x1384 window and stayed that way. Its splash Activity declares no orientation, so

@@ -242,6 +242,11 @@ start of that app, from the CLI (`start`, `run`) and the library window alike.
 Changes take effect at the next start. A setting you never chose is not stored,
 so it keeps following the emulator's default.
 
+A game window follows desktop habits without a setting: **F11** toggles fullscreen (the key never reaches the app), and the
+window's size is remembered per app in `launcher-window.txt` beside the settings and used at the next start. Position,
+fullscreen and a maximised window are not remembered; delete the file to forget the size.
+([details](ANDROID_RUNTIME.md#fullscreen-and-remembered-size-2026-11-07))
+
 An app's settings in the launcher are its compatibility profile. General
 contains window stats, Back key, network mode, the current bundled Android API,
 a button to open the app environment folder, and "Clear data…" and "Uninstall…".

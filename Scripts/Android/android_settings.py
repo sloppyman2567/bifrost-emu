@@ -3,6 +3,9 @@ import json
 import re
 
 SETTINGS = "launcher-settings.json"
+# The size the app's window had when it last closed, kept beside the settings (the emulator's backend reads and writes it
+# through BIFROST_ANDROID_WINDOW_STATE; see Source/System/Android/Window/RememberedSize.hpp).
+WINDOW_STATE = "launcher-window.txt"
 # Names accepted by the emulator's [android] back_key / BIFROST_ANDROID_BACK_KEY.
 BACK_KEYS = (("escape", "Esc"), ("backspace", "Backspace"), ("delete", "Delete"),
              ("f1", "F1"), ("f2", "F2"), ("f12", "F12"), ("none", "No back key"))
@@ -151,6 +154,7 @@ def launch_changes(settings):
 def apply_to_launch(app, options, environment):
     """Options and extra environment from saved choices; the command line and environment win."""
     flags, env = launch_changes(load(app))
+    env["BIFROST_ANDROID_WINDOW_STATE"] = str(app / WINDOW_STATE)
     if any(option.startswith(("--window-stats", "--no-window-stats")) for option in options):
         flags = []
     return list(options) + flags, {key: value for key, value in env.items() if key not in environment}

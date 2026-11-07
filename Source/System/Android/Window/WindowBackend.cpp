@@ -1,5 +1,6 @@
 #include "System/Android/Window/WindowBackend.hpp"
 #include "System/Android/Window/PadCursor.hpp"
+#include "System/Android/Window/RememberedSize.hpp"
 #include "System/Android/Window/WheelGestures.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include <atomic>
@@ -58,7 +59,7 @@ PadCursorMode current_pad_cursor_mode() {
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
   X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) \
   X(StartTextInput) X(StopTextInput) X(SetTextInputArea) X(PeepEvents) \
-  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio) X(GetModState) \
+  X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio) X(GetModState) X(SetWindowFullscreen) \
   X(CreateSystemCursor) X(SetCursor) X(DestroyCursor) X(ShowCursor) X(HideCursor) \
   X(OpenGamepad) X(CloseGamepad) X(GetGamepadName) X(GetGamepadVendor) X(GetGamepadProduct)
 // libSDL3.so.0 from the system; else the copy Tools/Fetch/fetch-sdl3.py builds for hosts without SDL3:
@@ -850,6 +851,13 @@ public:
     if (!update_ratio(width_, height_)) { close(); return fail("window size query"); }
     panel_long_ = std::max(width, height); panel_short_ = std::min(width, height);
     if (fit_new_window(width, height)) update_ratio(width_, height_);
+    // The size this app's window had when it last closed, applied once the app has set the window up (restore_size).
+    size_path_.clear();
+    size_pending_ = false;
+    if (const char *state = std::getenv("BIFROST_ANDROID_WINDOW_STATE")) {
+      size_path_ = state;
+      size_pending_ = remembered_size::load(size_path_, saved_w_, saved_h_);
+    }
     // Gamepads are optional: SDL reports the connected ones as added events.
     gamepads_ready_ = sdl_.InitSubSystem(SDL_INIT_GAMEPAD);
     if (!gamepads_ready_) std::fprintf(stderr, "[android-window] no gamepads: %s\n", sdl_.GetError());
@@ -873,6 +881,7 @@ public:
     if (gamepads_ready_) sdl_.QuitSubSystem(SDL_INIT_GAMEPAD);
     gamepads_ready_ = false;
     if (window_) {
+      save_size();
       // Leave the pointer as the desktop had it, and free the cursors before SDL quits (quitting
       // frees SDL's own list, so a later DestroyCursor would be a second free).
       if (cursor_hidden_ || pad_hid_cursor_) sdl_.ShowCursor();
@@ -1076,6 +1085,7 @@ private:
       return 1;
     }
     run_script();
+    restore_size();
     SDL_Event e;
     const auto id = sdl_.GetWindowID(window_);
     if (dbg().input_trace) {
@@ -1163,6 +1173,12 @@ private:
         text_reports_ += queued - 1;
         out.type = BIFROST_WINDOW_TEXT;
         return 1;
+      }
+      // F11 toggles fullscreen, as in a Linux game or browser. The window host owns the key, so the app never sees it.
+      if ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) && e.key.windowID == id &&
+          e.key.scancode == SDL_SCANCODE_F11) {
+        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) toggle_fullscreen();
+        continue;
       }
       if ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) && e.key.windowID == id) {
         if (key_became_text(e)) continue;
@@ -1600,6 +1616,47 @@ private:
     sdl_.SyncWindow(window_);
     return true;
   }
+  void toggle_fullscreen() {
+    const bool on = !(sdl_.GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN);
+    // The compositor answers with the new size, which reaches the app like any resize; leaving fullscreen brings the
+    // windowed size back.
+    if (!sdl_.SetWindowFullscreen(window_, on)) fail("fullscreen");
+  }
+  // Open the window in the size it had when it last closed. The app has already fixed its shape by now: a fixed-size
+  // app's panel (fit into any window), an orientation (a window of that shape). So this is an ordinary resize, as if the
+  // user had dragged the window, never a different size to open at (which would change a fixed-size app's panel).
+  void restore_size() {
+    if (!size_pending_) return;
+    size_pending_ = false;
+    int32_t w = saved_w_, h = saved_h_;
+    SDL_Rect bounds{};
+    const SDL_DisplayID display = sdl_.GetDisplayForWindow(window_);
+    sdl_.SyncWindow(window_);
+    int current_w = 0, current_h = 0;
+    if (!sdl_.GetWindowSize(window_, &current_w, &current_h) || current_w <= 0 || current_h <= 0 ||
+        (sdl_.GetWindowFlags(window_) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED)))
+      return;
+    if (display && sdl_.GetDisplayBounds(display, &bounds)) remembered_size::fit(w, h, bounds.w, bounds.h);
+    remembered_size::fit(w, h, area_w_, area_h_);  // the work area the first window was clamped to, once learned
+    // An app that asked for an orientation keeps that shape: the remembered size is the room it may take.
+    if (orientation_axis_ && !fixed_w_) {
+      w = current_w; h = current_h;
+      remembered_size::fit_shape(w, h, std::min(saved_w_, bounds.w > 0 ? bounds.w : saved_w_),
+                                 std::min(saved_h_, bounds.h > 0 ? bounds.h : saved_h_));
+    }
+    if ((w != current_w || h != current_h) && !sdl_.SetWindowSize(window_, w, h)) fail("remembered window size");
+  }
+  // Remember the window's size for the next launch. A fullscreen, maximised, minimised or hidden window has no size of
+  // its own to keep, so the earlier one stays.
+  void save_size() {
+    if (size_path_.empty()) return;
+    int w = 0, h = 0;
+    if ((sdl_.GetWindowFlags(window_) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED |
+                                         SDL_WINDOW_HIDDEN)) ||
+        !sdl_.GetWindowSize(window_, &w, &h))
+      return;
+    remembered_size::store(size_path_, w, h);
+  }
   bool update_ratio(int32_t &pixel_w, int32_t &pixel_h) {
     int logical_w = 0, logical_h = 0;
     pixel_w = pixel_h = 0;
@@ -1786,6 +1843,9 @@ private:
   int32_t panel_long_ = 0, panel_short_ = 0;  // open()'s size in desktop units
   int32_t area_w_ = INT32_MAX, area_h_ = INT32_MAX;  // work area limits learned from the open clamp
   int32_t orientation_axis_ = 0;
+  std::string size_path_;                 // BIFROST_ANDROID_WINDOW_STATE: where this app's window size is kept
+  int32_t saved_w_ = 0, saved_h_ = 0;     // the size read from it at open, desktop units
+  bool size_pending_ = false;             // saved_w_ x saved_h_ not applied yet
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;
   // The gamepad's pointer for touch-only apps (PadCursor), its picture in a popup layer, and what it queued this poll.

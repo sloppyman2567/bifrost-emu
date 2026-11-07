@@ -183,6 +183,15 @@ there (guided provisioning, update/reinstall) remain in progress.
   the real launcher offscreen with a slow poll in flight and interrupts it (it fails on the old code with SIGABRT).
   An installed Asgard (`/usr/local/share/bifrost/asgard`) keeps the crash until it is reinstalled.
 
+### Added (fullscreen and remembered window size)
+
+- **F11** in an Android game window toggles fullscreen, and the key never reaches the app. The window's size is now kept
+  per app (`launcher-window.txt` beside the app's settings, written when the window closes) and applied at the next start
+  after the app has set its window up, as a resize: a fixed-size app's panel is unchanged, an app that asked for an
+  orientation keeps its shape inside the remembered size, and the size is held inside the display. Position, fullscreen and
+  a maximised window are not remembered. Checked with a new SDL-free test (`make test-android-window-size`), the SDL3 backend
+  test against a fake SDL, and the settings tests; not on a real compositor or in a game.
+
 ### Added (minimised windows stop the app)
 
 - A game window that the desktop minimises, hides or covers now stops the app's Activities (`onPause`, `onStop`) and
