@@ -2435,12 +2435,43 @@ variable `BIFROST_ANDROID_WINDOW_MODE=keep`, passed to the guest by `android_man
 managed launcher take the `fixWindow` path above for any app, not only one that declares `resizeableActivity=false`. Not run
 against a real game here.
 
-Known limit: on a host resize the launcher recomputes the Configuration (`FrameworkDisplay`: `orientation` from the window's
-width and height, `screenWidthDp`, `screenHeightDp`, `smallestScreenWidthDp`), updates the resources and calls each Activity's
-`onConfigurationChanged`. It never relaunches an Activity, as Android does when the change is not in the Activity's
-`android:configChanges`. An app that relies on that relaunch to inflate its other layout (YouTube, narrowed to a tall window,
-stays in its landscape layout) therefore does not change shape. Activity relaunch (`onSaveInstanceState`, destroy, a new instance
-from `onCreate(savedInstanceState)`) is not implemented in `FrameworkActivities`.
+On a host resize the launcher recomputes the Configuration (`FrameworkDisplay`: `orientation` from the window's width and
+height, `screenWidthDp`, `screenHeightDp`, `smallestScreenWidthDp`), updates the resources, and hands every Activity to
+`FrameworkActivities.configurationChanged`, which relaunches one that does not handle the change (next section).
+
+#### Activity relaunch (2026-11-07)
+
+An Activity whose manifest `configChanges` lacks a field the resize changed is relaunched, as Android does. The decision is
+`ActivityRecord` of `android-15.0.0_r1` (`ensureActivityConfiguration`, `getConfigurationChanges`, `shouldRelaunchLocked`):
+the difference between the Configuration the Activity last knew (`Record.reported`, set at creation and after each change) and
+the current one; size changes that cross none of the thresholds the app's own resources declare (`layout-w600dp`) dropped
+through `android.window.SizeConfigurationBuckets.filterDiff`, built as `ActivityThread.reportSizeConfigurations` does; the window
+bounds (`CONFIG_WINDOW_CONFIGURATION`) never counted; relaunch when `changes & ~ActivityInfo.getRealConfigChanged() != 0`. Otherwise
+the Activity gets `onConfigurationChanged`, as before. A stopped Activity (covered, or the task hidden) is skipped, like Android's
+`ensureActivityConfiguration`, and takes the missed change when it is restarted (`ensureVisibility`): a relaunch if it needs one,
+`onConfigurationChanged` if its configuration differs, nothing if it does not.
+
+The relaunch is `ActivityThread.handleRelaunchActivity`: `isChangingConfigurations()` set; `onPause`; `onStop`;
+`onSaveInstanceState` (after `onStop`, as since P); `retainNonConfigurationInstances`; `onDestroy`; the window and context
+cleaned up; then a new instance of the same class with the same token, `Record`, results and caller, made with the saved Bundle
+and the retained instance, the Intent `setIntent()` last set, `onCreate(state)`, `onStart`, `onRestoreInstanceState`,
+`onPostCreate`, and `onResume` if the old one was resumed. The launcher Activity is relaunched the same way (`activities.root()`
+follows it, and `ManagedLauncher.activityReplaced` moves the process-state reference). Not done: `PersistableBundle` state
+(`persistableMode`), `onSaveInstanceState` on an ordinary stop (an existing gap, so a stopped Activity saves its state only
+when it is relaunched), and a relaunch that keeps the window (`preserveWindow`): the decor is removed and added again.
+
+Checked on the real runtime with a fixture (`Tests/Host/ManagedRelaunch.java`): without `configChanges` it is relaunched on a
+turn of the window with its state, retained instance and Intent, and `changing=true` on the old instance; with `configChanges` it
+only gets `onConfigurationChanged`. The Activity-stack, splash, dialog, geometry, views and Google-activity tests still pass
+(the dialog test failed once in a batch after five window tests and passed alone; its log showed no relaunch, no restart and
+a starved main thread). Not checked: a real app that is relaunched.
+
+YouTube is not helped by this: its main Activity declares `configChanges=0x1ff0` (keyboard, keyboardHidden, navigation,
+orientation, screenLayout, uiMode, screenSize, smallestScreenSize, density; `aapt2 dump xmltree` of the installed 21.42.247
+against `ActivityInfo`'s constants), so Android does not relaunch it for a resize either; it takes the change in
+`onConfigurationChanged`. Why it keeps its landscape layout when the window is narrowed is untraced: what its
+`onConfigurationChanged` receives (`orientation`, the dp sizes), the display and window metrics it reads, or a layout choice
+of its own.
 
 ### Native-density play windows (2026-10-12)
 

@@ -18,6 +18,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.os.Binder;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.IInterface;
@@ -48,7 +49,14 @@ final class FrameworkActivities {
     private static final String ACTIVITY_PERMISSIONS_WHO = "@android:requestPermissions:";
 
     private static final class Record {
-        final Activity activity;
+        volatile Activity activity;  // replaced by a relaunch; the token and everything else stay
+        final ActivityInfo info;
+        final Intent intent;
+        // ActivityRecord.mLastReportedConfiguration: what the Activity last knew, to find what a window change altered.
+        Configuration reported;
+        // android.window.SizeConfigurationBuckets of this instance's resources (null: not computed, or none).
+        Object sizeBuckets;
+        boolean sizeBucketsKnown;
         final IBinder token;
         final Record caller;      // receives the result, or null
         final String resultWho;
@@ -60,8 +68,9 @@ final class FrameworkActivities {
         ComponentName remoteCaller;
         // ActivityRecord.mCaptureCallbacks (IScreenCaptureObserver).
         final RemoteCallbackList<IInterface> captureObservers = new RemoteCallbackList<>();
-        Record(Activity activity, IBinder token, Record caller, String resultWho, int requestCode) {
-            this.activity = activity; this.token = token; this.caller = caller;
+        Record(Activity activity, ActivityInfo info, Intent intent, IBinder token, Record caller, String resultWho,
+                int requestCode) {
+            this.activity = activity; this.info = info; this.intent = intent; this.token = token; this.caller = caller;
             this.resultWho = resultWho; this.requestCode = requestCode;
         }
     }
@@ -172,14 +181,16 @@ final class FrameworkActivities {
     // The launcher Activity, registered before its onCreate: launches it
     // requests are posted and run once it has been resumed.
     synchronized void attach(Object thread, Object loaded, Instrumentation instrumentation,
-            Application application, Activity root, IBinder token) {
+            Application application, Activity root, ActivityInfo info, Intent intent, IBinder token) {
         this.thread = thread;
         this.loaded = loaded;
         this.instrumentation = instrumentation;
         this.application = application;
         main = new Handler(Looper.getMainLooper());
         remote.attach(application, main);
-        stack.add(new Record(root, token, null, null, -1));
+        Record record = new Record(root, info, intent, token, null, null, -1);
+        record.reported = new Configuration(root.getResources().getConfiguration());
+        stack.add(record);
     }
 
     // IActivityTaskManager.startActivity(caller, callingPackage, callingFeatureId,
@@ -350,7 +361,8 @@ final class FrameworkActivities {
         attachThread(activity, thread);
         method(context.getClass(), "setOuterContext", Context.class).invoke(context, activity);
         if (info.getThemeResource() != 0) activity.setTheme(info.getThemeResource());
-        Record record = new Record(activity, token, caller, resultWho, requestCode);
+        Record record = new Record(activity, info, intent, token, caller, resultWho, requestCode);
+        record.reported = new Configuration(activity.getResources().getConfiguration());
         record.occludes = occludesParent(info);
         synchronized (this) { stack.add(record); }
         System.out.println("APP_ACTIVITY_STARTING " + info.name);
@@ -412,6 +424,9 @@ final class FrameworkActivities {
             } else if (stoppedState(record.activity)) {
                 method(Activity.class, "performRestart", boolean.class).invoke(record.activity, true);
                 System.out.println("APP_ACTIVITY_RESTARTED " + record.activity.getClass().getName());
+                // ActivityRecord.ensureActivityConfiguration skips a stopped Activity; it applies the missed window
+                // change once the Activity is visible again, as a relaunch if the Activity does not handle it.
+                reconfigure(record, false, false);
                 revealed.add(record);
             }
             covered |= record.occludes;
@@ -519,6 +534,120 @@ final class FrameworkActivities {
         List<Activity> result = new ArrayList<>();
         for (Record record : stack) result.add(record.activity);
         return result;
+    }
+
+    // ActivityInfo.CONFIG_WINDOW_CONFIGURATION (hidden): a bounds change alone never relaunches
+    // (ActivityRecord.getConfigurationChanges).
+    private static final int CONFIG_WINDOW_CONFIGURATION = 0x20000000;
+
+    // The host window changed size or rotation: every Activity learns of it as ActivityRecord.ensureActivityConfiguration
+    // delivers it. One that does not handle the change itself (its manifest configChanges lacks a changed field) is
+    // relaunched; the others get onConfigurationChanged. A stopped Activity (covered, or the task hidden) waits until it
+    // is restarted. Called from the launcher's UI loop after the display and resources were updated.
+    void configurationChanged() throws Exception {
+        List<Record> records;
+        synchronized (this) { records = new ArrayList<>(stack); }
+        for (Record record : records) {
+            if (stackContains(record)) reconfigure(record, !background, true);
+        }
+    }
+
+    // `always`: deliver onConfigurationChanged even when the configuration is the one the Activity last knew (a window
+    // event that changed nothing it can see, as before); a restart delivers only what it missed.
+    private void reconfigure(Record record, boolean resumeAfterRelaunch, boolean always) throws Exception {
+        Activity activity = record.activity;
+        if (activity.isFinishing() || stoppedState(activity)) return;
+        Configuration current = new Configuration(activity.getResources().getConfiguration());
+        if (!always && current.equals(record.reported)) return;
+        int changes = configurationChanges(record, current);
+        record.reported = current;
+        // ActivityRecord.shouldRelaunchLocked: a change in a field the Activity does not list in configChanges.
+        if ((changes & ~(Integer) method(ActivityInfo.class, "getRealConfigChanged").invoke(record.info)) != 0) {
+            relaunch(record, changes, resumeAfterRelaunch && resumedState(activity));
+            return;
+        }
+        Field field = Activity.class.getDeclaredField("mCurrentConfig");
+        field.setAccessible(true);
+        field.set(activity, current);
+        activity.onConfigurationChanged(current);
+    }
+
+    // ActivityRecord.getConfigurationChanges: the difference from what the Activity last knew, without the size
+    // changes that cross none of the thresholds its resources (layout-w600dp) care about, and without the window
+    // bounds, which never relaunch.
+    private static int configurationChanges(Record record, Configuration current) throws Exception {
+        int changes = record.reported.diff(current);
+        if (!record.sizeBucketsKnown) {
+            // ActivityThread.reportSizeConfigurations: none reported means the server filters nothing.
+            Configuration[] sizes = (Configuration[]) method(android.content.res.Resources.class, "getSizeConfigurations")
+                    .invoke(record.activity.getResources());
+            record.sizeBuckets = sizes == null ? null : Class.forName("android.window.SizeConfigurationBuckets")
+                    .getConstructor(Configuration[].class).newInstance((Object) sizes);
+            record.sizeBucketsKnown = true;
+        }
+        if (record.sizeBuckets != null)
+            changes = (Integer) method(record.sizeBuckets.getClass(), "filterDiff", int.class, Configuration.class,
+                    Configuration.class, record.sizeBuckets.getClass())
+                    .invoke(null, changes, record.reported, current, record.sizeBuckets);
+        return changes & ~CONFIG_WINDOW_CONFIGURATION;
+    }
+
+    // ActivityThread.handleRelaunchActivity: onPause, onStop, onSaveInstanceState (it follows onStop since P), the
+    // non-configuration instance retained, onDestroy with isChangingConfigurations() true; then a new instance of the
+    // same Activity (same token, Record, results and Intent) is created with that state and the retained instance,
+    // started, restored and, if the old one was resumed, resumed.
+    private void relaunch(Record record, int changes, boolean resume) throws Exception {
+        Activity old = record.activity;
+        String name = old.getClass().getName();
+        System.out.println("APP_ACTIVITY_RELAUNCH " + name + " changes=0x" + Integer.toHexString(changes));
+        Field changing = Activity.class.getDeclaredField("mChangingConfigurations");
+        changing.setAccessible(true);
+        changing.setBoolean(old, true);
+        Field flags = Activity.class.getDeclaredField("mConfigChangeFlags");
+        flags.setAccessible(true);
+        flags.setInt(old, flags.getInt(old) | changes);
+        Intent intent = old.getIntent();  // Activity.setIntent() may have replaced the launching one
+        if (resumedState(old)) pause(old);
+        if (!stoppedState(old))
+            method(Activity.class, "performStop", boolean.class, String.class).invoke(old, false, "bifrost");
+        Bundle state = new Bundle();
+        instrumentation.callActivityOnSaveInstanceState(old, state);
+        Object retained = method(Activity.class, "retainNonConfigurationInstances").invoke(old);
+        method(Activity.class, "performDestroy").invoke(old);
+        removeWindow(old);
+        finalCleanup(old);
+        System.out.println("APP_ACTIVITY_DESTROYED " + name);
+
+        Context context = (Context) method(Class.forName("android.app.ContextImpl"), "createActivityContext",
+                thread.getClass(), loaded.getClass(), ActivityInfo.class, IBinder.class, int.class,
+                Configuration.class).invoke(null, thread, loaded, record.info, record.token, 0,
+                displays.activityOverride());
+        Activity fresh = instrumentation.newActivity(old.getClass(), context, record.token, application,
+                record.intent, record.info, record.info.loadLabel(application.getPackageManager()), null, null,
+                retained);
+        attachThread(fresh, thread);
+        method(context.getClass(), "setOuterContext", Context.class).invoke(context, fresh);
+        if (record.info.getThemeResource() != 0) fresh.setTheme(record.info.getThemeResource());
+        fresh.setIntent(intent);
+        record.activity = fresh;
+        record.sizeBuckets = null;
+        record.sizeBucketsKnown = false;
+        record.reported = new Configuration(fresh.getResources().getConfiguration());
+        Field current = Activity.class.getDeclaredField("mCurrentConfig");
+        current.setAccessible(true);
+        current.set(fresh, new Configuration(record.reported));
+        ManagedLauncher.activityReplaced(old, fresh);
+        System.out.println("APP_ACTIVITY_STARTING " + record.info.name);
+        instrumentation.callActivityOnCreate(fresh, state);
+        if (fresh.isFinishing()) return;  // torn down by update()
+        method(Activity.class, "performStart", String.class).invoke(fresh, "bifrost");
+        instrumentation.callActivityOnRestoreInstanceState(fresh, state);
+        instrumentation.callActivityOnPostCreate(fresh, state);
+        if (resume && !background) {
+            resume(fresh);
+            show(fresh);
+            System.out.println("APP_ACTIVITY_RESUMED " + record.info.name);
+        }
     }
 
     // Called from the launcher's UI loop: destroys finished Activities, newest

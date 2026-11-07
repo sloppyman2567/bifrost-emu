@@ -80,6 +80,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   reaches an app. The window's remembered size (`BIFROST_ANDROID_WINDOW_STATE`, `Window/RememberedSize.hpp`) is applied as
   a resize after the app has set up its window, never as the opening size (a fixed-size app's panel comes from the opening
   size), and is not saved for a fullscreen, maximised, minimised or hidden window. Keep position and fullscreen out of it.
+- A host window resize reaches Activities through `FrameworkActivities.configurationChanged`: relaunch exactly when Android
+  would (`ActivityRecord`: the diff from `Record.reported`, size buckets, no window bounds, `& ~getRealConfigChanged()`), else
+  `onConfigurationChanged`; a stopped Activity waits for its restart. A relaunch replaces `Record.activity` and keeps the
+  token, results and caller, so never hold an `Activity` across a resize (`activities.root()`, `ManagedLauncher.activityReplaced`).
+  `Tests/Host/ManagedRelaunch.java` covers both outcomes.
 - `media_session` (`FrameworkMediaSessions`) has no sessions and accepts only
   `dispatchMediaKeyEvent`; WebView forwards unhandled keys to it.
 - App processes register their code and profile paths with ART

@@ -183,6 +183,17 @@ there (guided provisioning, update/reinstall) remain in progress.
   the real launcher offscreen with a slow poll in flight and interrupts it (it fails on the old code with SIGABRT).
   An installed Asgard (`/usr/local/share/bifrost/asgard`) keeps the crash until it is reinstalled.
 
+### Added (Activity relaunch on a window resize)
+
+- An Activity whose manifest `configChanges` lacks a field that a host window resize changed is now relaunched as Android
+  does (`ActivityThread.handleRelaunchActivity`): `onPause`, `onStop`, `onSaveInstanceState`, `onDestroy` with
+  `isChangingConfigurations()` true, then a new instance with the saved state, the retained instance and the Intent
+  `setIntent()` last set. The decision follows `ActivityRecord` (size changes that cross no threshold of the app's own
+  resources do not relaunch; window bounds never do), a stopped Activity takes the change when it is restarted, and one that
+  declares the change still only gets `onConfigurationChanged`. Checked on the real runtime with a new fixture for both
+  cases; not with a real app that needs it. It does not fix YouTube staying in its landscape layout when narrowed: YouTube
+  declares orientation, size and layout in `configChanges`, so Android would not relaunch it either, and the cause is untraced.
+
 ### Added (fullscreen and remembered window size)
 
 - **F11** in an Android game window toggles fullscreen, and the key never reaches the app. The window's size is now kept

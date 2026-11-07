@@ -22,8 +22,7 @@ The aim is an Android game that behaves like any other window on a Linux desktop
 
 1. **It does not crash.** Ads come first: most free games carry them, and an ad is the commonest thing that ends a session
    (Geometry Dash Lite's WebView crash on `InputDevice.hasKeys`, SpongeBob's Kidoz ad layer failure).
-2. **The window behaves:** tiling, resizing, fullscreen and a remembered size, and an app that takes the window's new shape
-   (Activity relaunch on a configuration change).
+2. **The window behaves:** tiling, resizing, fullscreen and a remembered size, and an app that takes the window's new shape.
 3. **Input works** from the mouse, the keyboard, a pad, and a pad-driven pointer for apps that only take touch.
 4. **It does not hitch**, ads included. Measure before fixing. The session logs already say where the main thread stalls
    ([measured so far](#measured-so-far-ads-webview-and-windows)): WebView's first start is the commonest, then cold app and SDK
@@ -61,10 +60,10 @@ otherwise.
   sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
 - **Architecture:** Bifrost runs AArch64 only; an APK with only `armeabi-v7a` or `x86` libraries (Angry Birds Space)
   cannot start.
-- **Platform gaps:** a host window resize reaches an app as a new orientation and size, but its Activity is never relaunched
-  as Android does for an app that does not handle the change, so YouTube stays in its landscape layout when the window is
-  narrowed (the per-app Window setting's "Keep the app's shape" scales a game instead); no Settings screens, no host mDNS, no
-  toast animations. The Android Vulkan HAL copies every
+- **Platform gaps:** YouTube stays in its landscape layout when the window is narrowed, although a host resize reaches an app
+  as a new orientation and size and an Activity that does not declare the change is relaunched; YouTube declares it and takes it
+  in `onConfigurationChanged`, so the cause is untraced (the per-app Window setting's "Keep the app's shape" scales a game
+  instead); no Settings screens, no host mDNS, no toast animations. The Android Vulkan HAL copies every
   presented frame (no zero-copy swapchain).
 - **Undiagnosed:** Firefox 159 reaches onboarding and a GeckoView surface but loads no pages; not re-tested since the
   November 1 Binder fix.
@@ -102,9 +101,11 @@ app exit leaves the library and the other apps usable.
 - Investigate supported rewarded and interstitial ad SDKs with their test creatives; never synthesize reward success.
 - Answer what an ad's WebView asks of the device so that it never throws out of the app: done for the gamepad `hasKeys`
   call (the cause of Geometry Dash Lite's crash); the next unsupported call shows in the session log.
-- Relaunch an Activity when a host resize changes its configuration, so an app such as YouTube takes the window's portrait
-  or landscape shape; today only `onConfigurationChanged` is called, and the per-app Window setting's "Keep the app's shape"
-  scales a game instead.
+- Activity relaunch on a host resize: done in the tree, unreleased (an Activity that does not declare the change is relaunched
+  as Android does; [details](Android/ANDROID_RUNTIME.md#activity-relaunch-2026-11-07)), checked with a fixture on the real
+  runtime, not with a real app that needs it. It does not explain YouTube, which declares orientation, size and layout in
+  `configChanges` and so is never relaunched. Open: trace why YouTube keeps its landscape layout when narrowed (what its
+  `onConfigurationChanged` receives, the metrics it reads).
 - Measure frame pacing around ads before choosing a rendering fix: an ad-heavy session with the window-stats overlay on and an
   opt-in frame-time log (not written yet), split into the ad showing, the game while the ad loads, and closing it. The
   stall data below covers only main-thread blocks of about 1.5 s or more.
@@ -213,8 +214,9 @@ Open:
   fixtures (flush/reconfigure, B-frames, sustained playback).
 - Audio effects: `android.media.audiofx` loads and reports no effects; `Equalizer` and the like need DSP in front of the host's audio.
 - Activities from other processes beyond Play services; a real Play Games sign-in has not been observed.
-- Orientation, resize, focus, surface loss/recreation and background/foreground tests, and Activity relaunch on a configuration
-  change (`onSaveInstanceState`, destroy, a new instance) for apps that do not declare `configChanges`.
+- Orientation, resize, focus, surface loss/recreation and background/foreground tests with real apps. Activity relaunch for apps
+  that do not declare `configChanges` is done (fixture only); `onSaveInstanceState` on an ordinary stop and `PersistableBundle`
+  state are not.
 - Graphics ABI coverage from dependency audits; confirm the GLSL retry in Roblox and explain its low-resolution textures.
 - Memory: JIT code size, the remaining non-JIT heap, why the WebView service stays alive, and a controlled before/after
   measurement.

@@ -464,6 +464,11 @@ public final class ManagedLauncher {
         return new UnsupportedOperationException(service + "." + method);
     }
 
+    // A relaunch replaces the launcher Activity's instance; the process state follows the live one.
+    static void activityReplaced(Activity old, Activity fresh) {
+        if (activeActivity == old) activeActivity = fresh;
+    }
+
     private static boolean activityResumed() throws Exception {
         Activity activity = activeActivity;
         return activity != null && (Boolean) call(activity, "isResumed", new Class<?>[0]);
@@ -1529,7 +1534,7 @@ public final class ManagedLauncher {
         // An Activity may start another from onCreate (a splash opening the
         // game Activity). The launch is posted to the main looper, so it runs
         // after this Activity is created, started and resumed, as on Android.
-        if (play) activities.attach(thread, loaded, instrumentation, application, instance, token);
+        if (play) activities.attach(thread, loaded, instrumentation, application, instance, activity, intent, token);
         if (remoteRequest != null) activities.remoteRoot(remoteRequest.callingActivity);
         instrumentation.callActivityOnCreate(instance, null);
         System.out.println("APP_ACTIVITY_CREATED");
@@ -1841,13 +1846,8 @@ public final class ManagedLauncher {
                                     .getMethod("currentActivityThread").invoke(null);
                             call(activityThread, "handleConfigurationChanged",
                                     new Class<?>[] {Configuration.class, int.class}, displays.processConfiguration(), 0);
-                            for (Activity each : activities.all()) {
-                                Configuration current = new Configuration(each.getResources().getConfiguration());
-                                java.lang.reflect.Field field = Activity.class.getDeclaredField("mCurrentConfig");
-                                field.setAccessible(true);
-                                field.set(each, current);
-                                each.onConfigurationChanged(current);
-                            }
+                            // An Activity that does not handle the change is relaunched, as Android does (FrameworkActivities).
+                            activities.configurationChanged();
                         }
                         if (event[0] == 0) break;
                         // A gamepad connected or removed while the task is hidden still changes the device list.

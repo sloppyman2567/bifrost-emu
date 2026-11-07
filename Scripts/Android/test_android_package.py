@@ -3676,6 +3676,11 @@ class PackageTests(unittest.TestCase):
             activity_attributes = ' android:screenOrientation="landscape" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|density|uiMode"'
             component = component.replace(f'<activity android:name="{activity}"',
                                           f'<activity android:name="{activity}"{activity_attributes}')
+        if managed == "ManagedRelaunch" and name == "relaunch-handled" and not split:
+            # An Activity that declares the changes a window turn makes handles them itself.
+            activity_attributes = ' android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"'
+            component = component.replace(f'<activity android:name="{activity}"',
+                                          f'<activity android:name="{activity}"{activity_attributes}')
         if managed == "ManagedSplash" and not split:
             component += f'<activity android:name="{activity}$Main" android:exported="false"/>'
         if managed == "ManagedActivities" and not split:
@@ -4480,6 +4485,50 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
         # A legacy view animation ends: the window's draw time advances with each draw.
         self.assertIn("MANAGED_VIEWS_ANIMATION_END", text)
+
+    def launch_relaunch_fixture(self, name):
+        state = self.work / (name + "-state")
+        bundle = self.work / (name + ".apkm")
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk(name, managed="ManagedRelaunch"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
+        return text
+
+    def test_managed_activity_is_relaunched_when_the_window_turns(self):
+        # An Activity that does not declare the change is relaunched as Android does (ActivityThread.handleRelaunchActivity):
+        # paused, stopped, its state saved after onStop, destroyed with isChangingConfigurations() true; the new instance
+        # gets the saved Bundle, the retained instance and the Intent setIntent() replaced, and is resumed.
+        text = self.launch_relaunch_fixture("relaunch")
+        markers = ("RELAUNCH_CREATE gen=0 saved=none retained=null", "RELAUNCH_RESUME gen=0", "RELAUNCH_TURN",
+                   "APP_ACTIVITY_RELAUNCH org.bifrost.fixture.ManagedRelaunch changes=0x", "RELAUNCH_PAUSE gen=0",
+                   "RELAUNCH_STOP gen=0 changing=true", "RELAUNCH_SAVE gen=0", "RELAUNCH_DESTROY gen=0 changing=true",
+                   "RELAUNCH_CREATE gen=1 saved=saved-by-0 retained=retained-by-0", "RELAUNCH_START gen=1",
+                   "RELAUNCH_RESTORE gen=1 saved=saved-by-0", "RELAUNCH_RESUME gen=1", "intent=kept-by-0",
+                   "RELAUNCH_DESTROY gen=1 changing=false")
+        position = 0
+        lifecycle = "\n".join(line for line in text.splitlines() if "RELAUNCH" in line or "APP_ACTIVITY" in line)
+        for marker in markers:
+            found = text.find(marker, position)
+            self.assertNotEqual(found, -1, f"{marker!r} is missing or out of order; the lifecycle was:\n{lifecycle}")
+            position = found + len(marker)
+        self.assertNotIn("RELAUNCH_CONFIG_CHANGED", text)
+        self.assertEqual(text.count("APP_ACTIVITY_RELAUNCH"), 1)
+        # The turn changed the orientation the new instance was created with.
+        first, second = (int(n) for n in re.findall(r"RELAUNCH_CREATE gen=\d .*? orientation=(\d)", text))
+        self.assertNotEqual(first, second)
+
+    def test_managed_activity_that_handles_the_change_is_not_relaunched(self):
+        text = self.launch_relaunch_fixture("relaunch-handled")
+        self.assertRegex(text, r"RELAUNCH_TURN to \w+")
+        self.assertRegex(text, r"RELAUNCH_CONFIG_CHANGED gen=0 orientation=\d")
+        self.assertEqual(text.count("RELAUNCH_CREATE"), 1)
+        self.assertNotIn("APP_ACTIVITY_RELAUNCH", text)
+        self.assertNotIn("RELAUNCH_DESTROY gen=0 changing=true", text)
 
     def test_managed_window_geometry(self):
         # Every size an app can read agrees with the host window, and the attached
