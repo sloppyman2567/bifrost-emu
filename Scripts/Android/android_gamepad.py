@@ -260,8 +260,9 @@ def connect(window, application, backend):
         if window.pad_action(action):
             trace(action, "-> taken by the library window"); return
         popup = application.activePopupWidget()
-        modal = application.activeModalWidget()
-        # A dialog may give Start and Y their own meaning (the gamepad settings page: save, restore defaults).
+        # A dialog, or a page or sheet drawn inside the library window, may give Start and Y their own meaning (the gamepad
+        # settings page: save, restore defaults).
+        modal = application.activeModalWidget() or getattr(window, "sheet_widget", None)
         hook = {"options": "pad_options", "menu": "pad_menu"}.get(action)
         if modal is not None and popup is None and hook and hasattr(modal, hook):
             trace(action, "-> taken by the dialog (" + type(modal).__name__ + ")")
@@ -276,7 +277,8 @@ def connect(window, application, backend):
             # focus chain is what gets out.
             window_ = application.activeWindow() or widget
             (window_.focusPreviousChild if action == "up" else window_.focusNextChild)(); return
-        keys = keys_for(action, where, application.activeModalWidget() is not None)
+        inside = application.activeModalWidget() is not None or (hasattr(window, "sheet_active") and window.sheet_active())
+        keys = keys_for(action, where, inside)
         trace(action, "-> keys", keys or "none", "to", type(widget).__name__, "(" + where + ")")
         for name in keys: press(name, widget)
 

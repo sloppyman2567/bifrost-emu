@@ -47,7 +47,8 @@ such as "misc", "common" or "core". The current version lives in
 - The desktop library takes gamepads through `Scripts/Android/android_gamepad.py` (SDL3 by ctypes) as key presses on the focused
   widget, never as a second input path, and only while a library window is active: a game started from it reads the same pad.
   It must work without SDL3 or a pad, and an exception in the pad path switches pads off rather than aborting the process
-  (PyQt aborts on an exception in a slot).
+  (PyQt aborts on an exception in a slot). In the gamepad layout menus, confirmations and the settings page are drawn inside the
+  library window (`Sheet`, the embedded settings page), never as popup windows or message boxes the pad does not reach.
 - Setup scripts find host tools through `Scripts/Setup/find-host-tools.sh` (sbin, JDK and LLVM directories, `~/.local/bin`,
   `BIFROST_TOOL_DIRS`), never a bare `command -v`: `debugfs` is off an ordinary Debian user's `PATH`. Hosts without SDL3 build
   it with `Tools/Fetch/fetch-sdl3.py` into `Tools/sdl3`.

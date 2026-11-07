@@ -373,18 +373,18 @@ def session_ending(session):
     return ENDINGS[key]
 
 
-def settings_dialog(window, app, settings):
-    """Edit one persistent app profile; changes are staged until Save."""
-    from PyQt6.QtCore import Qt, QTimer, QUrl
-    from PyQt6.QtGui import QDesktopServices, QIcon, QPalette
-    from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame,
-                                 QFormLayout, QHeaderView, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-                                 QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
-    import android_settings
-    from android_package import API
+_PAD_ROW = []
+
+
+def pad_row_class():
+    """The large row of the gamepad pages and sheets (made once; Qt is imported only when it is first needed)."""
+    if _PAD_ROW: return _PAD_ROW[0]
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel
 
     class PadRow(QFrame):
-        """One setting of the gamepad page: its name and value; Left and Right change it, A toggles or steps on."""
+        """One row: its name and value. Left and Right change the value, A (Return or Space) toggles or steps on, Up and
+        Down move to the neighbouring row."""
         def __init__(self, title, value, step, enabled=None, tone="", changed=None):
             super().__init__()
             self.setObjectName("padrow"); self.setFocusPolicy(Qt.FocusPolicy.StrongFocus); self.setProperty("tone", tone)
@@ -406,12 +406,34 @@ def settings_dialog(window, app, settings):
             if key == Qt.Key.Key_Left and self.step: self.step(-1)
             elif key == Qt.Key.Key_Right and self.step: self.step(1)
             elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space) and self.step: self.step(1)
+            elif key == Qt.Key.Key_Down: self.focusNextChild(); return
+            elif key == Qt.Key.Key_Up: self.focusPreviousChild(); return
             else: super().keyPressEvent(event); return
             if self.changed: self.changed()
 
+    _PAD_ROW.append(PadRow)
+    return PadRow
+
+
+def settings_dialog(window, app, settings):
+    """Edit one persistent app profile; changes are staged until Save."""
+    from PyQt6.QtCore import Qt, QTimer, QUrl
+    from PyQt6.QtGui import QDesktopServices, QIcon, QPalette
+    from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame,
+                                 QFormLayout, QHeaderView, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+                                 QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+    import android_settings
+    from android_package import API
+
+    PadRow = pad_row_class()
+
     class Settings(QDialog):
         def __init__(self):
-            super().__init__(window)
+            # In the gamepad layout the page is drawn inside the library window (a child widget over a dimmed backdrop), not
+            # as a window of its own: the pad steers the main window's widgets, and a separate window takes focus differently.
+            if getattr(window, "big", False): super().__init__(window.centralWidget(), Qt.WindowType.SubWindow)   # QDialog adds Qt.Dialog to plain flags
+            else: super().__init__(window)
+            self.backdrop = None
             self.setWindowTitle(app["label"] + " settings")
             self.resize(620, 500)
             self.settings, self.removals = dict(settings), []
@@ -547,8 +569,10 @@ def settings_dialog(window, app, settings):
             """The gamepad layout of this dialog: one large row per setting over the same widgets, changed with the d-pad.
             Nothing here needs a keyboard or a mouse; the desktop widgets stay, hidden, as the model that saves."""
             for widget in (intro, tabs, buttons): widget.hide()
-            # A panel over the library, which stays in view behind it, not a screen of its own.
+            # A panel inside the library window, which stays in view behind it, not a screen of its own.
+            self.setObjectName("padsettings"); self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             self.resize(min(1000, round(window.width() * 0.82)), round(window.height() * 0.9))
+            self.finished.connect(self.release)
             heading = QLabel(app["label"]); font = heading.font(); font.setPointSizeF(font.pointSizeF() * 1.5); font.setBold(True)
             heading.setFont(font); layout = self.layout(); layout.insertWidget(0, heading)
             self.pad_rows = []
@@ -592,6 +616,28 @@ def settings_dialog(window, app, settings):
 
         def refresh_rows(self):
             for row in self.pad_rows: row.refresh()
+
+        def showEvent(self, event):
+            super().showEvent(event)
+            if not self.isWindow():          # the gamepad page: put it over a backdrop, in the middle of the library window
+                if self.backdrop is None:
+                    self.backdrop = QFrame(self.parentWidget()); self.backdrop.setObjectName("sheet"); self.backdrop.show()
+                    window.sheet_widget = self; window.pages.setEnabled(False)
+                self.reposition(); window.update_hints()
+
+        def reposition(self):
+            body = self.parentWidget()
+            if self.backdrop is not None: self.backdrop.setGeometry(body.rect()); self.backdrop.raise_()
+            self.raise_()
+            self.move(max(0, (body.width() - self.width()) // 2), max(0, (body.height() - self.height()) // 2))
+
+        def release(self, *_):
+            """Take the backdrop away. Safe to repeat: QDialog emits `finished` on every accept() or reject()."""
+            if self.backdrop is None: return
+            self.backdrop.deleteLater(); self.backdrop = None
+            if window.sheet_widget is self: window.sheet_widget = None
+            window.pages.setEnabled(True); window.update_hints()
+            QTimer.singleShot(0, window.focus_card)
 
         def pad_options(self):
             """Start: save."""
@@ -655,7 +701,7 @@ def build(state, application, settings=None, pads=None):
 
     `pads` is the gamepad backend (see android_gamepad): None opens SDL3's, False leaves gamepads out."""
     try:
-        from PyQt6.QtCore import QEvent, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
+        from PyQt6.QtCore import QEvent, QEventLoop, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
         from PyQt6.QtGui import (QActionGroup, QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPainterPath,
                                  QPalette, QPixmap)
         from PyQt6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
@@ -742,6 +788,17 @@ def build(state, application, settings=None, pads=None):
         QFrame#notice QLabel, QFrame#progress QLabel, QFrame#drawer QLabel {{ background: transparent; }}
         QLabel#drop {{ background: palette(window); border: 2px dashed palette(highlight); border-radius: 16px;
             font-weight: 600; }}
+        QFrame#sheet {{ background: rgba(0, 0, 0, 150); }}
+        QFrame#sheetpanel {{ background: palette(window); border: 2px solid palette(mid); border-radius: 18px; }}
+        QFrame#sheetpanel QLabel {{ background: transparent; }}
+        QFrame#padrow {{ background: palette(base); border: 3px solid transparent; border-radius: 14px; }}
+        QFrame#padrow:focus {{ background: {tint(accent, .18)}; border-color: palette(highlight); }}
+        QFrame#padrow QLabel {{ background: transparent; }}
+        QFrame#padrow:disabled QLabel {{ color: {colors["muted"].name()}; }}
+        QFrame#padrow[tone="danger"] QLabel#padvalue, QFrame#padrow[tone="danger"] QLabel {{ color: {danger.name()}; }}
+        QLabel#padvalue {{ color: {colors["accent_text"].name()}; font-weight: 600; }}
+        QLabel#padvalue[on="true"] {{ color: {good.name()}; }}
+        QDialog#padsettings {{ background: palette(window); border: 2px solid palette(mid); border-radius: 18px; }}
         QLabel#padkey {{ border: 2px solid {colors["muted"].name()}; border-radius: 14px; min-height: 24px; max-height: 24px;
             min-width: 24px; padding: 0 7px; font-weight: 700; qproperty-alignment: AlignCenter; }}
         QFrame#hints {{ border: none; border-top: 1px solid {tint(colors["text"], .18)}; }}
@@ -750,13 +807,6 @@ def build(state, application, settings=None, pads=None):
         QFrame#card:focus, QFrame#card[selected="true"] {{ background: {tint(accent, .16)}; }}
         QPushButton#play {{ min-height: 46px; border-radius: 12px; }}
         QDialog QPushButton {{ min-height: 44px; }}
-        QFrame#padrow {{ background: palette(base); border: 3px solid transparent; border-radius: 14px; }}
-        QFrame#padrow:focus {{ background: {tint(accent, .18)}; border-color: palette(highlight); }}
-        QFrame#padrow QLabel {{ background: transparent; }}
-        QFrame#padrow:disabled QLabel {{ color: {colors["muted"].name()}; }}
-        QFrame#padrow[tone="danger"] QLabel#padvalue, QFrame#padrow[tone="danger"] QLabel {{ color: {danger.name()}; }}
-        QLabel#padvalue {{ color: {colors["accent_text"].name()}; font-weight: 600; }}
-        QLabel#padvalue[on="true"] {{ color: {good.name()}; }}
         """ if big else "")
 
     ICON = 18
@@ -872,8 +922,65 @@ def build(state, application, settings=None, pads=None):
         painter.end()
         return pixmap
 
+    PadRow = pad_row_class()
+
+    class Sheet(QFrame):
+        """A menu or a question drawn inside the library window: a dimmed backdrop over it and a panel of rows. The gamepad
+        layout uses these in place of popup menus and message boxes, which are windows of their own and take keys and focus
+        differently from the cards the pad is known to steer."""
+        def __init__(self, window, title, entries, message=""):
+            body = window.centralWidget()
+            super().__init__(body)
+            self.window_, self.previous, self.loop, self.closed = window, application.focusWidget(), None, False
+            self.setObjectName("sheet"); self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            outer = QVBoxLayout(self); outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.panel = QFrame(); self.panel.setObjectName("sheetpanel")
+            self.panel.setFixedWidth(min(560, max(320, body.width() - 80)))
+            column = QVBoxLayout(self.panel); column.setContentsMargins(22, 20, 22, 20); column.setSpacing(8)
+            column.addWidget(scaled(QLabel(title), 1.3, True))
+            if message:
+                note = muted(QLabel(message)); note.setWordWrap(True); column.addWidget(note); column.addSpacing(4)
+            self.rows = []
+            for text, run, enabled, tone in entries:
+                row = PadRow(text, None, (lambda d, run=run: self.choose(run) if d > 0 else None), (lambda enabled=enabled: enabled), tone)
+                column.addWidget(row); self.rows.append(row)
+            outer.addWidget(self.panel)
+            self.setGeometry(body.rect()); self.show(); self.raise_()
+            window.pages.setEnabled(False)       # the cards underneath cannot take the focus or a click
+            first = next((row for row in self.rows if row.isEnabled()), None)
+            if first: first.setFocus()
+
+        def choose(self, run):
+            self.close_sheet()
+            if run: run() if self.loop is not None else QTimer.singleShot(0, run)
+
+        def close_sheet(self):
+            if self.closed: return
+            self.closed = True
+            window = self.window_
+            if window.sheet is self: window.sheet = None
+            window.pages.setEnabled(True)
+            self.hide(); self.deleteLater()
+            if self.previous is not None:
+                try: self.previous.setFocus()
+                except RuntimeError: pass
+            window.update_hints()
+            if self.loop is not None: self.loop.quit()
+
+        def keyPressEvent(self, event):
+            if event.key() == Qt.Key.Key_Escape: self.close_sheet()
+            else: super().keyPressEvent(event)
+
+        def mousePressEvent(self, event):
+            if not self.panel.geometry().contains(event.position().toPoint()): self.close_sheet()
+
     def confirm(parent, title, text, action):
         """Ask before something destructive, with the action on the button and no theme clip-art."""
+        host = parent if hasattr(parent, "show_sheet") else getattr(parent, "window_", None)
+        if host is not None and host.big:      # in the gamepad layout the question is a sheet, not a window of its own
+            answer = []
+            host.show_sheet(title, [("Cancel", None, True, ""), (action, lambda: answer.append(True), True, "danger")], text, wait=True)
+            return bool(answer)
         box = QMessageBox(parent); box.setWindowTitle(title); box.setText(text); box.setIcon(QMessageBox.Icon.NoIcon)
         accept = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
         cancel = box.addButton(QMessageBox.StandardButton.Cancel); box.setDefaultButton(cancel); box.setEscapeButton(cancel)
@@ -987,7 +1094,7 @@ def build(state, application, settings=None, pads=None):
             moves = {Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_Right: (1, 0), Qt.Key.Key_Up: (0, -1), Qt.Key.Key_Down: (0, 1)}
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space): self.window.activate_card(self.app)
             elif key in moves: self.window.move_focus(package, *moves[key])
-            elif key == Qt.Key.Key_Menu: self.window.card_menu(self.app, self.mapToGlobal(self.rect().center()))
+            elif key == Qt.Key.Key_Menu: self.window.card_menu(self.app, self.mapToGlobal(self.rect().center()), keyboard=True)
             else: super().keyPressEvent(event)
 
         def contextMenuEvent(self, event):
@@ -1110,6 +1217,7 @@ def build(state, application, settings=None, pads=None):
             # layout: auto follows the input (a pad press switches to the gamepad layout), or big, or desktop.
             self.big, self.pad_layout, self.pad_reader, self.pad_name = False, str(self.settings.value("layout", "auto")), None, ""
             self.card_limits, self.fullscreen_wanted, self.was_active = (MIN_CARD, MAX_CARD), False, set()
+            self.sheet, self.sheet_widget = None, None   # the open Sheet; the settings page while it is drawn in this window
             self.metrics, self.polled, self.install_queue, self.install_batch = None, 0.0, [], None
             self.setWindowTitle("Asgard"); self.setMinimumSize(720, 480); self.setAcceptDrops(True)
             self.setWindowIcon(application.windowIcon()); self.theming = False
@@ -1213,6 +1321,12 @@ def build(state, application, settings=None, pads=None):
             label = reader.label if reader else (lambda button, default: default)
             app = self.app(self.selected)
             rule = card_state(app, self.pending.get(app["package"])) if app else None
+            if self.sheet_active():
+                for (key, text), (name, words, visible) in zip(self.hint_parts, (
+                        (label(android_gamepad.SOUTH, "A"), "Choose", True), ("", "", False), ("", "", False), ("", "", False),
+                        (label(android_gamepad.EAST, "B"), "Back", True), ("", "", False))):
+                    key.setText(name); text.setText(words); key.setVisible(visible); text.setVisible(visible)
+                return
             closing = self.drawer.isVisible() or self.notice.isVisible()
             history = bool(app and (app["session"].get("session_id") or app.get("error")))   # something to look at
             shown = ((label(android_gamepad.SOUTH, "A"), rule["text"] if rule else "Select", True),
@@ -1263,6 +1377,9 @@ def build(state, application, settings=None, pads=None):
             """What only the library does with a pad action; True when it took the action. Menus and dialogs, which
             have their own keys, get all of them."""
             if application.activePopupWidget() or application.activeModalWidget(): return False
+            if self.sheet is not None and action == "back":
+                self.sheet.close_sheet(); return True
+            if self.sheet_active(): return False      # its rows (or the settings page, with its own Start and Y) take the rest
             if self.pad_wake(): return True
             if action == "sort":
                 keys = [key for key, _ in SORTS]
@@ -1286,22 +1403,34 @@ def build(state, application, settings=None, pads=None):
             else: return False
             return True
 
+        def sheet_active(self):
+            return self.sheet is not None or self.sheet_widget is not None
+
+        def show_sheet(self, title, entries, message="", wait=False):
+            """A menu or question inside this window: entries are (text, run, enabled, tone). With `wait` it returns when the
+            sheet closes, running the chosen entry first, like a message box."""
+            if self.sheet is not None: self.sheet.close_sheet()
+            sheet = self.sheet = Sheet(self, title, entries, message)
+            self.update_hints()
+            if wait:
+                # Registered first (self.sheet), so the pad and the hints already know a sheet is open while this waits.
+                sheet.loop = QEventLoop(); sheet.loop.exec()
+            return sheet
+
+        def layout_overlays(self):
+            body = self.centralWidget()
+            if self.sheet is not None: self.sheet.setGeometry(body.rect())
+            if self.sheet_widget is not None: self.sheet_widget.reposition()
+
         def launcher_menu(self):
             """Start: what the toolbar does with a mouse, as a menu a pad can walk."""
-            menu = QMenu(self)
-            menu.addAction("Install APK…").triggered.connect(self.install)
-            menu.addAction("Google account…").triggered.connect(self.google_account)
-            menu.addAction("Sort by " + ("recently played" if self.sort_mode == "name" else "name")).triggered.connect(
-                lambda: self.pad_action("sort"))
-            menu.addSeparator()
-            menu.addAction("Desktop layout" if self.big else "Gamepad layout").triggered.connect(
-                lambda: self.set_big(not self.big, remember=True))
-            menu.addAction("Leave full screen" if self.isFullScreen() else "Full screen").triggered.connect(
-                lambda: self.set_fullscreen(not self.isFullScreen()))
-            menu.addSeparator()
-            menu.addAction("Quit the library").triggered.connect(self.close)
-            size = menu.sizeHint()
-            menu.popup(self.mapToGlobal(QPoint((self.width() - size.width()) // 2, (self.height() - size.height()) // 2)))
+            self.show_sheet("Library", [
+                ("Install APK…", self.install, True, ""), ("Google account…", self.google_account, True, ""),
+                ("Sort by " + ("recently played" if self.sort_mode == "name" else "name"), lambda: self.pad_action("sort"), True, ""),
+                ("Desktop layout" if self.big else "Gamepad layout", lambda: self.set_big(not self.big, remember=True), True, ""),
+                ("Leave full screen" if self.isFullScreen() else "Full screen",
+                 lambda: self.set_fullscreen(not self.isFullScreen()), True, ""),
+                ("Quit the library", self.close, True, "danger")])
 
         def set_fullscreen(self, on):
             self.fullscreen_wanted = on
@@ -1483,6 +1612,7 @@ def build(state, application, settings=None, pads=None):
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
+            self.layout_overlays()
             self.google_button.setText("Google account" if self.width() >= 900 else "")
 
         def changeEvent(self, event):
@@ -1543,8 +1673,21 @@ def build(state, application, settings=None, pads=None):
                 action.triggered.connect(lambda _, command=command: self.remove_app(app, command))
             return menu
 
-        def card_menu(self, app, position):
-            self.build_menu(app).popup(position)
+        def menu_entries(self, app):
+            """The card menu as sheet entries: (text, run, enabled, tone)."""
+            rule = card_state(app, self.pending.get(app["package"])); running = app["session"].get("state") in ACTIVE
+            return [(rule["text"], lambda: self.act(app), rule["enabled"], ""),
+                    ("App settings…", lambda: self.configure(app), True, ""),
+                    ("Last session", lambda: self.open_drawer(app["package"]),
+                     bool(app["session"].get("session_id") or app.get("error")), ""),
+                    ("Clear data…", lambda: self.remove_app(app, "clear-data"), not running, ""),
+                    ("Uninstall…", lambda: self.remove_app(app, "uninstall"), not running, "danger")]
+
+        def card_menu(self, app, position, keyboard=False):
+            # The gamepad layout, and a key (the keyboard's Menu key, the pad's Y), get a sheet inside this window; a popup
+            # menu is a window of its own, and a mouse's context menu stays one.
+            if self.big or keyboard: self.show_sheet(app["label"], self.menu_entries(app))
+            else: self.build_menu(app).popup(position)
 
         def dropped(self, event):
             return [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]

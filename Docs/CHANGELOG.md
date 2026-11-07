@@ -50,6 +50,14 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Added (library gamepad control)
 
+- In the gamepad layout, and from the keyboard's Menu key, the card menu, the Start menu, the Clear data and Uninstall
+  confirmations and the settings page are drawn inside the library window (a dimmed backdrop and large rows, the cards
+  underneath disabled), not as popup menus, message boxes and dialogs. Those are windows of their own, and on the maintainer's
+  desktop the pad did not reach them (the Uninstall confirmation froze). The sheet's wait for an answer registers the sheet first,
+  so the pad and the hint bar know it is open. Tested on Qt's offscreen platform, which has no real window system: the
+  library is the only visible window while any of them is open, and the uninstall runs or is cancelled by the pad. Not tried on a
+  real display.
+
 - Ctrl-C in `asgard launcher` ended it with SIGABRT: the interrupt was raised inside a timer slot, and PyQt aborts on an exception
   in a slot. The library now handles SIGINT by asking its event loop to quit, also when it arrives before the loop has started,
   and shuts SDL3 down when the application quits. `BIFROST_GAMEPAD_DEBUG=1` traces what the library does with each press.

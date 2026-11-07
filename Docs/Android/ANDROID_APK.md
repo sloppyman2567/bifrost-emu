@@ -369,8 +369,14 @@ dialog uses (so saving and validation are the same): Up and Down move between ro
 steps through its options and wraps; A steps on too), A switches an On/Off row, **Y** restores the defaults, **Start** saves and
 **B** cancels, and the rows at the bottom (Clear data, Uninstall, Restore defaults, Save, Cancel) act on A. A row whose setting
 does not apply (Stats layout while the stats are off, Clear data and Uninstall while the app runs) is dimmed and skipped. The page
-leaves out what needs a keyboard, the device-property table; the Android emulator flag stays. The confirmation before Clear data
-or Uninstall is an ordinary dialog: Up and Down move between its buttons and A presses one.
+leaves out what needs a keyboard, the device-property table; the Android emulator flag stays.
+
+In the gamepad layout (and from the keyboard's Menu key) nothing opens as a window of its own: the card menu (Y), the Start menu,
+the confirmation before Clear data or Uninstall, and the settings page are drawn inside the library window, over a dimmed
+backdrop, and the cards underneath cannot take the focus or a click. A popup menu or message box is a separate window that takes
+keys and focus differently from the cards the pad steers; one froze at "Uninstall" for the maintainer. A sheet's rows are the same
+large rows as the settings page: Up and Down move, A chooses, B or a click on the backdrop closes it, and the focus returns to
+where it came from. A mouse's right-click menu and the desktop layout's dialogs are unchanged.
 
 In the desktop layout the dialog is the one a mouse uses, and a pad drives it too: Up and Down walk the controls, A toggles a
 check box or opens a combo box's list (Up, Down and A choose in it), LB and RB switch between General and Compatibility, and the

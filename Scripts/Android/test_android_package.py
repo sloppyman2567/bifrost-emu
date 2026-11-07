@@ -860,6 +860,7 @@ class LauncherLibraryTests(unittest.TestCase):
         patcher = patch.object(android_gamepad, "in_game_mode", return_value=False)
         patcher.start(); self.addCleanup(patcher.stop)
         self.pad = FakePads()
+        self.window.hide()                                   # setUp opened one; these tests use their own
         window = self.open_window(pads=self.pad)
         self.fill(count, window)
         window.activateWindow(); self.settle()
@@ -1109,11 +1110,11 @@ class LauncherLibraryTests(unittest.TestCase):
         self.press(window, pads.WEST)
         self.assertEqual(window.sort_mode, "name")
         self.press(window, pads.START)
-        menu = self.qt.activePopupWidget()
-        self.assertIsNotNone(menu)
-        self.assertIn("Quit the library", [action.text() for action in menu.actions()])
-        self.press(window, pads.EAST)                               # Escape reaches the menu, not the library
+        self.assertIsNotNone(window.sheet)                          # inside the window, not a popup window of its own
         self.assertIsNone(self.qt.activePopupWidget())
+        self.assertIn("Quit the library", [row.name.text() for row in window.sheet.rows])
+        self.press(window, pads.EAST)                               # B closes the sheet, not the library
+        self.assertIsNone(window.sheet)
         self.assertTrue(window.isVisible())
         window.open_drawer(window.order[0]); self.settle()
         self.assertTrue(window.drawer.isVisible())
@@ -1141,6 +1142,150 @@ class LauncherLibraryTests(unittest.TestCase):
         self.assertFalse(window.drawer.isVisible())
         self.assertIn("Nothing has been recorded", window.notice_text.text())
 
+    def visible_windows(self):
+        return [w for w in self.qt.topLevelWidgets() if w.isVisible()]
+
+    def test_the_card_menu_is_a_sheet_inside_the_window_that_the_pad_walks(self):
+        import android_gamepad as pads
+        window = self.pad_window(layout="big")
+        self.press(window, pads.DPAD_DOWN)                          # wakes the library, a card has the focus
+        self.press(window, pads.NORTH)                              # Y
+        self.assertIsNotNone(window.sheet)
+        self.assertEqual([row.name.text() for row in window.sheet.rows],
+                         ["Play", "App settings…", "Last session", "Clear data…", "Uninstall…"])
+        self.assertIsNone(self.qt.activePopupWidget())
+        self.assertEqual(self.visible_windows(), [window])          # nothing opened as a window of its own
+        self.assertFalse(window.pages.isEnabled())                  # the cards underneath cannot take the focus
+        self.assertEqual(self.row(), "Play")
+        self.assertFalse(window.sheet.rows[2].isEnabled())          # nothing recorded: Last session is dimmed
+        self.press(window, pads.DPAD_DOWN)
+        self.assertEqual(self.row(), "App settings…")
+        opened = []
+        with patch.object(window, "configure", lambda app: opened.append(app["package"])):
+            self.press(window, pads.SOUTH)
+        self.assertEqual(opened, [window.order[0]])
+        self.assertIsNone(window.sheet)
+        self.assertTrue(window.pages.isEnabled())
+        self.assertEqual(self.qt.focusWidget().objectName(), "card")  # the focus went back to the card
+        self.press(window, pads.NORTH); self.assertIsNotNone(window.sheet)
+        self.press(window, pads.EAST)                               # B closes it without choosing
+        self.assertIsNone(window.sheet); self.assertTrue(window.isVisible())
+
+    def test_a_sheet_follows_the_window_and_a_click_outside_it_closes_it(self):
+        import android_gamepad as pads
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtTest import QTest
+        window = self.pad_window(layout="big")
+        self.press(window, pads.DPAD_DOWN); self.press(window, pads.NORTH)
+        window.resize(900, 600); self.settle()
+        self.assertEqual(window.sheet.geometry(), window.centralWidget().rect())
+        QTest.mouseClick(window.sheet, Qt.MouseButton.LeftButton, pos=QPoint(4, 4))   # on the backdrop, outside the panel
+        self.assertIsNone(window.sheet)
+
+    def test_the_menu_key_opens_a_sheet_but_a_mouse_context_menu_stays_a_menu_on_the_desktop_layout(self):
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtTest import QTest
+        window = self.pad_window(layout="desktop")
+        card = window.cards[window.order[0]]
+        card.setFocus(); self.settle()
+        QTest.keyClick(card, Qt.Key.Key_Menu); self.settle()
+        self.assertIsNotNone(window.sheet)                          # the keyboard's Menu key, as the pad's Y, gets a sheet
+        window.sheet.close_sheet(); self.settle()
+        window.card_menu(card.app, QPoint(50, 50)); self.settle()   # what a right click does
+        self.assertIsNone(window.sheet)
+        self.assertIsNotNone(self.qt.activePopupWidget())
+        self.qt.activePopupWidget().close()
+
+    def test_a_confirmation_in_the_gamepad_layout_is_a_sheet_and_answers_like_a_message_box(self):
+        import android_gamepad as pads
+        from PyQt6.QtCore import QTimer
+        window = self.pad_window(layout="big")
+        app = window.apps[0]
+        seen = []
+        started = []
+        def choose(*buttons):
+            def run():
+                seen.append((window.sheet is not None, self.visible_windows() == [window], self.row()))
+                for button in buttons: self.press(window, button)
+            QTimer.singleShot(50, run)
+        with patch.object(window, "command", lambda arguments, done=None, env=None: started.append(arguments)):
+            choose(pads.DPAD_DOWN, pads.SOUTH)                      # Cancel has the focus first: Down to the action, A
+            self.assertTrue(window.remove_app(app, "uninstall"))
+            self.assertEqual(seen, [(True, True, "Cancel")])
+            self.assertEqual(started, [["uninstall", "--yes", app["package"]]])
+            started.clear()
+            choose(pads.SOUTH)                                      # A on Cancel
+            self.assertFalse(window.remove_app(app, "uninstall"))
+            self.assertEqual(started, [])
+            choose(pads.EAST)                                       # B
+            self.assertFalse(window.remove_app(app, "clear-data"))
+        self.assertIsNone(window.sheet)
+
+    def test_uninstalling_from_the_gamepad_settings_page_asks_above_it_and_then_does_it(self):
+        """Uninstall used to open a message box window the pad could not reach, and the page froze behind it."""
+        import android_gamepad as pads
+        from PyQt6.QtCore import QTimer
+        window = self.pad_window(layout="big")
+        window.apps[0]["launcher"] = "native_activity"
+        app = window.apps[0]
+        dialog = self.settings_dialog(window)
+        for _ in range(len(dialog.pad_rows)):                       # down to the Uninstall row
+            if self.row() == "Uninstall…": break
+            self.press(window, pads.DPAD_DOWN)
+        self.assertEqual(self.row(), "Uninstall…")
+        started, seen = [], []
+        def answer():
+            body = window.centralWidget()
+            seen.append((window.sheet is not None, self.visible_windows() == [window],
+                         body.children().index(window.sheet) > body.children().index(dialog),     # drawn above the page
+                         self.row()))
+            self.press(window, pads.DPAD_DOWN); self.press(window, pads.SOUTH)                   # Cancel has the focus: Down, A
+        QTimer.singleShot(50, answer)
+        with patch.object(window, "command", lambda arguments, done=None, env=None: started.append(arguments)):
+            self.press(window, pads.SOUTH)                          # A on Uninstall: blocks here until the sheet is answered
+        self.assertEqual(seen, [(True, True, True, "Cancel")])
+        self.assertEqual(started, [["uninstall", "--yes", app["package"]]])
+        self.assertIsNone(window.sheet)
+        self.assertFalse(dialog.isVisible())                        # the page closed itself after the uninstall started
+        self.assertIsNone(window.sheet_widget)
+        self.assertTrue(window.pages.isEnabled())
+
+    def test_cancelling_the_uninstall_leaves_the_gamepad_settings_page_open_and_usable(self):
+        import android_gamepad as pads
+        from PyQt6.QtCore import QTimer
+        window = self.pad_window(layout="big")
+        dialog = self.settings_dialog(window)
+        for _ in range(len(dialog.pad_rows)):
+            if self.row() == "Uninstall…": break
+            self.press(window, pads.DPAD_DOWN)
+        started = []
+        QTimer.singleShot(50, lambda: self.press(window, pads.EAST))                              # B cancels the question
+        with patch.object(window, "command", lambda arguments, done=None, env=None: started.append(arguments)):
+            self.press(window, pads.SOUTH)
+        self.assertEqual(started, [])
+        self.assertTrue(dialog.isVisible())
+        self.assertIsNone(window.sheet)
+        self.assertEqual(self.row(), "Uninstall…")                  # the focus is back on the row it came from
+        self.press(window, pads.DPAD_UP)
+        self.assertNotEqual(self.row(), "Uninstall…")               # and the page still answers the pad
+
+    def test_the_gamepad_settings_page_is_inside_the_window_not_a_window_of_its_own(self):
+        import android_gamepad as pads
+        window = self.pad_window(layout="big")
+        dialog = self.settings_dialog(window)
+        self.assertFalse(dialog.isWindow())
+        self.assertIs(dialog.parentWidget(), window.centralWidget())
+        self.assertIs(window.sheet_widget, dialog)
+        self.assertEqual(self.visible_windows(), [window])
+        self.assertFalse(window.pages.isEnabled())
+        self.assertTrue(window.centralWidget().rect().contains(dialog.geometry()))
+        window.resize(1000, 640); self.settle()                     # still in the middle after the window changes
+        self.assertEqual(dialog.geometry().center().x(), window.centralWidget().rect().center().x())
+        self.press(window, pads.EAST)
+        self.assertIsNone(window.sheet_widget)
+        self.assertTrue(window.pages.isEnabled())
+        self.assertFalse(dialog.isVisible())
+
     def test_a_menu_is_walked_with_the_dpad_and_chosen_with_a(self):
         import android_gamepad as pads
         window = self.pad_window()
@@ -1149,10 +1294,11 @@ class LauncherLibraryTests(unittest.TestCase):
         with patch.object(window, "install", lambda: chosen.append("install")), \
                 patch.object(window, "google_account", lambda: chosen.append("google")):
             self.press(window, pads.START)
-            self.press(window, pads.DPAD_DOWN); self.press(window, pads.DPAD_DOWN)   # Install, then Google account
+            self.assertEqual(self.row(), "Install APK…")            # the first row has the focus
+            self.press(window, pads.DPAD_DOWN)                      # Google account
             self.press(window, pads.SOUTH)
         self.assertEqual(chosen, ["google"])
-        self.assertIsNone(self.qt.activePopupWidget())
+        self.assertIsNone(window.sheet)
 
     def test_a_pad_press_does_nothing_while_no_library_window_is_active(self):
         import android_gamepad as pads
@@ -1217,7 +1363,9 @@ class LauncherLibraryTests(unittest.TestCase):
         """An app's settings dialog, open and modal, with the pad's first poll made against it."""
         dialog = self.launcher.settings_dialog(window, window.apps[0], settings)
         self.dialogs.append(dialog); dialog.open(); self.settle()
-        self.assertIs(self.qt.activeModalWidget(), dialog)
+        # In the gamepad layout the page is drawn inside the library window; otherwise it is a modal window of its own.
+        if window.big: self.assertIs(window.sheet_widget, dialog)
+        else: self.assertIs(self.qt.activeModalWidget(), dialog)
         window.pad_tick()
         return dialog
 
