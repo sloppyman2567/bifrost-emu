@@ -202,6 +202,22 @@ press, or a stick or trigger past half way, so a resting stick's drift does not)
 it again, and a pointer the app hid through `set_cursor` stays hidden. The guest side is in
 [gamepads](ANDROID_RUNTIME.md#gamepads-2026-11-06).
 
+### Visibility (2026-11-07)
+
+A plugin may report `BIFROST_WINDOW_VISIBILITY` (no payload, no new callback): `action` 1 when the window became visible
+and 0 when it stopped being (minimised, hidden or fully covered, whatever the host calls it). It is sent when the state
+changes, so a window that opens visible sends nothing; any other action is `-EPROTO`. Old plugins keep loading and never
+send it.
+
+The SDL3 backend reads the window's flags (`SDL_WINDOW_HIDDEN`, `_MINIMIZED`, `_OCCLUDED`) after each shown, hidden,
+minimised, restored, occluded or exposed event for its own window and reports the result when it differs from the last
+one. Reading the flags, not the event, keeps a burst such as hide-then-show consistent. X11 sends minimised and restored;
+xdg-shell never tells a client about minimising, so on Wayland the signal is a compositor suspending the window (SDL's
+occluded, then exposed), which a compositor may or may not do when a window is minimised or on another workspace
+([SDL's Wayland driver](https://github.com/libsdl-org/SDL/blob/main/src/video/wayland/SDL_waylandwindow.c): "we do not get
+minimize events from xdg-shell"; `XDG_TOPLEVEL_STATE_SUSPENDED` becomes `SDL_EVENT_WINDOW_OCCLUDED`). The guest side is in
+[window visibility](ANDROID_RUNTIME.md#window-visibility-2026-11-07).
+
 ## Validation and reproduction
 
 Completed checks:

@@ -62,6 +62,28 @@ int main() {
   CHECK(first->poll(event) == 1 && event.x == 20 && event.y == 40 && event.action == 0);
   setenv("BIFROST_TEST_SDL_EVENT", "other-window", 1);
   CHECK(first->poll(event) == 0 && event.type == 0);
+  // Visibility is reported once per change, from the window's flags and not the event that prompted the look:
+  // X11 minimises and restores, Wayland has no minimise and a compositor suspends the window (occluded, exposed).
+  {
+    auto state = [&](const char *flags, const char *mode, int expected) {
+      setenv("BIFROST_TEST_SDL_WINDOW_FLAGS", flags, 1);
+      setenv("BIFROST_TEST_SDL_EVENT", mode, 1);
+      const int result = first->poll(event);
+      if (expected < 0) return result == 0 && event.type == 0;
+      return result == 1 && event.type == BIFROST_WINDOW_VISIBILITY && event.action == expected;
+    };
+    CHECK(state("", "window:exposed", -1));              // already visible: nothing to report
+    CHECK(state("minimized", "window:minimized", 0));
+    CHECK(state("minimized", "window:minimized", -1));   // the same state is not reported twice
+    CHECK(state("", "window:restored", 1));
+    CHECK(state("occluded", "window:occluded", 0));
+    CHECK(state("", "window:exposed", 1));
+    CHECK(state("hidden", "window:hidden", 0));
+    CHECK(state("", "window:shown", 1));
+    CHECK(state("minimized", "window-other:minimized", -1));  // another window's state is not this one's
+    CHECK(state("", "window:restored", -1));
+    unsetenv("BIFROST_TEST_SDL_WINDOW_FLAGS");
+  }
   // The left button is still down from above: a wheel step is not a pinch then.
   setenv("BIFROST_TEST_SDL_EVENT", "gesture-wheel-held:1", 1);
   CHECK(first->poll(event) == 0 && event.type == 0);

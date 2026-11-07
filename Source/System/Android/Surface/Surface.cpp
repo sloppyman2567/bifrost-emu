@@ -835,7 +835,9 @@ int AndroidSurfaceManager::queue_get_event(uint64_t queue,
                                            uint64_t* out_event, bool managed) {
     if (!is_queue(queue)) return -9;   // -EBADF
     std::lock_guard<std::mutex> lk(mu_);
-    while (!managed && !pending_.empty() && pending_.front().type == EVENT_TYPE_DEVICE) pending_.pop_front();
+    while (!managed && !pending_.empty() &&
+           (pending_.front().type == EVENT_TYPE_DEVICE || pending_.front().type == EVENT_TYPE_VISIBILITY))
+        pending_.pop_front();
     if (pending_.empty()) return -11;  // -EWOULDBLOCK
     InputEvent ev = pending_.front();
     pending_.pop_front();
@@ -1097,6 +1099,15 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
         return;
     }
     InputEvent ev{};
+    if (e.type == BIFROST_WINDOW_VISIBILITY) {
+        ev.type = EVENT_TYPE_VISIBILITY;
+        ev.action = e.action;
+        ev.down_time_ns = ev.event_time_ns = e.time_ms * 1000000;
+        std::lock_guard<std::mutex> lk(mu_);
+        if (pending_.size() >= 256) pending_.pop_front();
+        pending_.push_back(ev);
+        return;
+    }
     if (e.type == BIFROST_WINDOW_KEY) {
         ev.type = IE_TYPE_KEY;
         ev.source = SRC_KEYBOARD;

@@ -67,6 +67,9 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                         data[12] = manager.key_event_time(event);
                         data[13] = length;
                         std::memcpy(&data[14], text, length);
+                    } else if (data[0] == static_cast<uint64_t>(frost::AndroidSurfaceManager::EVENT_TYPE_VISIBILITY)) {
+                        // The window's visibility: word 4 = 1 visible, 0 not.
+                        data[4] = manager.motion_action(event);
                     } else if (data[0] == static_cast<uint64_t>(frost::AndroidSurfaceManager::EVENT_TYPE_DEVICE)) {
                         // A gamepad connected (word 4 = 1) or removed (0), its device id in
                         // word 6: USB vendor and product in 7 and 8, controller number in 9,

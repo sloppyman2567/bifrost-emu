@@ -105,6 +105,27 @@ int main(int argc, char **argv) {
     CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) == 0);
     CHECK(manager.motion_event_time(input) == 1234000000);
     CHECK(manager.motion_down_time(input) == 1234000000);
+    manager.queue_finish_event(manager.input_queue_handle(), input);
+    // That mode repeats its pointer event on every poll: drain what the pump queued.
+    while (manager.queue_get_event(manager.input_queue_handle(), &input) == 0)
+      manager.queue_finish_event(manager.input_queue_handle(), input);
+    // A window that stops and starts being visible reaches the managed launcher in order, with the host's time and
+    // the new state in the action; a native activity's queue never sees it.
+    mode("poll-visibility");
+    manager.pump_host_events(nullptr);
+    mode("");
+    for (const int32_t visible : {0, 1}) {
+      CHECK(manager.queue_get_event(manager.input_queue_handle(), &input, true) == 0);
+      CHECK(manager.event_type(input) == frost::AndroidSurfaceManager::EVENT_TYPE_VISIBILITY);
+      CHECK(manager.motion_action(input) == visible);
+      CHECK(manager.motion_event_time(input) == (2000 + visible) * 1000000);
+      manager.queue_finish_event(manager.input_queue_handle(), input);
+    }
+    CHECK(manager.queue_get_event(manager.input_queue_handle(), &input, true) != 0);
+    mode("poll-visibility");
+    manager.pump_host_events(nullptr);
+    mode("");
+    CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) != 0);
     CHECK(!manager.install_window_backend(frost::make_sdl_android_window_backend()));
     // Destructor must close the owned window while the DSO is resident.
   }
@@ -113,7 +134,8 @@ int main(int argc, char **argv) {
   auto polling = frost::load_android_window_backend(argv[1], error);
   CHECK(polling);
   frost::AndroidWindowEvent event{};
-  for (const char *invalid : {"poll-invalid", "poll-positive", "poll-fail", "poll-nan", "poll-key-invalid"}) {
+  for (const char *invalid : {"poll-invalid", "poll-positive", "poll-fail", "poll-nan", "poll-key-invalid",
+                              "poll-visibility-invalid"}) {
     mode(invalid);
     CHECK(polling->poll(event) < 0 && event.type == 0);
   }

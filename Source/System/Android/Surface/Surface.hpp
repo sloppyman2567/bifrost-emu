@@ -358,6 +358,9 @@ public:
     // Private: a gamepad connected or removed, for the managed launcher's InputManager. Native activities
     // (AInputQueue) never see it; they learn of devices through the Java InputManager like on Android.
     static constexpr int32_t EVENT_TYPE_DEVICE = 0x101;
+    // Private: the host window became visible (action 1) or stopped being visible (0: minimised, hidden or covered).
+    // Only the managed launcher takes it, to stop and resume the app's Activities.
+    static constexpr int32_t EVENT_TYPE_VISIBILITY = 0x102;
 
  private:
     AndroidSurfaceManager();

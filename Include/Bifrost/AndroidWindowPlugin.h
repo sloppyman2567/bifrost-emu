@@ -22,7 +22,11 @@ enum bifrost_android_window_event_type {
     BIFROST_WINDOW_TEXT = 5,
     /* Only from a plugin with poll_gamepad: one gamepad payload is ready for
      * poll_gamepad, in order with the surrounding events. */
-    BIFROST_WINDOW_GAMEPAD = 6
+    BIFROST_WINDOW_GAMEPAD = 6,
+    /* The window became visible (action 1) or stopped being visible (action 0:
+     * minimised, hidden or fully covered, whatever the host reports). Sent only
+     * when the state changes, so a window that opens visible sends nothing. */
+    BIFROST_WINDOW_VISIBILITY = 7
 };
 enum bifrost_android_window_text_kind {
     BIFROST_WINDOW_TEXT_COMMIT = 1,   /* text the editor keeps (replaces any composition) */

@@ -864,6 +864,7 @@ public:
     backdrop_.reset();
     clear_binding();
     mouse_fingers_ = 0;
+    visible_ = true;
     gestures_ = {};
     pending_.clear();
     for (Pad &pad : pads_) sdl_.CloseGamepad(pad.handle);
@@ -1138,6 +1139,20 @@ private:
         out.type = BIFROST_WINDOW_RESIZE;
         out.width = fixed_w_ ? fixed_w_ : e.window.data1;
         out.height = fixed_w_ ? fixed_h_ : e.window.data2; return 1;
+      }
+      // Shown, hidden, minimised, restored, covered or uncovered: report the window's state now, once per change.
+      // X11 sends minimised and restored; Wayland has no minimise event, a compositor suspends the window instead
+      // (SDL's occluded, then exposed). Reading the flags here, not the event, keeps a burst consistent.
+      if ((e.type == SDL_EVENT_WINDOW_SHOWN || e.type == SDL_EVENT_WINDOW_HIDDEN ||
+           e.type == SDL_EVENT_WINDOW_MINIMIZED || e.type == SDL_EVENT_WINDOW_RESTORED ||
+           e.type == SDL_EVENT_WINDOW_OCCLUDED || e.type == SDL_EVENT_WINDOW_EXPOSED) && e.window.windowID == id) {
+        const bool visible = !(sdl_.GetWindowFlags(window_) &
+                               (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED));
+        if (visible == visible_) continue;
+        visible_ = visible;
+        out.type = BIFROST_WINDOW_VISIBILITY;
+        out.action = visible ? 1 : 0;
+        return 1;
       }
       if ((e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_TEXT_EDITING) && text_active_) {
         const bool commit = e.type == SDL_EVENT_TEXT_INPUT;
@@ -1624,6 +1639,7 @@ private:
   // AndroidSurfaceManager assigns the Android pointer ids.
   static constexpr int32_t kMouseFinger = 0, kMouseSecondFinger = 1, kFirstTouchFinger = 2;
   uint32_t mouse_fingers_ = 0; // bit per mouse finger reported down
+  bool visible_ = true;        // the last BIFROST_WINDOW_VISIBILITY state reported
   // Wheel, pinch and middle-drag gestures: their synthetic fingers wait in pending_ for the next polls.
   WheelGestures gestures_;
   std::deque<AndroidWindowEvent> pending_;

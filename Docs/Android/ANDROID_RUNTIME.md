@@ -2350,6 +2350,24 @@ place in the window, scale, the drawable's class, intrinsic size and bounds, the
 (`Configuration.densityDpi` and `DisplayMetrics.densityDpi`) and screen width/smallest width in dp its Resources see,
 then `APP_VIEW_DUMP_END <count>`, and removes the file. Create the file with `touch` while the app runs.
 
+### Window visibility (2026-11-07)
+
+When the host window stops being visible ([plugin `BIFROST_WINDOW_VISIBILITY`](ANDROID_WINDOW_PLUGINS.md#visibility-2026-11-07))
+the managed app is backgrounded as Android does when its task leaves the screen: the Activities are stopped
+(`onPause`, `onStop`), and they are resumed when it is visible again. The surface manager queues a private event
+(`EVENT_TYPE_VISIBILITY`, `0x102`, state in word 4 of op 3) that only the managed launcher takes; native activities never
+see it. `FrameworkActivities.windowVisible` runs the same stop and resume as the library's request
+(`taskVisible`), but does not ask the window to hide or show itself again: a window the desktop minimised stays in the
+taskbar, and the library's own hide and show come back as the same state and change nothing. The state goes to the
+supervisor (`task_state`) only when there is one, so an app run directly (`bifrost-emu app.apk`) also stops and resumes.
+While the task is in the background the launcher drops input events and keeps reading device and visibility events.
+
+Checked: the surface manager's queue and the plugin's validation (`make test-android-window-plugin`), the SDL3 backend's
+state changes on X11-style and Wayland-style sequences against a fake SDL (`make test-android-sdl-backend`), and the Java
+building with the managed launcher. Not checked: a real minimise on a real compositor, a game's CPU use while stopped, and
+whether KWin and other Wayland compositors suspend a minimised window at all. If one does not, a minimised game on it keeps
+running as before.
+
 ### Window shape (2026-10-28)
 
 Roblox opened as a near-square 1440x1384 window and stayed that way. Its splash Activity declares no orientation, so

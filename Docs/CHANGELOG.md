@@ -183,6 +183,18 @@ there (guided provisioning, update/reinstall) remain in progress.
   the real launcher offscreen with a slow poll in flight and interrupts it (it fails on the old code with SIGABRT).
   An installed Asgard (`/usr/local/share/bifrost/asgard`) keeps the crash until it is reinstalled.
 
+### Added (minimised windows stop the app)
+
+- A game window that the desktop minimises, hides or covers now stops the app's Activities (`onPause`, `onStop`) and
+  resumes them when it is visible again, as Android does for a task that leaves the screen. Before, a minimised game ran at
+  full speed. The window plugin has a new `BIFROST_WINDOW_VISIBILITY` event (no new callback; existing plugins are
+  unaffected). The SDL3 backend reads the window's flags after each shown, hidden, minimised, restored, occluded or exposed
+  event and reports changes; X11 sends minimised and restored, while Wayland sends no minimise event and relies on the
+  compositor suspending the window, which not every compositor does for a minimised one. A window the desktop minimised is
+  not hidden again by the app, and an app run without the library also stops and resumes. Checked with the plugin and
+  surface-manager unit test, the SDL3 backend test against a fake SDL, and the managed launcher building; not on a real
+  compositor or in a game.
+
 ### Added (realm idle timeout)
 
 - An Asgard realm with no app attached ends after 10 minutes (`ASGARD_REALM_IDLE_SECONDS`, `0` to keep it): the broker stops its

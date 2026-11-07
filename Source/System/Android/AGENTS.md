@@ -71,6 +71,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   from 1), drawn through the locked `show_popup`: translucent, never an input target, at most four updates a second,
   and asked once of a backend that returns `-ENOTSUP`. Test with the recording backend in
   `Tests/Unit/android_window_backend_host.cpp`.
+- Window visibility (`BIFROST_WINDOW_VISIBILITY`, private queue event `0x102`) is taken only by the managed launcher and
+  filtered from native queues. The backend reports a change of the window's flags, never one event per SDL event, and
+  `FrameworkActivities.windowVisible` stops or resumes the Activities without asking the window to hide or show again
+  (a minimised window must stay in the taskbar). It must work with no supervisor: `task_state` is reported only when
+  `ASGARD_PROCESS_TOKEN` is set, because an exception in the launcher's loop ends the app.
 - `media_session` (`FrameworkMediaSessions`) has no sessions and accepts only
   `dispatchMediaKeyEvent`; WebView forwards unhandled keys to it.
 - App processes register their code and profile paths with ART

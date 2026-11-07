@@ -13,7 +13,16 @@ bool SDL_SetWindowTitle(SDL_Window *window, const char *title) {
 bool SDL_GetWindowPosition(SDL_Window *window, int *x, int *y) {
     (void)window; *x = 0; *y = 0; return true;
 }
-SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) { (void)window; return SDL_WINDOW_INPUT_FOCUS; }
+/* BIFROST_TEST_SDL_WINDOW_FLAGS lists the state flags the window has: minimized, hidden, occluded. */
+SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) {
+    (void)window;
+    const char *state = getenv("BIFROST_TEST_SDL_WINDOW_FLAGS");
+    SDL_WindowFlags flags = SDL_WINDOW_INPUT_FOCUS;
+    if (state && strstr(state, "minimized")) flags |= SDL_WINDOW_MINIMIZED;
+    if (state && strstr(state, "hidden")) flags |= SDL_WINDOW_HIDDEN;
+    if (state && strstr(state, "occluded")) flags |= SDL_WINDOW_OCCLUDED;
+    return flags;
+}
 SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window *window) { return window ? 1 : 0; }
 bool SDL_GetDisplayBounds(SDL_DisplayID display, SDL_Rect *bounds) {
     if (display != 1 || !bounds) return false;
@@ -240,6 +249,22 @@ bool SDL_PollEvent(SDL_Event *event) {
     memset(event, 0, sizeof(*event));
     event->common.timestamp = 123000000;
     if (!strncmp(mode, "pad:", 4)) return pad_event(mode, event);
+    /* window:NAME is a state event of the window itself, window-other:NAME of another one. */
+    if (!strncmp(mode, "window:", 7) || !strncmp(mode, "window-other:", 13)) {
+        static const struct { const char *name; SDL_EventType type; } names[] = {
+            {"shown", SDL_EVENT_WINDOW_SHOWN}, {"hidden", SDL_EVENT_WINDOW_HIDDEN},
+            {"minimized", SDL_EVENT_WINDOW_MINIMIZED}, {"restored", SDL_EVENT_WINDOW_RESTORED},
+            {"occluded", SDL_EVENT_WINDOW_OCCLUDED}, {"exposed", SDL_EVENT_WINDOW_EXPOSED},
+        };
+        const bool other = mode[6] == '-';
+        const char *name = strchr(mode, ':') + 1;
+        for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+            if (strcmp(name, names[i].name)) continue;
+            event->type = names[i].type; event->window.windowID = other ? 99 : 1;
+            return true;
+        }
+        return false;
+    }
     if (!strncmp(mode, "gesture-", 8)) {
         if (!strcmp(mode, delivered_mode)) return false;
         snprintf(delivered_mode, sizeof(delivered_mode), "%s", mode);

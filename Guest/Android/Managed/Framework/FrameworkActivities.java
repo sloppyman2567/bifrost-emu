@@ -98,10 +98,22 @@ final class FrameworkActivities {
         FrameworkProcessRuntime.host(new org.json.JSONObject().put("operation", "home"));
     }
 
+    // The host window was minimised, hidden, covered or shown by the desktop: stop or resume like the library's
+    // request does, without asking the window to change again.
+    void windowVisible(boolean visible) throws Exception {
+        taskVisible(visible, false);
+    }
+
     private void taskVisible(boolean visible) throws Exception {
+        taskVisible(visible, true);
+    }
+
+    private void taskVisible(boolean visible, boolean changeWindow) throws Exception {
         if (background == !visible) return;
-        int error = ManagedLauncher.setTaskVisible(visible);
-        if (error != 0) throw new IllegalStateException("host task visibility: " + error);
+        if (changeWindow) {
+            int error = ManagedLauncher.setTaskVisible(visible);
+            if (error != 0) throw new IllegalStateException("host task visibility: " + error);
+        }
         background = !visible;
         if (background) {
             List<Record> records;
@@ -114,8 +126,10 @@ final class FrameworkActivities {
                 resume(record.activity);
             for (Record each : revealed) setVisible(each.activity, true);
         }
-        FrameworkProcessRuntime.host(new org.json.JSONObject().put("operation", "task_state")
-                .put("background", background));
+        // A window's own minimise or restore also reaches an app run without the library's supervisor.
+        if (System.getenv("ASGARD_PROCESS_TOKEN") != null)
+            FrameworkProcessRuntime.host(new org.json.JSONObject().put("operation", "task_state")
+                    .put("background", background));
         System.out.println(background ? "APP_TASK_BACKGROUND" : "APP_TASK_FOREGROUND");
     }
 

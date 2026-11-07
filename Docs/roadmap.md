@@ -111,10 +111,12 @@ app exit leaves the library and the other apps usable.
 - Move WebView's first start off the critical path: the UI thread waits in `startBrowserProcessesSync` the first time an ad
   opens a WebView (53 episodes, median 1.7 s). Creating a hidden WebView during the loading screen is untried; the stall
   log shows whether the median drops.
-- Tell the app about its window. The window plugin has six events (close, resize, key, pointer, text, gamepad); minimise,
-  hide, occlude and focus loss are traced and not delivered, so a minimised game keeps running at full speed. Task
-  visibility exists in the guest, but only the library's supervisor drives it. Add an append-only visibility and focus
-  event, pause and stop the Activities as Android does, and measure idle CPU before and after.
+- Tell the app about its window. The window plugin has seven events (close, resize, key, pointer, text, gamepad,
+  visibility). Done in the tree, unreleased: a window the desktop minimises, hides or covers stops the app's Activities
+  and resumes them when it is visible again ([visibility](Android/ANDROID_RUNTIME.md#window-visibility-2026-11-07));
+  checked against a fake SDL, not on a real compositor. Open: whether KWin and other Wayland compositors suspend a
+  minimised window (without that, a minimised game on Wayland keeps running), focus loss (traced, not delivered, and
+  Android keeps an unfocused app resumed), and idle CPU of a stopped game before and after.
 - Game windows have no fullscreen toggle and no remembered size or position: `--fullscreen` belongs to the library, which
   remembers only its own size and sort order. Decide whether each is a per-app setting.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested
