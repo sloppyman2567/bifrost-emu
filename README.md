@@ -67,7 +67,7 @@ that every feature has an automated test or a recorded capture.
 | [Azur Lane 9.3.7](Docs/Apps/azur-lane.md) | Android, Unity/IL2CPP | User-reported playable online through a finished battle, with audio and pause/resume (2026-11-01). Home screen captured at 60 FPS. |
 | [Arknights 37.7.41](Docs/Apps/arknights.md) | Android, Unity/IL2CPP | User-reported playable: microG sign-in and a battle at about 60 FPS (2026-11-03). |
 | The Battle Cats 15.6.1 | Android | User-reported playable (2026-10-29). |
-| [Umamusume: Pretty Derby](Docs/Apps/umamusume.md) | Android, Unity | Global 1.35.2: user-reported playable, title, home and Career story captured at 30 FPS (2026-11-01). JP 2.32.0: blocked by the game's device integrity check when it connects. |
+| [Umamusume: Pretty Derby](Docs/Apps/umamusume.md) | Android, Unity | Global 1.35.2: user-reported playable, title, home and Career story captured at 30 FPS, the game's own frame cap (2026-11-01). JP 2.32.0: blocked by the game's device integrity check when it connects. |
 | Subway Surfers 3.70.3 | Android, Unity/IL2CPP | User-reported playable, ads work (2026-10-29). |
 | Geometry Dash Lite 2.2.148 | Android, Cocos2d-x | User-reported playable (2026-10-29); ads only somewhat stable. |
 | Zenless Zone Zero 3.3.0 | Android, Unity/IL2CPP, Vulkan | User-confirmed gameplay in the city (2026-11-06), with very low-resolution textures and heavy lag (roughly 4 to 30 FPS on the overlay; the long loading screen is 0 to 2 FPS). Maximizing the window freezes its progress bar. |

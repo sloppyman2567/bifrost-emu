@@ -105,7 +105,7 @@
       "tested_version": "1.35.2",
       "status": "playable",
       "checked": "2026-11-01",
-      "evidence": "The maintainer reports it is playable. Screenshots show the title, home and Career story screens at 30 FPS; no race or training capture.",
+      "evidence": "The maintainer reports it is playable. Screenshots show the title, home and Career story screens at 30 FPS, the game's own frame cap; no race or training capture.",
       "page": "Docs/Apps/umamusume.md"
     },
     "com.kiloo.subwaysurf": {

@@ -24,9 +24,9 @@ Read from the screenshots below, in one session with no other app running. These
 | 11:15:20 | Career story | 30.0 | 15401 | 4445 MB | 11% / 9% |
 | 11:15:26 | Career story | 30.0 | 15598 | 4445 MB | 12% / 11% |
 
-- **Frame rate:** the story scenes averaged about 30 FPS (1,473 frames in 49 seconds). With the machine this idle, 30 FPS
-  looks like a cap rather than a limit of the emulator; where the cap comes from was not checked. The 0.0 FPS reading is
-  one moment during "Connecting", so it does not show how long the pause lasted.
+- **Frame rate:** the story scenes averaged about 30 FPS (1,473 frames in 49 seconds). That is the game's own frame cap,
+  not a limit of the emulator (maintainer's report, 2026-11-07); the machine was mostly idle at the time. The 0.0 FPS
+  reading is one moment during "Connecting", so it does not show how long the pause lasted.
 - **Memory:** the title bar counts the whole session by PSS ([window stats](../window-stats.md)). It reached about 4.3 GB
   by the home screen and then stayed near 4.4 GB, growing about 5 MB across the story readings.
 
@@ -60,4 +60,3 @@ These still images do not measure frame pacing or long-session stability.
 
 - Capture a race, training and audio evidence; none of the screenshots shows them.
 - Measure memory over a long session.
-- Find where the 30 FPS cap comes from.

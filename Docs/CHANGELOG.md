@@ -223,6 +223,8 @@ there (guided provisioning, update/reinstall) remain in progress.
 - Hungry Shark Evolution 14.5.0 and Hungry Shark World 8.2.6 are playable on the maintainer's report of stable gameplay
   (2026-11-06), with no capture; both only ran bounded sessions before. The badge reads 15 playable of 19. Hungry Shark
   World's Play Games sign-in still does not complete.
+- Umamusume's 30 FPS is recorded as the game's own frame cap (maintainer's report, 2026-11-07), not an open question:
+  its page, the README table and `compatibility.json` say so, and finding the cap's source is no longer remaining work.
 
 ### Apps get their own network security config (2026-11-05)
 
