@@ -2340,6 +2340,22 @@ black at the side. Observed with a probe of the real backend on this KWin/Waylan
 `BIFROST_TEST_SDL_WORK_AREA` clamps new windows. Roblox's menu surface now matches its window (2460x1384); a game
 in landscape was not run.
 
+#### The Window setting and resizing (2026-11-07)
+
+Most games declare no `resizeableActivity`, which Android reads as resizable, so a host window of another shape reaches them as
+a new display size and some draw wrongly (stretched, cropped, black). The per-app `window_mode` setting (see
+[the settings table](ANDROID_APK.md)) chooses: `resizable`, the default, passes the window's shape on, and `keep` (host
+variable `BIFROST_ANDROID_WINDOW_MODE=keep`, passed to the guest by `android_managed.window_mode_environment`) makes the
+managed launcher take the `fixWindow` path above for any app, not only one that declares `resizeableActivity=false`. Not run
+against a real game here.
+
+Known limit: on a host resize the launcher recomputes the Configuration (`FrameworkDisplay`: `orientation` from the window's
+width and height, `screenWidthDp`, `screenHeightDp`, `smallestScreenWidthDp`), updates the resources and calls each Activity's
+`onConfigurationChanged`. It never relaunches an Activity, as Android does when the change is not in the Activity's
+`android:configChanges`. An app that relies on that relaunch to inflate its other layout (YouTube, narrowed to a tall window,
+stays in its landscape layout) therefore does not change shape. Activity relaunch (`onSaveInstanceState`, destroy, a new instance
+from `onCreate(savedInstanceState)`) is not implemented in `FrameworkActivities`.
+
 ### Native-density play windows (2026-10-12)
 
 Play mode opens the host window at 1280x720 desktop units (720x1280 only for an

@@ -1383,7 +1383,11 @@ public final class ManagedLauncher {
             // resizeableActivity=false: Android keeps such an app's window at its size and scales it
             // (size compatibility mode) instead of resizing it, so a maximized host window must not
             // grow the app's surface (the game would keep drawing its first, smaller scene in a corner).
-            if (ActivityInfo.class.getField("resizeMode").getInt(activity) == 0 /* RESIZE_MODE_UNRESIZEABLE */) {
+            // The per-app Window setting "Keep the app's shape" makes any app such an app: a game that declares nothing
+            // (Android reads that as resizable) can draw wrongly in a window of another shape. The default stays
+            // resizable, so an app such as YouTube is told the window's shape.
+            boolean keepShape = "keep".equals(System.getenv("BIFROST_ANDROID_WINDOW_MODE"));
+            if (keepShape || ActivityInfo.class.getField("resizeMode").getInt(activity) == 0 /* RESIZE_MODE_UNRESIZEABLE */) {
                 error = fixWindow(width, height);
                 fixedWindow = error == 0;
                 fixedWindowSize = fixedWindow;

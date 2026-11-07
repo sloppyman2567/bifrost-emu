@@ -15,7 +15,8 @@ import time
 
 import android_gamepad
 from android_package import PACKAGE, ROOT
-from android_settings import BACK_KEYS, ENTER_KEYS, JIT_DISK_CACHE_SIZES, JIT_DISK_CACHES, NETWORKS, STATS_MODES, load as load_settings, save as save_settings
+from android_settings import (BACK_KEYS, ENTER_KEYS, JIT_DISK_CACHE_SIZES, JIT_DISK_CACHES, NETWORKS, STATS_MODES, WINDOW_MODES,
+                              load as load_settings, save as save_settings)
 from android_sessions import session_log
 
 ACTIVE = ("preparing", "starting", "running", "stopping")
@@ -454,6 +455,13 @@ def settings_dialog(window, app, settings):
             for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)
             self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
             form.addRow("Network", self.network)
+            self.window_mode = QComboBox()
+            for name, text in WINDOW_MODES: self.window_mode.addItem(text, name)
+            self.window_mode.setCurrentIndex(max(0, self.window_mode.findData(settings.get("window_mode", "resizable"))))
+            self.window_mode.setToolTip("Resizable: the window's size becomes the app's, for an app that adapts to it. Keep the "
+                                        "app's shape: the app gets a fixed panel of the shape it opened at, scaled to the window, "
+                                        "for a game that draws wrongly in a window of another shape")
+            form.addRow("Window", self.window_mode)
             import android_desktop
             self.menu_default = android_desktop.default_on(window.state)
             self.menu = QCheckBox("Show a launcher for this app in the desktop's application menu")
@@ -530,7 +538,7 @@ def settings_dialog(window, app, settings):
             buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                             self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
-                            self.network.currentData(), self.menu.isChecked())
+                            self.network.currentData(), self.window_mode.currentData(), self.menu.isChecked())
             # The gamepad page's rows draw their own focus; the desktop widgets get a ring.
             if getattr(window, "big", False): self.pad_page(intro, tabs, buttons, managed)
             else: android_gamepad.focus_ring(self)
@@ -559,7 +567,8 @@ def settings_dialog(window, app, settings):
             rows = [toggle("Show FPS, load and temperatures", self.stats), choice("Stats layout", self.stats_mode),
                     choice("Back key", self.back), choice("Enter key", self.enter),
                     choice("JIT disk cache", self.disk_cache), choice("JIT disk cache size", self.disk_cache_mb),
-                    choice("Network", self.network), toggle("Show in the desktop's application menu", self.menu)]
+                    choice("Network", self.network), choice("Window", self.window_mode),
+                    toggle("Show in the desktop's application menu", self.menu)]
             if managed: rows.append(choice("Android emulator flag", self.emulator))
             clear, uninstall = self.removals
             rows += [action("Clear data…", clear.click, clear.isEnabled),
@@ -606,17 +615,18 @@ def settings_dialog(window, app, settings):
             self.settings = {}
             self.stats.setChecked(False); self.stats_mode.setCurrentIndex(self.stats_mode.findData("normal"))
             self.back.setCurrentIndex(0); self.enter.setCurrentIndex(0); self.disk_cache.setCurrentIndex(0)
-            self.disk_cache_mb.setCurrentIndex(0); self.network.setCurrentIndex(0); self.menu.setChecked(self.menu_default)
-            self.initial = (False, "normal", "escape", "enter", "default", "default", "auto", self.menu_default)
+            self.disk_cache_mb.setCurrentIndex(0); self.network.setCurrentIndex(0); self.window_mode.setCurrentIndex(0)
+            self.menu.setChecked(self.menu_default)
+            self.initial = (False, "normal", "escape", "enter", "default", "default", "auto", "resizable", self.menu_default)
             self.emulator.setCurrentIndex(0); self.properties.setRowCount(0); self.error.hide()
 
         def result_settings(self):
             result = {k: v for k, v in self.settings.items() if not android_settings.property_name(k)}
             for key, value, initial in zip(("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb",
-                     "network", "menu_entry"),
+                     "network", "window_mode", "menu_entry"),
                     (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                      self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
-                     self.network.currentData(), self.menu.isChecked()), self.initial):
+                     self.network.currentData(), self.window_mode.currentData(), self.menu.isChecked()), self.initial):
                 if value != initial or key in result: result[key] = value
             value = self.emulator.currentData()
             if value is not None: result["property.ro.kernel.qemu"] = value
@@ -1191,7 +1201,7 @@ def build(state, application, settings=None, pads=None):
             self.hints = QFrame(); self.hints.setObjectName("hints")
             row = QHBoxLayout(self.hints); row.setContentsMargins(4, 10, 4, 0); row.setSpacing(8)
             self.hint_parts = []
-            for _ in range(5):
+            for _ in range(6):
                 key, text = QLabel(), muted(QLabel()); key.setObjectName("padkey")
                 self.hint_parts.append((key, text)); row.addWidget(key); row.addWidget(text); row.addSpacing(16)
             row.addStretch(); self.hints.hide()
@@ -1204,8 +1214,10 @@ def build(state, application, settings=None, pads=None):
             app = self.app(self.selected)
             rule = card_state(app, self.pending.get(app["package"])) if app else None
             closing = self.drawer.isVisible() or self.notice.isVisible()
+            history = bool(app and (app["session"].get("session_id") or app.get("error")))   # something to look at
             shown = ((label(android_gamepad.SOUTH, "A"), rule["text"] if rule else "Select", True),
                      (label(android_gamepad.WEST, "X"), "Sort", True), (label(android_gamepad.NORTH, "Y"), "Menu", True),
+                     ("Select", "Last session", history and not self.drawer.isVisible()),
                      (label(android_gamepad.EAST, "B"), "Close", closing), ("Start", "Library menu", True))
             for (key, text), (name, words, visible) in zip(self.hint_parts, shown):
                 key.setText(name); text.setText(words); key.setVisible(visible); text.setVisible(visible)
@@ -1257,6 +1269,11 @@ def build(state, application, settings=None, pads=None):
                 self.set_sort(keys[(keys.index(self.sort_mode) + 1) % len(keys)])
                 self.show_notice("Sorted by " + dict(SORTS)[self.sort_mode].lower(), timeout=1500)
             elif action == "options": self.launcher_menu()
+            elif action == "details":
+                # The pad's Select: what the card's red line or history button opens with a mouse.
+                app = self.app(self.selected)
+                if app and (app["session"].get("session_id") or app.get("error")): self.open_drawer(app["package"])
+                else: self.show_notice("Nothing has been recorded for this app yet.", timeout=2500)
             elif action == "back":
                 if self.drawer.isVisible(): self.close_drawer()
                 elif self.notice.isVisible(): self.notice.hide()

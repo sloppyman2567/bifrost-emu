@@ -275,6 +275,7 @@ mean the game process has already launched.
 | `enter_key` | `enter`, `dpad_center`, `button_a` | what Enter sends outside a text field, for games with their own cursor (`BIFROST_ANDROID_ENTER_KEY`); `button_a` reports a gamepad source |
 | `jit_disk_cache` | `default`, `on`, `off`, `verify` | experimental reuse of JIT translations across launches (`BIFROST_JIT_DISK_CACHE`); `default` follows `[jit] disk_cache` |
 | `jit_disk_cache_mb` | `default`, `128`, `256`, `512`, `1024`, `2048`, `4096` | on-disk budget of that cache for this app (`BIFROST_JIT_DISK_CACHE_MB`); `default` follows `[jit] disk_cache_mb`, normally 512 |
+| `window_mode` | `resizable`, `keep` | `resizable` (the default) lets the host window resize the app's display; `keep` gives the app a fixed panel of the shape it opened at, scaled to the window and pillarboxed, as Android does for `resizeableActivity=false` (`BIFROST_ANDROID_WINDOW_MODE=keep`): for a game that draws wrongly in a window of another shape. See [Window shape](ANDROID_RUNTIME.md#window-shape-2026-10-28) |
 | `menu_entry` | `on`, `off` | whether the app gets a launcher in the desktop's application menu (see [Menu entries](#menu-entries-2026-11-04)); unset follows `asgard desktop --default` (off at first: nothing is added to the menu until you ask) |
 | `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_OFFLINE=1`: the app's sockets cannot reach anything beyond loopback (`ENETUNREACH`), names do not resolve, and Android reports no network |
 
@@ -358,7 +359,7 @@ library reads pads through SDL3's gamepad API with ctypes (the library the Andro
 system, else the copy `make bootstrap` builds into `Tools/sdl3` or `PREFIX/lib/bifrost`; without SDL3 the library works as before).
 The pad becomes key presses on the focused widget, so cards, menus and dialogs all work: the d-pad or left stick moves, **A**
 plays, stops or presses (Space on buttons, check boxes and combo boxes), **B** closes the menu, dialog or details drawer (it never
-quits the library), **Y** opens the card's menu, **X** changes the sort order, **LB/RB** jump a page of cards (or change tab in a
+quits the library), **Y** opens the card's menu, **Select/View** opens the focused app's last session (what a mouse opens with the card's history button or its red line; the hint bar shows it only when there is something to look at), **X** changes the sort order, **LB/RB** jump a page of cards (or change tab in a
 dialog) and **Start** opens a library menu with Install APK, Google account, sort, the layout, full screen and Quit. In a dialog
 Up and Down walk the focus order. Face buttons are named as the pad names them (A or Cross), by position: the bottom one confirms.
 

@@ -445,6 +445,25 @@ class LauncherArgumentTests(unittest.TestCase):
             run("--window-stats")
             self.assertEqual(calls[-1], ["--window-stats"])
 
+    def test_the_window_setting_keeps_the_apps_shape_by_default_and_reaches_the_guest(self):
+        import android_managed
+        from android_settings import KEYS, launch_changes, parse
+        self.assertIn("window_mode", KEYS)
+        self.assertEqual([parse("window_mode", x) for x in ("resizable", "keep")], ["resizable", "keep"])
+        for bad in ("", "Keep", "freeform", "scaled"):
+            with self.assertRaises(ValueError):
+                parse("window_mode", bad)
+        self.assertEqual(launch_changes({}), ([], {}))                                  # unset: nothing added, the default is resizable
+        self.assertEqual(launch_changes({"window_mode": "keep"}), ([], {"BIFROST_ANDROID_WINDOW_MODE": "keep"}))
+        self.assertEqual(launch_changes({"window_mode": "resizable"})[1], {"BIFROST_ANDROID_WINDOW_MODE": "resizable"})
+        self.assertEqual(android_managed.window_mode_environment({}), {})
+        self.assertEqual(android_managed.window_mode_environment({"BIFROST_ANDROID_WINDOW_MODE": "keep"}),
+                         {"BIFROST_ANDROID_WINDOW_MODE": "keep"})
+        with self.assertRaises(ValueError):
+            android_managed.window_mode_environment({"BIFROST_ANDROID_WINDOW_MODE": "stretch"})
+        launcher = (ROOT / "Guest/Android/Managed/ManagedLauncher.java").read_text()
+        self.assertIn('"keep".equals(System.getenv("BIFROST_ANDROID_WINDOW_MODE"))', launcher)       # the guest reads the same name
+
     def test_stats_layout_is_validated_and_only_applies_while_stats_are_on(self):
         import json
         import sys
@@ -713,6 +732,20 @@ class LauncherProfileTests(unittest.TestCase):
         self.assertFalse(dialog.menu.isChecked())
         dialog.reset_profile()
         self.assertTrue(dialog.menu.isChecked())  # back to the state's default (on, just above)
+
+    def test_the_window_choice_defaults_to_resizable_and_saves_only_a_change(self):
+        dialog = self.edit({})
+        self.assertEqual(dialog.window_mode.currentData(), "resizable")
+        self.assertIn("default", dialog.window_mode.currentText())
+        self.assertNotIn("window_mode", dialog.result_settings())                       # leaving the default saves nothing
+        dialog.window_mode.setCurrentIndex(dialog.window_mode.findData("keep"))
+        self.assertEqual(dialog.result_settings()["window_mode"], "keep")
+        dialog = self.edit({"window_mode": "keep"})
+        self.assertEqual(dialog.window_mode.currentData(), "keep")
+        self.assertEqual(dialog.result_settings()["window_mode"], "keep")               # a saved choice stays saved
+        dialog.reset_profile()
+        self.assertEqual(dialog.window_mode.currentData(), "resizable")
+        self.assertNotIn("window_mode", dialog.result_settings())
 
     def test_profile_round_trip_uses_the_cli_format_and_cancel_does_not_save(self):
         from android_settings import save, load, properties
@@ -1088,6 +1121,26 @@ class LauncherLibraryTests(unittest.TestCase):
         self.assertFalse(window.drawer.isVisible())
         self.assertTrue(window.isVisible())                         # B never quits the library
 
+    def test_select_opens_the_focused_apps_last_session_and_the_hint_says_so(self):
+        import android_gamepad as pads
+        window = self.pad_window(layout="big")
+        window.apps[0] = dict(window.apps[0], session={"state": "failed", "session_id": "abc"})
+        window.render(); self.settle()
+        shown = lambda: [(key.text(), text.text()) for key, text in window.hint_parts if key.isVisible()]
+        self.press(window, pads.DPAD_DOWN)                                   # focus the first card
+        self.assertIn(("Select", "Last session"), shown())                   # this app has something to look at
+        self.press(window, pads.BACK)
+        self.assertTrue(window.drawer.isVisible())
+        self.assertEqual(window.drawer_package, window.order[0])
+        self.assertNotIn(("Select", "Last session"), shown())                # already showing it
+        self.press(window, pads.EAST)
+        self.assertFalse(window.drawer.isVisible())
+        self.press(window, pads.DPAD_RIGHT)                                  # an app that has never run: nothing to show
+        self.assertNotIn(("Select", "Last session"), shown())
+        self.press(window, pads.BACK)
+        self.assertFalse(window.drawer.isVisible())
+        self.assertIn("Nothing has been recorded", window.notice_text.text())
+
     def test_a_menu_is_walked_with_the_dpad_and_chosen_with_a(self):
         import android_gamepad as pads
         window = self.pad_window()
@@ -1275,6 +1328,21 @@ class LauncherLibraryTests(unittest.TestCase):
         self.press(window, pads.SOUTH)
         self.press(window, pads.EAST)                                                    # B cancels
         self.assertEqual(other.result(), QDialog.DialogCode.Rejected)
+
+    def test_the_gamepad_settings_page_has_the_window_row_and_changes_it_with_the_dpad(self):
+        import android_gamepad as pads
+        window = self.pad_window(layout="big")
+        dialog = self.settings_dialog(window)
+        names = [row.name.text() for row in dialog.pad_rows]
+        self.assertIn("Window", names)
+        for _ in range(len(names)):
+            if self.row() == "Window": break
+            self.press(window, pads.DPAD_DOWN)
+        self.assertEqual(self.row(), "Window")
+        self.assertEqual(dialog.window_mode.currentData(), "resizable")
+        self.press(window, pads.DPAD_RIGHT)
+        self.assertEqual(dialog.window_mode.currentData(), "keep")
+        self.assertEqual(dialog.result_settings()["window_mode"], "keep")
 
     def test_the_gamepad_settings_page_ends_in_actions_and_names_the_buttons(self):
         import android_gamepad as pads

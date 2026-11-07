@@ -353,6 +353,14 @@ def host_network_environment():
             "BIFROST_ANDROID_NETWORK_INTERFACE": interface or "wlan0"}
 
 
+def window_mode_environment(environ):
+    """The guest variable for the app's Window setting; unset leaves the default, which keeps the app's shape."""
+    mode = environ.get("BIFROST_ANDROID_WINDOW_MODE")
+    if mode not in (None, "keep", "resizable"):
+        raise ValueError("BIFROST_ANDROID_WINDOW_MODE must be keep or resizable")
+    return {"BIFROST_ANDROID_WINDOW_MODE": mode} if mode else {}
+
+
 def set_soname(path, soname):
     """Rewrite DT_SONAME in place; the new name must not be longer."""
     data = bytearray(path.read_bytes())
@@ -1008,7 +1016,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                                       ROOT / "build/android-framework/rootfs",
                                       ROOT / "build/android-art/rootfs",
                                       ROOT / "build/android-adapters", dex, media_mask)
-        guest_env = dict(guest_env, **network.result())
+        guest_env = dict(guest_env, **network.result(), **window_mode_environment(os.environ))
         guest_env["PATH"] = "/system/bin:/apex/com.android.runtime/bin"
         session_preload = {"LD_PRELOAD": "/system/lib64/" + BINDER_ATTACH}
     # A system app (microG) has no installed base.apk to compile; ART's JIT runs it.

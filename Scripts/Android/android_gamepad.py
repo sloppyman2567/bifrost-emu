@@ -26,7 +26,7 @@ DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT = 11, 12, 13, 14
 AXIS_LEFTX, AXIS_LEFTY = 0, 1
 LABELS = {1: "A", 2: "B", 3: "X", 4: "Y", 5: "Cross", 6: "Circle", 7: "Square", 8: "Triangle"}
 
-BUTTON_ACTIONS = {SOUTH: "accept", EAST: "back", WEST: "sort", NORTH: "menu", START: "options",
+BUTTON_ACTIONS = {SOUTH: "accept", EAST: "back", WEST: "sort", NORTH: "menu", START: "options", BACK: "details",
                   LEFT_SHOULDER: "page_up", RIGHT_SHOULDER: "page_down",
                   DPAD_UP: "up", DPAD_DOWN: "down", DPAD_LEFT: "left", DPAD_RIGHT: "right"}
 REPEATING = ("up", "down", "left", "right", "page_up", "page_down")

@@ -36,7 +36,23 @@ there (guided provisioning, update/reinstall) remain in progress.
   Using a pad hides the pointer until the mouse moves, as Steam does. The maintainer plays Subway Surfers with the 2026
   Steam Controller (2026-11-06). Rumble, back paddles and remapping are not implemented.
 
+### Added (per-app Window setting)
+
+- A per-app `window_mode` setting: `resizable` (the default, today's behaviour) or `keep`, which gives the app a fixed panel of
+  the shape it opened at, scaled to the host window and pillarboxed, as Android does for `resizeableActivity=false` (the path
+  Roblox and Battle Cats already take). It is for games that declare nothing and draw wrongly in a window of another shape.
+  Set it in the settings dialog (the gamepad page has a Window row), with `asgard config APP window_mode keep`, or with
+  `BIFROST_ANDROID_WINDOW_MODE`. The managed launcher reads the variable the launch passes into the guest. The launcher builds
+  and the settings tests pass; no game was run with it.
+- Known, not fixed: resizing the window does not make an app such as YouTube switch to its portrait layout. The launcher passes
+  the new orientation and size to `onConfigurationChanged` but never relaunches an Activity, which Android does for an app that
+  does not declare it handles the change. Written up in [the runtime notes](Android/ANDROID_RUNTIME.md#the-window-setting-and-resizing-2026-11-07).
+
 ### Added (library gamepad control)
+
+- The pad's Select/View button opens the focused app's last session (the details drawer with what the log shows), which
+  could only be reached with a mouse or touch in the gamepad layout, where the card's history button is hidden; the hint
+  bar offers it when the app has a recorded session or an error, and a notice says when it has none.
 
 - The desktop library (`asgard launcher`) can be driven with a gamepad. It reads pads through SDL3's gamepad API
   (`android_gamepad.py`, ctypes; Qt 6 has none) and turns them into key presses on the focused widget, so cards, menus and

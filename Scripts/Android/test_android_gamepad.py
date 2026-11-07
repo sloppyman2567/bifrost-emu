@@ -52,8 +52,11 @@ class PadReaderTests(unittest.TestCase):
             self.backend.pad({button})
             self.assertEqual(self.reader.poll(), [action])
             self.backend.pad(); self.reader.poll()
-        self.backend.pad({pads.GUIDE, pads.BACK})
-        self.assertEqual(self.reader.poll(), [])   # Steam's and the pad's own buttons are not ours
+        self.backend.pad({pads.GUIDE})
+        self.assertEqual(self.reader.poll(), [])   # Steam's own button is not ours
+        self.backend.pad(); self.reader.poll()
+        self.backend.pad({pads.BACK})
+        self.assertEqual(self.reader.poll(), ["details"])   # Select opens the last session's details
 
     def test_a_held_direction_repeats_after_a_delay_and_a_held_button_does_not(self):
         self.backend.pad({pads.DPAD_DOWN, pads.SOUTH})
