@@ -133,6 +133,7 @@ decoder or syscall dispatch table can reasonably remain large.
 | `Tools/CodeGen/` | Table specifications, generators and consistency checks |
 | `Tools/Fetch/` | Toolchain/header fetchers |
 | `Tools/Reference/` | Independent instruction and reference implementation utilities |
+| `Tools/Site/` | The project page: `build-site.py` builds it from the README, `compatibility.json` and the version (`.github/workflows/pages.yml` deploys it) |
 | `Tests/Unit/`, `Tests/Apps/`, `Tests/Asm/` | Guest fixtures, application probes and assembly tests |
 | `Tests/Host/` | Native host checks and Java framework probe sources |
 | `ThirdParty/` | Vendored headers, registries and dependencies |

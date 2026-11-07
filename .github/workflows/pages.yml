@@ -1,0 +1,51 @@
+name: Pages
+
+# The project page (Tools/Site/build-site.py) is rebuilt from the README, the compatibility
+# records and the version whenever one of them changes. Pages must be enabled with
+# "GitHub Actions" as its source; GOOGLE_SITE_VERIFICATION is an optional repository variable
+# holding a Search Console HTML-tag token.
+on:
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - Scripts/Android/compatibility.json
+      - Include/Bifrost/Version.hpp
+      - Docs/Images/**
+      - Tools/Site/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the page
+        env:
+          GOOGLE_SITE_VERIFICATION: ${{ vars.GOOGLE_SITE_VERIFICATION }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil
+          python3 Tools/Site/build-site.py
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: build/site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

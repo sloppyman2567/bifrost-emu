@@ -34,6 +34,10 @@ such as "misc", "common" or "core". The current version lives in
 
 - Start with the concrete failure, trace the first wrong value and compare
   with a trusted reference. Prefer primary sources and reproducible commands.
+- The project page (`Tools/Site/build-site.py`, deployed by `.github/workflows/pages.yml`) is generated from the
+  README's highlights, "What runs" summary, table and screenshots, `compatibility.json` and `Version.hpp`; edit those,
+  never the page. Its build fails when a playable or blocked app in `compatibility.json` has no matching README row
+  or a different status, so record a compatibility change in both.
 - Downloads in the setup tools read through `Tools/Android/download_progress.py` (progress on a terminal, sparse
   lines in a log) so a long fetch never looks hung; a new fetcher uses it too.
 - Preserve existing uncommitted work. Keep changes scoped; work on the current

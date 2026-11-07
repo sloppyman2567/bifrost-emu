@@ -36,6 +36,16 @@ there (guided provisioning, update/reinstall) remain in progress.
   Using a pad hides the pointer until the mouse moves, as Steam does. The maintainer plays Subway Surfers with the 2026
   Steam Controller (2026-11-06). Rumble, back paddles and remapping are not implemented.
 
+### Added (project page)
+
+- A minimal project page for GitHub Pages, `Tools/Site/build-site.py`, generated from the README (highlights, the
+  "What runs" summary and table, screenshots), `compatibility.json` and the version, and deployed by
+  `.github/workflows/pages.yml` when one of them changes. It carries a description, canonical URL, link-preview tags,
+  SoftwareApplication structured data and a sitemap, has light and dark themes and no JavaScript, and serves the
+  screenshots as WebP (about 0.4 MB instead of 8.5 MB). The build refuses to publish when a playable or blocked app in
+  `compatibility.json` disagrees with the README table. A Search Console token can be supplied through the
+  `GOOGLE_SITE_VERIFICATION` repository variable. Pages has to be enabled with GitHub Actions as its source.
+
 ### Fixed (system calls)
 
 - `ioctl(fd, FIOCLEX/FIONCLEX, NULL)` returned EFAULT: the terminal helper rejected every NULL argument before
