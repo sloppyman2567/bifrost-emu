@@ -8,7 +8,7 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [2.0.0-beta.1] — app keystore, Vulkan for Android apps, WebView fences and a faster JIT (2026-11-06)
+## [2.0.0-beta.1] — app keystore, Vulkan for Android apps, WebView fences and a faster JIT (2026-11-03)
 
 **2.0.0-beta.1** collects the changes made after 2.0.0-alpha.3 (2026-11-01): an Android Keystore so apps such as PolyTrack
 can save, real GPU fences for WebView, cheaper guest memory barriers, and a series of Tier-1 JIT changes (shared cold paths,

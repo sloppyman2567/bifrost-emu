@@ -120,6 +120,9 @@ progress table and the known blockers; everything that changed is in the
   fewer platform errors every game logged, and graphics-thunk fixes for pointer
   and string-array arguments.
 - **Window stats:** an in-window overlay (`--window-stats`) for Android apps.
+- **Android apps (beta.1):** a Vulkan device through a guest HAL over the host
+  thunk, an app Keystore (PolyTrack saves) and real GPU fences for WebView; Zenless
+  Zone Zero and Doki Doki Literature Club are recorded as playable.
 - **Open:** measured frame times, WebView interaction,
   and sustained play. A passing build or a launch is not gameplay.
 
