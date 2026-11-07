@@ -51,6 +51,10 @@ such as "misc", "common" or "core". The current version lives in
   destroys them (`Library.stop_jobs`, on close and on `aboutToQuit`): a QProcess destroyed while running calls its slot from its
   destructor, and the exception that raises aborts the process. In the gamepad layout menus, confirmations and the settings page are drawn inside the
   library window (`Sheet`, the embedded settings page), never as popup windows or message boxes the pad does not reach.
+- `asgard setup` and the library's **Set up…** offer run the steps named in `Scripts/Android/android_provisioning.py`. Keep
+  that list in step with the Makefile's `android-provision` and `install-asgard.py`'s `REQUIRED`/`MANIFESTS`
+  (`test_android_provisioning.py` fails when they drift). An installed copy is never set up from its own files: it is
+  reinstalled.
 - Setup scripts find host tools through `Scripts/Setup/find-host-tools.sh` (sbin, JDK and LLVM directories, `~/.local/bin`,
   `BIFROST_TOOL_DIRS`), never a bare `command -v`: `debugfs` is off an ordinary Debian user's `PATH`. Hosts without SDL3 build
   it with `Tools/Fetch/fetch-sdl3.py` into `Tools/sdl3`.

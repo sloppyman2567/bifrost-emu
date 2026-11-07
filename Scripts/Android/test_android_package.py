@@ -576,10 +576,13 @@ class LauncherArgumentTests(unittest.TestCase):
         self.assertEqual(parser_help.returncode, 0)
         self.assertEqual(run().stdout, parser_help.stdout)
         self.assertEqual(run("help").stdout, parser_help.stdout)
-        # The commands asgard lists are the ones android_package.py implements, plus the realm it runs itself.
-        implemented = {"realm"}
+        # The commands asgard lists are the ones android_package.py implements, plus the realm and the setup it runs itself.
+        implemented = {"realm", "setup"}
+        setup_help = run("setup", "-h")
+        self.assertEqual(setup_help.returncode, 0)
+        self.assertIn("usage: asgard setup", setup_help.stdout)
         for name in asgard.COMMANDS:
-            if name != "realm":
+            if name not in ("realm", "setup"):
                 result = subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"), name, "-h"],
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, (name, result.stderr))
@@ -1003,6 +1006,20 @@ class LauncherLibraryTests(unittest.TestCase):
         self.assertIsNone(explain({"state": "exited", "exit_code": 0}))
         self.assertIsNone(explain({"state": "exited", "exit_code": 0}, ads))
         self.assertEqual(explain({"state": "failed", "exit_code": 1}, licence)[0], "Play licence check failed")
+        # The host window did not open: what the card says and what to try depend on the line that said so.
+        for lines, advice in ((["[android] window backend sdl3-egl open failed (-38)"], "libsdl3"),
+                              (["[android] SDL3 video initialization failed: No available video device",
+                                "[android] window backend sdl3-egl open failed (-5)"], "no desktop"),
+                              (["[android] SDL3 window creation failed: Couldn't create window"], "log has the reason")):
+            found = self.launcher.log_findings(lines)
+            self.assertEqual([item["key"] for item in found], ["window"], lines)
+            line, text = explain({"state": "failed", "exit_code": 1}, found)
+            self.assertEqual(line, "Couldn't open a window")
+            self.assertIn(advice.lower(), text.lower())
+        self.assertIn("fetch-sdl3.py", explain({"state": "failed", "exit_code": 1},
+                      self.launcher.log_findings(["[android] window backend sdl3-egl open failed (-38)"]))[1])
+        # A real crash after an unrelated window message does not hide: the window comes first only when it is the cause.
+        self.assertEqual(self.launcher.log_findings(["[android] window backend sdl3-egl resize failed (-5)"]), [])
         failed_check = ("11-04 11:08:44.061 669522 669522 E LicenseClient: Error while checking license: "
                         "com.pairip.licensecheck.LicenseCheckException: Not allowed to bind with the licensing service")
         retry = "11-04 11:08:38.044 669522 669522 D LicenseClient: Retry #1. License check failed with error 'Not allowed'"
@@ -1692,6 +1709,136 @@ class LauncherLibraryTests(unittest.TestCase):
         started.clear()
         self.window.install_files([files[0]]); started[-1][1](0, "Installed org.single 2.0\n")
         self.assertEqual(self.window.announce, "org.single")
+
+    SETUP_REPORT = {"missing": [{"id": "runtime", "title": "Android runtime", "why": "the Android C library", "command": "a"},
+                                {"id": "tools", "title": "APK tools", "why": "aapt2 and apksigner", "command": "b"}],
+                    "can_set_up": True, "installed": False}
+
+    def answer_box(self, button):
+        """Click `button` of the next message box the library asks; yields the boxes asked, to check what they said."""
+        import contextlib
+        from PyQt6.QtWidgets import QMessageBox
+        @contextlib.contextmanager
+        def answering():
+            shown = []
+            def exec_(box):
+                shown.append(box)
+                next(b for b in box.buttons() if b.text().replace("&", "") == button).click()
+                return 0
+            with patch.object(QMessageBox, "exec", exec_):
+                yield shown
+        return answering()
+
+    def stub_commands(self, report=None):
+        """Replace the window's command runner: records each call, answers the setup check with `report`, and holds the rest."""
+        import json
+        self.settle(lambda: not self.window.refreshing)            # a listing the window started is still a real command
+        calls = []
+        def command(args, done=None, env=None, progress=None):
+            calls.append((args, done, progress))
+            if args[:2] == ["setup", "--check"]: done(0, json.dumps(report if report is not None else self.SETUP_REPORT))
+        self.window.command = command
+        return calls
+
+    def test_the_library_offers_setup_when_asgard_lacks_something(self):
+        window, calls = self.window, self.stub_commands()
+        window.check_setup()
+        self.assertTrue(window.notice.isVisible() and window.notice_action.isVisible())
+        self.assertEqual(window.notice_action.text(), "Set up…")
+        self.assertIn("Android runtime, APK tools", window.notice_text.text())
+        self.assertEqual(calls[0][0], ["setup", "--check", "--json"])
+        # An install would fail for it, so none is started: the offer is shown again.
+        package = self.root / "game.apk"; package.write_bytes(b"x")
+        window.notice.hide(); window.install_files([str(package)])
+        self.assertEqual([c[0][0] for c in calls], ["setup"])
+        self.assertTrue(window.notice.isVisible() and window.install_batch is None)
+        # The gamepad menu has the same way in.
+        window.launcher_menu()
+        self.assertEqual([row.name.text() for row in window.sheet.rows][:2], ["Set up Asgard…", "Install APK…"])
+
+    def test_an_installed_copy_that_is_incomplete_is_told_to_reinstall_not_to_set_up(self):
+        window = self.window
+        self.stub_commands(dict(self.SETUP_REPORT, can_set_up=False, installed=True))
+        window.check_setup()
+        self.assertTrue(window.notice.isVisible())
+        self.assertFalse(window.notice_action.isVisible())
+        self.assertIn("make install-asgard", window.notice_text.text())
+        window.launcher_menu()
+        self.assertNotIn("Set up Asgard…", [row.name.text() for row in window.sheet.rows])
+
+    def test_a_tree_with_nothing_missing_shows_nothing_and_clears_an_old_offer(self):
+        window = self.window
+        self.stub_commands()
+        window.check_setup()
+        self.assertTrue(window.notice.isVisible())
+        self.stub_commands({"missing": [], "can_set_up": False, "installed": False})
+        window.check_setup()
+        self.assertFalse(window.notice.isVisible())
+        self.assertIsNone(window.setup_status)
+        window.show_notice("Something else", error=True)                      # a notice that is not the offer stays
+        window.check_setup()
+        self.assertTrue(window.notice.isVisible())
+
+    def test_setup_runs_after_a_question_and_shows_each_step(self):
+        window, calls = self.window, self.stub_commands()
+        window.check_setup(); calls.clear()
+        with self.answer_box("Cancel") as asked:
+            window.setup_asgard()
+        self.assertEqual(asked[0].windowTitle(), "Set up Asgard")
+        self.assertIn("about a gigabyte", asked[0].text())
+        self.assertIn("• Android runtime: the Android C library", asked[0].text())
+        self.assertIn("• APK tools: aapt2 and apksigner", asked[0].text())
+        self.assertEqual(calls, [])                                             # declined: nothing runs
+        with self.answer_box("Set up"):
+            window.setup_asgard()
+        with self.answer_box("Set up") as again:
+            window.setup_asgard()                                               # a second press while it runs does nothing
+        self.assertEqual(again, [])
+        self.assertEqual([c[0] for c in calls], [["setup"]])
+        _, done, progress = calls[0]
+        self.assertTrue(window.progress.isVisible())
+        progress("== APK tools: aapt2 and apksigner")
+        self.assertIn("APK tools", window.progress_text.text())
+        progress("downloading aapt2: 40%")
+        self.assertIn("APK tools", window.progress_text.text()); self.assertIn("40%", window.progress_text.text())
+        done(0, "Asgard is set up.\n")
+        self.assertFalse(window.progress.isVisible())
+        self.assertIn("Asgard is set up", window.notice_text.text())
+        self.assertIsNone(window.setup_status)
+        self.assertEqual(calls[-1][0], ["list", "--json"])                      # the library is read again
+
+    def test_a_failed_setup_says_why_and_offers_another_try(self):
+        window, calls = self.window, self.stub_commands()
+        window.check_setup(); calls.clear()
+        with self.answer_box("Set up"):
+            window.setup_asgard()
+        calls[0][1](1, "== APK tools\nAsgard: Couldn't set up APK tools: fetch-aapt2.py stopped with status 3\n")
+        self.assertFalse(window.progress.isVisible())
+        self.assertIn("Setup stopped: Couldn't set up APK tools", window.notice_text.text())
+        self.assertEqual(window.notice_action.text(), "Try again")
+        self.assertTrue(window.setup_status)                                    # still missing: the offer stays possible
+        calls.clear(); window.notice_action.click()
+        self.assertEqual(calls[0][0], ["setup", "--check", "--json"])
+        self.assertEqual(window.notice_action.text(), "Set up…")
+
+    def test_an_install_that_fails_for_a_missing_piece_leads_to_the_offer(self):
+        window = self.window
+        calls = []
+        window.command = lambda args, done=None, env=None, progress=None: calls.append((args, done))
+        package = self.root / "game.apk"; package.write_bytes(b"x")
+        window.install_files([str(package)])
+        calls[-1][1](1, "Android package: Android runtime not provisioned (/x is missing). Run: python3 Tools/Android/fetch-android-runtime.py\n")
+        self.assertEqual(calls[-1][0], ["setup", "--check", "--json"])          # the library asks what else is missing
+        self.assertIn("Couldn't install game.apk", window.notice_text.text())
+
+    def test_command_hands_over_each_line_as_it_arrives_and_the_whole_output_at_the_end(self):
+        window, lines, finished = self.window, [], []
+        window.command(["help"], lambda code, output: finished.append((code, output)), progress=lines.append)
+        self.settle(lambda: finished)
+        code, output = finished[0]
+        self.assertEqual(code, 0)
+        self.assertTrue(lines and "commands:" in lines)
+        self.assertEqual(lines, [line.strip() for line in output.splitlines() if line.strip()])
 
     def test_dropped_files_are_filtered_to_packages(self):
         from PyQt6.QtCore import QMimeData, QUrl

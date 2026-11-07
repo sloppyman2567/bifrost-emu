@@ -76,7 +76,12 @@ In order. Each carries into the next pre-release until its acceptance test passe
 ### 1. Easier setup and a dependable app library (the beta.1 scope)
 
 - Guide runtime provisioning and signed APK installation from the library, with actionable missing-runtime and
-  window-backend errors. Done: a card says why a run ended and the drawer what to try.
+  window-backend errors. Done: a card says why a run ended and the drawer what to try; the library asks `asgard setup --check`
+  at start and, when a checkout lacks part of the runtime, offers **Set up…** (downloads and builds the missing steps, with
+  progress, resuming after a failure), refuses to start an install that cannot work, and an installed copy that is incomplete
+  is told to reinstall; a host window that would not open ends a run as "Couldn't open a window" with advice (no SDL3, no
+  desktop). Checked with fake commands and Qt's offscreen platform; the real downloads and builds were not run, nor was a
+  fresh machine used.
 - Make the launcher pick the intended graphics-capable executable, and stop headless validation from silently replacing the
   desktop default.
 - A clear update/reinstall flow, with routine controls outside Developer mode. Done: cards, icons, search, per-app

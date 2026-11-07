@@ -91,6 +91,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Testing/test_guest_cwd.sh         # getcwd/cd follow the host cwd without a sandbox
 ./Scripts/Android/test_android_super.py        # dynamic-partition unpacker vs a synthetic image (--compare SUPER.img: vs lpunpack)
 ./Scripts/Android/test_android_adapter_exports.py # the built managed libGLESv2.so exports every core ES 2.0-3.2 command and libandroid.so exports ASurfaceControl_createFromWindow (an app library's missing import fails its whole dlopen)
+./Scripts/Android/test_android_provisioning.py  # asgard setup: the steps a tree lacks and running them (fake commands), tied to the Makefile and the installer
 ./Scripts/Android/test_android_gamepad.py     # the library's gamepad control: pad states to actions, repeat, stick, keys per widget (offline)
 ./Scripts/Android/test_download_progress.py    # asgard-setup's download progress lines (terminal and piped), and resumable fetch against a local HTTP server
 ./Scripts/Android/test_asgard_stale_broker.py  # a broker an upgrade left running: restarted when idle, refused when busy; realm stop --force; the realm idle timeout (an idle realm ends, an attached app keeps it, a control request restarts the clock, 0 and a bad value, an emulator without the option); a broker that cannot start reports its exit and output (both start paths)

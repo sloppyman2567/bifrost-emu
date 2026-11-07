@@ -497,6 +497,7 @@ COMMANDS = {
     "config": "show or change an app's saved settings",
     "uninstall": "remove an app with its code and all its data",
     "clear-data": "reset an app's saves and settings; it stays installed",
+    "setup": "download and build what Asgard needs, in a source checkout (--check lists what is missing)",
     "launcher": "open the desktop app library",
     "desktop": "put installed apps in the desktop's application menu, or take them out",
     "refresh-icons": "read icons of apps installed by an older version",
@@ -564,6 +565,9 @@ def main():
                 value = broker_status(state)
             print(json.dumps(value))
             return 0
+        if args.command == "setup":
+            import android_provisioning
+            return android_provisioning.main(remainder)
         script = str(ROOT / "Scripts/Android/android_package.py")
         if args.command == "run":
             remainder = install_for_run(script, state, remainder)

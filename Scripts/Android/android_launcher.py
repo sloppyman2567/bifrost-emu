@@ -64,6 +64,9 @@ STATES = {"preparing": "Starting", "starting": "Starting", "running": "Running",
           "invalid": "Install is damaged"}
 # First match wins: a Chartboost line about missing Play services counts once.
 SIGNATURES = (
+    # The host window did not open (WindowBackend.cpp's fail() and Surface.cpp's open_host_window).
+    ("window", "Host window could not be opened", re.compile(
+        r"\[android\] (?:SDL3 (?:video initialization|window creation|window properties) failed|window backend \S+ open failed)")),
     ("crash", "Emulator caught a guest crash", re.compile(r"^\[crash\] ")),
     ("signal", "Native crash (Fatal signal)", re.compile(r"Fatal signal \d+")),
     ("java", "Java crash (FATAL EXCEPTION)", re.compile(r"FATAL EXCEPTION")),
@@ -317,6 +320,7 @@ def read_findings(path, limit=16 * 1024 * 1024):
 # Which findings can explain a run ending, in order, with what the card says and what to try. Ad and Play services
 # errors are not here: games usually keep running through them.
 CAUSES = (
+    ("window", "Couldn't open a window", None),     # its advice depends on the log line: window_advice
     ("crash", "Crashed in native code", "The app's native code hit a fault. Try again; if it keeps happening, the log shows where."),
     ("signal", "Crashed in native code", "The app's native code hit a fault. Try again; if it keeps happening, the log shows where."),
     ("java", "Crashed in Java code", "The app hit an unhandled error. Try again; if it keeps happening, the log shows where."),
@@ -325,6 +329,18 @@ CAUSES = (
      "This app asks the Google Play Store to confirm it was installed from Play. Bifrost has no Play Store, so the check "
      "fails and the app quits. Bifrost does not fake the answer, so this app cannot run here."),
 )
+def window_advice(example):
+    """What to try when the host window did not open, from the first log line that said so."""
+    example = example or ""
+    if "(-38)" in example:       # -ENOSYS: no SDL3 in this build, or its library could not be loaded
+        return ("Bifrost found no window library (SDL3). Install your distribution's SDL3 package (libsdl3), or in a source "
+                "checkout run: python3 Tools/Fetch/fetch-sdl3.py")
+    if re.search(r"video device|display|wayland|x11|xcb|DISPLAY", example, re.I):
+        return ("There was no desktop to open a window on. Start the library from a graphical session, not over SSH or on a "
+                "text console.")
+    return "The desktop would not give Bifrost a window. The log has the reason."
+
+
 # Android apps often quit this way (Process.killProcess on themselves), and so does the crash handler, so causes come first.
 SELF_KILL = re.compile(r"\s(\d+)\s+\d+\s+I Process\s*: Sending signal\. PID: \1 SIG: 9")
 
@@ -339,7 +355,9 @@ def explain_ending(session, findings=(), self_killed=False):
     if state == "interrupted":
         return "Ended unexpectedly", "Asgard lost track of this session, for example after a restart or if it was killed. Try again."
     for key, line, advice in CAUSES:
-        if key in found: return line, advice
+        if key not in found: continue
+        if advice is None: advice = window_advice(next((item.get("example") for item in findings if item.get("key") == key), None))
+        return line, advice
     if session.get("error"): return "Couldn't start", "The app did not get as far as opening. Try again; the log shows why."
     if self_killed: return None
     if code == 137: return "Ended from outside", "Something outside the app ended it, such as low memory or another program. Try again."
@@ -986,17 +1004,18 @@ def build(state, application, settings=None, pads=None):
         def mousePressEvent(self, event):
             if not self.panel.geometry().contains(event.position().toPoint()): self.close_sheet()
 
-    def confirm(parent, title, text, action):
-        """Ask before something destructive, with the action on the button and no theme clip-art."""
+    def confirm(parent, title, text, action, danger=True):
+        """Ask before something, with the action on the button and no theme clip-art. Destructive unless `danger` is False."""
         host = parent if hasattr(parent, "show_sheet") else getattr(parent, "window_", None)
         if host is not None and host.big:      # in the gamepad layout the question is a sheet, not a window of its own
             answer = []
-            host.show_sheet(title, [("Cancel", None, True, ""), (action, lambda: answer.append(True), True, "danger")], text, wait=True)
+            host.show_sheet(title, [("Cancel", None, True, ""), (action, lambda: answer.append(True), True, "danger" if danger else "")],
+                            text, wait=True)
             return bool(answer)
         box = QMessageBox(parent); box.setWindowTitle(title); box.setText(text); box.setIcon(QMessageBox.Icon.NoIcon)
-        accept = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
+        accept = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole if danger else QMessageBox.ButtonRole.AcceptRole)
         cancel = box.addButton(QMessageBox.StandardButton.Cancel); box.setDefaultButton(cancel); box.setEscapeButton(cancel)
-        accept.setObjectName("danger"); restyle(accept)
+        if danger: accept.setObjectName("danger"); restyle(accept)
         for button in box.buttons(): button.setIcon(QIcon())
         box.exec()
         return box.clickedButton() is accept
@@ -1231,6 +1250,7 @@ def build(state, application, settings=None, pads=None):
             self.card_limits, self.fullscreen_wanted, self.was_active = (MIN_CARD, MAX_CARD), False, set()
             self.sheet, self.sheet_widget = None, None   # the open Sheet; the settings page while it is drawn in this window
             self.metrics, self.polled, self.install_queue, self.install_batch = None, 0.0, [], None
+            self.setup_status, self.setting_up, self.notice_action_run = None, False, None  # what asgard setup --check last said
             self.setWindowTitle("Asgard"); self.setMinimumSize(720, 480); self.setAcceptDrops(True)
             self.setWindowIcon(application.windowIcon()); self.theming = False
             body = QWidget(); outer = QVBoxLayout(body)
@@ -1276,9 +1296,12 @@ def build(state, application, settings=None, pads=None):
             self.notice_details = QPushButton("Last session"); self.notice_details.setObjectName("ghost")
             self.notice_details.clicked.connect(
                 lambda: self.open_drawer(self.notice_details.property("package")))
+            self.notice_action = QPushButton(); self.notice_action.setObjectName("ghost"); self.notice_action.hide()
+            self.notice_action.clicked.connect(lambda: self.notice_action_run and self.notice_action_run())
             close = QToolButton(); close.setAutoRaise(True)
             close.setObjectName("tool"); close.setIcon(glyph("close", "muted")); close.clicked.connect(self.notice.hide)
-            row.addWidget(self.notice_icon); row.addWidget(self.notice_text, 1); row.addWidget(self.notice_details); row.addWidget(close)
+            row.addWidget(self.notice_icon); row.addWidget(self.notice_text, 1); row.addWidget(self.notice_details)
+            row.addWidget(self.notice_action); row.addWidget(close)
             self.notice.hide(); outer.addWidget(self.notice)
             self.notice_timer = QTimer(self); self.notice_timer.setSingleShot(True); self.notice_timer.timeout.connect(self.notice.hide)
             middle = QHBoxLayout(); middle.setSpacing(12)
@@ -1436,7 +1459,9 @@ def build(state, application, settings=None, pads=None):
 
         def launcher_menu(self):
             """Start: what the toolbar does with a mouse, as a menu a pad can walk."""
+            setup = bool(self.setup_status and self.setup_status["can_set_up"] and not self.setting_up)
             self.show_sheet("Library", [
+                *([("Set up Asgard…", self.setup_asgard, True, "")] if setup else []),
                 ("Install APK…", self.install, True, ""), ("Google account…", self.google_account, True, ""),
                 ("Sort by " + ("recently played" if self.sort_mode == "name" else "name"), lambda: self.pad_action("sort"), True, ""),
                 ("Desktop layout" if self.big else "Gamepad layout", lambda: self.set_big(not self.big, remember=True), True, ""),
@@ -1508,16 +1533,28 @@ def build(state, application, settings=None, pads=None):
             for card in self.cards.values(): card.developer.setVisible(shown)
             self.render(True); self.update_drawer(force=True)
 
-        def command(self, args, done=None, env=None):
+        def command(self, args, done=None, env=None, progress=None):
+            """Run an asgard command. `progress(line)` gets each line of its output as it arrives; `done(code, output)` ends it."""
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            received, pending = [], [b""]
+            def read():
+                data = bytes(process.readAllStandardOutput())
+                received.append(data)
+                if progress:
+                    pending[0] += data
+                    *lines, pending[0] = pending[0].split(b"\n")
+                    for line in lines:
+                        if line.strip(): progress(line.decode(errors="replace").strip())
+            process.readyReadStandardOutput.connect(read)
             if env:
                 environment = QProcessEnvironment.systemEnvironment()
                 for key, value in env.items(): environment.insert(key, value)
                 process.setProcessEnvironment(environment)
             self.jobs.add(process)
             def finished(code, status):
-                output = bytes(process.readAllStandardOutput()).decode(errors="replace")
+                read()
+                output = b"".join(received).decode(errors="replace")
                 self.jobs.discard(process); process.deleteLater()
                 if done: done(code, output)
             process.finished.connect(finished)
@@ -1831,10 +1868,14 @@ def build(state, application, settings=None, pads=None):
             self.command([command, "--yes", package], removed)
             return True
 
-        def show_notice(self, text, error=False, package=None, timeout=0):
+        def show_notice(self, text, error=False, package=None, timeout=0, action=None):
+            """`action` is (button text, what it runs): a way to fix what the notice says."""
             self.notice_icon.setPixmap(glyph("alert", "danger").pixmap(ICON, ICON) if error
                                        else glyph("info", "accent").pixmap(ICON, ICON))
             self.notice_text.setText(text)
+            self.notice_action_run = action[1] if action else None
+            self.notice_action.setVisible(bool(action))
+            if action: self.notice_action.setText(action[0])
             self.notice_details.setProperty("package", package); self.notice_details.setVisible(bool(package))
             self.notice.show()
             if timeout: self.notice_timer.start(timeout)
@@ -1914,6 +1955,55 @@ def build(state, application, settings=None, pads=None):
                 self.state = Path(path); self.path.setText(path); self.apps = []
                 self.close_drawer(); self.render(True); self.refresh()
 
+        def check_setup(self):
+            """Ask `asgard setup --check` what this tree still lacks, and offer to fix it. Unchanged when nothing is missing."""
+            def checked(code, output):
+                try: status = json.loads(output)
+                except ValueError: return          # an older Asgard without the command: say nothing
+                self.setup_status = status if status.get("missing") else None
+                if self.setup_status: self.offer_setup()
+                elif self.notice_action_run == self.setup_asgard: self.notice.hide()
+            self.command(["setup", "--check", "--json"], checked)
+
+        def offer_setup(self):
+            """The notice that says what is missing: with a button where this tree can set itself up."""
+            status = self.setup_status
+            titles = [item["title"] for item in status["missing"]]
+            shown = ", ".join(titles[:3]) + (f" and {len(titles) - 3} more" if len(titles) > 3 else "")
+            if status["can_set_up"]:
+                self.show_notice(f"Asgard isn't set up yet: it still needs {shown}. Apps can't be installed or started until then.",
+                                 error=True, action=("Set up…", self.setup_asgard))
+            else:
+                self.show_notice(f"This copy of Asgard is incomplete ({shown} missing). Install it again from the source "
+                                 "checkout with: make install-asgard", error=True)
+
+        def setup_asgard(self):
+            """Download and build what is missing (`asgard setup`), after saying what that involves."""
+            if self.setting_up or not self.setup_status or not self.setup_status["can_set_up"]: return
+            steps = "\n".join(f"• {item['title']}: {item['why']}" for item in self.setup_status["missing"])
+            if not confirm(self, "Set up Asgard",
+                           "Asgard will download and build the following. This needs an internet connection and can take a "
+                           "while: a full setup is about a gigabyte. It keeps what it finishes, so a failure or closing "
+                           f"this window doesn't lose it, and running it again resumes.\n\n{steps}", "Set up", danger=False):
+                return
+            self.setting_up, self.setup_step = True, ""; self.notice.hide()
+            self.progress_text.setText("Setting up Asgard…"); self.progress.show()
+            def progress(line):
+                text = line[3:] if line.startswith("== ") else None
+                if text: self.setup_step = text
+                self.progress_text.setText("Setting up Asgard: " + (self.setup_step or "starting")
+                                           + ("" if text else " (" + line[:80] + ")"))
+            def finished(code, output):
+                self.setting_up = False; self.progress.hide()
+                if code:
+                    self.show_notice("Setup stopped: " + short_error(output), error=True,
+                                     action=("Try again", self.check_setup))
+                else:
+                    self.show_notice("Asgard is set up. You can install apps now.", timeout=10000)
+                    self.setup_status = None
+                self.refresh()
+            self.command(["setup"], finished, progress=progress)
+
         def install(self):
             paths, _ = QFileDialog.getOpenFileNames(self, "Install Android apps", str(Path.home()),
                 "Android packages (*.apk *.apkm *.apks *.xapk);;All files (*)")
@@ -1923,6 +2013,8 @@ def build(state, application, settings=None, pads=None):
             """Queue packages; they install one at a time, and anything already queued keeps its place."""
             paths = installable(paths)
             if not paths: return
+            if self.setup_status and self.install_batch is None:
+                self.offer_setup(); return
             fresh = self.install_batch is None
             if fresh:
                 self.install_batch = {"total": 0, "done": 0, "installed": 0, "failed": [], "announce": None}
@@ -1953,6 +2045,7 @@ def build(state, application, settings=None, pads=None):
         def install_finished(self):
             batch, self.install_batch = self.install_batch, None
             self.progress.hide()
+            if any("not provisioned" in error for _, error in batch["failed"]): self.check_setup()
             if batch["failed"]:
                 name, error = batch["failed"][0]
                 more = f" ({len(batch['failed']) - 1} more failed)" if len(batch["failed"]) > 1 else ""
@@ -2005,6 +2098,7 @@ def show(state, fullscreen=False):
     # Full screen when asked for, and in Steam's Game Mode, where a pad is all there is.
     window.fullscreen_wanted = fullscreen or android_gamepad.in_game_mode()
     window.present()
+    window.check_setup()
     def activate():
         while server.hasPendingConnections():
             client = server.nextPendingConnection()

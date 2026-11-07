@@ -176,6 +176,23 @@ still match and all split/signature/integrity checks still run. Saves, accounts
 and launcher settings are retained. Asgard does not convert databases or saves
 to an older app's schema; use `clear-data` only if you intend to discard them.
 
+### Setting up from the library, and `asgard setup`
+
+`make android-provision` is the whole recipe; `Scripts/Android/android_provisioning.py` names its steps (runtime, APK tools,
+adapters, launcher, framework, ART image, microG) and checks each one's result. `asgard setup --check` lists what a tree
+lacks (`--json` for the library, exit status 0), and `asgard setup` runs the missing steps in order after
+`find-host-tools.sh` has found the host tools, stopping at the first failure; steps already done are skipped and an
+interrupted download resumes. The library asks the check once at start. When a checkout lacks something, a notice offers
+**Set up…** (also in the gamepad menu): it says what will be downloaded and built, runs `asgard setup` and shows each step,
+and an install that would fail for it is not started. An installed copy has no sources to build from, so for it a missing
+step means installing again (`make install-asgard`), and the notice says so instead of offering a button. The step list is
+checked against the Makefile and `install-asgard.py` by `Scripts/Android/test_android_provisioning.py`, so a new step in
+one must be added in the others.
+
+A run that ends because the host window would not open is explained on its card: `[android] window backend … open failed
+(-38)` is no SDL3 (install libsdl3, or `python3 Tools/Fetch/fetch-sdl3.py` in a checkout), an SDL video error naming no
+display or device is a session with no desktop (not over SSH or a text console), and anything else points at the log.
+
 Installation names the missing provisioning step (`fetch-android-runtime.py`,
 `fetch-aapt2.py`, `fetch-android-package-tools.py` or
 `make android-runtime-adapters`) instead of failing on a missing file.

@@ -236,7 +236,8 @@ def require_toolchain(runtime, adapters, aapt2, apksigner):
             (aapt2, "aapt2", "python3 Tools/Android/fetch-aapt2.py"),
             (apksigner, "apksigner", "python3 Tools/Android/fetch-android-package-tools.py")):
         if not path.exists():
-            raise ValueError(f"{what} not provisioned ({path} is missing). Run: {step}")
+            raise ValueError(f"{what} not provisioned ({path} is missing). Run: {step} "
+                             "(or everything that is missing: python3 Scripts/Android/asgard.py setup)")
 
 
 def install(source, state, runtime, adapters, aapt2, apksigner, media_root=None, *, allow_downgrade=False):

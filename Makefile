@@ -800,6 +800,7 @@ android-runtime-adapters:
 test-android-package: $(TARGET) android-window-plugin android-runtime-adapters
 	python3 Scripts/Android/test_android_package.py --emu $(abspath $(TARGET)) --plugin $(abspath $(ANDROID_WINDOW_PLUGIN))
 	python3 Scripts/Android/test_android_gamepad.py
+	python3 Scripts/Android/test_android_provisioning.py
 
 android-window-plugin: $(ANDROID_WINDOW_PLUGIN)
 

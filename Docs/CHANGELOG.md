@@ -183,6 +183,18 @@ there (guided provisioning, update/reinstall) remain in progress.
   the real launcher offscreen with a slow poll in flight and interrupts it (it fails on the old code with SIGABRT).
   An installed Asgard (`/usr/local/share/bifrost/asgard`) keeps the crash until it is reinstalled.
 
+### Added (setting up from the library)
+
+- `asgard setup` runs the steps of `make android-provision` that a tree is still missing (runtime, APK tools, adapters,
+  launcher, framework, ART image, microG), after checking the host tools, and `asgard setup --check [--json]` lists what is
+  missing. The desktop library asks at start and, for a checkout that lacks something, offers **Set up…** with a
+  description of what it will download and build, live progress, and a retry after a failure; an install that could not
+  work is no longer started, and an install that fails on a missing piece leads to the same offer. An installed copy that is
+  incomplete is told to reinstall instead. The step list is tied to the Makefile and the installer by tests.
+- A run that ends because the host window would not open now says so ("Couldn't open a window") with advice for a missing
+  SDL3 or a session with no desktop, instead of "Couldn't start". Checked with fake commands, Qt's offscreen platform and log
+  lines taken from the source; the real downloads and builds were not run, nor a real failed window open.
+
 ### Added (Activity relaunch on a window resize)
 
 - An Activity whose manifest `configChanges` lacks a field that a host window resize changed is now relaunched as Android

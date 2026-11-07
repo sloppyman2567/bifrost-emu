@@ -125,7 +125,7 @@ decoder or syscall dispatch table can reasonably remain large.
 
 | Directory | Contents |
 |---|---|
-| `Scripts/Android/` | Launch, install, supervise and test Android applications; the desktop library (`android_launcher.py`) and its gamepad control (`android_gamepad.py`) |
+| `Scripts/Android/` | Launch, install, supervise and test Android applications; the desktop library (`android_launcher.py`) and its gamepad control (`android_gamepad.py`); `asgard setup` and what a tree still lacks (`android_provisioning.py`) |
 | `Scripts/Testing/` | Guest suite, JIT verification and focused compatibility checks |
 | `Scripts/Setup/` | Rootfs and runtime setup, fixture download orchestration, host package and tool detection (`install-deps.sh`, `find-host-tools.sh`) |
 | `Scripts/Bench/` | Benchmark runner |
