@@ -319,7 +319,8 @@ That also fixes a stale-chain bug from the settling change above: a relinked pre
 later retirement could not unpatch it and it kept jumping into retired code.
 
 With `BIFROST_TIER2=1`, CoreMark moves from about 5% slower than Tier-1 to level with it (24,610 against 24,150 iterations/s
-over five alternating runs, within noise), and the three-block loop runs about 1.5 times faster. Tier-2 stays opt-in: no
+over five alternating runs, within noise; measured on a Ryzen 5 9600X overclocked to 5.68 GHz, not the Ryzen 7 5800X3D of the
+October 27 table, so these figures do not compare with that table's), and the three-block loop runs about 1.5 times faster. Tier-2 stays opt-in: no
 title is faster with it yet. `BIFROST_TIER2_GRAPH` reports the natural loop around each hot head.
 
 Hot heads now have to show a rate, not just 1,000 lifetime entries. In Arknights that takes Tier-2 code from 33.5 MB (the

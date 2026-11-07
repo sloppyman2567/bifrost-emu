@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
 Status: in progress. The current pre-release is **2.0.0-beta.1** (November 3, 2026), a version label: its own scope is
-only partly met. Updated November 3, 2026.
+only partly met. Updated November 7, 2026.
 
 Everything below is a development target, not a compatibility guarantee or a release date. "Done" means the contract is
 implemented and checked as the linked document says, not that every app using it works. Dated checkpoints, measurements
@@ -208,8 +208,11 @@ Open, in priority order:
    Android titles, then regions with internal branches (`BIFROST_TIER2_GRAPH` surveys them). It stays opt-in until then.
 6. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
-Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone needs a confirmed native
-reference; game kernels toward 2× native where the guest code allows it.
+Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the
+5800X3D on November 7, native CoreMark v1.01 built with gcc 16.2.1 `-O2` ran 37,950 iterations/s on one core and the JIT 14,785,
+about 39%; the Ryzen 5 9600X at 5.68 GHz that measured about 24,000 on November 4 is also at roughly 40%; both with the CPU
+governor on `performance`; see [the checkpoint](JIT.md#coremark-native-reference-2026-11-07)); game kernels toward 2× native
+where the guest code allows it.
 
 Acceptance: each stage passes architectural regressions, reference checks and real applications, and reduces spills and
 state transfers without excessive compile time or code growth; then matched gameplay frame times are measured.

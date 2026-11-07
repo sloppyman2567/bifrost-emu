@@ -1799,6 +1799,18 @@ compile, and QEMU's own runs spread 9%), so a few percent is noise. The earlier 
 at 110,000 iterations) was not remeasured on its binary, and this comparison does not attribute the change
 since then to particular commits. CoreMark does not predict game frame rates.
 
+### CoreMark native reference (2026-11-07)
+
+The native reference the 26%-of-native milestone was waiting for, on the same Ryzen 7 5800X3D, with the CPU governor on
+`performance` (all 16 threads, boost on; about 4.44 GHz). CoreMark v1.01 (EEMBC's `v1.01` tag) built with `make PORT_DIR=linux64
+XCFLAGS="-DPERFORMANCE_RUN=1 -DITERATIONS=160000"` and gcc 16.2.1 at its default `-O2` (no `-march=native`), run as
+`coremark.exe 0x0 0x0 0x66 160000 7 1 2000` pinned to one core: 37,951 / 37,951 / 37,933 iterations/s, `crcfinal` 0xa14c. The
+JIT (HEAD 36801777, default build, unpinned, `run_benchmarks.py --bench coremark --warmups 1 --runs 3`): median 10.83 s, 14,785
+iterations/s, every CRC valid. That is about 39% of native. A first native run on a power-saving governor gave 28,700, 32% low,
+so a CoreMark comparison is only meaningful with the governor fixed. The native build is gcc `-O2`; the AArch64 guest was
+built with `-O3`, and a tuned native build would score higher. The Ryzen 5 9600X (5.68 GHz overclock) that measured about
+24,000 iterations/s on November 4 is at roughly 40% of its own native score. Pinned and `BIFROST_TIER2=1` runs were not made here.
+
 ## Recorded changes
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged:
