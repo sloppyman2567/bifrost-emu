@@ -1165,10 +1165,10 @@ class LauncherLibraryTests(unittest.TestCase):
         widget = self.qt.focusWidget()
         return type(widget).__name__ + (":" + widget.text() if type(widget).__name__ == "QPushButton" else "")
 
-    def test_the_pad_edits_the_app_settings_a_check_box_a_combo_box_and_the_tabs(self):
+    def test_the_pad_edits_the_desktop_settings_dialog_a_check_box_a_combo_box_and_the_tabs(self):
         import android_gamepad as pads
         from PyQt6.QtWidgets import QTabWidget
-        window = self.pad_window(layout="big")
+        window = self.pad_window(layout="desktop")
         dialog = self.settings_dialog(window)
         tabs = dialog.findChild(QTabWidget)
         self.press(window, pads.RIGHT_SHOULDER); self.assertEqual(tabs.currentIndex(), 1)
@@ -1191,7 +1191,7 @@ class LauncherLibraryTests(unittest.TestCase):
     def test_the_pad_leaves_the_property_table_at_either_end_and_the_focus_is_drawn(self):
         import android_gamepad as pads
         from PyQt6.QtWidgets import QFrame, QTabWidget
-        window = self.pad_window(layout="big")
+        window = self.pad_window(layout="desktop")
         window.apps[0]["launcher"] = "managed_activity"
         dialog = self.settings_dialog(window, **{"property.a.b": "1", "property.c.d": "2"})
         dialog.findChild(QTabWidget).setCurrentIndex(1); self.settle()
@@ -1209,10 +1209,10 @@ class LauncherLibraryTests(unittest.TestCase):
         self.press(window, pads.DPAD_UP)
         self.assertNotEqual(self.focused(), "QTableWidget")                              # up from the first row leaves too
 
-    def test_the_pad_saves_and_cancels_the_app_settings(self):
+    def test_the_pad_saves_and_cancels_the_desktop_settings_dialog(self):
         import android_gamepad as pads
         from PyQt6.QtWidgets import QDialog
-        window = self.pad_window(layout="big")
+        window = self.pad_window(layout="desktop")
         dialog = self.settings_dialog(window)
         for _ in range(30):                                         # walk the focus order to Save
             if self.focused() == "QPushButton:Save": break
@@ -1224,6 +1224,83 @@ class LauncherLibraryTests(unittest.TestCase):
         self.press(window, pads.EAST)                               # B cancels, and the library stays
         self.assertEqual(other.result(), QDialog.DialogCode.Rejected)
         self.assertTrue(window.isVisible())
+
+    def row(self):
+        """The name of the gamepad settings page's focused row."""
+        return getattr(self.qt.focusWidget(), "name", None) and self.qt.focusWidget().name.text()
+
+    def test_the_gamepad_settings_page_changes_each_value_with_the_dpad(self):
+        import android_gamepad as pads
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QDialog
+        window = self.pad_window(layout="big")
+        window.apps[0]["launcher"] = "managed_activity"
+        dialog = self.settings_dialog(window)
+        self.assertTrue(dialog.windowState() & Qt.WindowState.WindowFullScreen)
+        self.assertEqual(self.row(), "Show FPS, load and temperatures")                 # the first row has the focus
+        self.press(window, pads.DPAD_DOWN)
+        self.assertEqual(self.row(), "Back key")                                         # the dimmed "Stats layout" is skipped
+        before = dialog.back.currentIndex()
+        self.press(window, pads.DPAD_RIGHT)
+        self.assertEqual(dialog.back.currentIndex(), before + 1)
+        self.press(window, pads.SOUTH)                                                   # A steps on, as Right does
+        self.assertEqual(dialog.back.currentIndex(), before + 2)
+        self.press(window, pads.DPAD_LEFT); self.press(window, pads.DPAD_LEFT); self.press(window, pads.DPAD_LEFT)
+        self.assertEqual(dialog.back.currentIndex(), dialog.back.count() - 1)           # Left wraps round
+        self.assertIn("‹", dialog.pad_rows[2].shown.text())
+        self.press(window, pads.DPAD_UP)
+        self.assertEqual(self.row(), "Show FPS, load and temperatures")
+        self.press(window, pads.SOUTH)
+        self.assertTrue(dialog.stats.isChecked())
+        self.assertEqual(dialog.pad_rows[0].shown.text(), "On")
+        self.assertTrue(dialog.pad_rows[1].isEnabled())                                  # "Stats layout" follows the switch
+        self.press(window, pads.DPAD_DOWN)
+        self.assertEqual(self.row(), "Stats layout")
+        self.press(window, pads.NORTH)                                                   # Y: restore the defaults
+        self.assertFalse(dialog.stats.isChecked())
+        self.assertEqual(dialog.back.currentIndex(), 0)
+        self.assertFalse(dialog.pad_rows[1].isEnabled())
+        self.press(window, pads.DPAD_RIGHT)
+        self.press(window, pads.START)                                                   # Start saves
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        other = self.settings_dialog(window)
+        self.press(window, pads.SOUTH)
+        self.press(window, pads.EAST)                                                    # B cancels
+        self.assertEqual(other.result(), QDialog.DialogCode.Rejected)
+
+    def test_the_gamepad_settings_page_ends_in_actions_and_names_the_buttons(self):
+        import android_gamepad as pads
+        from PyQt6.QtWidgets import QFrame, QLabel
+        window = self.pad_window(layout="big")
+        window.apps[0]["launcher"] = "native_activity"
+        dialog = self.settings_dialog(window)
+        names = [row.name.text() for row in dialog.pad_rows]
+        self.assertNotIn("Android emulator flag", names)                                 # only managed apps have the flag
+        self.assertEqual(names[-5:], ["Clear data…", "Uninstall…", "Restore defaults", "Save", "Cancel"])
+        self.assertTrue(dialog.pad_rows[-5].isEnabled() and dialog.pad_rows[-4].isEnabled())
+        calls = []
+        with patch.object(window, "remove_app", lambda app, command: calls.append(command) or command == "uninstall"):
+            for _ in range(len(names)):                                                  # down to the first action
+                if self.row() == "Clear data…": break
+                self.press(window, pads.DPAD_DOWN)
+            self.assertEqual(self.row(), "Clear data…")
+            self.press(window, pads.SOUTH)
+            self.assertEqual(calls, ["clear-data"])
+            self.assertTrue(dialog.isVisible())                                          # clearing data leaves the dialog open
+            self.press(window, pads.DPAD_DOWN); self.press(window, pads.SOUTH)
+        self.assertEqual(calls, ["clear-data", "uninstall"])
+        self.assertFalse(dialog.isVisible())                                             # an uninstall closes it
+        bar = dialog.findChild(QFrame, "hints")
+        keys = [key.text() for key in bar.findChildren(QLabel) if key.objectName() == "padkey"]
+        self.assertEqual(keys, ["A", "Left / Right", "Y", "B", "Start"])
+
+    def test_a_running_app_cannot_be_cleared_or_uninstalled_from_the_gamepad_page(self):
+        window = self.pad_window(layout="big")
+        window.apps[0]["session"] = {"state": "running"}
+        dialog = self.settings_dialog(window)
+        enabled = {row.name.text(): row.isEnabled() for row in dialog.pad_rows}
+        self.assertFalse(enabled["Clear data…"] or enabled["Uninstall…"])
+        self.assertTrue(enabled["Save"] and enabled["Restore defaults"])
 
     def test_the_layout_menu_entry_switches_and_remembers_the_choice(self):
         window = self.pad_window(layout="big")

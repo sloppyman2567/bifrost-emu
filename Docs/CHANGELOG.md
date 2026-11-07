@@ -48,9 +48,12 @@ there (guided provisioning, update/reinstall) remain in progress.
   screen. Only the window in front reacts, so a game reading the same pad does not also act on the library; a failing pad is
   switched off instead of aborting the library; `BIFROST_NO_GAMEPAD=1` turns it off. Built and tested with a fake pad on
   Qt's offscreen platform; not tried with a real pad, Game Mode or gamescope.
-- The per-app settings dialog takes the pad too: Up and Down walk the controls, A toggles or opens a combo box's list, LB and RB
-  switch tabs, B cancels, and the property table lets focus out at its first and last row. A ring is drawn around the focused
-  control (check boxes and combo boxes showed none).
+- An app's settings are a console-style page in the gamepad layout: full screen, one large row per setting, Left and Right
+  change the value (no popup lists), A toggles, Y restores defaults, Start saves, B cancels, a hint bar names the buttons, and
+  rows that do not apply are dimmed and skipped. It sits over the dialog's own widgets, so saving and validation are unchanged,
+  and leaves out the device-property table, which needs a keyboard. The desktop dialog also takes the pad (Up and Down walk
+  the controls, A toggles or opens a combo box's list, LB and RB switch tabs, the property table lets focus out at its
+  first and last row) and draws a ring around the focused control, which check boxes and combo boxes did not show.
 - Fixed: the library keeps the focused card focused when the grid is rebuilt (sorting dropped the focus), and `reflow` skips an
   order entry that has no card; a resize during the layout switch hit that and aborted the process with a `KeyError`.
 

@@ -214,6 +214,7 @@ def connect(window, application, backend):
 
     def kind(widget, action):
         if widget is not None and widget.objectName() == "card": return "card"
+        if widget is not None and widget.objectName() == "padrow": return "press"      # a row of the gamepad settings page
         if isinstance(widget, QMenu): return "menu"
         if isinstance(widget, QAbstractItemView):
             # A table in a dialog keeps Up and Down until its cursor is at the end, then they leave it.
@@ -232,6 +233,11 @@ def connect(window, application, backend):
     def handle(action):
         if window.pad_action(action): return
         popup = application.activePopupWidget()
+        modal = application.activeModalWidget()
+        # A dialog may give Start and Y their own meaning (the gamepad settings page: save, restore defaults).
+        hook = {"options": "pad_options", "menu": "pad_menu"}.get(action)
+        if modal is not None and popup is None and hook and hasattr(modal, hook):
+            getattr(modal, hook)(); return
         widget = (popup.focusWidget() or popup) if popup else (application.focusWidget() or application.activeWindow())
         if widget is None: return
         # Whatever is in a popup (a combo box's list, a menu) takes the arrows and Return itself.

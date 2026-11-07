@@ -362,8 +362,16 @@ quits the library), **Y** opens the card's menu, **X** changes the sort order, *
 dialog) and **Start** opens a library menu with Install APK, Google account, sort, the layout, full screen and Quit. In a dialog
 Up and Down walk the focus order. Face buttons are named as the pad names them (A or Cross), by position: the bottom one confirms.
 
-The per-app settings dialog works the same way: Up and Down walk the controls, A toggles a check box or opens a combo box's list
-(Up, Down and A choose in it), LB and RB switch between General and Compatibility, A on Save or Cancel (or B) finishes, and the
+In the gamepad layout an app's settings are a full-screen page of large rows, one per setting, over the same widgets the desktop
+dialog uses (so saving and validation are the same): Up and Down move between rows, **Left and Right change the value** (a choice
+steps through its options and wraps; A steps on too), A switches an On/Off row, **Y** restores the defaults, **Start** saves and
+**B** cancels, and the rows at the bottom (Clear data, Uninstall, Restore defaults, Save, Cancel) act on A. A row whose setting
+does not apply (Stats layout while the stats are off, Clear data and Uninstall while the app runs) is dimmed and skipped. The page
+leaves out what needs a keyboard, the device-property table; the Android emulator flag stays. The confirmation before Clear data
+or Uninstall is an ordinary dialog: Up and Down move between its buttons and A presses one.
+
+In the desktop layout the dialog is the one a mouse uses, and a pad drives it too: Up and Down walk the controls, A toggles a
+check box or opens a combo box's list (Up, Down and A choose in it), LB and RB switch between General and Compatibility, and the
 device-property table keeps Up and Down until its cursor is on the first or last row and then lets go. A ring is drawn around the
 control that has the focus, since check boxes and combo boxes show none of their own under the library's stylesheet. Typing a
 property name or value needs a keyboard: on SteamOS, Steam's on-screen keyboard types into the focused cell.

@@ -374,20 +374,46 @@ def session_ending(session):
 
 def settings_dialog(window, app, settings):
     """Edit one persistent app profile; changes are staged until Save."""
-    from PyQt6.QtCore import Qt, QUrl
+    from PyQt6.QtCore import Qt, QTimer, QUrl
     from PyQt6.QtGui import QDesktopServices, QIcon, QPalette
-    from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                                 QFormLayout, QHeaderView, QHBoxLayout, QLabel, QPushButton,
+    from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame,
+                                 QFormLayout, QHeaderView, QHBoxLayout, QLabel, QPushButton, QScrollArea,
                                  QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
     import android_settings
     from android_package import API
+
+    class PadRow(QFrame):
+        """One setting of the gamepad page: its name and value; Left and Right change it, A toggles or steps on."""
+        def __init__(self, title, value, step, enabled=None, tone="", changed=None):
+            super().__init__()
+            self.setObjectName("padrow"); self.setFocusPolicy(Qt.FocusPolicy.StrongFocus); self.setProperty("tone", tone)
+            self.value, self.step, self.enabled, self.changed = value, step, enabled, changed
+            row = QHBoxLayout(self); row.setContentsMargins(22, 14, 22, 14)
+            self.name = QLabel(title); self.shown = QLabel(); self.shown.setObjectName("padvalue")
+            self.shown.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(self.name, 1); row.addWidget(self.shown)
+            self.refresh()
+
+        def refresh(self):
+            if self.enabled: self.setEnabled(self.enabled())
+            text = self.value() if self.value else ""
+            self.shown.setText(text); self.shown.setProperty("on", text == "On")
+            self.shown.style().unpolish(self.shown); self.shown.style().polish(self.shown)
+
+        def keyPressEvent(self, event):
+            key = event.key()
+            if key == Qt.Key.Key_Left and self.step: self.step(-1)
+            elif key == Qt.Key.Key_Right and self.step: self.step(1)
+            elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space) and self.step: self.step(1)
+            else: super().keyPressEvent(event); return
+            if self.changed: self.changed()
 
     class Settings(QDialog):
         def __init__(self):
             super().__init__(window)
             self.setWindowTitle(app["label"] + " settings")
             self.resize(620, 500)
-            self.settings = dict(settings)
+            self.settings, self.removals = dict(settings), []
             layout = QVBoxLayout(self); layout.setContentsMargins(16, 14, 16, 14); layout.setSpacing(12)
             dim = lambda label: (label.setForegroundRole(QPalette.ColorRole.PlaceholderText), label)[1]
             intro = dim(QLabel("Saved for this app and shared with the command line. Changes apply the next time it starts."))
@@ -447,7 +473,7 @@ def settings_dialog(window, app, settings):
                 button = QPushButton(text); button.setObjectName(name)
                 button.setToolTip("Stop the app first" if running else tip); button.setEnabled(not running)
                 button.clicked.connect(lambda _, command=command: self.reject() if window.remove_app(app, command) else None)
-                removal.addWidget(button)
+                removal.addWidget(button); self.removals.append(button)
             removal.addStretch(); page.addLayout(removal)
             tabs.addTab(general, "General")
 
@@ -505,7 +531,65 @@ def settings_dialog(window, app, settings):
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                             self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
                             self.network.currentData(), self.menu.isChecked())
-            android_gamepad.focus_ring(self)
+            # The gamepad page's rows draw their own focus; the desktop widgets get a ring.
+            if getattr(window, "big", False): self.pad_page(intro, tabs, buttons, managed)
+            else: android_gamepad.focus_ring(self)
+
+        def pad_page(self, intro, tabs, buttons, managed):
+            """The gamepad layout of this dialog: one large row per setting over the same widgets, changed with the d-pad.
+            Nothing here needs a keyboard or a mouse; the desktop widgets stay, hidden, as the model that saves."""
+            for widget in (intro, tabs, buttons): widget.hide()
+            self.setWindowState(Qt.WindowState.WindowFullScreen)
+            heading = QLabel(app["label"]); font = heading.font(); font.setPointSizeF(font.pointSizeF() * 1.5); font.setBold(True)
+            heading.setFont(font); layout = self.layout(); layout.insertWidget(0, heading)
+            self.pad_rows = []
+            changed = self.refresh_rows
+
+            def choice(title, box):
+                step = lambda d: box.setCurrentIndex((box.currentIndex() + d) % box.count())
+                return PadRow(title, lambda: "‹   " + box.currentText() + "   ›", step, box.isEnabled, changed=changed)
+
+            def toggle(title, box):
+                return PadRow(title, lambda: "On" if box.isChecked() else "Off", lambda d: box.toggle(), changed=changed)
+
+            def action(title, run, enabled=None, tone=""):
+                return PadRow(title, None, lambda d: run() if d > 0 else None, enabled, tone, changed)
+
+            rows = [toggle("Show FPS, load and temperatures", self.stats), choice("Stats layout", self.stats_mode),
+                    choice("Back key", self.back), choice("Enter key", self.enter),
+                    choice("JIT disk cache", self.disk_cache), choice("JIT disk cache size", self.disk_cache_mb),
+                    choice("Network", self.network), toggle("Show in the desktop's application menu", self.menu)]
+            if managed: rows.append(choice("Android emulator flag", self.emulator))
+            clear, uninstall = self.removals
+            rows += [action("Clear data…", clear.click, clear.isEnabled),
+                     action("Uninstall…", uninstall.click, uninstall.isEnabled, "danger"),
+                     action("Restore defaults", self.pad_menu), action("Save", self.accept), action("Cancel", self.reject)]
+            body = QWidget(); column = QVBoxLayout(body); column.setContentsMargins(0, 0, 14, 0); column.setSpacing(8)
+            for row in rows: column.addWidget(row); self.pad_rows.append(row)
+            column.addStretch()
+            scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(body); layout.insertWidget(1, scroll, 1)
+            reader = getattr(window, "pad_reader", None)
+            label = reader.label if reader else (lambda button, default: default)
+            bar = QFrame(); bar.setObjectName("hints"); line = QHBoxLayout(bar); line.setContentsMargins(4, 10, 4, 0); line.setSpacing(8)
+            for name, words in ((label(android_gamepad.SOUTH, "A"), "Change"), ("Left / Right", "Adjust"),
+                                (label(android_gamepad.NORTH, "Y"), "Restore defaults"), (label(android_gamepad.EAST, "B"), "Cancel"),
+                                ("Start", "Save")):
+                key, text = QLabel(name), QLabel(words); key.setObjectName("padkey"); text.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+                line.addWidget(key); line.addWidget(text); line.addSpacing(16)
+            line.addStretch(); layout.addWidget(bar)
+            self.refresh_rows(); QTimer.singleShot(0, rows[0].setFocus)
+
+        def refresh_rows(self):
+            for row in self.pad_rows: row.refresh()
+
+        def pad_options(self):
+            """Start: save."""
+            self.accept()
+
+        def pad_menu(self):
+            """Y: restore the defaults (staged until Save, like the button)."""
+            self.reset_profile(); self.refresh_rows()
 
         def add_property(self, name="", value=""):
             row = self.properties.rowCount(); self.properties.insertRow(row)
@@ -655,6 +739,13 @@ def build(state, application, settings=None, pads=None):
         QFrame#card:focus, QFrame#card[selected="true"] {{ background: {tint(accent, .16)}; }}
         QPushButton#play {{ min-height: 46px; border-radius: 12px; }}
         QDialog QPushButton {{ min-height: 44px; }}
+        QFrame#padrow {{ background: palette(base); border: 3px solid transparent; border-radius: 14px; }}
+        QFrame#padrow:focus {{ background: {tint(accent, .18)}; border-color: palette(highlight); }}
+        QFrame#padrow QLabel {{ background: transparent; }}
+        QFrame#padrow:disabled QLabel {{ color: {colors["muted"].name()}; }}
+        QFrame#padrow[tone="danger"] QLabel#padvalue, QFrame#padrow[tone="danger"] QLabel {{ color: {danger.name()}; }}
+        QLabel#padvalue {{ color: {colors["accent_text"].name()}; font-weight: 600; }}
+        QLabel#padvalue[on="true"] {{ color: {good.name()}; }}
         """ if big else "")
 
     ICON = 18
