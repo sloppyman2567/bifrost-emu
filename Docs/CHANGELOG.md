@@ -65,6 +65,10 @@ there (guided provisioning, update/reinstall) remain in progress.
   (`Scripts/Testing/host_library.sh`, from `BIFROST_EMU`). The third, `vulkan`, fails only on the runner's llvmpipe
   device and its failing check was cut off: a failing test now shows the later lines that name a failure or an error and
   its last lines, not only its first 20.
+- With that output the `vulkan` failure showed every `vkMapMemory2`/`vkUnmapMemory2` check failing: the runner's loader is
+  Vulkan 1.3 and does not resolve these 1.4 commands, yet the guest's `vkGetInstanceProcAddr` returned their trampolines,
+  which only fail when called. A command the host loader could not resolve is now NULL to the guest, as the loader
+  answers, so an app (and the test, which then skips that section) takes its other path.
 
 - The Vulkan texture and audio test no longer ships third-party character art or an unlicensed sound clip: the
   Matikanetannhauser image and the "Mambo" sound effect (`Assets/Mambo`, baked into `mambo_tex.h` and

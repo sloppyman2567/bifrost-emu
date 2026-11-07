@@ -145,13 +145,18 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             } catch (...) { /* truncate */ }
         }
         namebuf[n] = 0;
+        // A command the host loader could not resolve is NULL here too, as
+        // the loader answers: a registered row without a host function only
+        // fails when called (an older loader lacks 1.4 commands such as
+        // vkMapMemory2), and an app checks the pointer to choose its path.
         uint64_t found = 0;
+        bool known = false;
         if (namebuf[0]) {
             for (const auto& lib : impl_->libs_) {
                 for (const auto& e : lib.entries) {
-                    if (e.name == namebuf) { found = e.guest_addr; break; }
+                    if (e.name == namebuf) { known = true; found = e.host_fn ? e.guest_addr : 0; break; }
                 }
-                if (found) break;
+                if (known) break;
             }
         }
         if (trace) {
