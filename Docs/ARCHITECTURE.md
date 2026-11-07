@@ -18,7 +18,7 @@ the emulator's memory, signal, syscall, loader and host-service implementations.
 | Linux syscall dispatch | `Source/System/Syscalls/Syscalls.cpp`; families in `Files/`, `Process/`, `Memory.cpp`, `Time.cpp`, `Compatibility.cpp`; Bifrost-private calls in `HostCalls/` |
 | Guest tracing | `Source/System/Core/GuestDebugger.*`: fork-family task ownership, cooperative ptrace stops, memory/regset commands, wait events and related-task procfs status |
 | Guest filesystem and devices | `Source/System/VFS/`: `VFS.cpp`, `HostPaths.cpp`, `Nodes/`, `Pseudo/` |
-| Android runtime integration | `Source/System/Android/`: `Binder/`, `Media/` (realm codec services, Goldfish media transport, host decoders), `Properties/`, `Services/`, `Surface/`, `Window/`; guest-side code lives in `Guest/Android/` |
+| Android runtime integration | `Source/System/Android/`: `Binder/`, `Media/` (realm codec services, Goldfish media transport, host decoders), `Properties/`, `Services/`, `Surface/`, `Window/` (SDL3 window backend, `WheelGestures`, `PadCursor`); guest-side code lives in `Guest/Android/` |
 | Guest-side code | `Guest/Android/` Bionic adapters, launchers and managed framework; `Guest/VDSO/` vDSO source |
 | Graphics and display | `Source/System/Graphics/`: `Display/`, `Input/`, `Thunks/` |
 | Host audio and API forwarding | `Source/System/Audio/Audio.cpp`, `AudioThunk/` |
@@ -125,13 +125,13 @@ decoder or syscall dispatch table can reasonably remain large.
 
 | Directory | Contents |
 |---|---|
-| `Scripts/Android/` | Launch, install, supervise and test Android applications |
+| `Scripts/Android/` | Launch, install, supervise and test Android applications; the desktop library (`android_launcher.py`) and its gamepad control (`android_gamepad.py`) |
 | `Scripts/Testing/` | Guest suite, JIT verification and focused compatibility checks |
-| `Scripts/Setup/` | Rootfs and runtime setup, fixture download orchestration |
+| `Scripts/Setup/` | Rootfs and runtime setup, fixture download orchestration, host package and tool detection (`install-deps.sh`, `find-host-tools.sh`) |
 | `Scripts/Bench/` | Benchmark runner |
 | `Tools/Android/` | Android provisioning and adapter builders |
 | `Tools/CodeGen/` | Table specifications, generators and consistency checks |
-| `Tools/Fetch/` | Toolchain/header fetchers |
+| `Tools/Fetch/` | Toolchain/header fetchers, and the SDL3 source build (`fetch-sdl3.py`) |
 | `Tools/Reference/` | Independent instruction and reference implementation utilities |
 | `Assets/Branding/` | The project icon (`bifrost-emu-icon.svg`) and the 1280×640 GitHub social preview card |
 | `Tools/Site/` | The project site (home and games pages): `build-site.py` builds it from the README, `compatibility.json` and the version into `layout.html` with `home.html`/`games.html` (`.github/workflows/pages.yml` deploys it) |

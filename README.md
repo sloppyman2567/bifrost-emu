@@ -297,9 +297,13 @@ python3 Scripts/Android/asgard.py run /path/to/package.apkm   # installs, then r
 python3 Scripts/Android/asgard.py realm status        # inspect the shared realm
 python3 Scripts/Android/asgard.py config org.example.package network offline   # per-app settings, applied at every start
 python3 Scripts/Android/asgard.py clear-data org.example.package   # reset saves; `uninstall` removes the app
-python3 Scripts/Android/asgard.py launcher             # the desktop app library: install, play, settings, last session
+python3 Scripts/Android/asgard.py launcher             # the desktop app library: install, play, settings, last session; a gamepad drives it too (--fullscreen)
 python3 Scripts/Android/asgard.py google sign-in       # experimental: microG's Google sign-in window (accounts shared by every app)
 ```
+
+Per-app settings (Back and Enter keys, Window, Controller, network, stats and more) are in the library's settings dialog and in the
+[APK guide's table](Docs/Android/ANDROID_APK.md#per-app-settings). A gamepad drives the library and, with the Controller
+setting, a touch cursor for apps that only take touch.
 
 Native `NativeActivity` libraries can also run directly with
 `./bifrost-emu --android libgame.so`. Android support is experimental: Google

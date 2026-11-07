@@ -25,6 +25,13 @@ the [changelog](CHANGELOG.md).
 | 2.0.0-alpha.3 (2026-11-01) | Released; WebView, media and ad scope mostly open | `media.extractor`, POSIX timers, installable Asgard and rootfs, `bifrost-emu app.apk`, window stats |
 | 2.0.0-beta.1 (2026-11-03) | Released as a label; scope partly met | Library cards, per-app settings, clear-data/uninstall, run-ended cards; app Keystore, WebView GPU fences, Vulkan for apps through a guest HAL, a faster Tier-1 JIT |
 
+**Since the beta.1 label (in the tree, not released):** the desktop library can be driven with a gamepad (a gamepad layout, menus,
+confirmations and the settings page drawn inside its window); per-app `window_mode` and `controller` settings, with a touch
+cursor driven by a pad; fixed-size apps can be tiled to a half or a corner; the Android setup's main downloads (the system image, microG, AAPT2, the Bionic runtime, the package tools, SDL3) resume
+when interrupted, and `make bootstrap` finds host tools and libraries without root, building SDL3 where the distribution has none. All of it was checked with fakes, on Qt's
+offscreen platform or in an Ubuntu 24.04 chroot, apart from what the maintainer saw on one KDE/Wayland desktop with a Steam
+Controller; none has run on a Steam Deck, in Game Mode, on a fresh Debian 13 or against a plain pad.
+
 **Games:** 17 recorded, 11 of them playable (7 Android, 4 Linux), 4 start without confirmed gameplay and 2 are blocked; see
 [What runs](../README.md#what-runs) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says
 otherwise.
@@ -37,7 +44,10 @@ otherwise.
   sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
 - **Architecture:** Bifrost runs AArch64 only; an APK with only `armeabi-v7a` or `x86` libraries (Angry Birds Space)
   cannot start.
-- **Platform gaps:** no Settings screens, no host mDNS, no toast animations. The Android Vulkan HAL copies every
+- **Platform gaps:** a host window resize reaches an app as a new orientation and size, but its Activity is never relaunched
+  as Android does for an app that does not handle the change, so YouTube stays in its landscape layout when the window is
+  narrowed (the per-app Window setting's "Keep the app's shape" scales a game instead); no Settings screens, no host mDNS, no
+  toast animations. The Android Vulkan HAL copies every
   presented frame (no zero-copy swapchain).
 - **Undiagnosed:** Firefox 159 reaches onboarding and a GeckoView surface but loads no pages; not re-tested since the
   November 1 Binder fix.
@@ -55,7 +65,9 @@ In order. Each carries into the next pre-release until its acceptance test passe
 - Make the launcher pick the intended graphics-capable executable, and stop headless validation from silently replacing the
   desktop default.
 - A clear update/reinstall flow, with routine controls outside Developer mode. Done: cards, icons, search, per-app
-  Back-key and stats settings, clear-data/uninstall and the last-session drawer.
+  Back-key, stats, Window and Controller settings, clear-data/uninstall and the last-session drawer; a library a gamepad can
+  drive (gamepad layout, Select for the last session); `make bootstrap` that resumes downloads and finds tools and libraries
+  without root. Open: all of it on a real Steam Deck and Game Mode, and on a fresh Debian 13.
 - Validate install → play → settings → stop/relaunch on a fresh setup, and broaden the app matrix with longer sessions and
   several apps in one realm on the supported Linux display stacks.
 
@@ -145,7 +157,8 @@ Open:
   fixtures (flush/reconfigure, B-frames, sustained playback).
 - Audio effects: `android.media.audiofx` loads and reports no effects; `Equalizer` and the like need DSP in front of the host's audio.
 - Activities from other processes beyond Play services; a real Play Games sign-in has not been observed.
-- Orientation, resize, focus, surface loss/recreation and background/foreground tests.
+- Orientation, resize, focus, surface loss/recreation and background/foreground tests, and Activity relaunch on a configuration
+  change (`onSaveInstanceState`, destroy, a new instance) for apps that do not declare `configChanges`.
 - Graphics ABI coverage from dependency audits; confirm the GLSL retry in Roblox and explain its low-resolution textures.
 - Memory: JIT code size, the remaining non-JIT heap, why the WebView service stays alive, and a controlled before/after
   measurement.
@@ -159,7 +172,10 @@ leaks or stale handles.
   issues.
 - Gamepads: Android apps get host pads with hotplug and an Xbox 360 mapping (SDL3 backend, `FrameworkGamepads`),
   checked in fakes and the framework; Subway Surfers is played with the 2026 Steam Controller (maintainer's report).
-  Still open: rumble, back paddles, per-game profiles and remapping, and pads for Linux guests' own input paths.
+  The desktop library takes a pad too (`android_gamepad.py`), and a per-app `controller` setting gives touch-only apps a pad-driven
+  pointer (Start+Select, left stick, A; `PadCursor`). Still open: rumble, back paddles, button remapping, scrolling with the
+  right stick in cursor mode, the Install APK file dialog (a window of its own the pad only steers like a keyboard), pads for
+  Linux guests' own input paths, and a check of all of it with a real pad on Game Mode and a plain Xbox-style pad.
 - Android touch, multitouch, keys and controller events; desktop-to-touch mappings stay configurable. Wheel/pinch zoom
   gestures and app pointer icons exist but are untried in live games.
 - Keyboard layouts, held keys, text input and pause/menu transitions without stuck or duplicated events.
@@ -259,6 +275,8 @@ regressions, published with host, settings, scene and duration.
   fixes that followed have not run on GitHub.
 - Run the strict suite and `make verify` on an AVX-512 host (the Ryzen 5 9600X); not done.
 - More Android games on RDNA 4: so far Subway Surfers and Arknights by the maintainer's reports.
+- `make bootstrap` on a fresh Debian 13 (tools off `PATH`, SDL3 built from source, no root): checked in an Ubuntu 24.04
+  chroot and with a real SDL3 build here, not on Debian 13 itself.
 - Fedora is unit-tested in a chroot only (run a game on Bazzite); Debian is compile-tested in containers; `make deps` failed
   on openSUSE; Alpine is untested ([support](SUPPORT.md)).
 
