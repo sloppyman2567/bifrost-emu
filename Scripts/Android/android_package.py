@@ -1103,7 +1103,10 @@ def main():
         command = commands.add_parser(name, help=text)
         command.add_argument("package")
         command.add_argument("--yes", action="store_true", help="do not ask for confirmation")
-    commands.add_parser("launcher", help="open the desktop app library")
+    launcher = commands.add_parser("launcher", help="open the desktop app library")
+    launcher.add_argument("--fullscreen", action="store_true",
+                          help="open full screen (the default in Steam's Game Mode); a gamepad press switches the library to its "
+                               "large-tile layout")
     commands.add_parser("refresh-icons", help="read the adaptive icons of apps installed before they were supported")
     desktop = commands.add_parser("desktop", help="make menu entries for the installed apps, or remove them")
     desktop.add_argument("--remove", action="store_true", help="remove every entry this state root made")
@@ -1138,7 +1141,7 @@ def main():
             args.packages = [resolve_package(args.state_root, name, fuzzy) for name in args.packages]
         if args.command == "launcher":
             from android_launcher import show
-            return show(args.state_root.resolve())
+            return show(args.state_root.resolve(), args.fullscreen)
         if args.command == "refresh-icons":
             refresh_icons(args.state_root, ROOT / "Tools/android-tools/aapt2")
             # A menu entry written before names the bitmap this may have replaced.

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 
+import android_gamepad
 from android_package import PACKAGE, ROOT
 from android_settings import BACK_KEYS, ENTER_KEYS, JIT_DISK_CACHE_SIZES, JIT_DISK_CACHES, NETWORKS, STATS_MODES, load as load_settings, save as save_settings
 from android_sessions import session_log
@@ -111,6 +112,8 @@ SORTS = (("name", "Name"), ("played", "Recently played"))
 FAILED = ("failed", "timed_out", "interrupted")
 MIN_CARD, MAX_CARD, GAP = 208, 280, 18
 GUTTER = 10  # between the cards and the scrollbar
+# The gamepad layout: tiles and type for arm's length, no controls that need a mouse or a keyboard.
+BIG_ICON, BIG_MIN_CARD, BIG_MAX_CARD, BIG_FONT = 150, 300, 380, 1.3
 
 
 def installable(paths):
@@ -125,10 +128,10 @@ def sort_apps(apps, mode):
     return sorted(apps, key=name)
 
 
-def grid_metrics(width):
-    """Columns and card width that fill `width`: cards stretch between MIN_CARD and MAX_CARD."""
-    columns = max(1, (width + GAP) // (MIN_CARD + GAP))
-    return columns, min(MAX_CARD, (width - (columns - 1) * GAP) // columns)
+def grid_metrics(width, minimum=MIN_CARD, maximum=MAX_CARD):
+    """Columns and card width that fill `width`: cards stretch between `minimum` and `maximum`."""
+    columns = max(1, (width + GAP) // (minimum + GAP))
+    return columns, min(maximum, (width - (columns - 1) * GAP) // columns)
 
 
 def poll_wait(minimized, active, busy):
@@ -502,6 +505,7 @@ def settings_dialog(window, app, settings):
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                             self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
                             self.network.currentData(), self.menu.isChecked())
+            android_gamepad.focus_ring(self)
 
         def add_property(self, name="", value=""):
             row = self.properties.rowCount(); self.properties.insertRow(row)
@@ -551,11 +555,13 @@ def settings_dialog(window, app, settings):
     return Settings()
 
 
-def build(state, application, settings=None):
-    """The library window without its single-instance socket or event loop (show() adds both)."""
+def build(state, application, settings=None, pads=None):
+    """The library window without its single-instance socket or event loop (show() adds both).
+
+    `pads` is the gamepad backend (see android_gamepad): None opens SDL3's, False leaves gamepads out."""
     try:
         from PyQt6.QtCore import QEvent, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSettings, QSize, QTimer, Qt, QUrl
-        from PyQt6.QtGui import (QActionGroup, QColor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath,
+        from PyQt6.QtGui import (QActionGroup, QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPainterPath,
                                  QPalette, QPixmap)
         from PyQt6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
                                      QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
@@ -564,6 +570,7 @@ def build(state, application, settings=None):
         raise ValueError("The desktop launcher requires PyQt6; the CLI works without it") from error
     application.setApplicationName("Asgard")
     icon_size, spacing = 88, GAP
+    base_font = QFont(application.font())
 
     def theme():
         """Colors for the current palette; the stylesheet and every glyph derive from them."""
@@ -579,7 +586,7 @@ def build(state, application, settings=None):
     def tint(color, alpha):
         return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha})"
 
-    def make_style(colors):
+    def make_style(colors, big=False):
         accent, danger, good = colors["accent"], colors["danger"], colors["good"]
         return f"""
         QDialogButtonBox {{ dialogbuttonbox-buttons-have-icons: 0; }}
@@ -640,7 +647,15 @@ def build(state, application, settings=None):
         QFrame#notice QLabel, QFrame#progress QLabel, QFrame#drawer QLabel {{ background: transparent; }}
         QLabel#drop {{ background: palette(window); border: 2px dashed palette(highlight); border-radius: 16px;
             font-weight: 600; }}
-        """
+        QLabel#padkey {{ border: 2px solid {colors["muted"].name()}; border-radius: 14px; min-height: 24px; max-height: 24px;
+            min-width: 24px; padding: 0 7px; font-weight: 700; qproperty-alignment: AlignCenter; }}
+        QFrame#hints {{ border: none; border-top: 1px solid {tint(colors["text"], .18)}; }}
+        """ + (f"""
+        QFrame#card {{ border-width: 4px; border-radius: 20px; }}
+        QFrame#card:focus, QFrame#card[selected="true"] {{ background: {tint(accent, .16)}; }}
+        QPushButton#play {{ min-height: 46px; border-radius: 12px; }}
+        QDialog QPushButton {{ min-height: 44px; }}
+        """ if big else "")
 
     ICON = 18
     glyph_cache = {}
@@ -844,6 +859,10 @@ def build(state, application, settings=None):
             self.action.setIconSize(QSize(ICON, ICON))
             self.gear.setIcon(glyph("tune", "muted")); self.history.setIcon(glyph("history", "muted"))
             self.action.setToolTip(rule.get("reason", ""))
+            big = self.window.big
+            for button in (self.gear, self.history): button.setVisible(not big)
+            for button in (self.action, self.gear, self.history):
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus if big else Qt.FocusPolicy.StrongFocus)
             session = app["session"]
             self.history.setEnabled(bool(session.get("session_id") or app.get("error")))
             self.developer.setText(f"{app['package']}\nUID {session.get('uid', '—')} · PID {session.get('pid') or '—'}")
@@ -986,6 +1005,9 @@ def build(state, application, settings=None):
             self.selected, self.drawer_package, self.drawer_stamp, self.drawer_scanned = None, None, None, 0
             self.order, self.announce = [], None
             self.settings = settings or QSettings("Asgard", "Library")
+            # layout: auto follows the input (a pad press switches to the gamepad layout), or big, or desktop.
+            self.big, self.pad_layout, self.pad_reader = False, str(self.settings.value("layout", "auto")), None
+            self.card_limits, self.fullscreen_wanted, self.was_active = (MIN_CARD, MAX_CARD), False, set()
             self.metrics, self.polled, self.install_queue, self.install_batch = None, 0.0, [], None
             self.setWindowTitle("Asgard"); self.setMinimumSize(720, 480); self.setAcceptDrops(True)
             self.setWindowIcon(application.windowIcon()); self.theming = False
@@ -1057,7 +1079,8 @@ def build(state, application, settings=None):
             column.setSpacing(10); column.addStretch(); self.pages.addWidget(empty)
             middle.addWidget(self.pages, 1); middle.addWidget(self.build_drawer())
             outer.addLayout(middle, 1)
-            outer.addWidget(self.build_developer())
+            self.developer_box = self.build_developer(); outer.addWidget(self.developer_box)
+            outer.addWidget(self.build_hints())
             self.setCentralWidget(body)
             # Nothing is selected on launch, and clicking empty space leaves the search box.
             body.setFocusPolicy(Qt.FocusPolicy.ClickFocus); body.setFocus()
@@ -1068,7 +1091,119 @@ def build(state, application, settings=None):
             geometry = self.settings.value("geometry")
             if not (geometry and self.restoreGeometry(geometry)): self.resize(1080, 720)
             self.timer = QTimer(self); self.timer.timeout.connect(self.tick); self.timer.start(1500)
+            if self.pad_layout == "big" or (self.pad_layout == "auto" and android_gamepad.in_game_mode()): self.set_big(True)
             self.render(True); self.refresh()
+
+        def build_hints(self):
+            """The bar of button hints at the bottom of the gamepad layout; its keys are drawn by the stylesheet."""
+            self.hints = QFrame(); self.hints.setObjectName("hints")
+            row = QHBoxLayout(self.hints); row.setContentsMargins(4, 10, 4, 0); row.setSpacing(8)
+            self.hint_parts = []
+            for _ in range(5):
+                key, text = QLabel(), muted(QLabel()); key.setObjectName("padkey")
+                self.hint_parts.append((key, text)); row.addWidget(key); row.addWidget(text); row.addSpacing(16)
+            row.addStretch(); self.hints.hide()
+            return self.hints
+
+        def update_hints(self):
+            if not self.big: return
+            reader = self.pad_reader
+            label = reader.label if reader else (lambda button, default: default)
+            app = self.app(self.selected)
+            rule = card_state(app, self.pending.get(app["package"])) if app else None
+            closing = self.drawer.isVisible() or self.notice.isVisible()
+            shown = ((label(android_gamepad.SOUTH, "A"), rule["text"] if rule else "Select", True),
+                     (label(android_gamepad.WEST, "X"), "Sort", True), (label(android_gamepad.NORTH, "Y"), "Menu", True),
+                     (label(android_gamepad.EAST, "B"), "Close", closing), ("Start", "Library menu", True))
+            for (key, text), (name, words, visible) in zip(self.hint_parts, shown):
+                key.setText(name); text.setText(words); key.setVisible(visible); text.setVisible(visible)
+
+        def set_big(self, on, remember=False):
+            """The gamepad layout (large tiles, hints, no mouse-only controls) or the desktop one."""
+            nonlocal icon_size
+            if remember: self.settings.setValue("layout", "big" if on else "desktop"); self.pad_layout = "big" if on else "desktop"
+            if on == self.big: return
+            self.big = on
+            icon_size = BIG_ICON if on else 88
+            font = QFont(base_font)
+            if on: font.setPointSizeF(font.pointSizeF() * BIG_FONT)
+            application.setFont(font)
+            if on: self.developer_toggle.setChecked(False)
+            for widget in (self.search, self.sort_button, self.google_button, self.install_button, self.developer_box):
+                widget.setVisible(not on)
+            self.hints.setVisible(on)
+            self.card_limits = (BIG_MIN_CARD, BIG_MAX_CARD) if on else (MIN_CARD, MAX_CARD)
+            for card in self.cards.values():                         # their fonts and icons are set when they are built
+                self.grid.removeWidget(card); card.hide(); card.deleteLater()
+            # No card, no place in the grid: restyling resizes the viewport at once, and reflow() walks the order.
+            self.cards.clear(); self.order = []; self.apply_theme(); self.update_hints()
+            QTimer.singleShot(0, self.focus_card)
+
+        def focus_card(self):
+            """Focus the selected card, else the first one; the empty library's button when there are none."""
+            card = self.cards.get(self.selected) or (self.cards.get(self.order[0]) if self.order else None)
+            if card is not None and card.isVisible(): card.setFocus(); self.scroll.ensureWidgetVisible(card)
+            elif self.pages.currentIndex() == 1 and self.empty_install.isVisible(): self.empty_install.setFocus()
+            return card is not None
+
+        def pad_wake(self):
+            """A pad press while nothing here shows it is listening: take the gamepad layout when the layout follows
+            the input, and put the focus on a card. True when that was all the press was for."""
+            if not self.big and self.pad_layout == "auto":
+                self.set_big(True); return True
+            focused = application.focusWidget()
+            if focused is not None and focused.objectName() == "card": return False
+            self.focus_card(); return True
+
+        def pad_action(self, action):
+            """What only the library does with a pad action; True when it took the action. Menus and dialogs, which
+            have their own keys, get all of them."""
+            if application.activePopupWidget() or application.activeModalWidget(): return False
+            if self.pad_wake(): return True
+            if action == "sort":
+                keys = [key for key, _ in SORTS]
+                self.set_sort(keys[(keys.index(self.sort_mode) + 1) % len(keys)])
+                self.show_notice("Sorted by " + dict(SORTS)[self.sort_mode].lower(), timeout=1500)
+            elif action == "options": self.launcher_menu()
+            elif action == "back":
+                if self.drawer.isVisible(): self.close_drawer()
+                elif self.notice.isVisible(): self.notice.hide()
+                self.update_hints()
+            elif action in ("page_up", "page_down") and self.selected in self.order:
+                card = self.cards[self.selected]; rows = max(1, self.scroll.viewport().height() // (card.height() + GAP))
+                index = self.order.index(self.selected) + (1 if action == "page_down" else -1) * rows * self.columns
+                target = self.cards[self.order[max(0, min(len(self.order) - 1, index))]]
+                target.setFocus(); self.scroll.ensureWidgetVisible(target)
+            else: return False
+            return True
+
+        def launcher_menu(self):
+            """Start: what the toolbar does with a mouse, as a menu a pad can walk."""
+            menu = QMenu(self)
+            menu.addAction("Install APK…").triggered.connect(self.install)
+            menu.addAction("Google account…").triggered.connect(self.google_account)
+            menu.addAction("Sort by " + ("recently played" if self.sort_mode == "name" else "name")).triggered.connect(
+                lambda: self.pad_action("sort"))
+            menu.addSeparator()
+            menu.addAction("Desktop layout" if self.big else "Gamepad layout").triggered.connect(
+                lambda: self.set_big(not self.big, remember=True))
+            menu.addAction("Leave full screen" if self.isFullScreen() else "Full screen").triggered.connect(
+                lambda: self.set_fullscreen(not self.isFullScreen()))
+            menu.addSeparator()
+            menu.addAction("Quit the library").triggered.connect(self.close)
+            size = menu.sizeHint()
+            menu.popup(self.mapToGlobal(QPoint((self.width() - size.width()) // 2, (self.height() - size.height()) // 2)))
+
+        def set_fullscreen(self, on):
+            self.fullscreen_wanted = on
+            if on: self.showFullScreen()
+            else: self.showNormal()
+
+        def present(self):
+            """Show the window in front, full screen if that is how it was asked for."""
+            if self.fullscreen_wanted: self.showFullScreen()
+            else: self.showNormal()
+            self.raise_(); self.activateWindow()
 
         def build_drawer(self):
             self.drawer = QFrame(); self.drawer.setObjectName("drawer"); self.drawer.setFixedWidth(340)
@@ -1160,6 +1295,9 @@ def build(state, application, settings=None):
                 except (ValueError, KeyError) as error:
                     self.show_notice("Couldn't read the app library: " + str(error)[:300], error=True); return
                 self.google_request(listed)
+                active = {a["package"] for a in self.apps if a["session"].get("state") in ACTIVE}
+                if self.big and self.was_active - active and not self.isActiveWindow(): self.present()
+                self.was_active = active
                 self.render(); self.update_drawer()
                 # Apps installed before adaptive icons were read get theirs once, without holding up the window.
                 if self.icons_scanned != self.state and any(a.get("icon_unscanned") for a in self.apps):
@@ -1186,6 +1324,7 @@ def build(state, application, settings=None):
                     card.update_app(app, self.pending.get(app["package"]))
             order = [a["package"] for a in visible]
             if relayout or order != self.order: self.reflow(order)
+            self.update_hints()
             running = sum(a["session"].get("state") in ACTIVE for a in self.apps)
             self.summary.setText(f"{len(self.apps)} app{'s' * (len(self.apps) != 1)}" + (f" · {running} running" if running else ""))
             if not self.apps:
@@ -1203,22 +1342,26 @@ def build(state, application, settings=None):
 
         def reflow(self, order=None):
             if order is not None: self.order = order
-            columns, width = grid_metrics(self.scroll.viewport().width() - GUTTER)
+            columns, width = grid_metrics(self.scroll.viewport().width() - GUTTER, *self.card_limits)
             self.columns, self.metrics = columns, (columns, width)
+            focused = application.focusWidget()      # taking the cards out of the grid drops the focus
+            keep = focused.app["package"] if focused is not None and focused.objectName() == "card" else None
             for card in self.cards.values():
                 self.grid.removeWidget(card); card.hide()
             previous = None
+            self.order = [package for package in self.order if package in self.cards]
             for index, package in enumerate(self.order):
                 card = self.cards[package]; card.set_width(width)
                 self.grid.addWidget(card, index // columns, index % columns); card.show()
                 if previous: QWidget.setTabOrder(previous, card)
                 previous = card
+            if keep in self.order: self.cards[keep].setFocus()
 
         def eventFilter(self, watched, event):
             # The viewport gets its size after the window's own resize event, so only
             # its own Resize carries the width the grid must fill.
             if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
-                if grid_metrics(self.scroll.viewport().width() - GUTTER) != self.metrics: self.reflow()
+                if grid_metrics(self.scroll.viewport().width() - GUTTER, *self.card_limits) != self.metrics: self.reflow()
             return super().eventFilter(watched, event)
 
         def resizeEvent(self, event):
@@ -1252,7 +1395,7 @@ def build(state, application, settings=None):
 
         def apply_theme(self):
             """Stylesheet and glyphs follow the palette, including a theme change while running."""
-            self.setStyleSheet(make_style(theme()))
+            self.setStyleSheet(make_style(theme(), self.big))
             self.search_action.setIcon(glyph("search", "muted")); self.google_button.setIcon(glyph("person", "text"))
             self.install_button.setIcon(glyph("plus", "onaccent")); self.empty_install.setIcon(glyph("plus", "onaccent"))
             for card in self.cards.values(): card.art = None; card.update_app(card.app, self.pending.get(card.app["package"]))
@@ -1313,6 +1456,7 @@ def build(state, application, settings=None):
             self.selected = package
             for name, card in self.cards.items(): card.set_selected(name == package)
             if self.drawer.isVisible() and package != self.drawer_package: self.open_drawer(package)
+            self.update_hints()
 
         def act(self, app):
             package = app["package"]
@@ -1412,10 +1556,10 @@ def build(state, application, settings=None):
             if not package: return
             self.drawer_package, self.drawer_stamp = package, None
             if self.selected != package: self.select(package)
-            self.drawer.show(); self.update_drawer(force=True)
+            self.drawer.show(); self.update_drawer(force=True); self.update_hints()
 
         def close_drawer(self):
-            self.drawer.hide(); self.drawer_package = None
+            self.drawer.hide(); self.drawer_package = None; self.update_hints()
 
         def update_drawer(self, force=False):
             if not self.drawer.isVisible(): return
@@ -1529,11 +1673,14 @@ def build(state, application, settings=None):
             if batch["installed"] == 1: self.announce = batch["announce"]
             self.refresh()
 
-    window = Library(); window.apply_theme()
+    window = Library()
+    backend = android_gamepad.open_backend() if pads is None else (pads or None)
+    if backend: android_gamepad.connect(window, application, backend)
+    window.apply_theme(); window.update_hints()
     return window
 
 
-def show(state):
+def show(state, fullscreen=False):
     import fcntl
     state = Path(state).resolve()
     try:
@@ -1558,7 +1705,9 @@ def show(state):
             path.unlink()
         if not server.listen(str(path)): raise RuntimeError(server.errorString())
     window = build(state, application)
-    window.show()
+    # Full screen when asked for, and in Steam's Game Mode, where a pad is all there is.
+    window.fullscreen_wanted = fullscreen or android_gamepad.in_game_mode()
+    window.present()
     def activate():
         while server.hasPendingConnections():
             client = server.nextPendingConnection()
@@ -1568,7 +1717,7 @@ def show(state):
                     client.abort(); return
                 if window.state != state:
                     window.state = state; window.path.setText(str(state)); window.refresh()
-                window.showNormal(); window.raise_(); window.activateWindow()
+                window.present()
                 client.write(b'ok\n'); client.flush(); client.disconnectFromServer()
             client.readyRead.connect(receive)
             client.disconnected.connect(client.deleteLater)

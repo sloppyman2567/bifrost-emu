@@ -759,6 +759,15 @@ class LauncherProfileTests(unittest.TestCase):
         self.assertEqual(dialog.result_settings(), {"property.ro.kernel.qemu": "custom", "property.debug.fixture": "1"})
 
 
+class FakePads:
+    """A gamepad backend whose one pad holds whatever `buttons` says."""
+    def __init__(self):
+        self.buttons = set()
+
+    def read(self):
+        return [{"name": "Fake pad", "buttons": set(self.buttons), "axes": {}, "labels": {0: 1, 1: 2, 2: 3, 3: 4}}]
+
+
 class LauncherLibraryTests(unittest.TestCase):
     """The real library window on Qt's offscreen platform: layout, sorting, input, queueing and theming."""
     @classmethod
@@ -770,6 +779,8 @@ class LauncherLibraryTests(unittest.TestCase):
             raise unittest.SkipTest("PyQt6 is not installed")
         with patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}):
             cls.qt = QApplication.instance() or QApplication([])
+        from PyQt6.QtGui import QFont
+        cls.font = QFont(cls.qt.font())      # the gamepad layout scales the application's font: put it back after each test
 
     def setUp(self):
         from PyQt6.QtCore import QSettings
@@ -779,14 +790,17 @@ class LauncherLibraryTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "state").mkdir()
         self.settings = QSettings(str(self.root / "library.ini"), QSettings.Format.IniFormat)
-        self.windows = []
+        self.windows, self.dialogs = [], []
         self.window = self.open_window()
 
     def tearDown(self):
+        for dialog in self.dialogs: dialog.close(); dialog.deleteLater()    # an open modal dialog would take the next test's keys
         for window in self.windows:
             window.timer.stop(); window.close()
+            if getattr(window, "pad_timer", None): window.pad_timer.stop()
             for job in list(window.jobs): job.kill(); job.waitForFinished(2000)   # no child outlives its window
             window.deleteLater()
+        self.qt.setFont(self.font)
         self.qt.processEvents()
         self.temporary.cleanup()
 
@@ -798,13 +812,33 @@ class LauncherLibraryTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("Qt events did not settle")
 
-    def open_window(self, size=(1100, 700)):
-        window = self.launcher.build(self.root / "state", self.qt, self.settings)
+    def open_window(self, size=(1100, 700), pads=False):
+        window = self.launcher.build(self.root / "state", self.qt, self.settings, pads=pads)
         window.timer.stop(); self.windows.append(window)
         self.settle(lambda: not window.refreshing)       # the initial listing of the empty library
         if size: window.resize(*size)
         window.show(); self.settle()
         return window
+
+    def pad_window(self, count=8, **settings):
+        """A library window of `count` apps with a fake pad, its first (recording) poll made."""
+        import android_gamepad
+        for key, value in settings.items(): self.settings.setValue(key, value)
+        patcher = patch.object(android_gamepad, "in_game_mode", return_value=False)
+        patcher.start(); self.addCleanup(patcher.stop)
+        self.pad = FakePads()
+        window = self.open_window(pads=self.pad)
+        self.fill(count, window)
+        window.activateWindow(); self.settle()
+        self.assertIsNotNone(self.qt.activeWindow(), "the offscreen window is not the active window")
+        window.pad_tick()
+        return window
+
+    def press(self, window, *buttons):
+        """Press and release pad buttons, a poll apart each, and let Qt settle."""
+        self.pad.buttons = set(buttons); window.pad_tick()
+        self.pad.buttons = set(); window.pad_tick()
+        self.settle()
 
     def app(self, index, label=None, **session):
         return {"package": f"org.fixture.g{index}", "label": label or f"Game {index:02d}", "version_name": f"1.{index}",
@@ -998,6 +1032,220 @@ class LauncherLibraryTests(unittest.TestCase):
         with unittest.mock.patch.object(QDialog, "exec", capture):
             self.window.google_button.click(); self.settle(lambda: bool(shown))
         self.assertTrue(shown)
+
+    def test_the_first_pad_press_switches_to_the_gamepad_layout_and_focuses_a_card(self):
+        import android_gamepad as pads
+        window = self.pad_window()
+        self.assertFalse(window.big)
+        self.assertTrue(window.search.isVisible() and window.install_button.isVisible())
+        self.press(window, pads.DPAD_DOWN)
+        self.assertTrue(window.big)
+        self.assertFalse(window.search.isVisible() or window.install_button.isVisible() or window.google_button.isVisible()
+                         or window.developer_box.isVisible())
+        self.assertTrue(window.hints.isVisible())
+        card = window.cards[window.order[0]]
+        self.assertEqual(card.icon.width(), self.launcher.BIG_ICON)
+        self.assertFalse(card.gear.isVisible() or card.history.isVisible())
+        self.assertIs(self.qt.focusWidget(), card)                  # that first press only woke it up: nothing moved
+        self.assertEqual(window.columns, self.launcher.grid_metrics(window.scroll.viewport().width() - self.launcher.GUTTER,
+                                                                    *window.card_limits)[0])
+
+    def test_the_pad_moves_between_cards_and_launches_the_focused_one(self):
+        import android_gamepad as pads
+        window = self.pad_window()
+        self.press(window, pads.DPAD_DOWN)                          # wakes
+        self.assertTrue(window.columns > 1 and len(window.order) > window.columns + 1)
+        self.press(window, pads.DPAD_RIGHT)
+        self.assertIs(self.qt.focusWidget(), window.cards[window.order[1]])
+        self.press(window, pads.DPAD_DOWN)
+        below = window.order[1 + window.columns]
+        self.assertIs(self.qt.focusWidget(), window.cards[below])
+        with patch.object(window, "act") as act:
+            self.press(window, pads.SOUTH)
+        act.assert_called_once_with(window.cards[below].app)
+        with patch.object(window, "card_menu") as menu:
+            self.press(window, pads.NORTH)
+        self.assertEqual(menu.call_args[0][0]["package"], below)
+
+    def test_x_sorts_start_opens_the_library_menu_and_b_closes_it_and_the_drawer(self):
+        import android_gamepad as pads
+        window = self.pad_window()
+        self.press(window, pads.DPAD_DOWN)
+        self.press(window, pads.WEST)
+        self.assertEqual(window.sort_mode, "played")
+        self.press(window, pads.WEST)
+        self.assertEqual(window.sort_mode, "name")
+        self.press(window, pads.START)
+        menu = self.qt.activePopupWidget()
+        self.assertIsNotNone(menu)
+        self.assertIn("Quit the library", [action.text() for action in menu.actions()])
+        self.press(window, pads.EAST)                               # Escape reaches the menu, not the library
+        self.assertIsNone(self.qt.activePopupWidget())
+        self.assertTrue(window.isVisible())
+        window.open_drawer(window.order[0]); self.settle()
+        self.assertTrue(window.drawer.isVisible())
+        self.press(window, pads.EAST)
+        self.assertFalse(window.drawer.isVisible())
+        self.assertTrue(window.isVisible())                         # B never quits the library
+
+    def test_a_menu_is_walked_with_the_dpad_and_chosen_with_a(self):
+        import android_gamepad as pads
+        window = self.pad_window()
+        self.press(window, pads.DPAD_DOWN)
+        chosen = []
+        with patch.object(window, "install", lambda: chosen.append("install")), \
+                patch.object(window, "google_account", lambda: chosen.append("google")):
+            self.press(window, pads.START)
+            self.press(window, pads.DPAD_DOWN); self.press(window, pads.DPAD_DOWN)   # Install, then Google account
+            self.press(window, pads.SOUTH)
+        self.assertEqual(chosen, ["google"])
+        self.assertIsNone(self.qt.activePopupWidget())
+
+    def test_a_pad_press_does_nothing_while_no_library_window_is_active(self):
+        import android_gamepad as pads
+        window = self.pad_window()
+        window.hide(); self.settle()
+        self.assertIsNone(self.qt.activeWindow())
+        self.press(window, pads.DPAD_DOWN, pads.SOUTH)
+        self.assertFalse(window.big)
+        window.show(); window.activateWindow(); self.settle()
+        self.pad.buttons = {pads.SOUTH}; window.pad_tick()          # still held when the window comes back
+        with patch.object(window, "act") as act:
+            window.pad_tick(); self.pad.buttons = set(); window.pad_tick()
+        act.assert_not_called()
+
+    def test_a_chosen_desktop_layout_stays_and_the_pad_still_navigates(self):
+        import android_gamepad as pads
+        window = self.pad_window(layout="desktop")
+        self.press(window, pads.DPAD_DOWN)
+        self.assertFalse(window.big)
+        self.assertTrue(window.search.isVisible())
+        self.assertEqual(self.qt.focusWidget().objectName(), "card")    # the press focused a card
+        self.press(window, pads.DPAD_RIGHT)
+        self.assertIs(self.qt.focusWidget(), window.cards[window.order[1]])
+
+    def test_switching_layout_never_leaves_the_grid_walking_cards_that_are_gone(self):
+        """The launcher aborted with a KeyError: a resize during the switch reflowed an order whose cards were cleared."""
+        import android_gamepad as pads
+        window = self.pad_window()
+        self.press(window, pads.DPAD_DOWN)                          # to the gamepad layout and back, with resizes between
+        window.resize(900, 600); self.settle()
+        window.set_big(False); window.resize(1100, 700); self.settle()
+        self.assertEqual(sorted(window.order), sorted(window.cards))
+        window.order = ["org.fixture.gone", *window.order]          # an order that names a card that does not exist
+        window.reflow()
+        self.assertNotIn("org.fixture.gone", window.order)
+
+    def test_a_failing_pad_switches_itself_off_instead_of_aborting_the_library(self):
+        import android_gamepad as pads
+        window = self.pad_window()
+        self.pad.read = lambda: 1 / 0
+        with patch("sys.stderr"):
+            window.pad_tick()                                       # a ZeroDivisionError here would abort the process
+        self.assertFalse(window.pad_timer.isActive())
+        self.assertTrue(window.isVisible())
+
+    def test_sorting_keeps_the_focused_card_focused(self):
+        import android_gamepad as pads
+        window = self.pad_window()
+        self.press(window, pads.DPAD_DOWN); self.press(window, pads.DPAD_RIGHT)
+        focused = window.order[1]
+        self.press(window, pads.WEST)
+        self.assertIs(self.qt.focusWidget(), window.cards[focused])
+
+    def settings_dialog(self, window, **settings):
+        """An app's settings dialog, open and modal, with the pad's first poll made against it."""
+        dialog = self.launcher.settings_dialog(window, window.apps[0], settings)
+        self.dialogs.append(dialog); dialog.open(); self.settle()
+        self.assertIs(self.qt.activeModalWidget(), dialog)
+        window.pad_tick()
+        return dialog
+
+    def focused(self):
+        widget = self.qt.focusWidget()
+        return type(widget).__name__ + (":" + widget.text() if type(widget).__name__ == "QPushButton" else "")
+
+    def test_the_pad_edits_the_app_settings_a_check_box_a_combo_box_and_the_tabs(self):
+        import android_gamepad as pads
+        from PyQt6.QtWidgets import QTabWidget
+        window = self.pad_window(layout="big")
+        dialog = self.settings_dialog(window)
+        tabs = dialog.findChild(QTabWidget)
+        self.press(window, pads.RIGHT_SHOULDER); self.assertEqual(tabs.currentIndex(), 1)
+        self.press(window, pads.LEFT_SHOULDER); self.assertEqual(tabs.currentIndex(), 0)
+        self.press(window, pads.DPAD_DOWN)
+        self.assertIs(self.qt.focusWidget(), dialog.stats)
+        self.assertFalse(dialog.stats.isChecked())
+        self.press(window, pads.SOUTH)
+        self.assertTrue(dialog.stats.isChecked() and dialog.stats_mode.isEnabled())
+        self.press(window, pads.DPAD_DOWN)
+        self.assertIs(self.qt.focusWidget(), dialog.stats_mode)
+        self.press(window, pads.SOUTH)                              # A opens the combo box's list
+        self.assertIsNotNone(self.qt.activePopupWidget())
+        before = dialog.stats_mode.currentIndex()
+        self.press(window, pads.DPAD_DOWN); self.press(window, pads.SOUTH)
+        self.assertIsNone(self.qt.activePopupWidget())
+        self.assertEqual(dialog.stats_mode.currentIndex(), before + 1)
+        self.assertIs(self.qt.focusWidget(), dialog.stats_mode)
+
+    def test_the_pad_leaves_the_property_table_at_either_end_and_the_focus_is_drawn(self):
+        import android_gamepad as pads
+        from PyQt6.QtWidgets import QFrame, QTabWidget
+        window = self.pad_window(layout="big")
+        window.apps[0]["launcher"] = "managed_activity"
+        dialog = self.settings_dialog(window, **{"property.a.b": "1", "property.c.d": "2"})
+        dialog.findChild(QTabWidget).setCurrentIndex(1); self.settle()
+        table = dialog.properties
+        table.setFocus(); table.setCurrentCell(0, 0); self.settle()
+        self.press(window, pads.DPAD_DOWN)
+        self.assertEqual((self.focused(), table.currentRow()), ("QTableWidget", 1))     # inside the table first
+        self.press(window, pads.DPAD_DOWN)
+        self.assertEqual(self.focused(), "QPushButton:Add property")                    # then out of it
+        ring = dialog.findChild(QFrame, "focusring")
+        self.assertTrue(ring.isVisible())
+        focus = self.qt.focusWidget()
+        self.assertTrue(ring.geometry().contains(focus.mapTo(dialog, focus.rect().center())))   # drawn around it
+        table.setFocus(); table.setCurrentCell(0, 0); self.settle()
+        self.press(window, pads.DPAD_UP)
+        self.assertNotEqual(self.focused(), "QTableWidget")                              # up from the first row leaves too
+
+    def test_the_pad_saves_and_cancels_the_app_settings(self):
+        import android_gamepad as pads
+        from PyQt6.QtWidgets import QDialog
+        window = self.pad_window(layout="big")
+        dialog = self.settings_dialog(window)
+        for _ in range(30):                                         # walk the focus order to Save
+            if self.focused() == "QPushButton:Save": break
+            self.press(window, pads.DPAD_DOWN)
+        self.assertEqual(self.focused(), "QPushButton:Save")
+        self.press(window, pads.SOUTH)
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        other = self.settings_dialog(window)
+        self.press(window, pads.EAST)                               # B cancels, and the library stays
+        self.assertEqual(other.result(), QDialog.DialogCode.Rejected)
+        self.assertTrue(window.isVisible())
+
+    def test_the_layout_menu_entry_switches_and_remembers_the_choice(self):
+        window = self.pad_window(layout="big")
+        self.assertTrue(window.big)
+        window.set_big(False, remember=True); self.settle()
+        self.assertFalse(window.big)
+        self.assertEqual(str(self.settings.value("layout")), "desktop")
+        self.assertTrue(window.search.isVisible() and window.developer_box.isVisible() and not window.hints.isVisible())
+        self.assertEqual(window.cards[window.order[0]].icon.width(), 88)
+        self.assertTrue(window.cards[window.order[0]].gear.isVisible())
+
+    def test_the_hints_name_the_pads_buttons_and_the_focused_apps_action(self):
+        import android_gamepad as pads
+        window = self.pad_window(layout="big")
+        self.press(window, pads.DPAD_DOWN)
+        shown = lambda: [(key.text(), text.text()) for key, text in window.hint_parts if key.isVisible()]
+        self.assertEqual(shown(), [("A", "Play"), ("X", "Sort"), ("Y", "Menu"), ("Start", "Library menu")])
+        window.apps[0] = dict(window.apps[0], session={"state": "running"})
+        window.render(); self.settle()
+        self.assertEqual(shown()[0], ("A", "Stop"))                 # the first card is the one focused
+        window.open_drawer(window.order[0]); self.settle()
+        self.assertIn(("B", "Close"), shown())
 
     def test_keyboard_and_double_click_play_but_not_a_disabled_game(self):
         from PyQt6.QtCore import Qt

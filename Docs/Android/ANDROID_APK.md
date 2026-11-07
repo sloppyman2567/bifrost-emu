@@ -351,6 +351,40 @@ it is minimized; it refreshes at once when the window is activated. Package IDs,
 paths and Java call tracing are grouped under Developer. (There is no interpreter checkbox: `asgard run --no-jit`
 covers that debugging use.)
 
+### Gamepad
+
+A gamepad drives the library without a keyboard or mouse (`Scripts/Android/android_gamepad.py`). Qt 6 has no gamepad module, so the
+library reads pads through SDL3's gamepad API with ctypes (the library the Android window needs anyway: `libSDL3.so.0` from the
+system, else the copy `make bootstrap` builds into `Tools/sdl3` or `PREFIX/lib/bifrost`; without SDL3 the library works as before).
+The pad becomes key presses on the focused widget, so cards, menus and dialogs all work: the d-pad or left stick moves, **A**
+plays, stops or presses (Space on buttons, check boxes and combo boxes), **B** closes the menu, dialog or details drawer (it never
+quits the library), **Y** opens the card's menu, **X** changes the sort order, **LB/RB** jump a page of cards (or change tab in a
+dialog) and **Start** opens a library menu with Install APK, Google account, sort, the layout, full screen and Quit. In a dialog
+Up and Down walk the focus order. Face buttons are named as the pad names them (A or Cross), by position: the bottom one confirms.
+
+The per-app settings dialog works the same way: Up and Down walk the controls, A toggles a check box or opens a combo box's list
+(Up, Down and A choose in it), LB and RB switch between General and Compatibility, A on Save or Cancel (or B) finishes, and the
+device-property table keeps Up and Down until its cursor is on the first or last row and then lets go. A ring is drawn around the
+control that has the focus, since check boxes and combo boxes show none of their own under the library's stylesheet. Typing a
+property name or value needs a keyboard: on SteamOS, Steam's on-screen keyboard types into the focused cell.
+
+The pad switches the library to a **gamepad layout**: 150 px icons on tiles of 300 to 380 px, larger type, a bar of button hints
+at the bottom (the focused app's action reads Play, Stop or Return to app), and none of the controls that need a mouse or a
+keyboard (search, Install, Google account, Developer, the per-card buttons). The layout is chosen by the `layout` setting (Qt
+settings, `Asgard/Library`): `auto` (the default) switches at the first pad press, and also at startup in Steam's Game Mode or
+a gamescope session; the Start menu's "Desktop layout" and "Gamepad layout" entries set `desktop` or `big` for good.
+`asgard launcher --fullscreen` opens full screen, as the library does by itself in Game Mode. Game Mode is recognised by
+`SteamGamepadUI=1` (what one forum report found Steam setting; Valve documents no such variable) or `GAMESCOPE_WAYLAND_DISPLAY`,
+neither verified here, so the first pad press switches the layout as well. When an app ends, the library in the gamepad layout
+asks for the focus back.
+
+Only a library window in front reacts: a game started from the library reads the same pad, so a press there never also launches
+or stops something here, and a button still held when the library returns is ignored until it is released. A pad that fails is
+switched off for the session with its error on stderr; `BIFROST_NO_GAMEPAD=1` turns gamepad control off.
+On SteamOS, add the launcher as a non-Steam game and give it a **gamepad** controller layout: Steam's default for such
+shortcuts is keyboard and mouse, and the library then sees no pad at all. This was built and tested with a fake pad on Qt's
+offscreen platform only; it has not been tried with a real pad, Game Mode or gamescope.
+
 Times on the cards follow the user's clock: GNOME, Unity, Budgie and Cinnamon keep a setting of their own (`gsettings`), and
 otherwise the time locale decides, through Qt's locale data, since `nl_langinfo` needs a generated locale on glibc and always
 says 24-hour on musl. The choice is read once, when the library starts.

@@ -36,6 +36,24 @@ there (guided provisioning, update/reinstall) remain in progress.
   Using a pad hides the pointer until the mouse moves, as Steam does. The maintainer plays Subway Surfers with the 2026
   Steam Controller (2026-11-06). Rumble, back paddles and remapping are not implemented.
 
+### Added (library gamepad control)
+
+- The desktop library (`asgard launcher`) can be driven with a gamepad. It reads pads through SDL3's gamepad API
+  (`android_gamepad.py`, ctypes; Qt 6 has none) and turns them into key presses on the focused widget, so cards, menus and
+  dialogs work: d-pad or stick to move, A to play, stop or press, B to close (never to quit), Y for the card menu, X to sort,
+  LB/RB to page, Start for a library menu (install, Google account, sort, layout, full screen, quit). A press switches the library
+  to a gamepad layout: 150 px icons on 300 to 380 px tiles, larger type, a bar of button hints, no controls that need a mouse
+  (`layout` setting: auto, big or desktop). It also starts that way, full screen, in Steam's Game Mode or a gamescope session
+  (recognised by `SteamGamepadUI` or `GAMESCOPE_WAYLAND_DISPLAY`, unverified), and `asgard launcher --fullscreen` asks for full
+  screen. Only the window in front reacts, so a game reading the same pad does not also act on the library; a failing pad is
+  switched off instead of aborting the library; `BIFROST_NO_GAMEPAD=1` turns it off. Built and tested with a fake pad on
+  Qt's offscreen platform; not tried with a real pad, Game Mode or gamescope.
+- The per-app settings dialog takes the pad too: Up and Down walk the controls, A toggles or opens a combo box's list, LB and RB
+  switch tabs, B cancels, and the property table lets focus out at its first and last row. A ring is drawn around the focused
+  control (check boxes and combo boxes showed none).
+- Fixed: the library keeps the focused card focused when the grid is rebuilt (sorting dropped the focus), and `reflow` skips an
+  order entry that has no card; a resize during the layout switch hit that and aborted the process with a `KeyError`.
+
 ### Added (setup without root)
 
 - `make bootstrap` finds what is already installed instead of failing at a generic check. `Scripts/Setup/find-host-tools.sh`

@@ -44,6 +44,10 @@ such as "misc", "common" or "core". The current version lives in
 - Downloads in the setup tools go through `download_progress.fetch` in `Tools/Android/download_progress.py` (progress on a
   terminal, sparse lines in a log; an interrupted download stays as `NAME.part` and resumes, and only a verified file replaces
   the destination), so a long fetch never looks hung and Ctrl-C never costs it; a new fetcher uses it too.
+- The desktop library takes gamepads through `Scripts/Android/android_gamepad.py` (SDL3 by ctypes) as key presses on the focused
+  widget, never as a second input path, and only while a library window is active: a game started from it reads the same pad.
+  It must work without SDL3 or a pad, and an exception in the pad path switches pads off rather than aborting the process
+  (PyQt aborts on an exception in a slot).
 - Setup scripts find host tools through `Scripts/Setup/find-host-tools.sh` (sbin, JDK and LLVM directories, `~/.local/bin`,
   `BIFROST_TOOL_DIRS`), never a bare `command -v`: `debugfs` is off an ordinary Debian user's `PATH`. Hosts without SDL3 build
   it with `Tools/Fetch/fetch-sdl3.py` into `Tools/sdl3`.
