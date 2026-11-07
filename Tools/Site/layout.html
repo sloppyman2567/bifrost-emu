@@ -8,7 +8,7 @@
 <link rel="canonical" href="$canonical">
 <meta name="robots" content="index, follow">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Bifrost">
+<meta property="og:site_name" content="bifrost-emu">
 <meta property="og:title" content="$title">
 <meta property="og:description" content="$description">
 <meta property="og:url" content="$canonical">
@@ -50,6 +50,8 @@ nav a:hover { color: var(--text); }
 .hero { padding: 48px 0 40px; border-bottom: 1px solid var(--line); }
 .hero h1 { font-size: clamp(32px, 5vw, 46px); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 16px; max-width: 760px;
   text-wrap: balance; }
+.badge { display: inline-block; font-size: 13px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--warn); border: 1px solid currentColor; border-radius: 999px; padding: 3px 10px; margin-bottom: 18px; }
 .hero p { font-size: 18px; color: var(--muted); margin: 0 0 26px; max-width: 680px; }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; }
 .button { display: inline-block; padding: 10px 18px; border-radius: 8px; font-weight: 600; text-decoration: none;
@@ -64,13 +66,21 @@ h2 { font-size: 24px; letter-spacing: -0.01em; margin: 0 0 8px; }
 .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 22px 32px; }
 .features h3 { font-size: 16px; margin: 0 0 4px; }
 .features p { margin: 0; color: var(--muted); font-size: 15px; }
-.table { width: 100%; border-collapse: collapse; font-size: 15px; }
+.table { width: 100%; border-collapse: collapse; font-size: 15px; table-layout: fixed; }
+.table th:nth-child(1) { width: 36%; } .table th:nth-child(2) { width: 13%; }
+.table th:nth-child(3) { width: 13%; } .table th:nth-child(4) { width: 38%; }
 .table th { text-align: left; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
   font-weight: 600; padding: 0 12px 10px 0; border-bottom: 1px solid var(--line); }
 .table td { padding: 12px 12px 12px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
-.table td.name { font-weight: 600; min-width: 170px; }
-.table td.kind { color: var(--muted); min-width: 130px; }
+@media (max-width: 640px) { .table { table-layout: auto; } }
+.table td.name { font-weight: 600; overflow-wrap: anywhere; }
+.table td.kind { color: var(--muted); }
 .table td.note { color: var(--muted); }
+details summary { cursor: pointer; color: var(--accent); font-size: 14px; font-weight: 600; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::after { content: " +"; }
+details[open] summary::after { content: " \2212"; }
+details p { margin: 6px 0 0; }
 .pill { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; font-weight: 600; }
 .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .pill.playable { color: var(--ok); } .pill.starts { color: var(--warn); }
@@ -104,7 +114,7 @@ footer a { color: var(--muted); }
 <body>
 <div class="wrap">
 <header class="top">
-  <a class="brand" href="$url"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#2f6f6a"/><path d="M7 21c5-9 13-9 18 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>Bifrost</a>
+  <a class="brand" href="$url"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#2f6f6a"/><path d="M7 21c5-9 13-9 18 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>bifrost-emu</a>
   <nav><a href="${url}games/">Games</a><a href="${url}#install">Install</a><a href="$repo">GitHub</a></nav>
 </header>
 
@@ -112,7 +122,7 @@ footer a { color: var(--muted); }
 $main</main>
 
 <footer>
-  <span>Bifrost $version</span>
+  <span>bifrost-emu $version</span>
   <a href="$repo">Source</a>
   <a href="$repo/blob/main/Docs/CHANGELOG.md">Changelog</a>
   <a href="$repo/blob/main/Docs/roadmap.md">Roadmap</a>

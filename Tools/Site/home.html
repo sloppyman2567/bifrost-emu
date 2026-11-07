@@ -1,8 +1,9 @@
 <div class="hero">
+  <span class="badge">Experimental beta</span>
   <h1>Run ARM64 Android games and Linux apps on your x86_64 Linux PC</h1>
-  <p>Bifrost is a free, open-source AArch64 emulator for Linux. A JIT compiler translates ARM64 code on the fly,
-  a real Android 15 runtime runs APKs without a phone, and games use your own GPU, audio and controllers. No QEMU,
-  no cross-compiler.</p>
+  <p>bifrost-emu lets your Linux PC run games and apps made for ARM64 phones and boards: Android games straight from
+  their APK, and ARM64 Linux programs. They run on your own graphics card, sound and controllers, with no phone and no
+  virtual machine. It is free and open source, and still experimental: games can crash, run slowly or not start.</p>
   <div class="actions">
     <a class="button primary" href="#install">Get started</a>
     <a class="button" href="$repo">View on GitHub</a>
@@ -16,10 +17,22 @@
 
 <section id="features" aria-labelledby="features-title">
   <h2 id="features-title">What it does</h2>
-  <p class="lead">An ARM64 user-mode emulator built for games: Linux programs and Android apps run as if they were native.</p>
+  <p class="lead">Games built for ARM64 run on an ordinary x86_64 Linux PC, as if they were made for it.</p>
   <div class="features">
-$features
+    <div><h3>Android games from an APK</h3><p>Run <code>bifrost-emu game.apk</code> and it installs and starts the game,
+    on a real Android 15 system that runs on your desktop.</p></div>
+    <div><h3>ARM64 Linux programs too</h3><p>Games and tools built for ARM64 Linux, the kind made for phones and
+    single-board computers, start like any other program.</p></div>
+    <div><h3>Your graphics card</h3><p>OpenGL and Vulkan go straight to your own GPU, and Android windows draw at your
+    monitor's full resolution.</p></div>
+    <div><h3>Controllers, keyboard and mouse</h3><p>Gamepads work as an Xbox-style controller, and the mouse stands in
+    for touch.</p></div>
+    <div><h3>Fast where it works</h3><p>ARM code is translated into native PC code while the game runs. Some games
+    reach about 60 FPS; others are still slow.</p></div>
+    <div><h3>Free</h3><p>Open source and in the public domain (Unlicense).</p></div>
   </div>
+  <p class="small" style="margin-top: 24px">How it works, for the technically curious: the
+  <a href="$repo#architecture">architecture overview</a> and <a href="$repo/blob/main/Docs/ARCHITECTURE.md">source map</a>.</p>
 </section>
 
 <section id="games" aria-labelledby="games-title">

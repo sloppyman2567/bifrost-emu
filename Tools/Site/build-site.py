@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Build the project site (GitHub Pages: a home page and a games page) from files in the repository.
 
-The page takes the version from Include/Bifrost/Version.hpp and, from README.md, the
-highlights, the "What runs" summary and table, and the screenshots; each table row's
-status is checked against Scripts/Android/compatibility.json, and the build fails rather
-than publish a page that disagrees with it. Writes index.html, games/index.html, sitemap.xml (submitted in Search
-Console: a project page's robots.txt is not read, only the domain root's) and the screenshots
-(WebP, and a JPEG link preview; needs Pillow) to the output directory (default build/site), with
-the Search Console verification files kept beside this script (google<token>.html, unchanged).
+The pages take the version from Include/Bifrost/Version.hpp and, from README.md, the "What
+runs" summary and table and the screenshots; the home page's plain-language copy is in home.html.
+Each table row's status is checked against Scripts/Android/compatibility.json, and the build fails
+rather than publish a page that disagrees with it. Writes index.html, games/index.html, sitemap.xml
+(submitted in Search Console: a project page's robots.txt is not read, only the domain root's) and
+the screenshots (WebP, and a JPEG link preview; needs Pillow) to the output directory (default
+build/site), with the Search Console verification files kept beside this script (google<token>.html,
+unchanged).
 
 Environment: SITE_URL (default from GITHUB_REPOSITORY, else the project's Pages address).
 """
@@ -23,8 +24,8 @@ import string
 
 ROOT = Path(__file__).resolve().parents[2]
 REPO = "https://github.com/sloppyman2567/bifrost-emu"
-DESCRIPTION = ("Free, open-source ARM64 emulator for x86_64 Linux: run Android games (APKs) and AArch64 Linux "
-               "apps with a JIT, a real Android 15 runtime and your own GPU.")
+DESCRIPTION = ("bifrost-emu is a free, open-source ARM64 emulator for x86_64 Linux: run Android games (APKs) and "
+               "AArch64 Linux apps with a JIT, Android 15 and your own GPU.")
 
 
 def site_url():
@@ -68,19 +69,6 @@ def section(readme, title):
     return match.group(1)
 
 
-def features(readme):
-    items = []
-    for bullet in re.split(r"\n(?=- )", section(readme, "Highlights").strip()):
-        text = " ".join(line.strip() for line in bullet.lstrip("- ").splitlines())
-        match = re.match(r"\*\*(.+?)\*\* — (.+)", text)
-        if not match:
-            raise SystemExit(f"README highlight not understood: {text[:60]}")
-        description = match.group(2)
-        description = description[:1].upper() + description[1:]  # the README continues a sentence after the dash
-        items.append(f"    <div><h3>{inline(match.group(1))}</h3><p>{inline(description)}</p></div>")
-    return "\n".join(items)
-
-
 def normalized(name):
     name = re.sub(r"\(.*?\)", "", name.lower())
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", name).split())
@@ -116,8 +104,11 @@ def games(readme, compat):
         statuses.append((normalized(plain(program)), state))
         if state == "playable":  # names for the home page, without versions
             playable += [re.sub(r"\s+\d+(\.\d+)+$", "", name.strip()) for name in plain(program).split(", ")]
-        rows.append(f'      <tr><td class="name">{inline(program)}</td><td class="kind">{inline(kind)}</td>'
-                    f'<td><span class="pill {state}">{LABELS[state]}</span></td><td class="note">{inline(status)}</td></tr>')
+        # Easy to scan: the platform alone, and the full notes (engine, frame rates, known issues) on request.
+        platform = kind.split(",")[0].strip()
+        rows.append(f'      <tr><td class="name">{inline(program)}</td><td class="kind">{inline(platform)}</td>'
+                    f'<td><span class="pill {state}">{LABELS[state]}</span></td><td class="note"><details><summary>Details'
+                    f'</summary><p>{inline(kind)}. {inline(status)}</p></details></td></tr>')
     # Every playable or blocked app on record has a row, and the row agrees with it.
     for package, app in compat["apps"].items():
         if app["status"] not in ("playable", "blocked"):
@@ -180,8 +171,8 @@ def main():
     summary, summary_html, rows, playable = games(readme, compat)
     shots, first_shot = screenshots(readme, args.output)
     json_ld = {
-        "@context": "https://schema.org", "@type": "SoftwareApplication", "name": "Bifrost",
-        "alternateName": "bifrost-emu", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Linux",
+        "@context": "https://schema.org", "@type": "SoftwareApplication", "name": "bifrost-emu",
+        "alternateName": "Bifrost", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Linux",
         "softwareVersion": version, "description": DESCRIPTION, "url": url, "downloadUrl": REPO,
         "codeRepository": REPO, "license": "https://unlicense.org/", "isAccessibleForFree": True,
         "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
@@ -196,11 +187,11 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(page)
     names = "\n".join(f"    <li>{html.escape(name)}</li>" for name in playable)
-    render("home.html", "Bifrost: run ARM64 Android games and Linux apps on x86_64 Linux", "", DESCRIPTION, json_ld,
+    render("home.html", "bifrost-emu: run ARM64 Android games and apps on x86_64 Linux", "", DESCRIPTION, json_ld,
            version=html.escape(version), games=summary.group(1), playable=summary.group(3), summary=summary_html,
-           playable_names=names, features=features(readme), shots=shots)
+           playable_names=names, shots=shots)
     # As many playable names as fit the ~160 characters a search result shows.
-    lead = (f"Which Android and Linux games run on Bifrost, the ARM64 emulator for x86_64 Linux: "
+    lead = (f"Which Android and Linux games run on bifrost-emu, the ARM64 emulator for x86_64 Linux: "
             f"{summary.group(3)} of {summary.group(1)} playable, including ")
     def joined(names):
         return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
@@ -208,10 +199,10 @@ def main():
     while len(listed) < len(playable) and len(lead + joined(playable[:len(listed) + 1])) < 159:
         listed = playable[:len(listed) + 1]
     games_description = lead + joined(listed) + "."
-    render("games.html", "Games that run on Bifrost: Android and Linux compatibility list", "games/", games_description,
-           {"@context": "https://schema.org", "@type": "CollectionPage", "name": "Bifrost game compatibility",
+    render("games.html", "bifrost-emu game compatibility: Android and Linux games", "games/", games_description,
+           {"@context": "https://schema.org", "@type": "CollectionPage", "name": "bifrost-emu game compatibility",
             "description": games_description, "url": url + "games/",
-            "isPartOf": {"@type": "WebSite", "name": "Bifrost", "url": url}},
+            "isPartOf": {"@type": "WebSite", "name": "bifrost-emu", "alternateName": "Bifrost", "url": url}},
            summary=summary_html, checked=summary.group(2), rows=rows)
     # Search Console's HTML-file verification: served as downloaded, next to the page.
     for verification in sorted(Path(__file__).parent.glob("google*.html")):

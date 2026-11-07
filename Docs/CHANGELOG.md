@@ -47,6 +47,10 @@ there (guided provisioning, update/reinstall) remain in progress.
   `compatibility.json` disagrees with the README table. Search Console's verification file
   (`Tools/Site/google110aba91ba93c9ba.html`) is published beside the page. Pages has to be enabled with GitHub
   Actions as its source.
+- The site speaks to players: it is named bifrost-emu (Bifrost, as Arm's Mali GPUs and their Mesa driver are also
+  called, is the alternate name), the home page says what the emulator does in plain language and links to the
+  architecture for the technical side, and each game on the games page shows its platform and status with the full
+  notes behind a Details toggle. Both pages say plainly that the emulator is experimental.
 
 ### Changed (tests)
 
