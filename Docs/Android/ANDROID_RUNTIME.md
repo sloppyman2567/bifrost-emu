@@ -2636,6 +2636,12 @@ android-15.0.0_r1 (`IAudioFlingerService.aidl`, `IAudioTrack.aidl`,
   futexes (see the syscall guide).
 - **Metrics.** Native `mediametrics::LogItem::record()` waited 5 s for `media.metrics`
   twice per track; a stub service accepts and drops submissions.
+- **AAudio stream format and callback buffer.** A stream opened without a format
+  (`AAUDIO_FORMAT_UNSPECIFIED`) is FLOAT here, which matches producers that leave
+  it unset and write float samples (Wwise in Zenless Zone Zero); a requested I16
+  stream stays I16. The guest callback buffer is sized for 32-bit samples even on
+  an I16 stream, so a producer writing wider samples cannot run off its mapping —
+  that overflow was the SIGSEGV in `memcpy` one page past the bounce (2026-11-06).
 
 Checked: `ManagedServiceBatch.audioTracks` plays a stereo tone (left a quarter of full
 scale, right a half) through a real `AudioTrack` and asserts that the server consumed every
@@ -2649,12 +2655,6 @@ garbage collected, not at the client's release.
 
 #### Managed OpenSL ES (2026-10-13)
 
-- **AAudio stream format and callback buffer.** A stream opened without a format
-  (`AAUDIO_FORMAT_UNSPECIFIED`) is FLOAT here, which matches producers that leave
-  it unset and write float samples (Wwise in Zenless Zone Zero); a requested I16
-  stream stays I16. The guest callback buffer is sized for 32-bit samples even on
-  an I16 stream, so a producer writing wider samples cannot run off its mapping —
-  that overflow was the SIGSEGV in `memcpy` one page past the bounce (2026-11-06).
 The image's real `libOpenSLES.so` (wilhelm) plays through AudioTrack, so
 `createTrack` fails without AudioFlinger and player Realize returns
 `SL_RESULT_CONTENT_UNSUPPORTED`; Azur Lane's CRIWARE then reports
@@ -2828,6 +2828,12 @@ pointer's register value, and keeps mapping/protection checks on the resolved
 address. It covers direct/sparse memory, atomics, thunk pointer translation and
 forked memory state. Instruction addresses are not untagged. This is data TBI,
 not MTE support or permission to claim memory-tag checking works.
+FrostJIT untags the final data address in a scratch register before its guards
+(`emit_untag_data_address`), so tagged heap accesses stay native; before that,
+every one failed the window bound and was interpreted (about a quarter of
+Zenless Zone Zero's guest instructions during startup). The exclusive monitor
+keeps the tagged address, as the interpreter does. `android_loader_host` runs
+tagged accesses through both engines and requires no interpreter step.
 Open gap (found 2026-10-12, not fixed): a faulting tagged access reports
 `si_addr` with its tag (e.g. `1 << 56`). Linux 5.11+ clears the tag bits unless
 the handler sets `SA_EXPOSE_TAGBITS`, and QEMU 11.1 reports the untagged address.
@@ -2847,12 +2853,6 @@ The Binder transport and syscall-option checkpoint is documented in
 ```bash
 python3 Tools/Android/fetch-aapt2.py
 python3 Scripts/Android/android_preflight.py /path/to/package.apkm --output report.json
-FrostJIT untags the final data address in a scratch register before its guards
-(`emit_untag_data_address`), so tagged heap accesses stay native; before that,
-every one failed the window bound and was interpreted (about a quarter of
-Zenless Zone Zero's guest instructions during startup). The exclusive monitor
-keeps the tagged address, as the interpreter does. `android_loader_host` runs
-tagged accesses through both engines and requires no interpreter step.
 python3 Scripts/Android/test_android_preflight.py
 ```
 
