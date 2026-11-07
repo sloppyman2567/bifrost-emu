@@ -26,6 +26,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   afterwards with no failed reservation and no WebView crash. That is one session, not a pass rate, and which hinted
   mapping first moved the cursor was not identified.
 
+### Changed (compatibility records)
+
+- `compatibility.json`, the README table and badge (13 playable of 19) and the support page now record Zenless Zone Zero
+  3.3.0 and Doki Doki Literature Club 1.3.11.1 as playable on the maintainer's report (2026-11-06); both were untested
+  before. Each carries its known defects: Zenless Zone Zero's very low-resolution textures, heavy lag and a progress bar
+  that freezes while the window is maximized, and Doki Doki Literature Club's corrupted audio and graphics that break when
+  the window is resized. The causes are not established.
+
 ## [2.0.0-beta.1] — app keystore, WebView fences and a faster JIT (2026-11-03)
 
 **2.0.0-beta.1** collects the changes made after 2.0.0-alpha.3 (2026-11-01): an Android Keystore so apps such as PolyTrack

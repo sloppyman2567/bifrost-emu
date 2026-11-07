@@ -31,7 +31,10 @@ Per-app results are recorded in `Scripts/Android/compatibility.json` (shown by
 `asgard compat`), each with the version and date it was checked. A person played
 SpongeBob: Krusty Cook-Off. Azur Lane and Umamusume Global are playable on the
 maintainer's report, with screenshots on their pages; The Battle Cats, Subway Surfers
-and Geometry Dash Lite on the report alone, with no capture. YouTube shows its home screen. Firefox reaches its onboarding and
+and Geometry Dash Lite on the report alone, with no capture. Zenless Zone Zero and
+Doki Doki Literature Club are playable on the maintainer's report (2026-11-06): the first with
+very low-resolution textures and heavy lag, the second with corrupted audio and graphics
+that break when the window is resized. YouTube shows its home screen. Firefox reaches its onboarding and
 browser screens, but pages do not load. Hungry Shark World, Hungry
 Shark Evolution and Uptodown start and run a bounded session. Oddmar gets past its opening video and on to the next one;
 gameplay is not confirmed. Roblox, TrickCal

@@ -140,6 +140,30 @@
       "checked": "2026-10-28",
       "evidence": "The maintainer's screenshot shows the home screen (logo, search bar and the Home, Shorts, Subscriptions and You tabs). Later sessions that day searched and played video while its frame conversion was profiled. The maintainer has not reported it as playable.",
       "notes": ["Shorts in a landscape window and the signed-in feed are not confirmed."]
+    },
+    "com.HoYoverse.Nap": {
+      "name": "Zenless Zone Zero",
+      "tested_version": "3.3.0",
+      "status": "playable",
+      "checked": "2026-11-06",
+      "evidence": "The maintainer played it past login, shader compilation and the loading screen into the city and says it works, with very low-resolution textures and heavy lag. Sampled frames of their screen recording show Sixth Street, dialogue and the map, and one session ran 44 minutes with no crash. It needed the guest-memory fix in the changelog: before it, its WebView aborted within about a minute of every stock run.",
+      "notes": [
+        "The frame rate is low: the overlay read roughly 4 to 30 FPS in the gameplay frames I read, and 0 to 2 FPS on the long loading screen after Press to Play. A 3-minute BIFROST_PROF run (the last 90 s in gameplay) spent 58 to 81% of CPU time in translated code with at most 2.7 of 12 host threads busy. Whether the JIT or something else sets the frame rate is not established.",
+        "Textures are very low resolution (maintainer-reported); the cause is not established. The host GPU has no ASTC or ETC2 support and Unity logs that it is decompressing ASTC_6x6 textures. The emulated device reports an unknown model, the ranchu SoC and 8 GiB, which a game may grade as low-end.",
+        "Maximizing the window leaves the progress bar frozen until the window is restored, while the rest of the screen keeps animating (maintainer-reported, not investigated).",
+        "A null dereference in libunity (libunity+0x72d350) ended two heavily traced startup sessions; it was not seen in stock sessions."
+      ]
+    },
+    "com.serenityforge.dokidokiliteratureclub": {
+      "name": "Doki Doki Literature Club",
+      "tested_version": "1.3.11.1",
+      "status": "playable",
+      "checked": "2026-11-06",
+      "evidence": "The maintainer played it into the story (dialogue and a Yes/No choice, in screenshots) on 2026-11-06. Ren'Py 8.4.1 reached its interface in about 12 s and sessions ran up to 3 minutes with exit status 0.",
+      "notes": [
+        "The audio is corrupted in the runs the maintainer checked on 2026-11-06. It is not AAudio's sample format: the game asks for a FLOAT stream and gets FLOAT. The cause has not been found.",
+        "Resizing the window corrupts the graphics: afterwards backgrounds, sprites and the textbox draw black while text still draws (maintainer screenshots). At the start size the graphics are fine. In a trace of one maximize, SDL destroys and recreates the EGL window surface, then about 270 glDeleteTextures and 176 glTexImage2D calls follow, and the EGL calls run on a different guest thread from the one that draws. The cause is not identified."
+      ]
     }
   }
 }

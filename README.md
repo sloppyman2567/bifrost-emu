@@ -21,7 +21,7 @@ Existing binaries need no cross-compiler and no QEMU.
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](Docs/SUPPORT.md)
 [![Version: 2.0.0-beta.1](https://img.shields.io/badge/version-2.0.0--beta.1-orange.svg)](Docs/CHANGELOG.md)
-[![Games: 11 playable of 17](https://img.shields.io/badge/games-11%20playable%20of%2017-brightgreen.svg)](#what-runs)
+[![Games: 13 playable of 19](https://img.shields.io/badge/games-13%20playable%20of%2019-brightgreen.svg)](#what-runs)
 
 ---
 
@@ -48,7 +48,7 @@ Existing binaries need no cross-compiler and no QEMU.
 
 ## What runs
 
-**17 games recorded (2026-11-03): 11 playable** (7 Android, 4 Linux), **4 start** without confirmed gameplay (Oddmar,
+**19 games recorded (2026-11-06): 13 playable** (9 Android, 4 Linux), **4 start** without confirmed gameplay (Oddmar,
 both Hungry Shark games, Teeworlds) and **2 are blocked** (Roblox, TrickCal). Umamusume counts as playable through its
 Global client; its JP client is blocked. Apps such as YouTube and Firefox are not counted.
 
@@ -65,6 +65,8 @@ that every feature has an automated test or a recorded capture.
 | [Umamusume: Pretty Derby](Docs/Apps/umamusume.md) | Android, Unity | Global 1.35.2: user-reported playable, title, home and Career story captured at 30 FPS (2026-11-01). JP 2.32.0: blocked by the game's device integrity check when it connects. |
 | Subway Surfers 3.70.3 | Android, Unity/IL2CPP | User-reported playable, ads work (2026-10-29). |
 | Geometry Dash Lite 2.2.148 | Android, Cocos2d-x | User-reported playable (2026-10-29); ads only somewhat stable. |
+| Zenless Zone Zero 3.3.0 | Android, Unity/IL2CPP, Vulkan | User-confirmed gameplay in the city (2026-11-06), with very low-resolution textures and heavy lag (roughly 4 to 30 FPS on the overlay; the long loading screen is 0 to 2 FPS). Maximizing the window freezes its progress bar. |
+| Doki Doki Literature Club 1.3.11.1 | Android, Ren'Py (SDL2, GLES) | User-confirmed play into the story (2026-11-06). The audio is corrupted, and resizing the window blacks out images while text still draws; neither cause is found. |
 | YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
 | Oddmar | Android, Unity/IL2CPP | Gets past its opening video and on to the next one (2026-11-01); gameplay is not confirmed. |
 | Hungry Shark Evolution, Hungry Shark World | Android | Run sessions to their windows; gameplay is not confirmed. Hungry Shark World's Play Games sign-in does not complete. |
