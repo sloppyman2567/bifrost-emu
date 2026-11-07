@@ -16,6 +16,22 @@ the [changelog](CHANGELOG.md).
 - Make input dependable across mouse, keyboard, touch and gamepads.
 - Keep correctness the gate for every optimization, and keep existing Linux applications working.
 
+## Direction: apps that feel native
+
+The aim is an Android game that behaves like any other window on a Linux desktop. In the order that costs a session most:
+
+1. **It does not crash.** Ads come first: most free games carry them, and an ad is the commonest thing that ends a session
+   (Geometry Dash Lite's WebView crash on `InputDevice.hasKeys`, SpongeBob's Kidoz ad layer failure).
+2. **The window behaves:** tiling, resizing, fullscreen and a remembered size, and an app that takes the window's new shape
+   (Activity relaunch on a configuration change).
+3. **Input works** from the mouse, the keyboard, a pad, and a pad-driven pointer for apps that only take touch.
+4. **It does not hitch**, ads included. Measure before fixing: whether the lag is in the ad, in the game while the ad loads or
+   when it closes decides whether the fix is rendering, the JIT or the WebView process, and none of it has been measured.
+5. **It starts quickly and stays small:** the persistent JIT cache and the memory breakdown.
+
+Not the focus: games behind attestation or anti-cheat, and compatibility sweeps with no concrete game to fix (see
+[not planned](#not-planned)).
+
 ## Where things stand
 
 | Milestone | State | Highlights |
@@ -75,7 +91,29 @@ Acceptance: a fresh user provisions and launches a supported app without editing
 Supported apps complete repeatable 30-minute interactive sessions with correct saves, audio and input; a failed install or
 app exit leaves the library and the other apps usable.
 
-### 2. Broader game support and less stutter (carried from alpha.2)
+### 2. Ads, WebView and windows that behave (carried from alpha.3)
+
+- Finish attached WebView pointer, focus and scroll delivery, then Chromium editors, caret-anchored candidate windows and
+  clipboard exchange ([WebView input](#webview-text-input-and-external-pages)).
+- Deliver returns and deep links from the host browser; Custom Tabs, verified App Links and other implicit intents.
+- Trace SpongeBob's stuck Kidoz ad; extend Surface/media lifecycle, reconfiguration and audio synchronization for the path
+  ad SDKs use.
+- Investigate supported rewarded and interstitial ad SDKs with their test creatives; never synthesize reward success.
+- Answer what an ad's WebView asks of the device so that it never throws out of the app: done for the gamepad `hasKeys`
+  call (the cause of Geometry Dash Lite's crash); the next unsupported call shows in the session log.
+- Relaunch an Activity when a host resize changes its configuration, so an app such as YouTube takes the window's portrait
+  or landscape shape; today only `onConfigurationChanged` is called, and the per-app Window setting's "Keep the app's shape"
+  scales a game instead.
+- Measure ad lag before choosing a fix: an ad-heavy session with the window-stats overlay on, split into the ad showing, the
+  game while the ad loads, and closing it.
+
+Acceptance: a supported SDK test creative loads, displays, accepts input, closes and returns to the game without losing
+input or audio; rewarded tests deliver the SDK's real completion callback once; no-fill, cancellation, network failure and
+renderer exit leave the game usable. Narrowing a resizable app's window (YouTube) gives its other layout, a fixed-size game
+is tiled to a half or a corner without distortion, and a recorded ad-heavy session says where the lag is before any fix
+for it is chosen.
+
+### 3. Broader game support and less stutter (carried from alpha.2)
 
 - Fix concrete startup and interaction blockers in selected games, starting with Azur Lane's delayed login UI, by
   completing service contracts rather than answering with empty success.
@@ -86,19 +124,6 @@ app exit leaves the library and the other apps usable.
 
 Acceptance: repeatable GPU-enabled runs report load time, CPU and compilation cost and median/p95/p99 frame times against a
 baseline, with correctness checks and sustained interaction. A window title's instantaneous FPS is not the measurement.
-
-### 3. WebView, media and possible ad support (carried from alpha.3)
-
-- Finish attached WebView pointer, focus and scroll delivery, then Chromium editors, caret-anchored candidate windows and
-  clipboard exchange ([WebView input](#webview-text-input-and-external-pages)).
-- Deliver returns and deep links from the host browser; Custom Tabs, verified App Links and other implicit intents.
-- Trace SpongeBob's stuck Kidoz ad; extend Surface/media lifecycle, reconfiguration and audio synchronization for the path
-  ad SDKs use.
-- Investigate supported rewarded and interstitial ad SDKs with their test creatives; never synthesize reward success.
-
-Acceptance: a supported SDK test creative loads, displays, accepts input, closes and returns to the game without losing
-input or audio; rewarded tests deliver the SDK's real completion callback once; no-fill, cancellation, network failure and
-renderer exit leave the game usable.
 
 ## Workstreams
 
