@@ -284,10 +284,55 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // size so later VK_WHOLE_SIZE maps can resolve. OUT handle at arg 3.
     if (entry.spec && entry.spec->policy == thunk::Policy::VK_ALLOC_MEMORY) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        // The pNext chain is staged, keeping only structs whose meaning
+        // survives the bridge: a dedicated image/buffer (host handles), the
+        // allocate flags (device addresses), priority and capture address.
+        // Import/export structs are dropped: they carry guest fd numbers,
+        // guest pointers or Android handle types the host driver must never
+        // see (it would own a guest fd number as one of its own).
+        VkMemoryAllocateInfoH guest_info{};
+        read_guest_struct(mem, cpu.regs[1], &guest_info);
+        const uint64_t guest_chain = reinterpret_cast<uint64_t>(guest_info.pNext);
         VkStage st;
+        if (guest_chain) {
+            bool ok = true;
+            const size_t need = vk_deep_chain_size(mem, guest_chain, &ok);
+            if (!ok) { cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(-1)); return true; }
+            st.buf.reserve(std::max<size_t>(need + 4096, 65536));  // before any pointer is handed out
+        }
         VkMemoryAllocateInfoH* info = st.alloc<VkMemoryAllocateInfoH>();
-        read_guest_struct(mem, cpu.regs[1], info);
+        *info = guest_info;
         info->pNext = nullptr;
+        if (guest_chain) {
+            void* head = nullptr;
+            vk_deep_fill_chain(mem, st, guest_chain, &head);
+            void** link = &info->pNext;
+            for (auto* node = static_cast<uint8_t*>(head); node;) {
+                int32_t stype;
+                std::memcpy(&stype, node, sizeof(stype));
+                auto* next = *reinterpret_cast<uint8_t**>(node + 8);
+                if (stype == 1000127001 || stype == 1000060000 ||   // dedicated, allocate flags
+                    stype == 1000238001 || stype == 1000257003) {   // priority, capture address
+                    *link = node;
+                    link = reinterpret_cast<void**>(node + 8);
+                }
+                node = next;
+            }
+            *link = nullptr;
+        }
+        // Placed maps cover whole pages, so a byte-exact size (a swapchain
+        // staging buffer of stride*height*4) would keep the bounce and its
+        // copy on every fence wait. Allocating more than the requirements is
+        // valid, except that a dedicated allocation must match them exactly.
+        bool dedicated = false;
+        for (auto* node = static_cast<const uint8_t*>(info->pNext); node;
+             node = *reinterpret_cast<const uint8_t* const*>(node + 8)) {
+            int32_t stype;
+            std::memcpy(&stype, node, sizeof(stype));
+            dedicated |= stype == 1000127001;
+        }
+        if (!dedicated && info->allocationSize % Memory::PAGE_SIZE)
+            info->allocationSize += Memory::PAGE_SIZE - info->allocationSize % Memory::PAGE_SIZE;
         size_t alloc_size = info->allocationSize;
         uint64_t host_mem = 0;
         uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
@@ -296,7 +341,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             try { mem->write(cpu.regs[3], &host_mem, sizeof(host_mem)); }
             catch (...) { /* out pointer unmapped */ }
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
-            impl_->vk_allocs_[host_mem] = alloc_size;
+            impl_->vk_allocs_[host_mem] = {alloc_size, cpu.regs[0]};
         }
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
         if (trace) fprintf(stderr, "[display-thunk] vkAllocateMemory (%zu bytes) → %d\n",
@@ -312,10 +357,14 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
         const uint64_t mem_handle = cpu.regs[1];
         bool was_mapped = false;
+        DisplayThunkImpl::VkMapped placed{};
         {
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
             auto it = impl_->vk_maps_.find(mem_handle);
-            if (it != impl_->vk_maps_.end()) {
+            if (it != impl_->vk_maps_.end() && it->second.placed) {
+                placed = std::move(it->second);
+                impl_->vk_maps_.erase(it);
+            } else if (it != impl_->vk_maps_.end()) {
                 uint8_t* src = mem->guest_to_host_ptr(it->second.bounce);
                 if (src && it->second.host_ptr && it->second.map_size)
                     vk_mapped::mapped_push(reinterpret_cast<uint8_t*>(it->second.host_ptr), src,
@@ -327,6 +376,10 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             }
             impl_->vk_allocs_.erase(mem_handle);
         }
+        // A placed map is unmapped with its range kept reserved before the
+        // free; freeing it mapped would let the driver munmap guest memory.
+        if (placed.placed)
+            impl_->vk_placed_unmap(placed.device, mem_handle, placed.bounce, placed.map_size);
         // Spec requires unmap-before-free; do the host unmap first when a
         // live mapping existed (else the host mapping leaks / driver UB).
         if (was_mapped && impl_->vk_unmap_host_)
@@ -349,16 +402,52 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // (and explicit flush/invalidate ranges).
     if (entry.spec && entry.spec->policy == thunk::Policy::VK_MAP_MEMORY) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        const uint64_t mem_handle = cpu.regs[1];
-        const uint64_t offset = cpu.regs[2];
+        // vkMapMemory  (device, memory, offset, size, flags, ppData)
+        // vkMapMemory2 (device, pMemoryMapInfo, ppData) — the 1.1 form keeps
+        // the same range inside a struct. The arm owns the ABI, so the info
+        // is read from guest memory here (dispatch reaches this arm before
+        // the generic pointer translation).
+        uint64_t mem_handle = cpu.regs[1];
+        uint64_t offset = cpu.regs[2];
         uint64_t size = cpu.regs[3];
-        const uint64_t flags = cpu.regs[4];
+        uint64_t flags = cpu.regs[4];
+        uint64_t ppdata_arg = cpu.regs[5];
+        const bool map2 = entry.name == "vkMapMemory2";
+        struct GuestMemoryMapInfo {
+            uint32_t sType;
+            uint32_t pad0;
+            uint64_t pNext;
+            uint32_t flags;
+            uint32_t pad1;
+            uint64_t memory;
+            uint64_t offset;
+            uint64_t size;
+        };
+        if (map2) {
+            GuestMemoryMapInfo info{};
+            read_guest_bytes(mem, cpu.regs[1], &info, sizeof(info));
+            if (info.pNext || (info.flags & 0x1u)) {
+                // VK_MEMORY_MAP_PLACED_BIT_EXT needs a placed pNext chain
+                // the guest bounce cannot express; fail closed.
+                cpu.regs[0] = 0xFFFFFFFDu;  // VK_ERROR_FEATURE_NOT_PRESENT
+                return true;
+            }
+            mem_handle = info.memory;
+            offset = info.offset;
+            size = info.size;
+            flags = info.flags;
+            ppdata_arg = cpu.regs[2];
+        }
         // Resolve VK_WHOLE_SIZE from the recorded allocation size.
         uint64_t alloc_size = 0;
+        uint64_t alloc_device = cpu.regs[0];
         {
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
             auto ai = impl_->vk_allocs_.find(mem_handle);
-            if (ai != impl_->vk_allocs_.end()) alloc_size = ai->second;
+            if (ai != impl_->vk_allocs_.end()) {
+                alloc_size = ai->second.size;
+                alloc_device = ai->second.device;
+            }
         }
         if (size == ~0ull) {
             if (alloc_size == 0 || offset >= alloc_size) {
@@ -366,6 +455,46 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 return true;
             }
             size = alloc_size - offset;
+        }
+        // Placed: the whole allocation is mapped at one guest range and the
+        // guest's offset selects inside it, so any in-range shape is served
+        // from the existing map.
+        auto write_ppdata = [&](uint64_t guest) {
+            if (!ppdata_arg) return;
+            try { mem->write(ppdata_arg, &guest, sizeof(guest)); }
+            catch (...) { /* out pointer unmapped */ }
+        };
+        const bool in_allocation = alloc_size && offset < alloc_size && size <= alloc_size - offset;
+        bool bounce_mapped = false;
+        {
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            auto it = impl_->vk_maps_.find(mem_handle);
+            if (it != impl_->vk_maps_.end() && it->second.placed) {
+                if (!in_allocation) { cpu.regs[0] = 0xFFFFFFFBu; return true; }
+                write_ppdata(it->second.bounce + offset);
+                cpu.regs[0] = 0;
+                return true;
+            }
+            bounce_mapped = it != impl_->vk_maps_.end();
+        }
+        if (!in_allocation)
+            DisplayThunkImpl::vk_placed_note("map of an allocation the bridge did not record, or out of its range: bounce");
+        if (in_allocation && !bounce_mapped) {
+            if (const uint64_t base = impl_->vk_placed_map(alloc_device, mem_handle, alloc_size)) {
+                DisplayThunkImpl::VkMapped mapping{
+                    reinterpret_cast<uint64_t>(mem->guest_to_host_ptr(base)), base, 0,
+                    alloc_size, alloc_size, {}, true, alloc_device};
+                {
+                    std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+                    impl_->vk_maps_.emplace(mem_handle, std::move(mapping));
+                }
+                write_ppdata(base + offset);
+                cpu.regs[0] = 0;
+                if (trace) fprintf(stderr, "[display-thunk] vkMapMemory (off=0x%llx sz=%llu) → 0 (placed at 0x%llx)\n",
+                                   (unsigned long long)offset, (unsigned long long)size,
+                                   (unsigned long long)base);
+                return true;
+            }
         }
         // Remap of an already-mapped object: only an IDENTICAL
         // offset/size shape returns the existing bounce (what real drivers
@@ -387,8 +516,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                     if (it->second.map_offset == offset &&
                         it->second.map_size == size) {
                         uint64_t same = it->second.bounce;
-                        if (cpu.regs[5]) {
-                            try { mem->write(cpu.regs[5], &same, sizeof(same)); }
+                        if (ppdata_arg) {
+                            try { mem->write(ppdata_arg, &same, sizeof(same)); }
                             catch (...) { /* out pointer unmapped */ }
                         }
                         cpu.regs[0] = 0;
@@ -422,8 +551,20 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             return true;
         }
         void* host_ptr = nullptr;
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, void**)>(entry.host_fn)(
-            cpu.regs[0], mem_handle, offset, size, flags, &host_ptr);
+        uint64_t ret;
+        if (map2) {
+            GuestMemoryMapInfo hi{};
+            hi.sType = 1000271000u;  // VK_STRUCTURE_TYPE_MEMORY_MAP_INFO
+            hi.flags = static_cast<uint32_t>(flags);
+            hi.memory = mem_handle;
+            hi.offset = offset;
+            hi.size = size;
+            ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, void**)>(
+                entry.host_fn)(cpu.regs[0], &hi, &host_ptr);
+        } else {
+            ret = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, void**)>(entry.host_fn)(
+                cpu.regs[0], mem_handle, offset, size, flags, &host_ptr);
+        }
         if (ret != 0 || !host_ptr) {
             cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
             if (trace) fprintf(stderr, "[display-thunk] vkMapMemory → %d (FAILED)\n",
@@ -465,8 +606,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             cpu.regs[0] = 0xFFFFFFFFu; // VK_ERROR_OUT_OF_HOST_MEMORY
             return true;
         }
-        if (cpu.regs[5]) {
-            try { mem->write(cpu.regs[5], &bounce, sizeof(bounce)); }
+        if (ppdata_arg) {
+            try { mem->write(ppdata_arg, &bounce, sizeof(bounce)); }
             catch (...) { /* out pointer unmapped — address lost */ }
         }
         cpu.regs[0] = 0;
@@ -481,11 +622,38 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // range, then unmap on the host.
     if (entry.spec && entry.spec->policy == thunk::Policy::VK_UNMAP_MEMORY) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        const uint64_t mem_handle = cpu.regs[1];
+        // vkUnmapMemory  (device, memory)
+        // vkUnmapMemory2 (device, pMemoryUnmapInfo) — memory is inside the
+        // info struct; its pNext/placement flags are not expressible here.
+        const bool unmap2 = entry.name == "vkUnmapMemory2";
+        struct GuestMemoryUnmapInfo {
+            uint32_t sType;
+            uint32_t pad0;
+            uint64_t pNext;
+            uint32_t flags;
+            uint32_t pad1;
+            uint64_t memory;
+        };
+        uint64_t mem_handle = cpu.regs[1];
+        if (unmap2) {
+            GuestMemoryUnmapInfo info{};
+            read_guest_bytes(mem, cpu.regs[1], &info, sizeof(info));
+            if (info.pNext || (info.flags & 0x1u)) {
+                // VK_MEMORY_UNMAP_RESERVE_BIT_EXT keeps the host mapping
+                // reserved; the guest bounce has no equivalent.
+                cpu.regs[0] = 0xFFFFFFFDu;
+                return true;
+            }
+            mem_handle = info.memory;
+        }
+        DisplayThunkImpl::VkMapped placed{};
         {
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
             auto it = impl_->vk_maps_.find(mem_handle);
-            if (it != impl_->vk_maps_.end()) {
+            if (it != impl_->vk_maps_.end() && it->second.placed) {
+                placed = std::move(it->second);
+                impl_->vk_maps_.erase(it);
+            } else if (it != impl_->vk_maps_.end()) {
                 uint8_t* src = mem->guest_to_host_ptr(it->second.bounce);
                 if (src && it->second.host_ptr && it->second.map_size)
                     vk_mapped::mapped_push(reinterpret_cast<uint8_t*>(it->second.host_ptr), src,
@@ -495,8 +663,24 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 impl_->vk_maps_.erase(it);
             }
         }
-        reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(entry.host_fn)(cpu.regs[0], mem_handle);
-        cpu.regs[0] = 0;
+        if (placed.placed) {
+            // Unmapped through vkUnmapMemory2KHR with the range reserved.
+            impl_->vk_placed_unmap(placed.device, mem_handle, placed.bounce, placed.map_size);
+            cpu.regs[0] = 0;
+            return true;
+        }
+        uint64_t uret = 0;
+        if (unmap2) {
+            GuestMemoryUnmapInfo hi{};
+            hi.sType = 1000271001u;  // VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO
+            hi.memory = mem_handle;
+            uret = reinterpret_cast<uint64_t (*)(uint64_t, const void*)>(
+                entry.host_fn)(cpu.regs[0], &hi);
+        } else {
+            uret = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(
+                entry.host_fn)(cpu.regs[0], mem_handle);
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(uret));
         if (trace) fprintf(stderr, "[display-thunk] vkUnmapMemory → 0\n");
         return true;
     }
@@ -520,7 +704,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             for (uint32_t i = 0; i < count; i++) {
                 rr[i].pNext = nullptr;
                 auto it = impl_->vk_maps_.find(rr[i].memory);
-                if (it == impl_->vk_maps_.end()) continue;
+                if (it == impl_->vk_maps_.end() || it->second.placed) continue;  // real memory
                 auto& m = it->second;
                 uint64_t off = rr[i].offset;
                 uint64_t sz = rr[i].size;
@@ -568,7 +752,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             auto ilive = mem->allocations_snapshot();
             for (uint32_t i = 0; i < count; i++) {
                 auto it = impl_->vk_maps_.find(rr[i].memory);
-                if (it == impl_->vk_maps_.end()) continue;
+                if (it == impl_->vk_maps_.end() || it->second.placed) continue;  // real memory
                 auto& m = it->second;
                 uint64_t off = rr[i].offset;
                 uint64_t sz = rr[i].size;
@@ -659,9 +843,11 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         // RT needs acceleration-structure build marshalling; descriptor
         // buffer needs a whole bindless model. Guests that don't see
         // the strings take non-RT / conventional-binding paths.
+        // VK_EXT_map_memory_placed is the bridge's own (placed vkMapMemory):
+        // a guest address is not a host placement address.
         static const char* kHiddenExt[] = {
             "VK_KHR_ray_query", "VK_KHR_acceleration_structure",
-            "VK_EXT_descriptor_buffer" };
+            "VK_EXT_descriptor_buffer", "VK_EXT_map_memory_placed" };
         auto hidden = [](const char* n) {
             for (const char* h : kHiddenExt)
                 if (std::strcmp(n, h) == 0)

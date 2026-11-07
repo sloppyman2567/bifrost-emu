@@ -73,10 +73,44 @@ struct DisplayThunkImpl {
         uint64_t map_size;    // bytes mapped (resolved from VK_WHOLE_SIZE)
         uint64_t alloc_size;  // total VkDeviceMemory allocation size
         std::vector<uint8_t> baseline; // last synchronized host/guest bytes
+        // Placed (VK_EXT_map_memory_placed): the driver mapped the whole
+        // allocation at `bounce` inside the guest window, so the guest uses
+        // the real memory. No baseline and no push/pull; map_offset is 0 and
+        // map_size the allocation size, whatever range the guest asked for.
+        bool placed = false;
+        uint64_t device = 0;  // host VkDevice (placed unmaps need it)
     };
+    struct VkAlloc { uint64_t size; uint64_t device; };
     std::unordered_map<uint64_t, VkMapped> vk_maps_;    // memory handle → map
-    std::unordered_map<uint64_t, uint64_t> vk_allocs_;  // handle → alloc size
+    std::unordered_map<uint64_t, VkAlloc> vk_allocs_;   // handle → allocation
     std::mutex vk_maps_mu;
+    // ── Placed memory maps (VulkanPlacedMemory.cpp) ──────────────────
+    // Devices created with VK_EXT_map_memory_placed + memoryUnmapReserve,
+    // with their vkMapMemory2KHR/vkUnmapMemory2KHR. Guarded by vk_maps_mu.
+    struct VkPlacedDevice { void* map2; void* unmap2; uint64_t alignment; };
+    std::unordered_map<uint64_t, VkPlacedDevice> vk_placed_devices_;
+    void* vk_lib_ = nullptr;  // host libvulkan handle (resolved at registration)
+    // Storage for a vkCreateDevice create info extended with the placed
+    // extension; it must outlive the host call.
+    struct VkPlacedDeviceRequest {
+        struct Features { int32_t sType; const void* pNext; uint32_t placed, range, reserve; } features{};
+        uint8_t info[72] = {};  // VkDeviceCreateInfo (LP64)
+        std::vector<const char*> extensions;
+        uint64_t alignment = 0;
+        bool active = false;
+    };
+    // Rewrites `info_arg` (a host VkDeviceCreateInfo*) when the physical
+    // device supports placed maps; false leaves it untouched.
+    bool vk_placed_prepare(uint64_t physical, uint64_t& info_arg, VkPlacedDeviceRequest& req);
+    void vk_placed_register(uint64_t device, uint64_t alignment);
+    // Maps a whole allocation at a fresh guest range; 0 when it cannot.
+    uint64_t vk_placed_map(uint64_t device, uint64_t memory, uint64_t alloc_size);
+    // Unmaps (keeping the range reserved), restores guest memory there and
+    // releases the range. Called without vk_maps_mu.
+    void vk_placed_unmap(uint64_t device, uint64_t memory, uint64_t base, uint64_t size);
+    void vk_placed_release_device(uint64_t device);
+    // Says once per distinct reason why a map keeps its bounce.
+    static void vk_placed_note(const char* reason);
     // Handle registry for stale-handle fail-closed validation (vkquake:
     // single corrupt bind/cmd per ~10k good calls after 30+ good frames).
     // Every guest-visible descriptor set / command buffer is born in our
@@ -92,6 +126,13 @@ struct DisplayThunkImpl {
     // vkMapMemory with garbage regs (ppData write through a garbage
     // pointer). Written once before initialized=true; never rewritten.
     void* vk_unmap_host_ = nullptr;
+    // Guest instance API version, requested through VkApplicationInfo at
+    // vkCreateInstance, encoded (major << 8) | minor. The Khronos loader
+    // populates a device dispatch table only for that version, so a newer
+    // core entry point jumps through a null slot and the host dies at
+    // pc=0. dispatch rejects such calls with VK_ERROR_FEATURE_NOT_PRESENT.
+    // Multi-instance guests are rare; the most recent create wins.
+    uint32_t vk_instance_api_version_ = 0x0100u;   // 1.0
     // live bytes available at guest addr inside a tracked allocation.
     // untracked bases (stack/brk/elf via map_range) are allowed up to the
     // next tracked neighbor so a write never sprays into tracked heap.
@@ -132,16 +173,23 @@ struct DisplayThunkImpl {
         }
         return 0;
     }
+    // Placed maps need no synchronization: only bounces make push/pull (and
+    // their allocation snapshot) worth doing.
+    bool has_bounce_maps_locked() const {
+        for (const auto& kv : vk_maps_)
+            if (!kv.second.placed) return true;
+        return false;
+    }
     // Publish changed guest bytes to host mappings before submits/presents.
-    // No snapshot when nothing is mapped: the map copy + lock is pure
-    // overhead at ~10M thunk calls/s and the common case is empty.
+    // No snapshot without a bounce: the map copy + lock is pure overhead at
+    // ~10M thunk calls/s, and with placed maps the common case has none.
     void vk_sync_push_all() {
         std::lock_guard<std::mutex> g(vk_maps_mu);
-        if (vk_maps_.empty()) return;
+        if (!has_bounce_maps_locked()) return;
         auto live = mem->allocations_snapshot();
         for (auto& kv : vk_maps_) {
             VkMapped& m = kv.second;
-            if (!m.map_size || !m.host_ptr) continue;
+            if (m.placed || !m.map_size || !m.host_ptr) continue;
             if (!tracked_room(live, m.bounce, static_cast<size_t>(m.map_size)))
                 continue;  // stale bounce: never push from reused heap
             uint8_t* src = mem->guest_to_host_ptr(m.bounce);
@@ -152,14 +200,14 @@ struct DisplayThunkImpl {
     }
     // Merge host readback after completion waits, preserving guest writes
     // prepared for later submits (including writes in other allocations).
-    // Same empty-map fast path as the push side.
+    // Same no-bounce fast path as the push side.
     void vk_sync_pull_all() {
         std::lock_guard<std::mutex> g(vk_maps_mu);
-        if (vk_maps_.empty()) return;
+        if (!has_bounce_maps_locked()) return;
         auto live = mem->allocations_snapshot();
         for (auto& kv : vk_maps_) {
             VkMapped& m = kv.second;
-            if (!m.map_size || !m.host_ptr) continue;
+            if (m.placed || !m.map_size || !m.host_ptr) continue;
             if (!tracked_room(live, m.bounce, static_cast<size_t>(m.map_size)))
                 continue;  // stale bounce: never pull into reused heap
             uint8_t* dst = mem->guest_to_host_ptr(m.bounce);

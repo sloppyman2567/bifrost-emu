@@ -241,6 +241,19 @@ void DisplayThunk::register_known_symbols_() {
             if (!fd.handle) fd.handle = dlopen(fd.sonames[1], RTLD_LAZY);
         }
         void* host_fn = fd.handle ? dlsym(fd.handle, spec.name) : nullptr;
+        // Not every Vulkan entry point is an exported loader symbol: the
+        // loader guarantees the 1.0 core set and interposes part of 1.1+,
+        // so the registry-wide rows added after 1.0 (memory requirements 2,
+        // device properties 2, maintenance/1.3 commands) would otherwise
+        // register with a null host_fn and crash at the first call. Ask the
+        // loaded loader itself — vkGetInstanceProcAddr(NULL, name) — the
+        // same fallback GraphicThunk uses for eglGetProcAddress.
+        if (!host_fn && spec.lib == thunk::LibFamily::VK && fd.handle) {
+            using GipaFn = void* (*)(void*, const char*);
+            auto gipa = reinterpret_cast<GipaFn>(
+                dlsym(fd.handle, "vkGetInstanceProcAddr"));
+            if (gipa) host_fn = gipa(nullptr, spec.name);
+        }
         // GetProcAddress must stay non-null: dispatch returns the
         // trampoline before calling it, but a null host_fn short-circuits
         // to 0 first.
@@ -311,7 +324,9 @@ void DisplayThunk::register_known_symbols_() {
     }
     // Cache the host vkUnmapMemory for the map/unmap/free arms (they must
     // never call the MAP arm's entry.host_fn as a 2-arg unmap).
-    if (kFamilies[0].handle)
+    if (kFamilies[0].handle) {
         impl_->vk_unmap_host_ = dlsym(kFamilies[0].handle, "vkUnmapMemory");
+        impl_->vk_lib_ = kFamilies[0].handle;  // placed-map capability queries
+    }
 }
 }  // namespace arm64emu

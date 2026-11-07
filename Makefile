@@ -120,7 +120,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check nativegen nativegen-check nativegen-expect opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check wlviewporter wlviewporter-check vkmarshal vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb generated-check ci FORCE
+.PHONY: all opgen opgen-check nativegen nativegen-check nativegen-expect opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check wlviewporter wlviewporter-check vkmarshal vkmarshal-check vkcoverage vkcoverage-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb generated-check ci FORCE
 
 all: $(TARGET)
 ifeq ($(BUILD_PROFILE),release)
@@ -245,6 +245,17 @@ vkmarshal-check:
 # plain 'p' — the deep-marshal roadmap.
 vkxml-check:
 	python3 Tools/CodeGen/vkxmlcheck.py $(THUNK_SPECS) ThirdParty/VulkanHeaders/registry/vk.xml
+
+# Generate the core-Vulkan rows thunk_dp.txt is missing (inside marked
+# BEGIN/END comments in the spec, like the GL coverage block):
+# VK_CMD_DEEP/_OUT when vkmarshalgen.py has a plan, plain VULKAN when every
+# pointer pointee is pointer-free. Commands that need a hand arm (OUT struct
+# writeback, template payloads, uncounted void*) are printed with the reason.
+vkcoverage:
+	python3 Tools/CodeGen/vkcoverage.py $(THUNK_SPECS) $(VKMARSHAL_XML)
+
+vkcoverage-check:
+	python3 Tools/CodeGen/vkcoverage.py --check $(THUNK_SPECS) $(VKMARSHAL_XML)
 
 # Audit every GL/GLES row in the spec against the vendored Khronos gl.xml
 # (ThirdParty/GLRegistry/gl.xml): arity + pointer-position agreement. Same
@@ -633,7 +644,7 @@ setup-tests:
 	echo "Cross-compiled $$count glibc-dynamic variant binaries."
 
 # Generated source checks share one entry point for CI and local reviews.
-generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlviewporter-check vkmarshal-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check
+generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlviewporter-check vkmarshal-check vkcoverage-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check
 
 # Local guest-correctness gate: generator drift, host APIs, JIT/interpreter
 # regressions, sandbox coverage, and a focused dynamic-glibc run.

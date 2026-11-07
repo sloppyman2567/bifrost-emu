@@ -50,6 +50,7 @@ BIFROST_TEXT_SCRIPT='down:H,text:h;up:H;edit:ni;text:x'  # Android window tests:
 BIFROST_NO_THUNK_GRAPHICS=1      # Disable GL/EGL/SDL2 thunking
 BIFROST_NO_THUNK_AUDIO=1         # Disable ALSA/PulseAudio thunking
 BIFROST_NO_THUNK_DISPLAY=1       # Disable Vulkan/Wayland thunking
+BIFROST_VK_NO_PLACED=1           # Keep vkMapMemory guest bounces instead of placed maps (A/B)
 ```
 
 Graphical programs log their first successful frame presentation to stderr

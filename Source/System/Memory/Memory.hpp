@@ -121,6 +121,12 @@ public:
                         int* error = nullptr);
     // Install a read-only shared device backing over an existing mapping.
     bool map_device_readonly(uint64_t addr, uint64_t size, int host_fd);
+    // Put fresh anonymous storage back under [addr, addr+size) after host code
+    // outside Memory replaced it in the window (a placed Vulkan map unmapped
+    // with VK_MEMORY_UNMAP_RESERVE_BIT_EXT leaves a PROT_NONE reservation).
+    // Contents become zero and host protection read/write; guest mapping state
+    // is unchanged, so callers release the range (untrack_allocation) next.
+    void restore_anonymous(uint64_t addr, uint64_t size);
     // Replace existing storage with coherent file aliases. Returns a host errno.
     int map_shared_file(uint64_t addr, uint64_t size, int fd, uint64_t offset,
                         uint8_t prot);

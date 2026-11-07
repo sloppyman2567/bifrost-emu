@@ -18,6 +18,48 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   address". The two requests now set and clear the guest descriptor's close-on-exec flag for every fd type, and an
   unhandled argument-free request is ENOTTY. `test_fcntl_owner` covers it and passes natively on the host kernel.
 
+### Fixed (Vulkan marshalling)
+
+- 38 hand-written Vulkan rows were plain `VULKAN` although their structs carry guest pointers, so the host driver got
+  the guest's `pNext` chain (or allocator callbacks) unconverted. Zenless Zone Zero crashed in `libvulkan_radeon`
+  walking a `VkImageViewCreateInfo` chain. Create infos (image view, buffer, buffer view, sampler, fence, semaphore,
+  event, query and command pools, pipeline cache, swapchain, headless surface) and info/query structs
+  (`vkSignalSemaphore`, `vkAcquireNextImage2KHR`, surface and device-group capabilities) now have generated deep
+  plans, and allocator-only destroys null the allocator. `vkxmlcheck.py` (in `make generated-check`) fails any such
+  row that names no hand arm, so the class cannot return unnoticed. Two device-group rows the HAL work had put inside
+  the generated Vulkan block now sit after it, where `vkcoverage.py` leaves them alone.
+- Debug labels and object names (`vkCmdBeginDebugUtilsLabelEXT`, `vkSetDebugUtilsObjectNameEXT`), the KHR
+  device-address alias and the acceleration-structure create/destroy rows were `-` rows with the same untranslated
+  pointers; they have plans now, and the `vkxmlcheck.py` rule covers `-` rows too.
+- Struct descriptors staged a pointer member's elements at 8 bytes whenever the element type was an enum, a flags type
+  or `void`: `VkSpecializationInfo.pData`, `VkPipelineCacheCreateInfo.pInitialData` and push-constant values read 8x
+  their byte count, and stage-mask and format arrays (`VkSubmitInfo.pWaitDstStageMask`,
+  `VkPipelineRenderingCreateInfo.pColorAttachmentFormats`) twice theirs. An over-read that crossed an unmapped page
+  zero-filled the whole staged buffer. `vkxml.py` sizes them now (a counted `void*` is a byte buffer); 67 fields changed.
+- `vkAllocateMemory` dropped its whole `pNext` chain, including dedicated allocations and the device-address flag. It
+  stages the chain now and keeps dedicated, allocate-flags, priority and capture-address structs; import/export structs
+  stay out (they carry guest fd numbers or guest pointers).
+- The Android HAL's `vkCreatePipelineCache` no longer discards the app's cache blob (the host stages it now), and its
+  swapchain staging buffer prefers cached host memory: the CPU reads it back every frame, and the first coherent type
+  can be device-local VRAM.
+- A host fault inside a DisplayThunk or AudioThunk call now names the call (`thunk=` in the report), as GraphicThunk
+  calls already did.
+- A device-level core entry point newer than the apiVersion the guest created its instance with (1.0 or 1.1) is
+  rejected with `VK_ERROR_FEATURE_NOT_PRESENT`. The loader builds a device dispatch table only for the instance's
+  version, so such a call jumped through a null slot and killed the host at pc 0 (`vkGetBufferMemoryRequirements2` on
+  1.0, `vkMapMemory2` on 1.1). The thunk records the version at `vkCreateInstance`; `test_vulkan` checks a 1.1 entry
+  point on a 1.0 instance.
+
+### Changed
+
+- Vulkan memory maps are placed in the guest window (`VK_EXT_map_memory_placed`) when the host driver supports it, so
+  the guest reads and writes the driver's memory directly. Before, every `vkWaitForFences`/`vkQueueWaitIdle`/
+  `vkDeviceWaitIdle` copied every mapped allocation back into its guest bounce and every submit compared them all,
+  serialized on one lock: about 70% of Zenless Zone Zero's host CPU across eight fence-waiting threads (perf call
+  graphs). On an RX 9060 XT (RADV, Mesa 26.2) the same scene went from about 0.8 to about 18 fps (observed in the
+  window, not a benchmark). Drivers without the extension keep the bounce; `BIFROST_VK_NO_PLACED=1` forces it.
+  `test_vulkan` checks a ranged map lands at base + offset in both modes.
+
 ### Fixed
 
 - **A fork child that exited without `exec` could leave its parent waiting forever.** `exit` (93) only ended the

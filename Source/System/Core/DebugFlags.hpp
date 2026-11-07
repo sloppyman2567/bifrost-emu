@@ -67,6 +67,7 @@ struct DebugFlags {
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     bool audio_trace = false;  // BIFROST_AUDIO_TRACE — audio thunk calls with arguments and results
+    bool vk_no_placed = false; // BIFROST_VK_NO_PLACED — keep vkMapMemory bounces (A/B control for placed maps)
     // BIFROST_TEXT_SCRIPT — key and text events pushed into the Android window's SDL queue once
     // text input starts: "down:H,text:h;up:H;edit:ni;text:..." (steps by ';' 100 ms apart, items
     // in a step pushed together; down:/up: take an SDL scancode name). For input tests.
@@ -225,6 +226,7 @@ struct DebugFlags {
         f.jit_verify = std::getenv("BIFROST_JIT_VERIFY") != nullptr;
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.audio_trace = all || env("BIFROST_AUDIO_TRACE");
+        f.vk_no_placed = env("BIFROST_VK_NO_PLACED");
         if (const char* script = std::getenv("BIFROST_TEXT_SCRIPT")) f.text_script = script;
         f.input_trace = all || env("BIFROST_INPUT_TRACE");
         f.android_logical_pixels = env("BIFROST_ANDROID_LOGICAL_PIXELS");

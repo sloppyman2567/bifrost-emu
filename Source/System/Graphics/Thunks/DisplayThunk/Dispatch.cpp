@@ -1,5 +1,6 @@
 // DisplayThunk::dispatch — the SVC entry for every display-API symbol.
 #include "System/Graphics/Thunks/DisplayThunk/DisplayThunkInternal.hpp"
+#include "System/Graphics/Thunks/ThunkCallRecord.hpp"
 namespace arm64emu {
 
 int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
@@ -15,6 +16,9 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
+    // A host fault in the driver or libc during this call names it
+    // (`thunk=` in the fault report). The registered entry outlives the call.
+    thunk_call::Scope thunk_scope(entry.spec ? entry.spec->name : entry.name.c_str());
     bool trace = dbg().thunk_trace;
 
     // ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
@@ -652,6 +656,50 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    // ── Instance version: record + core-version gate ────────────────
+    // Both must run before pointer translation: vkCreateInstance's args[0]
+    // is the guest VkInstanceCreateInfo here and a host bounce pointer
+    // after it. The Khronos loader builds a DEVICE dispatch table only for
+    // the apiVersion the instance was created with, so a newer core device
+    // entry point jumps through a null slot and the host dies at pc=0
+    // (vkGetBufferMemoryRequirements2 on 1.0, vkMapMemory2 on 1.1).
+    // Instance commands are resolved from the ICD directly and are left
+    // alone. Extension commands are absent from the table.
+    // VkInstanceCreateInfo.pApplicationInfo is at offset 24 and
+    // VkApplicationInfo.apiVersion at offset 44 (LP64, sizeof(app) = 48).
+    if (entry.spec && entry.spec->lib == thunk::LibFamily::VK) {
+        if (entry.name == "vkCreateInstance" && args[0] && impl_->mem) {
+            uint64_t app_info = 0;
+            try { impl_->mem->read(args[0] + 24, &app_info, 8); } catch (...) {}
+            if (app_info) {
+                uint32_t api = 0;
+                try { impl_->mem->read(app_info + 44, &api, 4); } catch (...) {}
+                const uint32_t major = (api >> 22) & 0x7Fu;
+                const uint32_t minor = (api >> 12) & 0x3FFu;
+                if (major == 1 && minor <= 4) {
+                    impl_->vk_instance_api_version_ = (major << 8) | minor;
+                    if (trace)
+                        fprintf(stderr, "[display-thunk] vkCreateInstance: "
+                                "guest asked Vulkan %u.%u\n", major, minor);
+                }
+            }
+        }
+        uint8_t vmaj = 0, vmin = 0;
+        bool vdev = false;
+        const uint32_t have = impl_->vk_instance_api_version_;
+        if (thunk::vk_core_version(entry.name.c_str(), &vmaj, &vmin, &vdev) &&
+            vdev && ((static_cast<uint32_t>(vmaj) << 8) | vmin) > have) {
+            if (trace)
+                fprintf(stderr, "[display-thunk] %s needs Vulkan %u.%u, "
+                        "instance is %u.%u — rejected "
+                        "(VK_ERROR_FEATURE_NOT_PRESENT)\n",
+                        entry.name.c_str(), vmaj, vmin,
+                        have >> 8, have & 0xFFu);
+            cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(-8));
+            return 0;
+        }
+    }
+
     // ── GetProcAddress: return guest trampoline for a registered symbol ─
     if (entry.flags & THUNK_GET_PROC) {
         char namebuf[256];
@@ -768,6 +816,9 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         size_t elem_size = 0;
         bool on_success_only = false;   // OUT handles: write back only
                                         // when the host call succeeded
+        const thunk::VkStructDesc* sdesc = nullptr;  // out=6/7: staged OUT
+                                        // struct layout, published
+                                        // field-wise after the call
     };
     DeepOutRec vk_out_recs[4];
     int vk_n_out_recs = 0;
@@ -851,6 +902,62 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     need = (need + 7u) & ~size_t(7);
                     need += (size_t)hcount * 8;
                     if (vk_n_out_recs >= 4) { ok = false; break; }
+                    vk_out_recs[vk_n_out_recs++] = rec;
+                    vk_deep_done |= 1u << r.arg;
+                    continue;
+                }
+
+                // ── STRUCT_INOUT: stage the struct + pNext chain, then
+                // copy the result back field-wise (out=6: count in a
+                // register; out=7: count behind a guest u32* pointer).
+                // This is the Vulkan 1.1 query family (memory requirements
+                // 2, properties 2, subresource layout 2 ...): the driver
+                // fills the staged copies and every pointer member is
+                // restored to the guest's own value before publication.
+                if (r.out == 6 || r.out == 7) {
+                    if (!args[r.arg] || !r.desc) {
+                        args[r.arg] = 0;
+                        vk_deep_done |= 1u << r.arg;
+                        continue;
+                    }
+                    DeepOutRec rec{};
+                    rec.arg = r.arg;
+                    rec.guest_array = args[r.arg];
+                    rec.sdesc = r.desc;
+                    rec.elem_size = r.desc->size;
+                    if (r.out == 7 && r.count_arg < kMaxArgs) {
+                        rec.count_arg_idx = r.count_arg;
+                        rec.guest_count_ptr = args[r.count_arg];
+                        uint32_t cnt = 0;
+                        if (rec.guest_count_ptr) {
+                            try { impl_->mem->read(rec.guest_count_ptr,
+                                                   &cnt, 4); }
+                            catch (...) { cnt = 0; }
+                        }
+                        if (cnt > kVkDeepMaxElems) cnt = kVkDeepMaxElems;
+                        rec.staged_elems = cnt;
+                        need = (need + 3u) & ~size_t(3);
+                        need += 4;
+                        vk_deep_done |= 1u << r.count_arg;
+                    } else if (r.out == 6 && r.count_arg != 0xFF &&
+                               r.count_arg < kMaxArgs) {
+                        rec.staged_elems = static_cast<uint32_t>(
+                            std::min<uint64_t>(args[r.count_arg],
+                                               kVkDeepMaxElems));
+                    } else {
+                        rec.staged_elems = 1;
+                    }
+                    need = (need + 7u) & ~size_t(7);
+                    need += vk_deep_size_one(impl_->mem, rec.guest_array,
+                                             r.desc, rec.staged_elems, 0,
+                                             &ok);
+                    if (!ok) break;
+                    if (njobs >= 8 || vk_n_out_recs >= 4) {
+                        ok = false;
+                        break;
+                    }
+                    jobs[njobs++] = {r.arg, rec.staged_elems,
+                                     rec.guest_array, false, r.desc};
                     vk_out_recs[vk_n_out_recs++] = rec;
                     vk_deep_done |= 1u << r.arg;
                     continue;
@@ -1160,6 +1267,19 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    // vkCreateDevice: ask for placed memory maps when the device has them
+    // (VulkanPlacedMemory.cpp). args[1] is the staged host create info here;
+    // `placed_request` owns the extended copy until the host call returns.
+    DisplayThunkImpl::VkPlacedDeviceRequest placed_request;
+    const uint64_t device_info_from_app = args[1];
+    const bool create_device = entry.host_fn && impl_->mem && entry.name == "vkCreateDevice" &&
+                               (vk_deep_done & 2u) && args[1];
+    if (create_device) impl_->vk_placed_prepare(args[0], args[1], placed_request);
+    // A device takes its memory with it: unmap placed ranges (keeping them
+    // reserved) before the driver can munmap them.
+    if (entry.host_fn && impl_->mem && entry.name == "vkDestroyDevice")
+        impl_->vk_placed_release_device(args[0]);
+
     // Submits execute GPU work that reads the host mappings (vkMapMemory
     // / persistent-coherent bounces) — push them before any submit
     // reaches the driver, on BOTH the deep path and the generic fallback.
@@ -1273,6 +1393,15 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return 0;
     }
 
+    // A row can be registered without a resolved host symbol (a loader
+    // that exports neither the name nor resolves it through
+    // vkGetInstanceProcAddr). Never jump through null: report
+    // VK_ERROR_FEATURE_NOT_PRESENT the way the hand arms do.
+    if (!entry.host_fn) {
+        cpu.regs[0] = 0xFFFFFFFDu;
+        return 0;
+    }
+
     uint64_t ret = 0;
     if (entry.n_stack >= 7) {
         using Fn15 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
@@ -1323,6 +1452,19 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             args[4], args[5], args[6], args[7]);
     }
 
+    if (create_device && placed_request.active) {
+        using CreateDevice = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t);
+        // A driver that refuses the extended create info gets the app's own.
+        if (static_cast<int32_t>(ret) != 0) {
+            DisplayThunkImpl::vk_placed_note("device refused the placed-map extension: created without it");
+            ret = reinterpret_cast<CreateDevice>(entry.host_fn)(
+                args[0], device_info_from_app, args[2], args[3]);
+        }
+        else if (args[3])
+            impl_->vk_placed_register(*reinterpret_cast<const uint64_t*>(args[3]),
+                                      placed_request.alignment);
+    }
+
     // Completion waits pull host mappings back into the bounces so the
     // guest sees GPU readback results (vkMapMemory PCWFC discipline).
     if (ret == 0 && impl_->mem &&
@@ -1341,6 +1483,48 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (vk_n_out_recs > 0) {
         auto out_live = impl_->mem ? impl_->mem->allocations_snapshot()
                                    : std::vector<std::pair<uint64_t,uint64_t>>();
+        // Field-wise publish of a staged OUT struct: the driver wrote into
+        // the host copy (scalars, embedded arrays, chain nodes). Pointer
+        // slots are restored to the guest's own values first — the values
+        // the driver saw were host addresses and must never reach guest
+        // memory. Chain nodes are matched host-copy ↔ guest one by one
+        // through the pNext slot the fill pass relinked.
+        auto vk_out_struct_back = [&](uint64_t guest,
+                                      const uint8_t* staged) {
+            uint64_t g = guest;
+            const uint8_t* s = staged;
+            for (int depth = 0;
+                 depth < kVkDeepMaxPnextNodes && g && s; depth++) {
+                int32_t stype = 0;
+                std::memcpy(&stype, s, 4);
+                const thunk::VkStructDesc* d =
+                    thunk::vk_find_struct_by_stype(stype);
+                if (!d) break;
+                std::vector<uint8_t> tmp(d->size);
+                std::memcpy(tmp.data(), s, d->size);
+                const thunk::VkFieldDesc* pn = nullptr;
+                for (uint16_t fi = 0; fi < d->nfields; fi++) {
+                    const thunk::VkFieldDesc& f = d->fields[fi];
+                    uint64_t orig = 0;
+                    try { impl_->mem->read(g + f.off, &orig, 8); }
+                    catch (...) { orig = 0; }
+                    std::memcpy(tmp.data() + f.off, &orig, 8);
+                    if (f.elem & thunk::VKM_PNEXT) pn = &f;
+                }
+                size_t have = impl_->live_room(out_live, g, d->size);
+                if (have) {
+                    try { impl_->mem->write(g, tmp.data(), have); }
+                    catch (...) { /* unmapped destination */ }
+                }
+                uint64_t gnext = 0;
+                if (pn) std::memcpy(&gnext, tmp.data() + pn->off, 8);
+                const void* snext =
+                    pn ? *reinterpret_cast<const void* const*>(s + pn->off)
+                       : nullptr;
+                g = gnext;
+                s = reinterpret_cast<const uint8_t*>(snext);
+            }
+        };
         for (int oi = 0; oi < vk_n_out_recs; oi++) {
             const DeepOutRec& rec = vk_out_recs[oi];
             if (rec.on_success_only && ret != 0) continue;  // OUT handles
@@ -1351,6 +1535,23 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     try { impl_->mem->write(rec.guest_count_ptr, &actual, 4); }
                     catch (...) { /* unmapped count pointer */ }
                 }
+            }
+            if (rec.sdesc) {
+                // STRUCT_INOUT: publish up to the driver-reported count,
+                // clamped to what was staged (never past the arena copy).
+                if (!rec.staged || !rec.guest_array) continue;
+                uint32_t n = rec.staged_elems;
+                if (rec.staged_count) {
+                    uint32_t actual = 0;
+                    std::memcpy(&actual, rec.staged_count, 4);
+                    if (actual < n) n = actual;
+                }
+                for (uint32_t k = 0; k < n; k++)
+                    vk_out_struct_back(
+                        rec.guest_array + (uint64_t)k * rec.sdesc->size,
+                        reinterpret_cast<const uint8_t*>(rec.staged) +
+                            (uint64_t)k * rec.sdesc->size);
+                continue;
             }
             if (rec.staged && rec.guest_array && rec.staged_elems) {
                 size_t bytes = (size_t)rec.staged_elems * rec.elem_size;

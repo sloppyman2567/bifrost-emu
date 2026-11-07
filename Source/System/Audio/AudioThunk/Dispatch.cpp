@@ -1,5 +1,6 @@
 // AudioThunk::dispatch — resolves the symbol and runs the per-API stages.
 #include "System/Audio/AudioThunk/AudioThunkInternal.hpp"
+#include "System/Graphics/Thunks/ThunkCallRecord.hpp"
 namespace arm64emu {
 int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return -ENOSYS;
@@ -8,6 +9,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (local_id >= impl_->id_to_idx_.size()) return -ENOENT;
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
+    thunk_call::Scope thunk_scope(entry.name.c_str());  // `thunk=` in host-fault reports
     const std::string name = entry.name;
     AudioThunkImpl& I = *impl_;
     const bool trace = dbg().thunk_trace || dbg().audio_trace;

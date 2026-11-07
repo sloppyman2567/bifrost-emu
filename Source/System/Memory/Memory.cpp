@@ -739,6 +739,17 @@ int Memory::sync_shared(uint64_t addr, uint64_t size, int flags) {
     // the host msync of the same range writes them back.
     return ::msync(direct_window_ + addr, size, flags) < 0 ? errno : 0;
 }
+void Memory::restore_anonymous(uint64_t addr, uint64_t size) {
+    if (!size || (addr & PAGE_MASK) || addr >= window_size_) return;
+    uint64_t end;
+    if (__builtin_add_overflow(addr, size, &end) ||
+        __builtin_add_overflow(end, PAGE_MASK, &end)) return;
+    end = std::min<uint64_t>(end & ~PAGE_MASK, window_size_);
+    std::unique_lock<std::shared_mutex> g(mu_);
+    void* mapped = ::mmap(direct_window_ + addr, end - addr, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+    if (mapped == MAP_FAILED) throw std::bad_alloc();
+}
 bool Memory::map_device_readonly(uint64_t addr, uint64_t size, int host_fd) {
     if (!size || (addr & PAGE_MASK) || (size & PAGE_MASK)) return false;
     return map_shared_file(addr, size, host_fd, 0, GUEST_PROT_READ) == 0;

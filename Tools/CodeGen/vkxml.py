@@ -27,6 +27,7 @@ class Param:
     optional: bool = False
     const: bool = False
     is_ptr: int = 0    # pointer level (* count)
+    array_len: int = 0 # fixed C array length ([N]) — passes by value/decays
 
 
 @dataclass
@@ -205,6 +206,24 @@ def parse_registry(xml_path):
                     except ValueError:
                         pass   # float constants (1000.0F) — unused here
 
+    # Core API version of every command, from <feature api="vulkan"> blocks.
+    # Extension-only commands are absent: those are never version-gated.
+    core_versions = {}
+    for feat in root.findall('feature'):
+        if 'vulkan' not in [a.strip() for a in
+                            (feat.get('api') or '').split(',')]:
+            continue
+        parts = (feat.get('number') or '1.0').split('.')
+        try:
+            fmajor, fminor = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            continue
+        for req in feat.findall('require'):
+            for ce in req.findall('command'):
+                cname = ce.get('name')
+                if cname:
+                    core_versions[cname] = (fmajor, fminor)
+
     commands = {}
     commands_elem = root.find('commands')
     for c in commands_elem.iter('command'):
@@ -234,12 +253,26 @@ def parse_registry(xml_path):
             ptype = ptype_el.text if ptype_el is not None else ''
             pname = pname_el.text if pname_el is not None else ''
             is_ptr = text.count('*')
+            # fixed C array parameter: <name>blendConstants</name>[4] — the
+            # suffix is SIBLING TEXT after the <name> element, so it is not
+            # part of the name. The value decays to a pointer in C, but
+            # vk.xml carries no '*' for it: the thunk layer must see it as a
+            # pointer ABI, never as an integer register.
+            parr = 0
+            mp = re.search(re.escape(pname) + r'\[(\d+)\]', text)
+            if mp:
+                parr = int(mp.group(1))
+            else:
+                me = re.search(re.escape(pname) + r'\[([A-Za-z_]\w*)\]', text)
+                if me:
+                    parr = api_consts.get(me.group(1), 0)
             param = Param(
                 type=ptype, name=pname,
                 len_=p.get('len'),
                 optional=(p.get('optional', 'false').split(',')[0] == 'true'),
                 const=text.strip().startswith('const'),
                 is_ptr=is_ptr,
+                array_len=parr,
             )
             cmd.params.append(param)
         commands[cname] = cmd
@@ -317,6 +350,7 @@ def parse_registry(xml_path):
         'struct_aliases': struct_aliases,
         'union_names': union_names,
         'stypes': stypes,
+        'core_versions': core_versions,
         'bitfield_structs': bitfield_structs,
     }
     # resolve struct aliases AFTER member parsing (aliases may chain)
@@ -348,7 +382,12 @@ def arg_kinds(cmd, cls):
         kind = classify_type(p.type, cls['handles'], cls['enum_names'],
                               cls['bitmask_names'], cls['funcptrs'])
         if p.is_ptr == 0:
-            if kind == 'float':
+            if p.array_len:
+                # fixed C array parameter (const float blendConstants[4]):
+                # it decays to a pointer in the actual ABI, so it must be
+                # translated as one — never passed as an integer register.
+                out.append('P')
+            elif kind == 'float':
                 out.append('f')
             else:
                 out.append('i')
@@ -473,8 +512,12 @@ def layout_struct(name, reg, cache=None):
             max_align = max(max_align, 8)
             offset = align_up(offset, 8)
             base = m.type
+            ln = m.len_ or ''
             if base == 'void':
-                elem = 'ptr'
+                # A counted void* is a byte buffer in Vulkan (pData/dataSize,
+                # pInitialData/initialDataSize, pValues/size); staging it as
+                # 8-byte elements read 8x past the guest's buffer.
+                elem = 'scalar:1' if ln and 'null-terminated' not in ln else 'ptr'
             elif base == 'char':
                 elem = 'char'
             elif base in reg['handles']:
@@ -482,9 +525,15 @@ def layout_struct(name, reg, cache=None):
             elif base in reg['structs']:
                 elem = 'struct:' + base
             else:
+                # Enums and flags too (VkPipelineStageFlags, VkFormat): their
+                # element size, not a pointer's.
                 sz = SCALAR_SIZES.get(base)
+                if not sz:
+                    try:
+                        sz = type_size(base, reg, cache)
+                    except (KeyError, ValueError):
+                        sz = None
                 elem = f'scalar:{sz}' if sz else 'ptr'
-            ln = m.len_ or ''
             if 'null-terminated' in ln and ',' not in ln:
                 count = 'nullterm'
             elif ln:

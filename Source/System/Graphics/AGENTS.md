@@ -20,6 +20,54 @@
   `make opgen-thunk`; host symbols fall back from `dlsym` to `eglGetProcAddress`. `dlsym(RTLD_DEFAULT)` finds GL only because
   `register_known_symbols_` loads libGL `RTLD_GLOBAL`: nothing names GL at link time, so a toolchain that defaults to
   `--as-needed` (Ubuntu's) drops `-lGL`, and raw lookups then miss (`glMapBuffer` returned NULL).
+- `vkcoverage.py` generates the core-Vulkan rows `thunk_dp.txt` is missing from
+  `vk.xml`: `VK_CMD_DEEP`/`_OUT` when `vkmarshalgen.py` has a plan (nested guest
+  pointers staged), plain `VULKAN` when every pointer pointee is pointer-free
+  (recursively, function pointers and `pNext` included), and `f` args only for
+  the mixed shapes `Dispatch.cpp` forwards verbatim. Fixed C array parameters
+  (`const float blendConstants[4]`) decay to pointers and must be `p`. Commands
+  that need a hand arm (OUT struct writeback, template payloads, uncounted
+  `void*`) are printed with the reason; `vkxmlcheck.py` fails a DEEP row whose
+  command has no generated plan. Regenerate with `make vkcoverage`, then `make
+  vkmarshal opgen-thunk`. The same rule binds hand rows: `vkxmlcheck.py` fails a `VULKAN` row
+  whose pointees carry pointers (`vkcoverage.plain_safe`: `pNext`, arrays, function pointers)
+  unless `HAND_ARMS` names the arm that marshals it. Such a command gets a plan in
+  `vkmarshalgen.py` (`CMD_CREATE_PLANS`, `CMD_STRUCT_IO_PLANS`, or `CMD_NULLIFY_PLANS` for an
+  allocator-only destroy) and `VK_CMD_DEEP`/`VK_CMD_DEEP_OUT`. Plain `VULKAN` copies only the top
+  struct, so a `pNext` chain reached RADV as a guest pointer (`vkCreateImageView`). The rule covers `-`
+  rows as well. Struct descriptors size each pointer member's elements from vk.xml (`vkxml.py`): a
+  counted `void*` is a byte buffer and enums/flags use their own size, never a pointer's 8.
+- `vkAllocateMemory` stages its `pNext` chain but keeps only structs whose meaning survives the bridge
+  (dedicated, allocate flags, priority, capture address); import/export structs carry guest fds or
+  pointers and are dropped.
+- The Android guest's Vulkan *driver* is `Guest/Android/Adapters/vulkan_hal.c`,
+  built as `managed/vulkan.bifrost.so` and installed at
+  `/vendor/lib64/hw/vulkan.bifrost.so` with `ro.hardware.vulkan=bifrost`. It is
+  a HAL module (`HMI`, `hwvulkan_device_t`) plus ICD entry points, owns no Vulkan
+  state, and forwards through `0x100D` to the host loader's thunked symbols; it
+  filters the loader-provided `VK_KHR_android_surface` out of
+  `vkCreateInstance` because the host Linux loader rejects it. Add a new
+  `libvulkan.so` case to the `0x100D` resolver in `Syscalls/HostCalls/Thunks.cpp`
+  before relying on it. `vulkan_native_buffer.c` supplies the loader's
+  `VK_ANDROID_native_buffer` handshake (`vkAcquireImageANDROID`,
+  `vkQueueSignalReleaseImageANDROID`, plus create/destroy device/image and
+  device-extension enumeration wrappers): the gralloc allocation is a sealed
+  memfd the host driver cannot import, so it copies through a host-visible
+  staging buffer (cached memory first: the CPU reads it back every frame)
+  inside the loader's acquire/release fences and semaphores.
+  `vkCreateImage` strips `VkNativeBufferANDROID`, creates an ordinary host image
+  with its own memory and remembers the gralloc layout; destroy the image
+  before freeing that memory. Keep the copy serialized (`copy_mutex`).
+- The instance `apiVersion` the guest requested (`VkApplicationInfo.apiVersion`,
+  offset 44, read at `vkCreateInstance` before pointer translation) is the version the
+  Khronos loader built the device dispatch tables for. A newer core **device** command
+  makes the loader tail-jump a null slot and the host dies at `pc=0` (seen with
+  `vkGetBufferMemoryRequirements2` on a 1.0 instance and `vkMapMemory2`, 1.4 core, on a
+  1.1 one). `Dispatch::dispatch` rejects those calls with `VK_ERROR_FEATURE_NOT_PRESENT`
+  using the generated `vk_core_version` table. Instance commands are resolved from the
+  ICD regardless of version and are not gated; extension-only commands are absent from
+  the table. The most recent `vkCreateInstance` wins, and `test_vulkan` covers both the
+  1.4 path and the rejection on a 1.0 instance.
 - GL binding state is per context. `GraphicThunkImpl::tracker()` returns the
   calling thread's current EGL context's `GLStateTracker` (switched after a
   successful `eglMakeCurrent`), else the default tracker for SDL/GLFW GL.
@@ -74,14 +122,26 @@
   `glReadPixels` is the one exception, appended by `build-android-adapters.py`), and `glcoverage.py` generates
   them, skipping only commands whose pointer has a computed bulk size (a `const GLchar *` with `COMPSIZE()` is a
   string, not a bulk buffer). `Scripts/Android/test_android_adapter_exports.py` checks the built library.
-- `GraphicThunk::dispatch` marks the symbol it runs (`thunk_call::Scope`,
-  `Thunks/ThunkCallRecord.hpp`); the host-fault report in `FrostJIT/Runtime/FaultHandler.cpp` ends
-  with `thunk=<name>` when the fault happened inside a graphics thunk call, i.e. in the driver or
-  libc acting on that call's arguments. The marker holds a name pointer only (the handler
-  allocates and locks nothing); AudioThunk and DisplayThunk calls are not marked.
+- `GraphicThunk::dispatch`, `DisplayThunk::dispatch` and `AudioThunk::dispatch` mark the symbol
+  they run (`thunk_call::Scope`, `Thunks/ThunkCallRecord.hpp`); the host-fault report in
+  `FrostJIT/Runtime/FaultHandler.cpp` ends with `thunk=<name>` when the fault happened inside a
+  thunk call, i.e. in the driver or libc acting on that call's arguments. The marker holds a name
+  pointer only (the handler allocates and locks nothing). A new host-API dispatcher marks its
+  calls the same way.
   Guest callback pointers require guest runners, not host function invocation.
   Stage Vulkan storage before taking pointers into it; reallocation invalidates
   those pointers. Preserve deep-marshalling bounds and layout checks.
+- Vulkan maps are placed when the device allows it (`DisplayThunk/VulkanPlacedMemory.cpp`):
+  `vkCreateDevice` adds `VK_EXT_map_memory_placed` + `VK_KHR_map_memory2` when the host has
+  `memoryMapPlaced` and `memoryUnmapReserve` (alignment at most a page; a refused create is
+  retried with the app's info), and `vkMapMemory` maps the whole allocation at a fresh guest range
+  and returns base + offset. The guest then uses the real memory: no baseline, push or pull. Every
+  placed map is unmapped with `VK_MEMORY_UNMAP_RESERVE_BIT_EXT` before its memory is freed or its
+  device destroyed, then `Memory::restore_anonymous` puts guest memory back and the range is
+  released, so the window never has a hole. The extension is hidden from the guest's list. Anything
+  else (no extension, unaligned allocation size, unknown allocation) keeps the bounce below;
+  `BIFROST_VK_NO_PLACED=1` forces it. Not handled: a guest munmap/MAP_FIXED over a placed range
+  (the driver memory would be reused as plain memory) and a forked child inheriting the mapping.
 - GL/GLES and Vulkan mapping APIs return guest bounces, never raw host mapping
   pointers. Preserve mapping lifetime, explicit flush/invalidate, pre-submit
   writeback and post-wait readback. A GL bounce mirrors a real host mapping of

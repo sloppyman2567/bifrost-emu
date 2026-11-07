@@ -71,6 +71,15 @@ CMD_PLANS = {
     'vkUpdateDescriptorSets': None,
     # Phase B batch 5: fence waits
     'vkWaitForFences': None,
+    # Registry-wide pass (vkcoverage.py): flat/nested arrays whose count
+    # is a sibling parameter, plus layer/device-group enumerations.
+    'vkBindBufferMemory2': None, 'vkBindImageMemory2': None,
+    'vkEnumerateInstanceLayerProperties': None,
+    'vkEnumerateDeviceLayerProperties': None,
+    'vkEnumeratePhysicalDeviceGroups': None,
+    'vkMergePipelineCaches': None, 'vkGetPipelineCacheData': None,
+    'vkCmdWaitEvents2': None, 'vkCmdPushDescriptorSet': None,
+    'vkCmdResolveImage': None,
 }
 
 # Create-style commands (Phase B batches 1–3): create/record shape with
@@ -94,6 +103,87 @@ CMD_CREATE_PLANS = {
     # Phase B batch 5
     'vkCreateInstance', 'vkCreateDevice',
     'vkAllocateCommandBuffers',
+    # Registry-wide pass (vkcoverage.py): input-only commands whose whole
+    # payload is one const struct (or two) with interior arrays, plus the
+    # SDK-style create/query shapes.
+    'vkCmdBeginRendering', 'vkCmdPipelineBarrier2', 'vkCmdSetEvent2',
+    'vkCmdPushConstants2', 'vkCmdPushDescriptorSet2',
+    'vkCmdBeginRenderPass2', 'vkCmdEndRenderPass2', 'vkCmdNextSubpass2',
+    'vkCmdCopyBuffer2', 'vkCmdCopyImage2', 'vkCmdBlitImage2',
+    'vkCmdResolveImage2', 'vkCmdCopyBufferToImage2',
+    'vkCmdCopyImageToBuffer2',
+    'vkCmdBindDescriptorSets2',
+    'vkCmdSetRenderingAttachmentLocations',
+    'vkCmdSetRenderingInputAttachmentIndices',
+    # Images carry a pNext chain once the app knows the driver takes
+    # external (Android hardware buffer) memory: VkExternalMemoryImageCreateInfo
+    # and friends are guest pointers RADV would dereference (Zenless Zone Zero
+    # faulted inside libvulkan_radeon vkCreateImage, 2026-11-06).
+    'vkCreateImage',
+    'vkCreateRenderPass2', 'vkCreateSamplerYcbcrConversion',
+    'vkCreateDescriptorUpdateTemplate', 'vkCreatePrivateDataSlot',
+    'vkGetDeviceQueue2', 'vkWaitSemaphores',
+    # Create infos that carry a pNext chain (and, for swapchains, a queue
+    # family array). These were plain VULKAN rows, which copied only the top
+    # struct: Zenless Zone Zero's VkImageViewCreateInfo chain reached RADV as
+    # a guest pointer (host fault in libvulkan_radeon, 2026-11-06).
+    # vkxmlcheck.py now rejects such a row unless it names a hand arm.
+    'vkCreateImageView', 'vkCreateBuffer', 'vkCreateBufferView',
+    'vkCreateSampler', 'vkCreateFence', 'vkCreateSemaphore', 'vkCreateEvent',
+    'vkCreateQueryPool', 'vkCreateCommandPool', 'vkCreatePipelineCache',
+    'vkCreateSwapchainKHR', 'vkCreateHeadlessSurfaceEXT',
+    'vkCreateAccelerationStructureKHR',
+}
+
+# Destroy/free entry points whose only pointer parameter is the guest's
+# VkAllocationCallbacks. That struct carries GUEST function pointers, so the
+# host call gets nullptr — the same rule the create plans apply (out=3).
+CMD_NULLIFY_PLANS = {
+    'vkDestroyBufferView', 'vkDestroyDescriptorUpdateTemplate',
+    'vkDestroyPrivateDataSlot', 'vkDestroySamplerYcbcrConversion',
+    'vkDestroyInstance', 'vkDestroyDevice', 'vkDestroySwapchainKHR',
+    'vkDestroyCommandPool', 'vkDestroyImage', 'vkDestroyImageView',
+    'vkDestroyBuffer', 'vkDestroyRenderPass', 'vkDestroyFramebuffer',
+    'vkDestroyShaderModule', 'vkDestroyPipelineCache', 'vkDestroyPipeline',
+    'vkDestroyPipelineLayout', 'vkDestroyDescriptorSetLayout',
+    'vkDestroyDescriptorPool', 'vkDestroyFence', 'vkDestroySemaphore',
+    'vkDestroyEvent', 'vkDestroyQueryPool', 'vkDestroySampler',
+    'vkDestroySurfaceKHR', 'vkDestroyAccelerationStructureKHR',
+}
+
+# Vulkan 1.1 query/create shapes: a const input struct (staged, out=4), an
+# optional allocator (nulled, out=3) and a struct the driver FILLS (out=6),
+# or a struct array whose count lives behind a guest u32* (out=7). The
+# runtime publishes those results field-wise, restoring the guest's own
+# pointer values (see Dispatch.cpp vk_out_struct_back).
+CMD_STRUCT_IO_PLANS = {
+    'vkGetBufferMemoryRequirements2', 'vkGetImageMemoryRequirements2',
+    'vkGetDeviceBufferMemoryRequirements', 'vkGetDeviceImageMemoryRequirements',
+    'vkGetDeviceImageSparseMemoryRequirements',
+    'vkGetImageSparseMemoryRequirements', 'vkGetImageSparseMemoryRequirements2',
+    'vkGetPhysicalDeviceMemoryProperties2',
+    'vkGetPhysicalDeviceFormatProperties2',
+    'vkGetPhysicalDeviceImageFormatProperties2',
+    'vkGetPhysicalDeviceExternalBufferProperties',
+    'vkGetPhysicalDeviceExternalFenceProperties',
+    'vkGetPhysicalDeviceExternalSemaphoreProperties',
+    'vkGetPhysicalDeviceQueueFamilyProperties2',
+    'vkGetPhysicalDeviceSparseImageFormatProperties',
+    'vkGetPhysicalDeviceSparseImageFormatProperties2',
+    'vkGetPhysicalDeviceToolProperties',
+    'vkGetImageSubresourceLayout2', 'vkGetRenderingAreaGranularity',
+    'vkGetDescriptorSetLayoutSupport',
+    'vkGetBufferDeviceAddress', 'vkGetBufferOpaqueCaptureAddress',
+    'vkGetDeviceMemoryOpaqueCaptureAddress',
+    'vkCopyImageToImage', 'vkCopyImageToMemory', 'vkCopyMemoryToImage',
+    'vkTransitionImageLayout', 'vkQueueBindSparse',
+    # Info structs with pNext chains, formerly plain VULKAN rows.
+    'vkSignalSemaphore', 'vkAcquireNextImage2KHR',
+    'vkGetPhysicalDeviceSurfaceCapabilities2KHR',
+    'vkGetDeviceGroupPresentCapabilitiesKHR',
+    # Debug labels and object names carry a string Mesa copies.
+    'vkCmdBeginDebugUtilsLabelEXT', 'vkSetDebugUtilsObjectNameEXT',
+    'vkGetBufferDeviceAddressKHR',
 }
 # vkQueuePresentKHR STAYS a hand arm by design (plan Phase B item 5):
 # pResults needs FIELD-level OUT semantics inside the staged struct,
@@ -231,6 +321,8 @@ inline const VkCmdPlan* vk_find_cmd_plan(const char* name) {
 // sType → struct-descriptor index for EVERY chainable struct in the
 // registry (sorted ascending; binary search). Unknown sTypes are not
 // present — callers truncate the chain there.
+{VERSION_TABLE}
+
 {STYPE_TABLE}
 
 inline constexpr size_t kVkStypeCount =
@@ -462,6 +554,64 @@ def main():
                 out_aux[cmd] = co
             plans[cmd] = plist
 
+    # ── allocator-only destroy/free plans (out=3 NULLIFY) ────────────
+    for cmd in sorted(CMD_NULLIFY_PLANS):
+        c = reg['commands'].get(cmd)
+        if c is None:
+            print(f'WARN: {cmd} not in registry', file=sys.stderr)
+            continue
+        plist = [(pidx, 0, ('hnd',), 3)
+                 for pidx, p in enumerate(c.params)
+                 if p.is_ptr and p.type == 'VkAllocationCallbacks']
+        if plist:
+            plans[cmd] = plist
+
+    # ── struct-in / struct-out query plans (out=6/7, see set docs) ────
+    for cmd in sorted(CMD_STRUCT_IO_PLANS):
+        c = reg['commands'].get(cmd)
+        if c is None:
+            print(f'WARN: {cmd} not in registry', file=sys.stderr)
+            continue
+        def sib(name):
+            for j, q in enumerate(c.params):
+                if q.name == name:
+                    return j
+            return None
+        plist = []
+        ok = True
+        for pidx, p in enumerate(c.params):
+            if not p.is_ptr:
+                continue
+            ln = (p.len_ or '').split(',')[0].strip()
+            cidx = sib(ln) if ln else None
+            # scalar/enum count or result pointer (uint32_t* pCount,
+            # VkResult* ...) — leave on the generic translate path
+            if p.type in ('uint32_t', 'size_t') or \
+                    p.type in reg['enum_names']:
+                continue
+            if p.type == 'VkAllocationCallbacks' and p.const:
+                plist.append((pidx, 0, ('hnd',), 3))          # NULLIFY
+                continue
+            if p.type in layouts and p.const:
+                want_struct(p.type)
+                plist.append((pidx, cidx if cidx is not None else 0xFF,
+                              p.type, 4))                     # STRUCT_IN
+                continue
+            if p.type in layouts and not p.const:
+                want_struct(p.type)
+                count_ptr = cidx is not None and c.params[cidx].is_ptr
+                plist.append((pidx, cidx if cidx is not None else 0xFF,
+                              p.type, 7 if count_ptr else 6))
+                continue
+            if p.type == 'void' and p.const:
+                continue          # generic 'p' translation reads it only
+            print(f'WARN: {cmd} param {p.name} ({p.type}): no struct-io '
+                  f'role — command left generic', file=sys.stderr)
+            ok = False
+            break
+        if ok and plist:
+            plans[cmd] = plist
+
     # ── chainable structs: EVERY struct with a resolvable sType member
     # gets a descriptor so generated pNext-chain walking covers the full
     # registry, not just the plan closure.
@@ -636,7 +786,53 @@ def main():
         ''.join(f'    {{{v},{i}}},\n' for (v, i) in entries) +
         '};')
 
+    cmds = reg.get('commands', {})
+
+    def _device_level(cname):
+        c = cmds.get(cname)
+        return bool(c and c.params and c.params[0].type == 'VkDevice')
+
+    version_rows = sorted((k, v[0], v[1], _device_level(k))
+                          for k, v in reg.get('core_versions', {}).items())
+    version_table = (
+        '// Minimum core API version of each command (extension-only commands\n'
+        '// are absent). The loader builds its DEVICE dispatch table for the\n'
+        '// apiVersion the guest instance was created with, so a newer core\n'
+        '// device command jumps through a null slot and the host dies at\n'
+        '// pc=0. Instance commands are resolved from the ICD directly and\n'
+        '// are never gated.\n'
+        'struct VkCoreVersion {\n'
+        '    const char* name;\n'
+        '    uint8_t major;\n'
+        '    uint8_t minor;\n'
+        '    bool device;\n'
+        '};\n\n'
+        'inline constexpr VkCoreVersion kVkCoreVersions[] = {\n' +
+        ''.join(f'    {{"{n}", {maj}, {mi}, {str(dev).lower()}}},\n'
+                for n, maj, mi, dev in version_rows) +
+        '};\n\n'
+        'inline constexpr size_t kVkCoreVersionCount =\n'
+        '    sizeof(kVkCoreVersions) / sizeof(kVkCoreVersions[0]);\n\n'
+        'inline bool vk_core_version(const char* name, uint8_t* major,\n'
+        '                            uint8_t* minor, bool* device) {\n'
+        '    size_t lo = 0, hi = kVkCoreVersionCount;\n'
+        '    while (lo < hi) {\n'
+        '        size_t mid = (lo + hi) / 2;\n'
+        '        int c = __builtin_strcmp(kVkCoreVersions[mid].name, name);\n'
+        '        if (c < 0) lo = mid + 1; else hi = mid;\n'
+        '    }\n'
+        '    if (lo < kVkCoreVersionCount &&\n'
+        '        __builtin_strcmp(kVkCoreVersions[lo].name, name) == 0) {\n'
+        '        *major = kVkCoreVersions[lo].major;\n'
+        '        *minor = kVkCoreVersions[lo].minor;\n'
+        '        *device = kVkCoreVersions[lo].device;\n'
+        '        return true;\n'
+        '    }\n'
+        '    return false;\n'
+        '}\n')
+
     out = HEADER
+    out = out.replace('{VERSION_TABLE}', version_table)
     out = out.replace('{STRUCT_TABLES}', '\n\n'.join(tables))
     out = out.replace('{STRUCT_ROWS}', '\n'.join(rows))
     out = out.replace('{PLAN_TABLES}', '\n\n'.join(plan_tables))
