@@ -75,6 +75,20 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   (about 0.8 fps, not limited by the JIT). `android_loader_host` checks tagged loads, stores, pairs, Q stores, LSE and
   LL/SC against the interpreter, and its stale `clone_for_fork` check now uses a host fork.
 
+### Added (Android Vulkan HAL)
+
+- Android apps see a Vulkan device. `Guest/Android/Adapters/vulkan_hal.c` is a guest HAL module
+  (`/vendor/lib64/hw/vulkan.bifrost.so`, selected by `ro.hardware.vulkan=bifrost`) that forwards every command to the host
+  Vulkan thunk. The AOSP loader keeps its dispatch table in the first word of each dispatchable object, so every
+  `VkInstance`, `VkPhysicalDevice`, `VkDevice`, `VkQueue` and `VkCommandBuffer` it returns is a two-word guest object
+  (dispatch slot, host handle). `vulkan_native_buffer.c` implements `VK_ANDROID_native_buffer` by copying: the software
+  gralloc allocator is a sealed memfd the host driver cannot import, so each presented frame costs a full-frame copy and
+  there is no zero-copy path. `vkCreateInstance` drops instance extensions the host does not advertise, and device
+  groups that list their members explicitly are rejected. Unity now reports the host GPU (Zenless Zone Zero logs
+  `AMD Radeon RX 9060 XT (RADV GFX1200)`, Vulkan 1.3.0). The module and its limits are described in
+  [ANDROID_RUNTIME.md](Android/ANDROID_RUNTIME.md); the roadmap's "no Android Vulkan HAL" gap is replaced by the
+  zero-copy item.
+
 ### Fixed (audio)
 
 - An AAudio stream opened without a format (`AAUDIO_FORMAT_UNSPECIFIED`) is FLOAT, which matches producers that leave

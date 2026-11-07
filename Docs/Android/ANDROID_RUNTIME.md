@@ -3278,3 +3278,73 @@ Checkpoints and investigations are in [the history](../archive/ANDROID_RUNTIME-h
 - [First SpongeBob rendering milestone (2026-10-07)](../archive/ANDROID_RUNTIME-history.md#first-spongebob-rendering-milestone-2026-10-07)
 - [Native sensor-service profile (2026-10-07)](../archive/ANDROID_RUNTIME-history.md#native-sensor-service-profile-2026-10-07)
 - [ART field lookup restart correction](../archive/ANDROID_RUNTIME-history.md#art-field-lookup-restart-correction)
+
+### Guest Vulkan HAL module (2026-11-06)
+
+Android's `system/lib64/libvulkan.so` is the real AOSP loader, so the guest
+needs a driver module where the loader looks for one:
+`/vendor/lib64/hw/vulkan.<ro.hardware.vulkan>.so`. `Guest/Android/Adapters/vulkan_hal.c`
+is that module. It exports the HAL module descriptor (`HMI`, i.e.
+`HAL_MODULE_INFO_SYM`, with `hwvulkan_device_t` and `open()`) and the ICD entry
+points `vk_icdNegotiateLoaderICDInterfaceVersion` (4),
+`vk_icdGetInstanceProcAddr` and `vk_icdGetPhysicalDeviceProcAddr`.
+
+The loader follows the ICD contract and stores its own dispatch table in the
+first word of every dispatchable object a driver returns, after checking
+`ICD_LOADER_MAGIC`. A host handle cannot serve as that object: the guest cannot
+read host memory, and handing one over faulted inside `loader_set_dispatch` on
+an unmapped host page. Every `VkInstance`, `VkPhysicalDevice`, `VkDevice`,
+`VkQueue` and `VkCommandBuffer` this module returns is therefore a two-word
+guest object — word 0 is the loader's dispatch slot, word 1 the host handle
+(`Guest/Android/Include/vulkan_dispatchable.h`).
+
+`vulkan_handles.c` owns the commands that create, destroy or carry those
+handles (instance/device/queue/command-buffer creation and destruction, the
+physical-device enumerations and `vkQueueSubmit`/`vkQueueSubmit2`/
+`vkCmdExecuteCommands`, whose command-buffer arrays are translated). Every other
+command is a generated entry point: the adapter builder derives one per `vk.xml`
+command and, where the first parameter is dispatchable, replaces it with word 1
+before jumping to the host thunk; `bf_vk_shim` hands those addresses out by name.
+No marshalling lives in the guest — the existing Vulkan rows still stage guest
+structures. The module negotiates ICD interface version 4; version 5 would
+require `vk_icdEnumerateAdapterPhysicalDevices`. Device groups that list their
+members explicitly are rejected with `VK_ERROR_FEATURE_NOT_PRESENT` rather than
+forwarded untranslated.
+
+Two things are module policy rather than passthrough: `vkCreateInstance` drops
+instance extensions the host does not advertise (the loader adds
+`VK_KHR_android_surface` itself, which the Linux loader would reject and fail
+the whole create), and `vkGetSwapchainGrallocUsageANDROID` /
+`vkGetSwapchainGrallocUsage2ANDROID` report
+`GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_RENDER` (plus `SW_READ_OFTEN` for
+transfer/sampled usage) because gralloc usage is driver policy.
+
+The adapter builder emits it as `managed/vulkan.bifrost.so`; the managed runtime
+installs it next to `mapper.bifrost.so` and sets `ro.hardware.vulkan=bifrost` in
+the debug-ramdisk property overrides, which `Properties.cpp` applies after the
+partition `build.prop` files. The visible default linker namespace already
+searches `/vendor/lib64/hw`.
+
+`Guest/Android/Adapters/vulkan_native_buffer.c` implements the private
+`VK_ANDROID_native_buffer` extension the loader's Android swapchain needs. The
+software allocator is a sealed memfd, which the host driver cannot import as
+image memory, so the bridge copies: `vkCreateImage` strips
+`VkNativeBufferANDROID`, creates a normal host image with its own memory and
+remembers the gralloc fd layout; `vkAcquireImageANDROID` waits the loader's
+acquire fence (poll on the guest fd), uploads the gralloc pixels through a
+host-visible staging buffer and signals the loader's binary semaphore (and its
+fence) with the same queue submission; `vkQueueSignalReleaseImageANDROID`
+submits the reverse copy on the app's queue after the loader's wait
+semaphores, waits for it, writes the rows back into the gralloc mapping and
+returns `-1` because the copy is already complete. The bridge advertises the
+extension from `vkEnumerateDeviceExtensionProperties` and filters it (and any
+other host-unknown extension) out of `vkCreateDevice`.
+
+Copy-path limits: the gralloc format must byte-match the app's `VkFormat`
+(RGBA/RGBX/BGRA 8888, RGB 565, R8, RGBA FP16 are accepted), staging is CPU
+memory so acquire/release costs a full-frame copy, the image is left in
+`VK_IMAGE_LAYOUT_GENERAL`, and the copy assumes the app renders on the queue
+the loader passes to release (the bridge records the device's first queue
+family and replaces it with the caller's queue). A zero-copy path needs a
+dma-buf-backed gralloc allocation, which the software allocator does not
+provide.

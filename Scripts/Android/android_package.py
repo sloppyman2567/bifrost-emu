@@ -191,7 +191,8 @@ def verify_adapters(adapters, runtime):
     }
     managed = {"libbifrost-activity.so", "managed/libandroid.so", "managed/libEGL.so",
                "managed/libGLESv1_CM.so", "managed/libGLESv2.so", "managed/libGLESv3.so", "managed/libaaudio.so",
-               "managed/libOpenSLES.so", "managed/mapper.bifrost.so", "managed/am",
+               "managed/libOpenSLES.so", "managed/mapper.bifrost.so",
+               "managed/vulkan.bifrost.so", "managed/am",
                "managed/libbifrost-binder-attach.so"}
     files = set(metadata.get("files", {}))
     if (

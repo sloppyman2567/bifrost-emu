@@ -1904,6 +1904,7 @@ class SettingsIdentityTests(unittest.TestCase):
             names = ("libbifrost-activity.so", "managed/am", "managed/libandroid.so", "managed/libEGL.so",
                      "managed/libGLESv1_CM.so", "managed/libGLESv2.so", "managed/libGLESv3.so",
                      "managed/libaaudio.so", "managed/libOpenSLES.so", "managed/mapper.bifrost.so",
+                     "managed/vulkan.bifrost.so",
                      "managed/libbifrost-binder-attach.so")
             files = {}
             for name in names:

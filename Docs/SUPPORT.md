@@ -44,8 +44,8 @@ guarantees, and gameplay is confirmed only where the file says `playable`.
 
 Google account support is experimental. Play services come from microG, so behaviour that needs real Google services
 (device attestation, a Play Games profile, an adult-age check) is unavailable.
-An Android Vulkan HAL, Settings screens, host mDNS, HDR and arbitrary APK
-compatibility are not provided or claimed. An APK that ships only 32-bit
+Settings screens, host mDNS, HDR and arbitrary APK compatibility are not provided or
+claimed. The Android Vulkan HAL copies each presented frame (no zero-copy swapchain). An APK that ships only 32-bit
 libraries cannot start. See
 [runtime contracts](Android/ANDROID_RUNTIME.md), [APK tooling](Android/ANDROID_APK.md)
 and the [roadmap](roadmap.md) for open items and the known blockers by cause.

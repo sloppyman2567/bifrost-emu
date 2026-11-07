@@ -396,7 +396,7 @@ def install_managed_graphics(root, adapters):
     lib64 = root / "system/lib64"
     names = ("libandroid.so", "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so", "libGLESv3.so", "libaaudio.so",
              "libOpenSLES.so")
-    if {p.name for p in adapters.glob("*.so")} != set(names) | {"mapper.bifrost.so", BINDER_ATTACH}:
+    if {p.name for p in adapters.glob("*.so")} != set(names) | {"mapper.bifrost.so", "vulkan.bifrost.so", BINDER_ATTACH}:
         raise ValueError("Unexpected managed graphics adapters")
     shutil.copyfile(adapters / BINDER_ATTACH, lib64 / BINDER_ATTACH)
     for adapter in (adapters / name for name in names):
@@ -409,6 +409,9 @@ def install_managed_graphics(root, adapters):
     vendor = root / "vendor/lib64/hw"
     vendor.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(adapters / "mapper.bifrost.so", vendor / "mapper.bifrost.so")
+    # Android's libvulkan loader finds its driver through this HAL module, the
+    # same way it finds the gralloc mapper above.
+    shutil.copyfile(adapters / "vulkan.bifrost.so", vendor / "vulkan.bifrost.so")
     # android_load_sphal_library falls back to the visible default namespace
     # in this framework profile. Keep the normal vendor HAL location.
     config = root / "linkerconfig/ld.config.txt"
@@ -885,13 +888,17 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     adapter_names = ["libbifrost-activity.so", "managed/am"] + [
         "managed/" + name for name in ("libandroid.so", "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so",
                                       "libGLESv3.so", "libaaudio.so", "libOpenSLES.so",
-                                      "mapper.bifrost.so", BINDER_ATTACH)]
+                                      "mapper.bifrost.so", "vulkan.bifrost.so", BINDER_ATTACH)]
     for name in adapter_names:
         if file_hash(adapters / name) != adapter_manifest["files"].get(name):
             raise ValueError("Modified managed runtime adapter: " + name)
     settings_key = settings_user_key(app.parent)
     import android_settings
     property_overrides = android_settings.properties(android_settings.load(app))
+    # Both the app-facing detection (Unity logs and gates on this) and the
+    # loader's driver name come from this property; the module above is
+    # installed as /vendor/lib64/hw/vulkan.bifrost.so.
+    property_overrides.setdefault("ro.hardware.vulkan", "bifrost")
     identity = {"schema": 3, "code": code, "files": metadata["files"], "media_mask": media_mask,
                 "framework": file_hash(framework / "bifrost-framework.json"),
                 "microg": {package: value[3] for package, value in android_microg.PACKAGES.items()},

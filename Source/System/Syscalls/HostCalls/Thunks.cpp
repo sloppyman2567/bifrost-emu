@@ -94,6 +94,12 @@ int64_t syscall_host_thunks(Emulator& emu, CPU& cpu, uint64_t num) {
                         if (!address && library == "libGLESv2.so" && symbol == "glReadPixels")
                             address = thunk->resolve("libGL.so.1", symbol);
                     }
+                } else if (library == "libvulkan.so" || library == "libvulkan.so.1") {
+                    // The guest Vulkan HAL module
+                    // (Guest/Android/Adapters/vulkan_hal.c) forwards to the
+                    // host loader instead of the guest loader it lives behind.
+                    if (auto* thunk = emu.graphics().display_thunk(); thunk && thunk->enabled())
+                        address = thunk->resolve(library, symbol);
                 } else if (library == "libandroid.so" || library == "liblog.so") {
                     if (auto* thunk = emu.graphics().display_thunk(); thunk && thunk->enabled())
                         address = thunk->resolve(library, symbol);

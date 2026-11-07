@@ -135,6 +135,217 @@ def platform_forwards(staging, thunked):
     return sorted(n for n in public if n not in provided and n not in window)
 
 
+VULKAN_DISPATCHABLE = {"VkInstance", "VkPhysicalDevice", "VkDevice", "VkQueue",
+                       "VkCommandBuffer"}
+
+
+def vulkan_commands():
+    """(first parameter type, alias target) per command, from the vendored
+    Khronos vk.xml.
+
+    The alias map matters: Android's loader asks a driver for the KHR names
+    (`vkGetPhysicalDeviceFeatures2KHR` and friends), but the host Linux loader
+    exports only the core names they alias. Resolving an alias by its own name
+    finds nothing, so those commands have to be reached through their target.
+    """
+    import xml.etree.ElementTree as ElementTree
+    registry = ElementTree.parse(
+        ROOT / "ThirdParty/VulkanHeaders/registry/vk.xml").getroot()
+    first, aliases = {}, {}
+    for command in registry.find("commands").iter("command"):
+        # Only alias-only rows carry the name on the element; every other
+        # command names itself in <proto>.
+        name = command.get("name")
+        if name:
+            aliases[name] = command.get("alias")
+            continue
+        proto = command.find("proto")
+        if proto is None:
+            continue
+        params = [param for param in command.findall("param")
+                  if param.get("api") is None
+                  or "vulkan" in [a.strip() for a in param.get("api").split(",")]]
+        first[proto.findtext("name")] = (params[0].findtext("type")
+                                         if params else None)
+    resolved = {}
+    for name, target in aliases.items():
+        if target in first:
+            first[name] = first[target]
+            resolved[name] = target
+    return first, resolved
+
+
+def vulkan_allocator_arguments():
+    """Command -> argument index of its VkAllocationCallbacks pointer.
+
+    A driver calls pfnAllocation/pfnFree while it runs, but an app's callbacks
+    are guest function pointers: passing them through makes the host driver
+    jump into guest memory and fault (vkCreatePipelineCache, 2026-11-06, host
+    fault with pc == addr). The shim zeroes that argument so the host uses its
+    own allocator, which is also what an ICD without a host allocator bridge
+    must do.
+    """
+    import xml.etree.ElementTree as ElementTree
+    registry = ElementTree.parse(
+        ROOT / "ThirdParty/VulkanHeaders/registry/vk.xml").getroot()
+    found = {}
+    for command in registry.find("commands").iter("command"):
+        # vk.xml names a command inside <proto>, not on the element.
+        name = (command.findtext("proto/name") or "").strip()
+        if not name:
+            continue
+        params = [param for param in command.findall("param")
+                  if param.get("api") is None
+                  or "vulkan" in [a.strip() for a in param.get("api").split(",")]]
+        for index, param in enumerate(params):
+            if "VkAllocationCallbacks" in ElementTree.tostring(
+                    param, encoding="unicode"):
+                found[name] = index
+                break
+    return found
+
+
+def vulkan_shims():
+    """Assembly for one entry point per Vulkan command.
+
+    Android's libvulkan loader hands a driver back the dispatchable objects it
+    created and expects the driver to call through them, so a command's first
+    argument is one of this module's two-word objects: the loader's dispatch
+    slot, then the host handle. The shim resolves the host loader symbol lazily
+    (0x100D, like the other adapters) and replaces that object with the host
+    handle before jumping to it. Written in assembly so no signature — SIMD,
+    variadic or stack arguments — has to be spelled out. The table at the end
+    lets the module hand these addresses out by command name.
+    """
+    commands, aliases = vulkan_commands()
+    allocators = vulkan_allocator_arguments()
+    # The name the host loader must be asked for: an alias' target, else itself.
+    host_names = {name: aliases.get(name, name) for name in commands}
+    save = [
+        "sub sp,sp,#208",
+        "stp x0,x1,[sp,#0]",
+        "stp x2,x3,[sp,#16]",
+        "stp x4,x5,[sp,#32]",
+        "stp x6,x7,[sp,#48]",
+        "stp x8,x30,[sp,#64]",
+        "stp q0,q1,[sp,#80]",
+        "stp q2,q3,[sp,#112]",
+        "stp q4,q5,[sp,#144]",
+        "stp q6,q7,[sp,#176]",
+    ]
+    restore = [
+        "ldp x0,x1,[sp,#0]",
+        "ldp x2,x3,[sp,#16]",
+        "ldp x4,x5,[sp,#32]",
+        "ldp x6,x7,[sp,#48]",
+        "ldp x8,x30,[sp,#64]",
+        "ldp q0,q1,[sp,#80]",
+        "ldp q2,q3,[sp,#112]",
+        "ldp q4,q5,[sp,#144]",
+        "ldp q6,q7,[sp,#176]",
+        "add sp,sp,#208",
+    ]
+    lines = [".text"]
+    for name in sorted(commands):
+        lines += [
+            f".type bf_vk_{name},%function",
+            f"bf_vk_{name}:",
+            f"adrp x16,.Lvptr_{name}",
+            f"add x16,x16,:lo12:.Lvptr_{name}",
+            "ldar x17,[x16]",
+            f"cbnz x17,.Lvcall_{name}",
+            *save,
+            "adrp x0,.Lvlib",
+            "add x0,x0,:lo12:.Lvlib",
+            f"adrp x1,.Lvhost_{name}",
+            f"add x1,x1,:lo12:.Lvhost_{name}",
+            "mov x8,#0x100d",
+            "svc #0",
+            "cmp x0,#0",
+            f"b.le .Lvmissing_{name}",
+            "mov x17,x0",
+            f"adrp x16,.Lvptr_{name}",
+            f"add x16,x16,:lo12:.Lvptr_{name}",
+            "stlr x17,[x16]",
+            *restore,
+            f".Lvcall_{name}:",
+            # Word 1 of the object is the host handle (see
+            # Guest/Android/Include/vulkan_dispatchable.h). A null dispatchable
+            # is legal for vkGetInstanceProcAddr/vkGetDeviceProcAddr, so the
+            # load has to be skipped rather than fault.
+            *(["cbz x0,.Lvnull_" + name, "ldr x0,[x0,#8]", f".Lvnull_{name}:"]
+              if commands[name] in VULKAN_DISPATCHABLE else []),
+            # Guest allocation callbacks must not reach the host driver: it
+            # would call guest code from host context and fault.
+            *([f"mov x{allocators[name]},xzr"]
+              if name in allocators and allocators[name] < 8 else []),
+            "br x17",
+            f".Lvmissing_{name}:",
+            "add sp,sp,#208",
+            f"adrp x0,.Lvname_{name}",
+            f"add x0,x0,:lo12:.Lvname_{name}",
+            "b bf_vk_missing",
+            f".size bf_vk_{name},.-bf_vk_{name}",
+        ]
+    lines += [".section .rodata", '.Lvlib: .asciz "libvulkan.so"']
+    for name in sorted(commands):
+        lines += [f'.Lvname_{name}: .asciz "{name}"',
+                  f'.Lvhost_{name}: .asciz "{host_names[name]}"']
+    lines += [".bss", ".balign 8"]
+    for name in sorted(commands):
+        lines += [f".Lvptr_{name}: .quad 0"]
+    lines += ['.section .data.rel.ro,"aw",%progbits', ".balign 8",
+              ".hidden bf_vk_shims", ".global bf_vk_shims", "bf_vk_shims:"]
+    for name in sorted(commands):
+        lines += [f".quad .Lvname_{name}", f".quad .Lvhost_{name}",
+                  f".quad bf_vk_{name}"]
+    lines += [".quad 0", ".quad 0", ".quad 0",
+              '.section .note.GNU-stack,"",%progbits']
+    return "\n".join(lines) + "\n"
+
+
+def vulkan_extension_table():
+    """C source mapping each device extension to the commands it adds.
+
+    A driver that advertises an extension owes the app every command in it.
+    Where the host loader has no symbol for one of them the module refuses the
+    command, the loader leaves that dispatch slot NULL, and an app that
+    enabled the extension calls it (Unity 2.x + VK_KHR_fragment_shading_rate,
+    2026-11-06). The module checks this table before it forwards the host's
+    device extension list, so advertisement and entry points agree.
+    """
+    import xml.etree.ElementTree as ElementTree
+    registry = ElementTree.parse(
+        ROOT / "ThirdParty/VulkanHeaders/registry/vk.xml").getroot()
+    extensions = []
+    for extension in registry.find("extensions").iter("extension"):
+        if extension.get("type") != "device":
+            continue
+        commands = []
+        for require in extension.findall("require"):
+            for command in require.findall("command"):
+                name = command.get("name")
+                if name and name not in commands:
+                    commands.append(name)
+        if commands:
+            extensions.append((extension.get("name"), commands))
+    extensions.sort()
+    lines = [
+        "/* Generated from vk.xml by build-android-adapters.py: the commands each",
+        "   device extension adds, for bf_vk_extension_servable(). */",
+        '#include "vulkan_dispatchable.h"',
+        "",
+    ]
+    for index, (_, commands) in enumerate(extensions):
+        joined = ", ".join('"' + command + '"' for command in commands)
+        lines.append(f"static const char *const bf_ext_{index}[] = {{{joined}, 0}};")
+    lines += ["", "const struct bf_vk_extension bf_vk_extensions[] = {"]
+    for index, (name, commands) in enumerate(extensions):
+        lines.append(f'    {{"{name}", bf_ext_{index}, {len(commands)}}},')
+    lines += ["    {0, 0, 0},", "};", ""]
+    return "\n".join(lines)
+
+
 def build(runtime, output):
     spec = importlib.util.spec_from_file_location(
         "runtime", ROOT / "Tools/Android/fetch-android-runtime.py"
@@ -245,6 +456,29 @@ def build(runtime, output):
                                  str(bionic / "libc.so"), "-o", str(managed / "mapper.bifrost.so")],
                        check=True)
         names.append("managed/mapper.bifrost.so")
+        # Android's Vulkan loader opens this as its driver HAL module
+        # (hw_get_module "vulkan" -> /vendor/lib64/hw/vulkan.<name>.so). It owns
+        # no Vulkan state: every entry point forwards to the host loader
+        # through DisplayThunk, and it filters the loader-provided Android
+        # surface extension the host does not know. The dispatchable objects the
+        # loader expects to own are the module's own guest structs (see its
+        # vulkan_dispatchable.h); the generated shims unwrap them per command.
+        vulkan_shim_source = staging / "vulkan-shims.S"
+        vulkan_shim_source.write_text(vulkan_shims())
+        vulkan_extension_source = staging / "vulkan-extensions.c"
+        vulkan_extension_source.write_text(vulkan_extension_table())
+        subprocess.run(common + ["-std=c2x", "-mno-outline-atomics", "-fPIC", "-shared",
+                                 "-Wl,-soname,vulkan.bifrost.so",
+                                 "-I" + str(ROOT / "ThirdParty/VulkanHeaders/include"),
+                                 str(ROOT / "Guest/Android/Adapters/vulkan_hal.c"),
+                                 str(ROOT / "Guest/Android/Adapters/vulkan_dispatchable.c"),
+                                 str(ROOT / "Guest/Android/Adapters/vulkan_handles.c"),
+                                 str(ROOT / "Guest/Android/Adapters/vulkan_native_buffer.c"),
+                                 str(vulkan_extension_source),
+                                 str(vulkan_shim_source),
+                                 str(bionic / "libc.so"),
+                                 "-o", str(managed / "vulkan.bifrost.so")], check=True)
+        names.append("managed/vulkan.bifrost.so")
         # Preloaded into app processes: see its header.
         subprocess.run(common + ["-std=c2x", "-mno-outline-atomics", "-fPIC", "-shared",
                                  "-Wl,-soname,libbifrost-binder-attach.so", "-Wl,--no-as-needed",

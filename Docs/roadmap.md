@@ -37,7 +37,8 @@ otherwise.
   sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
 - **Architecture:** Bifrost runs AArch64 only; an APK with only `armeabi-v7a` or `x86` libraries (Angry Birds Space)
   cannot start.
-- **Platform gaps:** no Settings screens, no host mDNS, no Android Vulkan HAL, no toast animations.
+- **Platform gaps:** no Settings screens, no host mDNS, no toast animations. The Android Vulkan HAL copies every
+  presented frame (no zero-copy swapchain).
 - **Undiagnosed:** Firefox 159 reaches onboarding and a GeckoView surface but loads no pages; not re-tested since the
   November 1 Binder fix.
 
@@ -137,8 +138,9 @@ pointer-to-pointer parameters and a retry for mobile GLSL index conversions.
 
 Open:
 
-- An Android Vulkan HAL over the host Vulkan thunk (apps see zero devices today), with `VK_ANDROID_native_buffer`
-  swapchains on gralloc buffers.
+- A zero-copy Android Vulkan swapchain. The HAL's `VK_ANDROID_native_buffer` copies a full frame per present because
+  the software gralloc allocator is a sealed memfd the host driver cannot import as image memory; it needs a
+  dma-buf-backed allocation.
 - `MediaPlayer` beyond FNAF Mobile Port (video to a Surface, streaming, seeking, long sessions); decoder validation beyond small
   fixtures (flush/reconfigure, B-frames, sustained playback).
 - Audio effects: `android.media.audiofx` loads and reports no effects; `Equalizer` and the like need DSP in front of the host's audio.
