@@ -913,6 +913,46 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             if (is_double) emit_byte(0x66);
             emit_byte(0x0F); emit_byte(0x2E);
             emit_byte(0xC1);  // xmm0, xmm1
+            // A compare that feeds a conditional branch or an integer select leaves its result in the
+            // host flags, as a SUBS would, and the consumer reads them: no store and reload of pstate, and no data-dependent
+            // branches to build it (random outcomes, as in culling and collision, mispredicted up to
+            // three times per compare). The usual materialisation writes pstate only where the flags
+            // are still live. Two small integers, chosen from the ucomis flags and compared with one
+            // cmp, give the flags a subtraction would leave for each ARM outcome (SF=N, ZF=Z, CF=!C,
+            // OF=V): greater 1-0, equal 0-0, less 0-1, unordered 0x80000000-1 (signed overflow).
+            // a = 1 only for greater (seta: CF=0 and ZF=0), 0x80000000 if unordered (PF); b = CF.
+            // mov leaves the flags alone, so the one ucomis feeds seta, setb and cmov.
+            // Other consumers (fcsel, mrs, a later op) keep the sequence below: its predicted branches
+            // take the compare off their data path, which measured faster when the outcome is
+            // predictable (a clamp that rarely fires), and the flags reach them through pstate.
+            // The consumer is the first op after the compare that is not a constant, a move, a register
+            // load or an add (which keep the flags, or materialise them if they must not): a `cinc`
+            // is a load, a constant and an add before its select. This only picks the faster of two
+            // correct sequences, so a miss costs speed and nothing else.
+            bool branch_follows = false;
+            if (!cp.conditional && cur_insts_) {
+                for (size_t k = cur_op_index_ + 1; k < cur_insts_->size() && k <= cur_op_index_ + 6; k++) {
+                    const IROp next = (*cur_insts_)[k].op;
+                    if (next == IROp::IMM || next == IROp::MOV || next == IROp::LOAD_REG ||
+                        next == IROp::ADD || next == IROp::NOP) continue;
+                    branch_follows = next == IROp::BRCOND || next == IROp::BRCOND_FALLTHRU ||
+                        next == IROp::CSEL || next == IROp::CSINC || next == IROp::CSINV ||
+                        next == IROp::CSNEG;  // these read host flags directly
+                    break;
+                }
+            }
+            if (branch_follows) {
+                emit_mov_imm32_zext(RAX, 0);
+                emit_byte(0x0F); emit_byte(0x97); emit_byte(0xC0);   // seta al
+                emit_mov_imm32_zext(RCX, 0);
+                emit_byte(0x0F); emit_byte(0x92); emit_byte(0xC1);   // setb cl
+                emit_mov_imm32_zext(RDX, 0x80000000);
+                emit_byte(0x0F); emit_byte(0x4A); emit_byte(0xC2);   // cmovp eax, edx
+                emit_byte(0x39); emit_byte(0xC8);                    // cmp eax, ecx
+                flags_in_host_ = true; flags_match_pstate_ = false;
+                flags_from_sub_ = true;  // CF is in SUB convention
+                return true;
+            }
             // Build pstate in RDX using conditional moves.
             // pushfq to get flags into RAX, then test bits.
             emit_pushfq();

@@ -28,6 +28,7 @@ was 353 runs with the JIT and 337 with `--no-jit` (16 skips) on 2026-11-03. The 
 On 2026-11-06, in a tree that adds `memory_high_gap` (a host `Memory` test for a 16 GiB reservation in a 512 GiB window,
 JIT run only), `--strict` ran 365 tests with the JIT, all passing and none skipped, and 337 with `--no-jit`, all passing, with
 28 JIT-only tests not selected there (15 in the 2026-11-01 count).
+`jit_fcmp_flags` (NZCV after FCMP, FCMPE and FCCMP for every ordering, with branch and cset consumers; it passes under QEMU) adds one more.
 `jit_neon_struct` (LD2-LD4/ST2-ST4: every size, width, register position and post-index form against a reference model that also passes
 under QEMU; page-edge faults; `verify_jit.sh` runs it with `no-fault` and again in full) adds one run in each mode. On 2026-11-07 the
 unit, toybox and real-world categories (no windows, `--quick`) ran 266 tests with the JIT and 240 with `--no-jit` (26 skips), all

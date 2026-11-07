@@ -16,6 +16,34 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## FP compares in the host flags, and where last-level misses come from (2026-11-07)
+
+`fcmp` built NZCV with `pushfq`, a chain of up to three data-dependent branches and a read-modify-write of pstate: about 22 host
+instructions and 110 bytes on the hot path of every compare, with branches that mispredict on random outcomes. When the compare
+feeds a conditional branch or an integer select (`b.mi`, `cinc`), `FP_CMP` now leaves its result in the host flags, as `SUBS`
+does: `seta`, `setb` and a `cmovp` pick two small integers and one `cmp` of them leaves exactly the flags a subtraction would for
+each outcome (greater 1-0, equal 0-0, less 0-1, unordered 0x80000000-1), and the consumer reads them. Pstate is written only where
+the flags are still live, by the existing materialisation. A compare that feeds `fcsel`, `mrs` or anything else keeps the old
+sequence: with the lazy flags audiomix (clamps that rarely fire, then `fcsel`) was 17-38% slower, because the old branches were
+predicted and took the compare off the data path while the lazy flags put it on a longer one. `FCCMP` is unchanged.
+`Tests/Unit/jit_fcmp_flags.c` checks every pair of {-inf, -2.5, -0, +0, 3, +inf, quiet NaN, signalling NaN}, single and double,
+register and `#0.0` forms, `FCMP`, `FCMPE` and `FCCMP` (condition true and false), plus branch and `cset` consumers (2328 checks;
+it passes under QEMU, with the JIT in each cache configuration, with `--no-jit` and under `BIFROST_JIT_VERIFY`).
+
+Measured here (same method as the sections below, against the build before this change): cull 33.9 to 27.1 times native, collide
+11.4 to 8.1, particles 3.4 to 3.0, the other six unchanged; on a frame of all nine kernels, time -7.3%, cycles -6.6%, host
+instructions -3.4%, branch mispredicts -12.6%; the cull loop's executed code spans 80 cache lines instead of 84. L1 miss counters
+did not move beyond their run-to-run noise (instruction misses varied between 188k and 260k across identical runs).
+
+Where last-level misses come from: a CoreMark run (`Tests/Unit/coremark.elf`) shows about 3.0M last-level misses and 20M L1D
+misses at 2,000 iterations and at 20,000 alike, so they are fixed costs of the process, not of executing the guest; L1 instruction
+misses do scale, at about 60 per iteration. A trivial guest costs 0.65-0.75M last-level misses and 39.6M instructions (10 ms) in a
+warm process, with the dynamic loader relocating 103 libraries (the FFmpeg stack and its codecs are linked in). A sampled
+`cache-misses` profile of one CoreMark run put 61% in `ld-linux`, 20% in the emulator (`GraphicThunk::register_function_` 7.5%,
+`translate_block` 2.3%), 10.5% in libc and 0.9% in generated code; that was a single, cold run and is only indicative. So a
+whole-process miss count against another emulator largely compares startup and translation, which a leaner loader footprint,
+lazily registered thunks and less emitted code would cut, not the generated code's behaviour.
+
 ## Scalar FP cold steps after the block (2026-11-07)
 
 Every scalar FP operation had its ARM-semantic step (the NaN path: commit, single-step the interpreter, reload the vector cache)

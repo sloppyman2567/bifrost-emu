@@ -2017,6 +2017,8 @@ private:
     // which permits skipping the flush→reload sandwich for scratch vregs
     // already cached in the target host reg.
     size_t cur_op_index_ = 0;
+    // The IR block being compiled by Tier-1 (null elsewhere), for emitters that look at the next op.
+    const std::vector<IRInst>* cur_insts_ = nullptr;
     // vreg_last_use_op_[v] = index of the IR op that LAST reads scratch
     // vreg `v` as a source (src1/src2/aux), or -1 if `v` is never read as
     // a source in this block. Populated by the same use-scan that builds

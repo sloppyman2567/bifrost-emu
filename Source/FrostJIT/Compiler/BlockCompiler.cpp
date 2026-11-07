@@ -1076,6 +1076,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     deferred_guards_.clear();
     deferred_fp_steps_.clear();
     defer_guards_ = true;
+    struct InstsScope {
+        const std::vector<IRInst>*& slot;
+        ~InstsScope() { slot = nullptr; }
+    } insts_scope{cur_insts_};
+    cur_insts_ = &ir_block.insts;
     for (size_t i = 0; i < ir_block.insts.size(); i++) {
         const IRInst& inst = ir_block.insts[i];
         cur_op_index_ = i;

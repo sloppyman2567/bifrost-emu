@@ -74,6 +74,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   `compile_simd_structure_` uses XMM0-2 and XMM12-15 only; `vec_inst_effects` declares that clobber set (0xF007) and the
   registers read or written, so change them together. Tier-2 stops at the op. A post-index `Rm` is any of X0-X30 and only 31
   selects the immediate: the interpreter, the helper and the translator agree, and `jit_neon_struct` checks X30.
+- `FP_CMP` (not `FCCMP`) leaves SUB-convention host flags (`flags_in_host_`, `flags_from_sub_`) with no pstate store when its
+  consumer, found past constants, moves, register loads and adds, is a conditional branch or an integer select; `fcsel`, `mrs`
+  and anything else keep the branchy pstate sequence, which measured faster when the outcome is predictable. The choice reads
+  `cur_insts_`, the Tier-1 block being compiled (null elsewhere, so Tier-2 takes the pstate sequence); either path is correct.
 - A single LD16/ST16 in Tier-1 is `compile_guarded_vec16`. Its 16-byte page checks stay in its own
   tail: the shared cold stubs exist for widths up to 8 (`flush_deferred_guards` checks `g.width`).
 - Block growth past the cap is only for loops (`selfloop_extent`, at most twice the cap); its look-ahead

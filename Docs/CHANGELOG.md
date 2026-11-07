@@ -166,6 +166,15 @@ there (guided provisioning, update/reinstall) remain in progress.
   preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
   social preview setting.
 
+### Changed (FP compares in the host flags)
+
+- `fcmp` and `fcmpe` feeding a conditional branch or an integer select leave their result in the host flags, as `SUBS` does, instead
+  of building pstate with `pushfq` and up to three data-dependent branches (about 22 instructions and 110 bytes per compare).
+  On a reconstructed kernel set cull went from 33.9 to 27.1 times native, collide from 11.4 to 8.1 and particles from 3.4 to 3.0; a
+  frame of all nine kernels took 7.3% less time and mispredicted 12.6% fewer branches. Other consumers (`fcsel`, `mrs`) keep the
+  old sequence, which is faster when the outcome is predictable. `jit_fcmp_flags` is new (2328 checks, also run under QEMU).
+  [Details](JIT.md#fp-compares-in-the-host-flags-and-where-last-level-misses-come-from-2026-11-07).
+
 ### Changed (scalar FP cold steps after the block)
 
 - The ARM-semantic NaN step of every scalar FP operation is emitted after the block, as the vector guards already were, so the hot
