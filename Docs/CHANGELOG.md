@@ -38,8 +38,9 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Added (project page)
 
-- A minimal project page for GitHub Pages, `Tools/Site/build-site.py`, generated from the README (highlights, the
-  "What runs" summary and table, screenshots), `compatibility.json` and the version, and deployed by
+- A minimal project site for GitHub Pages, a home page and a games page with the full compatibility list,
+  `Tools/Site/build-site.py`, generated from the README (highlights, the "What runs" summary and table,
+  screenshots), `compatibility.json` and the version, and deployed by
   `.github/workflows/pages.yml` when one of them changes. It carries a description, canonical URL, link-preview tags,
   SoftwareApplication structured data and a sitemap, has light and dark themes and no JavaScript, and serves the
   screenshots as WebP (about 0.4 MB instead of 8.5 MB). The build refuses to publish when a playable or blocked app in

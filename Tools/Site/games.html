@@ -1,0 +1,28 @@
+<div class="page-head">
+  <h1>Games that run on Bifrost: Android and Linux compatibility</h1>
+  <p class="lead">$summary Results are the maintainer's own runs and reports, checked on $checked; each game's tested
+  version is in its name.</p>
+</div>
+
+<section id="list" aria-labelledby="list-title">
+  <h2 id="list-title">Compatibility list</h2>
+  <div class="legend">
+    <p><span class="pill playable">Playable</span><br>Someone played it on Bifrost and confirmed gameplay.</p>
+    <p><span class="pill starts">Starts</span><br>Runs to its title, menu or window; gameplay is not confirmed.</p>
+    <p><span class="pill blocked">Blocked</span><br>Starts, then the app itself ends the session.</p>
+    <p><span class="pill tested">Tested</span><br>Programs covered by the automated test suite.</p>
+  </div>
+  <table class="table">
+    <thead><tr><th>Program</th><th>Platform</th><th>Status</th><th>Notes</th></tr></thead>
+    <tbody>
+$rows
+    </tbody>
+  </table>
+</section>
+
+<section aria-labelledby="try-title">
+  <h2 id="try-title">Try a game</h2>
+  <p class="lead">Install Bifrost, then run an Android game's APK with <code>bifrost-emu game.apk</code>. The
+  <a href="${url}#install">install steps</a> are on the home page; the
+  <a href="$repo/blob/main/Docs/Android/ANDROID_APK.md">APK guide</a> covers APK sets, updates and per-app settings.</p>
+</section>

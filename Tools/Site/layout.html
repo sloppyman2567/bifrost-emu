@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bifrost: run ARM64 Android games and Linux apps on x86_64 Linux</title>
+<title>$title</title>
 <meta name="description" content="$description">
-<link rel="canonical" href="$url">
+<link rel="canonical" href="$canonical">
 <meta name="robots" content="index, follow">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Bifrost">
-<meta property="og:title" content="Bifrost: ARM64 Android games and Linux apps on x86_64 Linux">
+<meta property="og:title" content="$title">
 <meta property="og:description" content="$description">
-<meta property="og:url" content="$url">
+<meta property="og:url" content="$canonical">
 <meta property="og:image" content="$og_image">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Bifrost: ARM64 Android games and Linux apps on x86_64 Linux">
+<meta name="twitter:title" content="$title">
 <meta name="twitter:description" content="$description">
 <meta name="twitter:image" content="$og_image">
 <meta name="theme-color" content="#f7f7f5" media="(prefers-color-scheme: light)">
@@ -75,6 +75,13 @@ h2 { font-size: 24px; letter-spacing: -0.01em; margin: 0 0 8px; }
 .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .pill.playable { color: var(--ok); } .pill.starts { color: var(--warn); }
 .pill.blocked { color: var(--bad); } .pill.tested { color: var(--info); }
+.names { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 24px; padding: 0; list-style: none; }
+.names li { background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 14px; }
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 28px; margin: 0 0 28px;
+  font-size: 14px; color: var(--muted); }
+.legend p { margin: 0; }
+.page-head { padding: 40px 0 8px; }
+.page-head h1 { font-size: clamp(28px, 4vw, 38px); line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 12px; text-wrap: balance; }
 .shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
 figure { margin: 0; }
 figure img { width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px;
@@ -98,67 +105,11 @@ footer a { color: var(--muted); }
 <div class="wrap">
 <header class="top">
   <a class="brand" href="$url"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#2f6f6a"/><path d="M7 21c5-9 13-9 18 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>Bifrost</a>
-  <nav><a href="#games">Games</a><a href="#install">Install</a><a href="$repo">GitHub</a></nav>
+  <nav><a href="${url}games/">Games</a><a href="${url}#install">Install</a><a href="$repo">GitHub</a></nav>
 </header>
 
 <main>
-<div class="hero">
-  <h1>Run ARM64 Android games and Linux apps on your x86_64 Linux PC</h1>
-  <p>Bifrost is a free, open-source AArch64 emulator for Linux. A JIT compiler translates ARM64 code on the fly,
-  a real Android 15 runtime runs APKs without a phone, and games use your own GPU, audio and controllers. No QEMU,
-  no cross-compiler.</p>
-  <div class="actions">
-    <a class="button primary" href="#install">Get started</a>
-    <a class="button" href="$repo">View on GitHub</a>
-  </div>
-  <div class="facts">
-    <span><strong>$playable</strong> of $games games playable</span>
-    <span>Version <strong>$version</strong></span>
-    <span>Public domain (Unlicense)</span>
-  </div>
-</div>
-
-<section id="features" aria-labelledby="features-title">
-  <h2 id="features-title">What it does</h2>
-  <p class="lead">An ARM64 user-mode emulator built for games: Linux programs and Android apps run as if they were native.</p>
-  <div class="features">
-$features
-  </div>
-</section>
-
-<section id="games" aria-labelledby="games-title">
-  <h2 id="games-title">Games and apps that run</h2>
-  <p class="lead">$summary Results are the maintainer's own runs and reports, checked on $checked.</p>
-  <table class="table">
-    <thead><tr><th>Program</th><th>Platform</th><th>Status</th><th>Notes</th></tr></thead>
-    <tbody>
-$rows
-    </tbody>
-  </table>
-</section>
-
-<section id="screenshots" aria-labelledby="screenshots-title">
-  <h2 id="screenshots-title">Screenshots</h2>
-  <p class="lead">Captures from real sessions on Bifrost, not mockups.</p>
-  <div class="shots">
-$shots
-  </div>
-</section>
-
-<section id="install" aria-labelledby="install-title">
-  <h2 id="install-title">Install</h2>
-  <p class="lead">From a fresh clone, one command installs the host packages, builds the emulator and sets up the Android
-  runtime under <code>~/.local</code> (about 1.5 GB of pinned downloads).</p>
-<pre><code>git clone $repo &amp;&amp; cd bifrost-emu
-make bootstrap</code></pre>
-  <p class="lead">Then run an Android game or an ARM64 Linux program:</p>
-<pre><code>bifrost-emu game.apk          # installs and runs an Android app
-bifrost-emu ./program-arm64   # runs an ARM64 Linux binary</code></pre>
-  <p class="small">Needs an x86_64 CPU with SSE4.1 and FMA3. Distribution support, Debian packages and Bazzite/Distrobox
-  steps are in the <a href="$repo/blob/main/Docs/SUPPORT.md">support matrix</a> and the
-  <a href="$repo#quick-start">quick start</a>.</p>
-</section>
-</main>
+$main</main>
 
 <footer>
   <span>Bifrost $version</span>

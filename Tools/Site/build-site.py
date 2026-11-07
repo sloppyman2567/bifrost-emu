@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build the project page (GitHub Pages) from files already in the repository.
+"""Build the project site (GitHub Pages: a home page and a games page) from files in the repository.
 
 The page takes the version from Include/Bifrost/Version.hpp and, from README.md, the
 highlights, the "What runs" summary and table, and the screenshots; each table row's
 status is checked against Scripts/Android/compatibility.json, and the build fails rather
-than publish a page that disagrees with it. Writes index.html, sitemap.xml (submitted in Search
+than publish a page that disagrees with it. Writes index.html, games/index.html, sitemap.xml (submitted in Search
 Console: a project page's robots.txt is not read, only the domain root's) and the screenshots
 (WebP, and a JPEG link preview; needs Pillow) to the output directory (default build/site), with
 the Search Console verification files kept beside this script (google<token>.html, unchanged).
@@ -106,7 +106,7 @@ def games(readme, compat):
     summary = re.search(r"\*\*(\d+) games recorded \((\d{4}-\d{2}-\d{2})\): (\d+) playable\*\*.*?(?=\n\n)", body, re.S)
     if not summary:
         raise SystemExit("README 'What runs' summary not understood")
-    rows, statuses = [], []
+    rows, statuses, playable = [], [], []
     table = re.search(r"^\| Program \| Kind \| Status \|\n\|[-|]+\|\n((?:\|.*\|\n)+)", body, re.M)
     if not table:
         raise SystemExit("README 'What runs' table not found")
@@ -114,6 +114,8 @@ def games(readme, compat):
         program, kind, status = (cell.strip() for cell in line.strip("|").split(" | "))
         state = status_of(status)
         statuses.append((normalized(plain(program)), state))
+        if state == "playable":  # names for the home page, without versions
+            playable += [re.sub(r"\s+\d+(\.\d+)+$", "", name.strip()) for name in plain(program).split(", ")]
         rows.append(f'      <tr><td class="name">{inline(program)}</td><td class="kind">{inline(kind)}</td>'
                     f'<td><span class="pill {state}">{LABELS[state]}</span></td><td class="note">{inline(status)}</td></tr>')
     # Every playable or blocked app on record has a row, and the row agrees with it.
@@ -129,7 +131,7 @@ def games(readme, compat):
         if app["status"] == "blocked" and found[0] not in ("blocked", "playable"):
             raise SystemExit(f"README marks {app['name']} {found[0]}, compatibility.json blocked")
     text = " ".join(summary.group(0).split())
-    return summary, inline(text), "\n".join(rows)
+    return summary, inline(text), "\n".join(rows), playable
 
 
 def screenshots(readme, output):
@@ -175,20 +177,42 @@ def main():
     if args.output.exists():
         shutil.rmtree(args.output)
     args.output.mkdir(parents=True)
-    summary, summary_html, rows = games(readme, compat)
+    summary, summary_html, rows, playable = games(readme, compat)
     shots, first_shot = screenshots(readme, args.output)
-    json_ld = json.dumps({
+    json_ld = {
         "@context": "https://schema.org", "@type": "SoftwareApplication", "name": "Bifrost",
         "alternateName": "bifrost-emu", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Linux",
         "softwareVersion": version, "description": DESCRIPTION, "url": url, "downloadUrl": REPO,
         "codeRepository": REPO, "license": "https://unlicense.org/", "isAccessibleForFree": True,
         "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
-    }, separators=(",", ":")).replace("</", "<\\/")
-    page = string.Template((Path(__file__).with_name("page.html")).read_text()).substitute(
-        description=html.escape(DESCRIPTION), url=url, repo=REPO, og_image=url + first_shot, json_ld=json_ld,
-        version=html.escape(version), games=summary.group(1), playable=summary.group(3), checked=summary.group(2),
-        summary=summary_html, features=features(readme), rows=rows, shots=shots)
-    (args.output / "index.html").write_text(page)
+    }
+    def render(name, title, path, description, structured, **values):
+        main = string.Template(Path(__file__).with_name(name).read_text()).substitute(url=url, repo=REPO, **values)
+        page = string.Template(Path(__file__).with_name("layout.html").read_text()).substitute(
+            title=html.escape(title), description=html.escape(description), canonical=url + path, url=url, repo=REPO,
+            og_image=url + first_shot, json_ld=json.dumps(structured, separators=(",", ":")).replace("</", "<\\/"),
+            version=html.escape(version), main=main)
+        target = args.output / path / "index.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(page)
+    names = "\n".join(f"    <li>{html.escape(name)}</li>" for name in playable)
+    render("home.html", "Bifrost: run ARM64 Android games and Linux apps on x86_64 Linux", "", DESCRIPTION, json_ld,
+           version=html.escape(version), games=summary.group(1), playable=summary.group(3), summary=summary_html,
+           playable_names=names, features=features(readme), shots=shots)
+    # As many playable names as fit the ~160 characters a search result shows.
+    lead = (f"Which Android and Linux games run on Bifrost, the ARM64 emulator for x86_64 Linux: "
+            f"{summary.group(3)} of {summary.group(1)} playable, including ")
+    def joined(names):
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    listed = playable[:1]
+    while len(listed) < len(playable) and len(lead + joined(playable[:len(listed) + 1])) < 159:
+        listed = playable[:len(listed) + 1]
+    games_description = lead + joined(listed) + "."
+    render("games.html", "Games that run on Bifrost: Android and Linux compatibility list", "games/", games_description,
+           {"@context": "https://schema.org", "@type": "CollectionPage", "name": "Bifrost game compatibility",
+            "description": games_description, "url": url + "games/",
+            "isPartOf": {"@type": "WebSite", "name": "Bifrost", "url": url}},
+           summary=summary_html, checked=summary.group(2), rows=rows)
     # Search Console's HTML-file verification: served as downloaded, next to the page.
     for verification in sorted(Path(__file__).parent.glob("google*.html")):
         if not re.fullmatch(r"google[0-9a-f]{16}\.html", verification.name) or \
@@ -198,7 +222,8 @@ def main():
     today = datetime.date.today().isoformat()
     (args.output / "sitemap.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-        f"  <url><loc>{url}</loc><lastmod>{today}</lastmod></url>\n</urlset>\n")
+        + "".join(f"  <url><loc>{url}{path}</loc><lastmod>{today}</lastmod></url>\n" for path in ("", "games/"))
+        + "</urlset>\n")
     print(f"Wrote {args.output.relative_to(ROOT) if args.output.is_relative_to(ROOT) else args.output} for {url}")
 
 
