@@ -12,7 +12,8 @@ the [changelog](CHANGELOG.md).
 
 - Run selected ARM64 Android games through the integrated Android runtime (real ART, framework and Bionic), installed and
   started from the desktop library.
-- Sustain Linux game performance, and run Linux games from the same library.
+- Sustain Linux game performance. Linux games run from the command line; the desktop library is for Android apps (see
+  [not planned](#not-planned)).
 - Make input dependable across mouse, keyboard, touch and gamepads.
 - Keep correctness the gate for every optimization, and keep existing Linux applications working.
 
@@ -76,8 +77,6 @@ In order. Each carries into the next pre-release until its acceptance test passe
 
 - Guide runtime provisioning and signed APK installation from the library, with actionable missing-runtime and
   window-backend errors. Done: a card says why a run ended and the drawer what to try.
-- Run Linux games from the library, each with its rootfs profile and linker. Today Asgard runs Android apps only, and a
-  Linux game started by hand without its setup can crash without explanation.
 - Make the launcher pick the intended graphics-capable executable, and stop headless validation from silently replacing the
   desktop default.
 - A clear update/reinstall flow, with routine controls outside Developer mode. Done: cards, icons, search, per-app
@@ -356,6 +355,8 @@ regressions, published with host, settings, scene and duration.
 
 ## Not planned
 
+- **Linux games in the desktop library.** The library stays an Android app library; Linux games are started from the
+  command line with their rootfs profile (decided by the maintainer, 2026-11-07, as a niche use).
 - **Save export/import from the library.** Online games keep progress on their servers, and local saves stay with each
   app's data.
 - **Bypassing or forging attestation, anti-cheat or integrity checks.**
