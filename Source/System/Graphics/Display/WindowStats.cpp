@@ -333,6 +333,44 @@ static bool gpu_info(std::string &name, uint64_t &vram, std::string &device, boo
     vram = uint64_t(mb) * 1024 * 1024;
   return true;
 }
+// The host device a Vulkan-only guest renders through, named as its driver names it
+// ("AMD Radeon RX 9060 XT (RADV GFX1200)"). Such a guest has no GL context to report a
+// renderer, and the kernel driver alone ("amdgpu") does not name the card. One instance is
+// created the first time a present path needs it; a host without the loader returns empty.
+static std::string host_vulkan_name() {
+  void *vk = dlopen("libvulkan.so.1", RTLD_LAZY | RTLD_LOCAL);
+  if (!vk) return {};
+  auto create = reinterpret_cast<PFN_vkCreateInstance>(dlsym(vk, "vkCreateInstance"));
+  auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(dlsym(vk, "vkDestroyInstance"));
+  auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(dlsym(vk, "vkEnumeratePhysicalDevices"));
+  auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(dlsym(vk, "vkGetPhysicalDeviceProperties"));
+  std::string name, first;
+  VkInstance instance{};
+  VkApplicationInfo app{};
+  app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO; app.apiVersion = VK_API_VERSION_1_1;
+  VkInstanceCreateInfo info{};
+  info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO; info.pApplicationInfo = &app;
+  if (create && destroy && enumerate && properties && create(&info, nullptr, &instance) == VK_SUCCESS) {
+    uint32_t count = 0;
+    if (enumerate(instance, &count, nullptr) == VK_SUCCESS && count && count <= 64) {
+      std::vector<VkPhysicalDevice> devices(count);
+      if (enumerate(instance, &count, devices.data()) == VK_SUCCESS) {
+        // A game renders on the discrete GPU; any other host falls back to its first device.
+        VkPhysicalDeviceProperties props{};
+        for (auto gpu : devices) {
+          properties(gpu, &props);
+          if (first.empty()) first = props.deviceName;
+          if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) { name = props.deviceName; break; }
+        }
+        if (name.empty()) name = first;
+      }
+    }
+    destroy(instance, nullptr);
+  }
+  dlclose(vk);
+  return name;
+}
+
 struct State {
   Clock clock;
   std::string title, decorated;
@@ -485,10 +523,15 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
   packet.panel_vram_known = sensors.vram_known || packet.vram_known;
   packet.panel_vram_used = sensors.vram_known ? sensors.vram_used : packet.used_vram;
   packet.panel_vram_total = sensors.vram_known ? sensors.vram_total : packet.vram;
-  snprintf(packet.panel_gpu, sizeof(packet.panel_gpu), "%s",
-           state.gpu.empty() ? sensors.gpu_driver.c_str() : state.gpu.c_str());
+  // A Vulkan-only guest has no GL renderer string, so ask the host Vulkan loader once: the
+  // device it reports is the one the emulator forwards the guest's rendering to. The kernel
+  // driver name stays the last resort.
+  static const std::string host_gpu = host_vulkan_name();
+  const std::string &gpu_name = !state.gpu.empty() ? state.gpu
+                              : !host_gpu.empty() ? host_gpu : sensors.gpu_driver;
+  snprintf(packet.panel_gpu, sizeof(packet.panel_gpu), "%s", gpu_name.c_str());
   snprintf(packet.cpu, sizeof(packet.cpu), "%s", cpu.c_str());
-  snprintf(packet.gpu, sizeof(packet.gpu), "%s", state.gpu.empty() ? "unavailable" : state.gpu.c_str());
+  snprintf(packet.gpu, sizeof(packet.gpu), "%s", gpu_name.empty() ? "unavailable" : gpu_name.c_str());
   packet.frames = state.clock.frames;
   packet.last_ns = state.clock.last_ns;
   packet.fps = state.clock.active_fps(now);
@@ -514,7 +557,7 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
              packet.fps, packet.w, packet.h, (unsigned long long)packet.frames,
              packet.ram / 1e6, packet.total_ram / 1e6);
     title = state.decorated = state.title + suffix + " | " + cpu + " | " +
-        (state.gpu.empty() ? "unavailable" : state.gpu) + " | VRAM " +
+        (gpu_name.empty() ? "unavailable" : gpu_name) + " | VRAM " +
         detail::vram_text(packet.used_vram, packet.vram, packet.vram_known);
   }
   packet.separate = dbg().window_stats_window;

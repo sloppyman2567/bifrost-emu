@@ -106,6 +106,12 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   buffer is sized for 32-bit samples even on an I16 stream, so a producer that writes wider samples cannot run off its
   mapping: that overflow was a SIGSEGV in `memcpy` one page past the bounce (2026-11-06).
 
+### Changed (window stats)
+
+- The GPU line names the host device for a Vulkan-only guest. Such a guest has no GL context and so no renderer
+  string; it falls back to the host Vulkan loader's device name, from one instance created on first use (empty when
+  the host has no loader).
+
 ### Fixed (guest memory)
 
 - **A 16 GiB reservation failed with ENOMEM while most of a 512 GiB realm window was empty, and Zenless Zone Zero's

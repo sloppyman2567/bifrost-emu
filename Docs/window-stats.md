@@ -111,7 +111,9 @@ It shows, from top to bottom:
   (a temperature, or used/total memory); meters and numbers turn amber from 80 percent and red from 95,
   temperatures at 80 and 90 degrees Celsius;
 - a dim footer: `Emulator`, this process's CPU share, session RAM, and the shortened GPU name (`llvmpipe`
-  identifies a software renderer).
+  identifies a software renderer). A guest that presents through Vulkan has no GL renderer string, so the name
+  comes from the host Vulkan loader's device (`AMD Radeon RX 9060 XT (RADV GFX1200)`), not the kernel driver
+  (`amdgpu`), which names no card.
 
 Text keeps its case: the font has lower case with descenders. Accented Latin letters print without the accent
 (`Pokémon` as `Pokemon`), dashes and curly quotes as their ASCII forms, and other characters as `?`. A title or
@@ -130,6 +132,8 @@ Readings come from generic Linux interfaces, sampled once a second, with no vend
 - GPU usage: amdgpu's `gpu_busy_percent` (the whole GPU). Without that file, the kernel's DRM client usage
   statistics (`drm-engine-*` times in fdinfo, which Intel and other drivers print): this process's busiest engine
   over the elapsed time and engine count. That is this process's share, not the whole GPU.
+- GPU name: the presenting window's GL renderer string, else the host Vulkan loader's device name (one instance
+  is created the first time it is needed, and a discrete device is preferred over an integrated one).
 - VRAM: amdgpu's `mem_info_vram_*` (the whole GPU), else the per-process DRM accounting described above.
 - System RAM: `MemTotal` minus `MemAvailable`.
 
