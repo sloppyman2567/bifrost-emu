@@ -134,6 +134,7 @@ bool FrostJIT::compile_llsc_native(const IRInst& inst) {
         emit_modrm_disp(RDX, CPU_REG, kVersion);
         fail_unlock.push_back(emit_jcc_rel32_placeholder(5));                         // jne fail_unlock
         emit_mov_reg(R11, RAX);
+        emit_untag_data_address(R11);  // the reservation keeps the tagged address, as the interpreter does
         emit_load(RAX, CPU_REG, kValue);                                              // expected = loaded value
         memory_fault_stub_ = fault_stub;
         register_memory_fault_site();

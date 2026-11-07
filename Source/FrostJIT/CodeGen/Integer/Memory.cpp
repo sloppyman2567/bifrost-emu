@@ -56,13 +56,16 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     const uint16_t saved_pins = pinned_host_regs_;
     pinned_host_regs_ |= (1u << address);
     if (!load) pinned_host_regs_ |= (1u << value);
+    // A tagged address (Android data TBI) is untagged in a copy: the access
+    // and its checks use `effective`, the guest register keeps its tag.
     int effective = address;
-    if (mp.offset) {
+    if (mp.offset || data_tbi()) {
         effective = alloc_reg();
         pinned_host_regs_ |= (1u << effective);
         emit_byte(rex(true, effective >= 8, false, address >= 8));
         emit_byte(0x8D);
         emit_modrm_disp(effective, address, static_cast<int32_t>(mp.offset));
+        emit_untag_data_address(effective);
     }
     const int temp = alloc_reg();
     pinned_host_regs_ |= (1u << temp);
@@ -109,10 +112,10 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         memory_fault_stub_ = 1;
         guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
         if (load) {
-            emit_load_mem(page, effective, 0, mp.width, false);
+            emit_load_mem(page, effective, 0, mp.width, false, true);
             set_vreg_reg(inst.dest, page);
         } else {
-            emit_store_mem(effective, 0, value, mp.width);
+            emit_store_mem(effective, 0, value, mp.width, true);
         }
         guard.has_site = fault_site_count_.load(std::memory_order_relaxed) == guard.site_index + 1;
         memory_fault_stub_ = 0;
@@ -135,10 +138,10 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     if (load) {
         // The result uses a scratch register, leaving the original address
         // and every mapped architectural value intact if the load faults.
-        emit_load_mem(page, effective, 0, mp.width, false);
+        emit_load_mem(page, effective, 0, mp.width, false, true);
         set_vreg_reg(inst.dest, page);
     } else {
-        emit_store_mem(effective, 0, value, mp.width);
+        emit_store_mem(effective, 0, value, mp.width, true);
     }
     pinned_host_regs_ = saved_pins;
     return true;
@@ -173,12 +176,13 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
     const uint16_t saved_pins = pinned_host_regs_;
     pinned_host_regs_ |= (1u << address);
     int effective = address;
-    if (disp) {
+    if (disp || data_tbi()) {
         effective = alloc_reg();
         pinned_host_regs_ |= (1u << effective);
         emit_byte(rex(true, effective >= 8, false, address >= 8));
         emit_byte(0x8D);
         emit_modrm_disp(effective, address, static_cast<int32_t>(disp));
+        emit_untag_data_address(effective);
     }
     const int temp = alloc_reg();
     pinned_host_regs_ |= (1u << temp);

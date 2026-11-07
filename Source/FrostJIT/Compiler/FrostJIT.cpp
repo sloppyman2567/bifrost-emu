@@ -361,6 +361,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             flush_invalidate_host_regs(MEM_CLOBBER);
             // Load base address → RAX.
             load_vreg_to_reg(RAX, inst.src1);
+            emit_untag_data_address(RAX);
             size_t jae_patch = 0;
             if (!memory_fault_stub_) {
                 emit_window_limit(RDX, w);

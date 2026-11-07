@@ -62,6 +62,7 @@ bool FrostJIT::compile_simd_memory_(const IRInst& inst) {
             // rax = addr + imm
             load_vreg_to_reg(RAX, inst.src1);
             if (lp.offset != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(lp.offset));
+            emit_untag_data_address(RAX);
             size_t jmp_past = 0;
             if (!memory_fault_stub_) {
                 // Limit check: addr + 16*nregs <= window size.
@@ -169,6 +170,7 @@ bool FrostJIT::compile_simd_memory_(const IRInst& inst) {
             // rax = addr + imm
             load_vreg_to_reg(RAX, inst.src1);
             if (sp.offset != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(sp.offset));
+            emit_untag_data_address(RAX);
             size_t jmp_past = 0;
             if (!memory_fault_stub_) {
                 // Limit check.

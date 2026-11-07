@@ -1422,6 +1422,12 @@ private:
     // the limit loaded into `scratch` for a width without an entry (never gated).
     static constexpr int kJccA = 7, kJccAE = 3;
     int emit_window_bound_cmp(int idx, uint64_t width, int scratch, bool gate);
+    // Android data TBI (Memory::data_address): clear bits 63:56 of the final
+    // data address in `reg` before its bound check and access. `reg` must be a
+    // scratch copy; the guest register keeps its tag. Emits nothing without
+    // TBI, and clobbers host flags otherwise.
+    bool data_tbi() const { return guest_memory_ && guest_memory_->data_top_byte_ignore(); }
+    void emit_untag_data_address(int reg);
     void emit_mov_reg(int dst, int src);
     void emit_load(int dst, int base, int32_t off);
     void emit_store(int base, int32_t off, int src);
@@ -1561,9 +1567,12 @@ private:
     // the default arm_cond_to_x86() mapping (which assumes SUB convention)
     // is correct for all conditions.
     // Uses RAX and RCX as scratch (caller must ensure they're free).
-    // Memory access (direct-window path).
-    void emit_load_mem(int dst, int addr_reg, int32_t off, int w, bool sign_ext);
-    void emit_store_mem(int addr_reg, int32_t off, int src_reg, int w);
+    // Memory access (direct-window path). `untagged`: addr_reg already holds
+    // the final untagged address (off must be 0); otherwise data TBI untags
+    // addr_reg + off in a scratch index register.
+    void emit_load_mem(int dst, int addr_reg, int32_t off, int w, bool sign_ext,
+                       bool untagged = false);
+    void emit_store_mem(int addr_reg, int32_t off, int src_reg, int w, bool untagged = false);
     // Move a 64-bit immediate into RAX, using the 32-bit zero-extend form
     // when the value fits in 32 bits (smaller code).
     void emit_mov_imm_to_rax(uint64_t val);

@@ -182,7 +182,7 @@ bool FrostJIT::disk_cache_ready(Emulator& emu) {
     h.bytes(&cpu_features_, sizeof cpu_features_);
     h.u64(guest_memory_->window_size());
     h.u64((chain_skip_enabled() ? 1 : 0) | (direct_call_enabled() ? 2 : 0) | (wex_enabled_ ? 4 : 0) |
-          (no_fma3_ ? 8 : 0) | (no_avx2_ ? 16 : 0));
+          (no_fma3_ ? 8 : 0) | (no_avx2_ ? 16 : 0) | (data_tbi() ? 32 : 0));
     h.u64(CODE_BUF_SIZE);
     for (const char* name : kCodegenSwitches) {
         const char* v = getenv(name);

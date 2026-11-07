@@ -70,6 +70,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   tail: the shared cold stubs exist for widths up to 8 (`flush_deferred_guards` checks `g.width`).
 - Block growth past the cap is only for loops (`selfloop_extent`, at most twice the cap); its look-ahead
   reads mapped executable pages directly and must stay a hint that adds no code-word dependency.
+- Android data TBI (`Memory::data_address`): every native data access untags its final address
+  (base + offset) with `emit_untag_data_address` in a scratch copy before the bound and page checks;
+  the guest register keeps its tag. A new access path that skips it is correct but interprets every
+  tagged (Scudo heap) access. `data_tbi()` is part of the disk-cache fingerprint.
 - A scalar FP load or store is `LOAD_MEM` + `FMOV_G2F` or `FMOV_F2G` + `STORE_MEM`,
   never `SIMD_LDST`: that op is not cache-compatible and would veto the XMM cache
   for the whole block. Vd is written only after the load, so a fault leaves it intact.

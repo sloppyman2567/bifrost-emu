@@ -99,6 +99,7 @@ void FrostJIT::emit_memory_guard(const IRInst& inst) {
         emit_mov_imm64(RDX, offset);
         emit_add_reg(RAX, RDX);
     }
+    emit_untag_data_address(RAX);
     std::vector<size_t> cold;
     emit_window_limit(RCX, size);
     emit_cmp_reg(RAX, RCX);

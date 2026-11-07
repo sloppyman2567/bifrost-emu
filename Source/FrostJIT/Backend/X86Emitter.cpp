@@ -768,6 +768,11 @@ void FrostJIT::emit_window_limit(int dst, uint64_t width) {
     if (limit <= 0xFFFFFFFFULL) emit_mov_imm32_zext(dst, static_cast<uint32_t>(limit));
     else emit_mov_imm64(dst, limit);
 }
+void FrostJIT::emit_untag_data_address(int reg) {
+    if (!data_tbi()) return;
+    emit_shift_imm8(reg, 4, 8);  // shl reg, 8
+    emit_shift_imm8(reg, 5, 8);  // shr reg, 8
+}
 int FrostJIT::emit_window_bound_cmp(int idx, uint64_t width, int scratch, bool gate) {
     if (guest_memory_ && width && width <= Memory::JIT_WINDOW_LIMIT_MAX_WIDTH) {
         // cmp r64, r/m64 (REX.W 3B /r): flags of idx - bound, as emit_cmp_reg.
@@ -782,7 +787,7 @@ int FrostJIT::emit_window_bound_cmp(int idx, uint64_t width, int scratch, bool g
     return kJccA;
 }
 void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
-                             bool sign_ext) {
+                             bool sign_ext, bool untagged) {
     // Indexed window addressing (2026-08-21): the guest address is used
     // DIRECTLY as the SIB index into [WIN_REG + idx + disp] — the offset
     // folds into the displacement, and the old base copy + `add WIN_REG`
@@ -796,12 +801,15 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     // materialized sum in RDX.
     // idx = off ? lea-scratch : addr_reg; must differ from dst (the load
     // writes dst). lim = the limit constant register; must differ from idx.
+    // Data TBI untags the sum in the scratch index too, never addr_reg.
     int idx = addr_reg;
-    if (off != 0) {
-        idx = (dst != RDX) ? RDX : ((dst != RCX) ? RCX : R8);
+    if (off != 0 || (data_tbi() && !untagged)) {
+        idx = (dst != RDX && addr_reg != RDX) ? RDX
+            : ((dst != RCX && addr_reg != RCX) ? RCX : R8);
         emit_byte(rex(true,idx>=8,false,addr_reg>=8)); // lea off(%addr),%idx
         emit_byte(0x8D);
         emit_modrm_disp(idx, addr_reg, off);
+        if (!untagged) emit_untag_data_address(idx);
     }
     size_t jmp_past = 0;
     if (!memory_fault_stub_) {
@@ -850,7 +858,7 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
         patch_jmp_rel32(jmp_past, end_rel);
     }
 }
-void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
+void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w, bool untagged) {
     // Indexed window addressing (2026-08-21): the address (or its LEA sum
     // when off != 0) is used DIRECTLY as the SIB index into
     // [WIN_REG + idx] — no R8 copy, no `add WIN_REG`. addr_reg and src_reg
@@ -860,11 +868,12 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     // R8/R9 (the scratch pair), addr_reg must not be RDX.
     // idx = off ? lea-scratch : addr_reg.
     int idx = addr_reg;
-    if (off != 0) {
+    if (off != 0 || (data_tbi() && !untagged)) {
         idx = (addr_reg != R8) ? R8 : R9;
         emit_byte(rex(true,idx>=8,false,addr_reg>=8)); // lea off(%addr),%idx
         emit_byte(0x8D);
         emit_modrm_disp(idx, addr_reg, off);
+        if (!untagged) emit_untag_data_address(idx);
     }
     // BIFROST_JIT_SLOW_STORES=1: route EVERY store through the C slow path
     // (jit_store_mem_slow → Memory::write) so BIFROST_WATCH can observe JIT

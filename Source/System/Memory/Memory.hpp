@@ -103,6 +103,7 @@ public:
     // Configure once before starting any guest CPU. Android/Bionic uses
     // top-byte tags for internal allocator pointers even without MTE.
     void set_data_top_byte_ignore(bool enabled) { data_top_byte_ignore_ = enabled; }
+    bool data_top_byte_ignore() const { return data_top_byte_ignore_; }
     // Android profile: unhinted mappings that do not fit below the main
     // stack go above LOW_REGION_SIZE instead of filling the low 4 GiB.
     // Linux places them top-down, high; ART and Bionic then expect low

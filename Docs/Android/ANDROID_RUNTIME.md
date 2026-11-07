@@ -2828,6 +2828,12 @@ The Binder transport and syscall-option checkpoint is documented in
 ```bash
 python3 Tools/Android/fetch-aapt2.py
 python3 Scripts/Android/android_preflight.py /path/to/package.apkm --output report.json
+FrostJIT untags the final data address in a scratch register before its guards
+(`emit_untag_data_address`), so tagged heap accesses stay native; before that,
+every one failed the window bound and was interpreted (about a quarter of
+Zenless Zone Zero's guest instructions during startup). The exclusive monitor
+keeps the tagged address, as the interpreter does. `android_loader_host` runs
+tagged accesses through both engines and requires no interpreter step.
 python3 Scripts/Android/test_android_preflight.py
 ```
 

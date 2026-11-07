@@ -27,6 +27,11 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   this way: its main thread was inside WebView's `System.loadLibrary`, waiting on such a child after the SDK's fork.
   A child with no other guest or SDL thread now takes the same `_exit` path as `exit_group`
   (`has_only_calling_thread`); `test_fork_stuck_report` covers a child that exits instead of execing.
+- FrostJIT honours Android's data top-byte-ignore: tagged (Scudo heap) addresses are untagged before the memory guards
+  instead of failing the window bound and being interpreted one instruction at a time. Zenless Zone Zero's game process
+  interpreted 39.7M guest instructions in a 150 s startup run before and 10.1M after; its frame rate did not change
+  (about 0.8 fps, not limited by the JIT). `android_loader_host` checks tagged loads, stores, pairs, Q stores, LSE and
+  LL/SC against the interpreter, and its stale `clone_for_fork` check now uses a host fork.
 
 ### Fixed (guest memory)
 
