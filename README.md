@@ -1,3 +1,5 @@
+<img src="Assets/Branding/bifrost-emu-icon.svg" alt="bifrost-emu icon" width="72" height="72">
+
 # bifrost-emu
 
 ```

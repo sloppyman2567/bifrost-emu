@@ -11,6 +11,7 @@ on:
       - Scripts/Android/compatibility.json
       - Include/Bifrost/Version.hpp
       - Docs/Images/**
+      - Assets/Branding/**
       - Tools/Site/**
       - .github/workflows/pages.yml
   workflow_dispatch:

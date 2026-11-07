@@ -6,9 +6,9 @@ runs" summary and table and the screenshots; the home page's plain-language copy
 Each table row's status is checked against Scripts/Android/compatibility.json, and the build fails
 rather than publish a page that disagrees with it. Writes index.html, games/index.html, sitemap.xml
 (submitted in Search Console: a project page's robots.txt is not read, only the domain root's) and
-the screenshots (WebP, and a JPEG link preview; needs Pillow) to the output directory (default
-build/site), with the Search Console verification files kept beside this script (google<token>.html,
-unchanged).
+the screenshots (WebP; needs Pillow) to the output directory (default build/site), with the icon and
+social preview from Assets/Branding and the Search Console verification files kept beside this
+script (google<token>.html, unchanged).
 
 Environment: SITE_URL (default from GITHUB_REPOSITORY, else the project's Pages address).
 """
@@ -126,13 +126,12 @@ def games(readme, compat):
 
 
 def screenshots(readme, output):
-    """The README's screenshots as WebP at most 960 px wide (twice their width on the page), and the first one as a
-    1200 px JPEG link preview, the format every social card reader takes."""
+    """The README's screenshots as WebP at most 960 px wide (twice their width on the page)."""
     try:
         from PIL import Image
     except ImportError:
         raise SystemExit("build-site.py needs Pillow (python3 -m pip install pillow)")
-    shots, preview = [], None
+    shots = []
     images = output / "images"
     images.mkdir(parents=True, exist_ok=True)
     for src, alt, caption in re.findall(r'<img src="([^"]+)" alt="([^"]+)"[^>]*><br><sub>([^<]+)</sub>',
@@ -141,11 +140,6 @@ def screenshots(readme, output):
         stem = source.parent.name.lower() + "-" + source.stem
         with Image.open(source) as image:
             image = image.convert("RGB")
-            if preview is None:
-                card = image.copy()
-                card.thumbnail((1200, 1200))
-                card.save(images / "preview.jpg", quality=85, optimize=True, progressive=True)
-                preview = "images/preview.jpg"
             image.thumbnail((960, 960))
             image.save(images / f"{stem}.webp", quality=80, method=6)
             width, height = image.size
@@ -154,7 +148,7 @@ def screenshots(readme, output):
                      f"</figcaption></figure>")
     if not shots:
         raise SystemExit("README has no screenshots")
-    return "\n".join(shots), preview
+    return "\n".join(shots)
 
 
 def main():
@@ -169,7 +163,13 @@ def main():
         shutil.rmtree(args.output)
     args.output.mkdir(parents=True)
     summary, summary_html, rows, playable = games(readme, compat)
-    shots, first_shot = screenshots(readme, args.output)
+    shots = screenshots(readme, args.output)
+    # The project icon (tab icon and header mark) and the social preview card (link previews).
+    branding = ROOT / "Assets/Branding"
+    shutil.copyfile(branding / "bifrost-emu-icon.svg", args.output / "icon.svg")
+    shutil.copyfile(branding / "social-preview.png", args.output / "social-preview.png")
+    icon = re.sub(r"<title>.*?</title>\s*", "", (branding / "bifrost-emu-icon.svg").read_text().strip())
+    icon = icon.replace("<svg ", '<svg aria-hidden="true" ', 1)
     json_ld = {
         "@context": "https://schema.org", "@type": "SoftwareApplication", "name": "bifrost-emu",
         "alternateName": "Bifrost", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Linux",
@@ -181,7 +181,7 @@ def main():
         main = string.Template(Path(__file__).with_name(name).read_text()).substitute(url=url, repo=REPO, **values)
         page = string.Template(Path(__file__).with_name("layout.html").read_text()).substitute(
             title=html.escape(title), description=html.escape(description), canonical=url + path, url=url, repo=REPO,
-            og_image=url + first_shot, json_ld=json.dumps(structured, separators=(",", ":")).replace("</", "<\\/"),
+            og_image=url + "social-preview.png", icon=icon, json_ld=json.dumps(structured, separators=(",", ":")).replace("</", "<\\/"),
             version=html.escape(version), main=main)
         target = args.output / path / "index.html"
         target.parent.mkdir(parents=True, exist_ok=True)

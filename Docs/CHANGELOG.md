@@ -51,6 +51,10 @@ there (guided provisioning, update/reinstall) remain in progress.
   called, is the alternate name), the home page says what the emulator does in plain language and links to the
   architecture for the technical side, and each game on the games page shows its platform and status with the full
   notes behind a Details toggle. Both pages say plainly that the emulator is experimental.
+- The project has an icon: three nested arcs in soft rainbow colours on teal, the rainbow bridge of the name
+  (`Assets/Branding/bifrost-emu-icon.svg`), on the site's tab and header and above the README title. A 1280×640 social
+  preview card (`Assets/Branding/social-preview.png`) is the site's link-preview image and is meant for the repository's
+  social preview setting.
 
 ### Changed (tests)
 
