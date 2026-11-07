@@ -31,6 +31,11 @@ static const uint32_t icon_pixels[4] = {0xff112233, 0xff445566, 0xff778899, 0xff
 
 int main(void) {
     uint64_t lib=thunk_dlopen("libSDL2.so"); CHECK(lib);
+    /* A build without host SDL2 still resolves every SDL symbol, to stubs that return 0. */
+    struct { uint8_t major, minor, patch; } version={0};
+    void (*get_version)(void*)=sym(lib,"SDL_GetVersion");
+    get_version(&version);
+    if (version.major!=2) { puts("SKIP: this emulator build has no host SDL2"); return 77; }
     Surface *(*create)(uint32_t,int,int,int,uint32_t)=sym(lib,"SDL_CreateRGBSurfaceWithFormat");
     Surface *(*from)(void*,int,int,int,int,uint32_t)=sym(lib,"SDL_CreateRGBSurfaceWithFormatFrom");
     Surface *(*convert)(Surface*,Format*,uint32_t)=sym(lib,"SDL_ConvertSurface");

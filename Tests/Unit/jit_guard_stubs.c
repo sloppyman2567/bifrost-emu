@@ -23,6 +23,12 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+// Linux 5.11 uapi; toolchains with older kernel headers (CI's Bootlin musl has
+// 4.19) lack it. Older kernels reject the flag with EINVAL, handled below.
+#ifndef UFFD_USER_MODE_ONLY
+#define UFFD_USER_MODE_ONLY 1
+#endif
+
 static int failures, checks;
 #define CHECK(c) do { checks++; if (!(c)) { failures++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
 

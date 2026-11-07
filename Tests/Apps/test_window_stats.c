@@ -38,6 +38,17 @@ int main(int argc, char **argv) {
   const int stats = argc > 1 && strcmp(argv[1], "title") == 0;
   uint64_t lib = thunk_dlopen("libSDL2.so");
   CHECK(lib);
+  // A build without host SDL2 still resolves every SDL symbol, to stubs that
+  // return 0, so SDL_Init would report success.
+  struct {
+    uint8_t major, minor, patch;
+  } version = {0};
+  void (*get_version)(void *) = sym(lib, "SDL_GetVersion");
+  get_version(&version);
+  if (version.major != 2) {
+    puts("SKIP: this emulator build has no host SDL2");
+    return 77;
+  }
   int (*init)(uint32_t) = sym(lib, "SDL_Init");
   void *(*create)(const char *, int, int, int, int, uint32_t) =
       sym(lib, "SDL_CreateWindow");

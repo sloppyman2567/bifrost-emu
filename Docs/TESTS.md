@@ -91,11 +91,11 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Android/test_asgard_process_host.py   # service children carry --asgard-service-parent and die with a killed supervisor (real emulator, plus a control)
 make test-shader-index-conversion               # the int() rewrite glCompileShader retries a rejected ES 3.x source with; gles_uint_index (run_tests.sh) checks it through the thunk on the host driver
 make test-android-wheel-gestures               # wheel/pinch/middle-drag as two-finger gestures (SDL-free); test-android-sdl-backend checks them through the backend
-./Scripts/Testing/test_window_stats.sh         # window stats modes, overlay and sensors (SDL probes open windows unless SDL_VIDEODRIVER=offscreen)
-./Scripts/Testing/test_rootfs_profile.sh   # named rootfs profiles: install, list, select, errors, uninstall
+./Scripts/Testing/test_window_stats.sh         # window stats modes, overlay and sensors (SDL probes open windows unless SDL_VIDEODRIVER=offscreen; exit 77 without host SDL2)
+./Scripts/Testing/test_rootfs_profile.sh   # named rootfs profiles: install, list, select, errors, uninstall (exit 77 without the fetched toolchains)
 ./Scripts/Testing/test_setup_rootfs.sh     # bifrost-emu --setup-rootfs installs, uninstalls, runs a packaged installer from the cache and reports a missing one
 ./Scripts/Testing/test_guest_env.sh         # the guest gets the caller's environment (curated one in a sandbox)
-./Scripts/Testing/test_exec_jit.sh          # programs started by execve run under the JIT
+./Scripts/Testing/test_exec_jit.sh          # programs started by execve run under the JIT (exit 77 without the busybox fixture)
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
 ./Scripts/Testing/test_host_cpu_models.sh   # JIT fixtures on older x86-64 CPUs under qemu-x86_64; exit 77 if it cannot run
 make test-audio-declick                     # a stream leaving or rejoining the mix never steps the output (no sound device needed)
@@ -143,8 +143,11 @@ when the host display or required APIs are unavailable.
 `--strict` makes a missing selected guest binary a failure. Use
 `--allow-missing REGEX` only for named external fixture bundles that are
 intentionally optional; each such omission is printed as a skip. Exit 77
-remains an environment skip for display/driver tests, and JIT-only cases
-remain skipped under `--no-jit`. CI uses strict mode so fixture compilation
+remains an environment skip for display/driver tests, SDL tests in a build
+without host SDL2, and host scripts whose fetched fixtures or toolchains are
+absent; a missing emulator stays a failure. JIT-only cases remain skipped
+under `--no-jit`. Host harnesses that link `libbifrost.a` use the headless
+library (`release-sdl0-gl0`), which CI's build step has already compiled. CI uses strict mode so fixture compilation
 failures cannot silently reduce test coverage.
 
 For repeated performance runs, use `Scripts/Bench/run_benchmarks.py`. It performs

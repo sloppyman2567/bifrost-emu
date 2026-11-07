@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Presentation-clock, overlay/sensor and guest title/log regression. UI placement is a desktop check.
 set -euo pipefail
+# run_tests.sh names the emulator under test in BIFROST_EMU, possibly relative to the caller's directory.
+EMU=${BIFROST_EMU:-${EMU:-}}
+[[ -z $EMU || $EMU = /* ]] || EMU="$PWD/$EMU"
 cd "$(dirname "$0")/../.."
 EMU=${EMU:-./bifrost-emu}
 TASK_TMP=$(mktemp -d)

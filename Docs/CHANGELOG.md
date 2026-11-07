@@ -8,7 +8,19 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [Unreleased]
+## [2.0.0-beta.1] — app keystore, Vulkan for Android apps, WebView fences and a faster JIT (2026-11-06)
+
+**2.0.0-beta.1** collects the changes made after 2.0.0-alpha.3 (2026-11-01): an Android Keystore so apps such as PolyTrack
+can save, real GPU fences for WebView, cheaper guest memory barriers, and a series of Tier-1 JIT changes (shared cold paths,
+tighter exits and flags, native scalar and vector FP by element and LD1R, loop bodies kept in one block, lighter Q-register
+accesses). It also gives Android apps a Vulkan device through a guest HAL over the host thunk, with placed memory maps and
+deep-marshalled Vulkan structs, records Zenless Zone Zero and Doki Doki Literature Club as playable, and fixes the CI-only
+test failures. It is the first beta label, not a completed beta scope: the [v2.0 goals](roadmap.md) and the beta.1 items still open
+there (guided provisioning, update/reinstall) remain in progress.
+
+- The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
+  the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
+  pages, CoreMark tables, screenshots) keep that label.
 
 ### Fixed (system calls)
 
@@ -133,6 +145,19 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   afterwards with no failed reservation and no WebView crash. That is one session, not a pass rate, and which hinted
   mapping first moved the cursor was not identified.
 
+### Fixed (tests and CI)
+
+- CI's strict regressions failed six tests that had passed only on a provisioned machine. `jit_guard_stubs.c` used
+  `UFFD_USER_MODE_ONLY` (Linux 5.11 uapi), which CI's pinned Bootlin musl toolchain (4.19 headers) lacks, so
+  `make setup-tests` silently skipped the fixture; it now defines the flag when the headers do not. `jit_profiler`
+  built the SDL/GL library inside its 60 s timeout on a runner that had built only the headless one; it and
+  `memory_high_gap`, neither of which uses SDL or GL, link the headless library like the other host harnesses.
+  `exec_jit` and `rootfs_profile` exit 77 when their fetched busybox fixture or cross toolchains are absent.
+  `sdl_surface_format` and `window_stats` exit 77 in a build without host SDL2, whose stub `SDL_Init` reports
+  success: `SDL_GetVersion` leaves the version zeroed there. `test_window_stats.sh` also ran `./bifrost-emu` instead
+  of the emulator `run_tests.sh` names in `BIFROST_EMU`.
+- `Tools/CodeGen/vkcoverage.py` is executable in git again, which CI's mode check requires.
+
 ### Changed (compatibility records)
 
 - `compatibility.json`, the README table and badge (13 playable of 19) and the support page now record Zenless Zone Zero
@@ -140,18 +165,6 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   before. Each carries its known defects: Zenless Zone Zero's very low-resolution textures, heavy lag and a progress bar
   that freezes while the window is maximized, and Doki Doki Literature Club's corrupted audio and graphics that break when
   the window is resized. The causes are not established.
-
-## [2.0.0-beta.1] — app keystore, WebView fences and a faster JIT (2026-11-03)
-
-**2.0.0-beta.1** collects the changes made after 2.0.0-alpha.3 (2026-11-01): an Android Keystore so apps such as PolyTrack
-can save, real GPU fences for WebView, cheaper guest memory barriers, and a series of Tier-1 JIT changes (shared cold paths,
-tighter exits and flags, native scalar and vector FP by element and LD1R, loop bodies kept in one block, lighter Q-register
-accesses). It is the first beta label, not a completed beta scope: the [v2.0 goals](roadmap.md) and the beta.1 items still open
-there (guided provisioning, update/reinstall) remain in progress.
-
-- The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
-  the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
-  pages, CoreMark tables, screenshots) keep that label.
 
 ### Apps get their own network security config (2026-11-05)
 

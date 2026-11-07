@@ -9,7 +9,9 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 EMU=${BIFROST_EMU:-"$REPO_ROOT/bifrost-emu"}
 [[ $EMU = /* ]] || EMU="$PWD/$EMU"  # this script changes directory
 BB="$REPO_ROOT/Tests/Apps/realworld/busybox-aarch64"
-for need in "$EMU" "$BB"; do [[ -e "$need" ]] || { echo "missing: $need" >&2; exit 2; }; done
+[[ -e "$EMU" ]] || { echo "missing: $EMU" >&2; exit 2; }
+# busybox is a downloaded real-world fixture (make setup-tests does not build it).
+[[ -e "$BB" ]] || { echo "exec_jit: skipped, $BB is not provisioned"; exit 77; }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/bifrost-exec-jit.XXXXXX")
 trap 'rm -rf -- "$WORK"' EXIT

@@ -7,8 +7,10 @@ set -euo pipefail
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$REPO_ROOT"
 EMU=${BIFROST_EMU:-"$REPO_ROOT/bifrost-emu"}
-for need in "$EMU" Tests/Apps/hello_dyn_glibc.elf Tools/aarch64-linux-gnu-cross Tools/aarch64-linux-musl-cross; do
-    [[ -e "$need" ]] || { echo "missing: $need" >&2; exit 2; }
+[[ -e "$EMU" ]] || { echo "missing: $EMU" >&2; exit 2; }
+# install-rootfs.sh --no-fetch copies its libraries from these fetched toolchains.
+for need in Tests/Apps/hello_dyn_glibc.elf Tools/aarch64-linux-gnu-cross Tools/aarch64-linux-musl-cross; do
+    [[ -e "$need" ]] || { echo "rootfs_profile: skipped, $need is not provisioned"; exit 77; }
 done
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/bifrost-rootfs-profile.XXXXXX")
