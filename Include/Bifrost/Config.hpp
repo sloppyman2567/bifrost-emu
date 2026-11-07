@@ -115,6 +115,8 @@ struct Config {
     // names are those of frost::android_keycode_for_name.
     std::string android_back_key = "escape";  // BIFROST_ANDROID_BACK_KEY
     std::string android_enter_key = "enter";  // BIFROST_ANDROID_ENTER_KEY
+    // How a gamepad drives a pointer for touch-only apps: auto (Start+Select toggles it), gamepad (never), cursor (on).
+    std::string android_controller = "auto";  // BIFROST_ANDROID_CONTROLLER
     // Guest sockets may reach only loopback; connect/send elsewhere fail with ENETUNREACH.
     bool android_offline = false;             // BIFROST_ANDROID_OFFLINE
     // ── Methods ──────────────────────────────────────────────────────

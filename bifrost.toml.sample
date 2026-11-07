@@ -88,5 +88,8 @@ back_key = "escape"       # BIFROST_ANDROID_BACK_KEY — PC key sent as Android 
 enter_key = "enter"       # BIFROST_ANDROID_ENTER_KEY — what Enter sends outside a text
                           # field, for games with their own cursor: enter,
                           # dpad_center or button_a
+controller = "auto"       # BIFROST_ANDROID_CONTROLLER — a gamepad as a touch pointer for apps
+                          # that only take touch: auto (Start+Select together turn a
+                          # cursor on or off), gamepad (never) or cursor (on at once)
 offline = false           # BIFROST_ANDROID_OFFLINE — guest sockets reach only loopback:
                           # connect/send to any other IP fails with ENETUNREACH

@@ -16,6 +16,11 @@ JIT_DISK_CACHE_VALUES = {"on": "1", "off": "0", "verify": "verify"}
 # On-disk budget per app in MB (BIFROST_JIT_DISK_CACHE_MB); default follows [jit] disk_cache_mb, normally 512.
 JIT_DISK_CACHE_SIZES = (("default", "Default (512 MB)"), ("128", "128 MB"), ("256", "256 MB"), ("512", "512 MB"),
                         ("1024", "1 GB"), ("2048", "2 GB"), ("4096", "4 GB"))
+# What a gamepad does for an app that only takes touch: auto (the default) leaves the pad a pad and lets Start and Select
+# together turn on a touch cursor (BIFROST_ANDROID_CONTROLLER), gamepad never has a cursor and leaves Start and Select to the
+# game, cursor has the cursor on from the start.
+CONTROLLERS = (("auto", "Auto: Start+Select for a touch cursor (default)"), ("gamepad", "Gamepad only"),
+               ("cursor", "Touch cursor always on"))
 # How the app's window follows the host window. resizable (the default; BIFROST_ANDROID_WINDOW_MODE unset or resizable) lets
 # the host window resize the app's display, for an app that adapts to it; keep gives the app a fixed panel of the shape it
 # opened at, scaled to the host window and pillarboxed (what Android does for resizeableActivity=false), for a game that
@@ -34,9 +39,10 @@ CHOICES = {"window_stats_mode": tuple(name for name, _ in STATS_MODES),
            "enter_key": tuple(name for name, _ in ENTER_KEYS),
            "jit_disk_cache": tuple(name for name, _ in JIT_DISK_CACHES),
            "jit_disk_cache_mb": tuple(name for name, _ in JIT_DISK_CACHE_SIZES), "network": NETWORKS,
-           "window_mode": tuple(name for name, _ in WINDOW_MODES)}
+           "window_mode": tuple(name for name, _ in WINDOW_MODES),
+           "controller": tuple(name for name, _ in CONTROLLERS)}
 KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "network",
-        "window_mode", "menu_entry")
+        "window_mode", "controller", "menu_entry")
 BOOLEANS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False}
 PROPERTY_PREFIX = "property."
 
@@ -137,6 +143,8 @@ def launch_changes(settings):
         env["BIFROST_ANDROID_OFFLINE"] = "1"
     if "window_mode" in settings:
         env["BIFROST_ANDROID_WINDOW_MODE"] = settings["window_mode"]
+    if "controller" in settings:
+        env["BIFROST_ANDROID_CONTROLLER"] = settings["controller"]
     return flags, env
 
 

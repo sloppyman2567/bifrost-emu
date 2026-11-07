@@ -180,6 +180,7 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
         if (section == "android") {
             if (key == "back_key") { std::string v = raw_val; unquote(v); android_back_key = v; return true; }
             if (key == "enter_key") { std::string v = raw_val; unquote(v); android_enter_key = v; return true; }
+            if (key == "controller") { std::string v = raw_val; unquote(v); android_controller = v; return true; }
             if (key == "offline")  { bool v; if (!parse_bool(raw_val, v)) return false; android_offline = v; return true; }
         }
         // Unknown section / key — silently ignored for forward compat.
@@ -293,6 +294,7 @@ void Config::apply_env() {
     // [android]
     env_str ("BIFROST_ANDROID_BACK_KEY", android_back_key);
     env_str ("BIFROST_ANDROID_ENTER_KEY", android_enter_key);
+    env_str ("BIFROST_ANDROID_CONTROLLER", android_controller);
     env_bool("BIFROST_ANDROID_OFFLINE", android_offline);
 }
 // ── Config::dump ───────────────────────────────────────────────────────
@@ -344,6 +346,7 @@ void Config::dump(std::string& out) const {
     ss << "[android]\n";
     ss << "back_key = \"" << android_back_key << "\"\n";
     ss << "enter_key = \"" << android_enter_key << "\"\n";
+    ss << "controller = \"" << android_controller << "\"\n";
     ss << "offline  = " << (android_offline ? "true" : "false") << "\n";
     ss << "\n";
     out = ss.str();

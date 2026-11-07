@@ -661,7 +661,7 @@ generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlvie
 ci: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-window-plugin-cli test-shader-index-conversion
+	$(MAKE) test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-pad-cursor test-android-window-plugin-cli test-shader-index-conversion
 	$(MAKE) verify
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict --no-jit
@@ -676,7 +676,7 @@ ci: setup-tests generated-check $(TARGET)
 check-all: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-window-plugin-cli test-shader-index-conversion
+	$(MAKE) test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-pad-cursor test-android-window-plugin-cli test-shader-index-conversion
 	@./Scripts/Setup/setup-rootfs.sh
 	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
 	@test -f rootfs/lib/ld-musl-aarch64.so.1 || { echo "error: musl loader missing from rootfs" >&2; exit 1; }
@@ -743,6 +743,12 @@ test-android-yuv420: $(LIB)
 test-android-window-backend: $(LIB)
 	$(CXX) $(CXXFLAGS) Tests/Unit/android_window_backend_host.cpp $(LIB) -o $(OBJDIR)/android_window_backend_host $(LDFLAGS)
 	./$(OBJDIR)/android_window_backend_host
+
+.PHONY: test-android-pad-cursor
+test-android-pad-cursor:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Unit/android_pad_cursor.cpp -o $(OBJDIR)/android_pad_cursor
+	./$(OBJDIR)/android_pad_cursor
 
 .PHONY: test-android-wheel-gestures
 test-android-wheel-gestures:

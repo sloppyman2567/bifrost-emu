@@ -158,6 +158,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   with `generate-key-layout.py`. Nothing in `ManagedLauncher`'s static initialization may need the main Looper. Run
   `make test-android-sdl-backend`, `make test-android-window-plugin` and `MANAGED_GAMEPADS_OK`
   (`ManagedServiceBatch`).
+- The pad cursor (`Window/PadCursor.hpp`, SDL-free) takes the left stick, triggers, A and X while it is on, and Start+Select
+  switch it. Whatever it takes it must give back: a chord sends the game the release of the Start or Select it already saw,
+  and turning it on releases A and X and centres the stick and triggers for the game. Its events are a mouse's
+  (`kMouseFinger`, `kMouseSecondFinger`) in app pixels. Run `make test-android-pad-cursor` and `make test-android-sdl-backend`.
 - Wheel, trackpad pinch and middle-drag input become synthetic two-finger gestures in `Window/WheelGestures`
   (SDL-free; the SDL3 backend queues its events ahead of newer ones). Fingers never stay down: they lift on idle,
   button press, focus loss and close. Test with `make test-android-wheel-gestures` and

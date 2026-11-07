@@ -1509,6 +1509,25 @@ never crowds buttons out of the queue. Native activities read them through `AInp
 removals are a private device record (event type `0x101`) that only the managed launcher's op 3 takes; closing the
 window removes the pads it had.
 
+#### Touch cursor (2026-11-07)
+
+For an app that only takes touch, `Window/PadCursor.hpp` (SDL-free, tested by `make test-android-pad-cursor`) turns a pad into a
+pointer. The per-app `controller` setting (`[android] controller`, `BIFROST_ANDROID_CONTROLLER`) picks `auto` (the default: the
+pad stays a pad, and Start and Select pressed within 350 ms of each other turn the cursor on and off), `gamepad` (never; Start
+and Select are the game's) or `cursor` (on from the start). While it is on, the left stick moves the pointer (a dead zone of
+0.15 and a squared curve, about 1.1 panel heights per second at full deflection; the left trigger slows it to a quarter and the
+right doubles it), A is the primary finger and X a second one that stays where it went down, and the pointer is kept inside the
+app's panel (a fixed-size app's panel, else the window's pixels). The events are the ones a mouse makes (`kMouseFinger` and
+`kMouseSecondFinger`, hover when no finger is down, a drag while A is held), so the app sees ordinary touch. The picture is
+drawn in code (`pad_cursor_bitmap`: a white arrow with a dark outline) into a popup layer above the game, mapped through the
+same letterbox fit, and goes away after four seconds without movement. B, the d-pad, Y, the shoulders and the right stick
+still reach the game. The first of Start and Select pressed has already gone to the game, so a chord takes it back (the game
+is sent its release) and the rest of both presses is the cursor's; turning the cursor on also releases A and X and centres the
+left stick and the triggers for the game, and turning it off lifts any finger that is down. `make test-android-sdl-backend`
+plays the chord, A, X and the three modes through the real handler with a fake SDL3 (the picture needs a real display and is
+not covered there). Not tried with a real pad. Not done: scrolling with the right stick, and a pointer that follows layers
+created after it.
+
 The op-3 record carries a joystick motion's axes in words 20..27 and a device record as action (word 4), device id
 (6), USB vendor and product (7, 8), controller number (9) and the name (length in 13, bytes from 14).
 `FrameworkGamepads` is the device side the launcher otherwise lacks, read from `android-15.0.0_r1`:

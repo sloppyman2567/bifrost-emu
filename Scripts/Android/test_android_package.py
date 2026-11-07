@@ -733,6 +733,26 @@ class LauncherProfileTests(unittest.TestCase):
         dialog.reset_profile()
         self.assertTrue(dialog.menu.isChecked())  # back to the state's default (on, just above)
 
+    def test_the_controller_setting_reaches_the_emulator_and_defaults_to_auto(self):
+        from android_settings import KEYS, launch_changes, parse
+        self.assertIn("controller", KEYS)
+        self.assertEqual([parse("controller", x) for x in ("auto", "gamepad", "cursor")], ["auto", "gamepad", "cursor"])
+        for bad in ("", "Auto", "touch", "mouse"):
+            with self.assertRaises(ValueError):
+                parse("controller", bad)
+        self.assertEqual(launch_changes({}), ([], {}))                                  # unset: nothing added, the default is auto
+        self.assertEqual(launch_changes({"controller": "cursor"}), ([], {"BIFROST_ANDROID_CONTROLLER": "cursor"}))
+        dialog = self.edit({})
+        self.assertEqual(dialog.controller.currentData(), "auto")
+        self.assertNotIn("controller", dialog.result_settings())                        # leaving the default saves nothing
+        dialog.controller.setCurrentIndex(dialog.controller.findData("gamepad"))
+        self.assertEqual(dialog.result_settings()["controller"], "gamepad")
+        dialog = self.edit({"controller": "cursor"})
+        self.assertEqual(dialog.controller.currentData(), "cursor")
+        dialog.reset_profile()
+        self.assertEqual(dialog.controller.currentData(), "auto")
+        self.assertNotIn("controller", dialog.result_settings())
+
     def test_the_window_choice_defaults_to_resizable_and_saves_only_a_change(self):
         dialog = self.edit({})
         self.assertEqual(dialog.window_mode.currentData(), "resizable")

@@ -5,6 +5,11 @@
 #include <memory>
 #include <string>
 namespace frost {
+// How a gamepad drives a pointer for touch-only apps (PadCursor), for windows opened from now on: 0 auto (Start and Select
+// together turn it on and off), 1 gamepad (never), 2 cursor (on from the start). Unset, a window reads
+// BIFROST_ANDROID_CONTROLLER. The name is one of auto, gamepad, cursor; -1 for any other.
+void set_pad_cursor_mode(int mode);
+int pad_cursor_mode_for_name(const std::string &name);
 struct AndroidWindowBinding { uint64_t window = 0; void *display = nullptr; };
 using AndroidWindowEvent = bifrost_android_window_event_v2;
 using AndroidWindowText = bifrost_android_window_text_v2;
@@ -61,9 +66,10 @@ public:
   // Host pixels per desktop coordinate unit (the display's scale factor).
   virtual double pixel_density() { return 1.0; }
   // An app that cannot be resized (resizeableActivity=false) keeps this pixel
-  // size whatever the host window becomes: the window keeps its aspect ratio and
-  // every layer, and input, is scaled to fit (Android scales such an app and
-  // letterboxes it rather than resizing it).
+  // size whatever the host window becomes: the window takes any shape (it is not
+  // aspect-locked, so a compositor can tile it) and every layer, and input, is
+  // scaled to fit and centred (Android scales such an app and letterboxes it
+  // rather than resizing it).
   virtual int set_fixed_size(int32_t, int32_t) { return -ENOTSUP; }
   // Managed display orientation: 0 releases the request, 1 portrait, 2 landscape.
   virtual int set_orientation(int32_t) { return -ENOTSUP; }

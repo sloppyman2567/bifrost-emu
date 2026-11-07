@@ -236,6 +236,66 @@ int main() {
     hidden.reset();
     CHECK(contents(log) == "cursor-hide\ngamepad-quit\ncursor-show\nwindow-destroy\nvideo-quit\n");
   }
+  // The pad cursor (PadCursor is tested on its own): through the real handler, Start and Select together turn it on and take
+  // the Start the game already saw back; A is then a touch at the middle of the panel and never reaches the game; in gamepad
+  // mode none of it happens; in cursor mode it is on from the start. The picture needs a real display, so the binding fails.
+  {
+    struct Seen { int type, action, pointer, key; float x, y; };
+    auto must = [](bool ok, const char *what) {   // CHECK returns from main; a lambda that returns events cannot use it
+      if (!ok) { std::fprintf(stderr, "SDL3 pad cursor check failed: %s\n", what); std::exit(1); }
+    };
+    auto play = [&](const char *script, int mode) {
+      frost::set_pad_cursor_mode(mode);
+      setenv("BIFROST_TEST_SDL_BINDING_FAIL", "1", 1);
+      auto pads = frost::make_sdl_android_window_backend();
+      must(pads->open("pad cursor", 800, 600) == 0, "open");
+      setenv("BIFROST_TEST_SDL_EVENT", script, 1);
+      std::vector<Seen> seen;
+      for (int polls = 0; polls < 64; ++polls) {
+        frost::AndroidWindowEvent e{};
+        if (pads->poll(e) != 1) continue;
+        if (e.type == BIFROST_WINDOW_GAMEPAD) {
+          frost::AndroidWindowGamepad pad{};
+          must(pads->poll_gamepad(pad) == 1, "poll_gamepad");
+          seen.push_back({int(e.type), int(pad.action), 0, pad.kind == BIFROST_GAMEPAD_BUTTON ? int(pad.key_code) : -int(pad.kind), 0, 0});
+        } else if (e.type == BIFROST_WINDOW_POINTER) {
+          seen.push_back({int(e.type), int(e.action), int(e.pointer_id), 0, e.x, e.y});
+        }
+      }
+      unsetenv("BIFROST_TEST_SDL_EVENT");
+      unsetenv("BIFROST_TEST_SDL_BINDING_FAIL");
+      pads.reset();
+      frost::set_pad_cursor_mode(-1);
+      return seen;
+    };
+    auto pad_key = [](const Seen &s, int key, int action) { return s.type == BIFROST_WINDOW_GAMEPAD && s.key == key && s.action == action; };
+    constexpr int kKeyA = 96, kKeyStart = 108, kKeySelect = 109;
+    // Auto: the chord turns it on. Start went to the game first, so the game is told it was released; Select is the cursor's.
+    auto seen = play("pad:added,start-down,select-down,a-down,a-up,select-up,start-up", 0);
+    CHECK(seen.size() == 5);
+    CHECK(pad_key(seen[1], kKeyStart, 0) && pad_key(seen[2], kKeyStart, 1));
+    CHECK(seen[3].type == BIFROST_WINDOW_POINTER && seen[3].action == 0 && seen[3].pointer == 0);
+    CHECK(seen[3].x == 800.0f && seen[3].y == 600.0f);                 // the middle of the 1600x1200 panel
+    CHECK(seen[4].type == BIFROST_WINDOW_POINTER && seen[4].action == 1 && seen[4].pointer == 0);
+    for (const Seen &s : seen) CHECK(!pad_key(s, kKeyA, 0) && !pad_key(s, kKeySelect, 0));   // A and Select never reached the game
+    // Off: A is an ordinary button, and Start and Select separately are the game's.
+    seen = play("pad:added,start-down,start-up,select-down,select-up,a-down,a-up", 0);
+    CHECK(seen.size() == 7 && pad_key(seen[1], kKeyStart, 0) && pad_key(seen[2], kKeyStart, 1) &&
+          pad_key(seen[3], kKeySelect, 0) && pad_key(seen[5], kKeyA, 0) && pad_key(seen[6], kKeyA, 1));
+    // Gamepad mode: the chord is two presses for the game and A stays a button.
+    seen = play("pad:added,start-down,select-down,a-down,a-up", 1);
+    CHECK(seen.size() == 5 && pad_key(seen[1], kKeyStart, 0) && pad_key(seen[2], kKeySelect, 0) && pad_key(seen[3], kKeyA, 0));
+    for (const Seen &s : seen) CHECK(s.type != BIFROST_WINDOW_POINTER);
+    // Cursor mode: on from the start, so A is a touch straight away; X is a second finger.
+    seen = play("pad:added,a-down,a-up,x-down,x-up", 2);
+    CHECK(seen.size() == 5);
+    CHECK(seen[1].type == BIFROST_WINDOW_POINTER && seen[1].action == 0 && seen[1].pointer == 0);
+    CHECK(seen[2].type == BIFROST_WINDOW_POINTER && seen[2].action == 1);
+    CHECK(seen[3].type == BIFROST_WINDOW_POINTER && seen[3].action == 0 && seen[3].pointer == 1);
+    CHECK(seen[4].type == BIFROST_WINDOW_POINTER && seen[4].action == 1 && seen[4].pointer == 1);
+    CHECK(frost::pad_cursor_mode_for_name("auto") == 0 && frost::pad_cursor_mode_for_name("gamepad") == 1 &&
+          frost::pad_cursor_mode_for_name("cursor") == 2 && frost::pad_cursor_mode_for_name("touch") < 0);
+  }
   // Gamepads: hotplug, buttons as Android KEYCODE_BUTTON_*, the d-pad as hat axes (last press wins), stick and
   // trigger values in Android's ranges, repeats and unknown devices dropped, and a focus loss releasing what is held.
   {

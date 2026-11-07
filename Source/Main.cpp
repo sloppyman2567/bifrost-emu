@@ -54,6 +54,7 @@
 #include "System/Graphics/Display/WindowStats.hpp"
 #include "System/Android/Package/PackageLauncher.hpp"
 #include "System/Android/Surface/Surface.hpp"
+#include "System/Android/Window/WindowBackend.hpp"
 #include "System/Syscalls/Files/SocketPolicy.hpp"
 #include "System/Loader/RootfsDiscovery.hpp"
 #include "System/Loader/RootfsSetup.hpp"
@@ -453,6 +454,13 @@ int main(int argc, char** argv) {
             return 2;
         }
         frost::set_android_enter_key(enter);
+        int controller = frost::pad_cursor_mode_for_name(cfg.android_controller);
+        if (controller < 0) {
+            fprintf(stderr, "bifrost-emu: unknown [android] controller '%s' "
+                    "(auto, gamepad or cursor)\n", cfg.android_controller.c_str());
+            return 2;
+        }
+        frost::set_pad_cursor_mode(controller);
     }
     arm64emu::network_offline().store(cfg.android_offline);
     while (arg_i < argc) {

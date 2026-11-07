@@ -1,9 +1,12 @@
 #include "System/Android/Window/WindowBackend.hpp"
+#include "System/Android/Window/PadCursor.hpp"
 #include "System/Android/Window/WheelGestures.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <climits>
 #include <cmath>
 #include <cstring>
@@ -32,6 +35,15 @@
 #endif
 namespace frost {
 namespace {
+std::atomic<int> g_pad_cursor_mode{-1};  // set_pad_cursor_mode; -1: read BIFROST_ANDROID_CONTROLLER
+PadCursorMode current_pad_cursor_mode() {
+  int mode = g_pad_cursor_mode.load();
+  if (mode < 0) {
+    const char *name = std::getenv("BIFROST_ANDROID_CONTROLLER");
+    mode = name ? pad_cursor_mode_for_name(name) : 0;
+  }
+  return mode == 1 ? PadCursorMode::Gamepad : mode == 2 ? PadCursorMode::Cursor : PadCursorMode::Auto;
+}
 #if defined(BIFROST_USE_SDL3)
 // SDL2 guest thunks remain linked to SDL2. Resolve every SDL3 entry through its
 // own DSO, as sdl2-compat does, rather than interposing overlapping SDL names.
@@ -1037,6 +1049,7 @@ public:
     gesture_out_.clear();
     gestures_.idle(static_cast<uint64_t>(monotonic_ms()), gesture_out_);
     pending_.insert(pending_.end(), gesture_out_.begin(), gesture_out_.end());
+    tick_cursor(monotonic_ms());
     // Synthetic fingers of a wheel gesture go out in order, ahead of the event that came after them.
     if (pending_.empty()) {
       const int result = poll_sdl(out);
@@ -1294,6 +1307,11 @@ private:
     }
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
     case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+      // The pad cursor first: it may use the button (the game then never sees it) and take back one it already passed on.
+      cursor_out_.clear();
+      const bool cursor_used = cursor_.button(e.gbutton.button, e.gbutton.down, time_ms, cursor_out_);
+      apply_cursor(cursor_out_, time_ms);
+      if (cursor_used) return true;
       auto pad = find(e.gbutton.which);
       if (pad == pads_.end()) return true;
       const int hat = e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_LEFT || e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT
@@ -1326,6 +1344,7 @@ private:
       return true;
     }
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+      if (cursor_.axis(e.gaxis.axis, e.gaxis.value)) return true;   // the left stick and triggers, while the cursor is on
       auto pad = find(e.gaxis.which);
       static const int kSlots[] = {
           BIFROST_GAMEPAD_AXIS_X, BIFROST_GAMEPAD_AXIS_Y, BIFROST_GAMEPAD_AXIS_Z, BIFROST_GAMEPAD_AXIS_RZ,
@@ -1363,6 +1382,103 @@ private:
     default:
       return false;
     }
+  }
+  // The pad cursor's moves: the pointer events a mouse makes (so the app sees ordinary touch), the picture, and a button the
+  // game must now see released. The panel it lives in is the fixed size of an app that has one, else the window's pixels.
+  void tick_cursor(int64_t now_ms) {
+    if (!cursor_.active() && !cursor_visible_) return;
+    int32_t w = fixed_w_, h = fixed_h_;
+    if (!w && !sdl_.GetWindowSizeInPixels(window_, &w, &h)) return;
+    cursor_.set_bounds(w, h);
+    cursor_out_.clear();
+    cursor_.tick(now_ms, cursor_out_);
+    apply_cursor(cursor_out_, now_ms);
+    if (cursor_visible_ && now_ms - cursor_moved_ms_ > kCursorIdleMs) hide_cursor();
+  }
+  void apply_cursor(const std::vector<PadCursor::Output> &outputs, int64_t time_ms) {
+    for (const PadCursor::Output &o : outputs) {
+      switch (o.kind) {
+      case PadCursor::Output::Move:
+      case PadCursor::Output::Down:
+      case PadCursor::Output::Up: {
+        AndroidWindowEvent event{};
+        event.type = BIFROST_WINDOW_POINTER;
+        event.time_ms = time_ms;
+        event.x = o.x; event.y = o.y;
+        event.pointer_id = o.finger == 0 ? kMouseFinger : kMouseSecondFinger;
+        const bool down = o.kind == PadCursor::Output::Down || (o.kind == PadCursor::Output::Move && o.held);
+        event.action = o.kind == PadCursor::Output::Down ? 0 : o.kind == PadCursor::Output::Up ? 1 : (o.held ? 2 : 7);
+        event.pressure = down ? 1 : 0;
+        pending_.push_back(event);
+        cursor_moved_ms_ = time_ms;
+        show_cursor(cursor_.x(), cursor_.y());
+        break;
+      }
+      case PadCursor::Output::ReleaseToGame:
+        release_game_button(o.button, time_ms);
+        break;
+      case PadCursor::Output::Toggled:
+        std::fprintf(stderr, "[android-window] controller cursor %s\n", o.on ? "on" : "off");
+        if (o.on) {
+          // The game must not be left holding what the cursor now owns: A, X and the left stick and triggers.
+          release_game_button(padbtn::kSouth, time_ms);
+          release_game_button(padbtn::kWest, time_ms);
+          center_game_axes(time_ms);
+          cursor_moved_ms_ = time_ms;
+          show_cursor(cursor_.x(), cursor_.y());
+        } else {
+          hide_cursor();
+        }
+        break;
+      }
+    }
+  }
+  void show_cursor(float x, float y) {
+    const int32_t w = fixed_w_ ? fixed_w_ : width_, h = fixed_h_ ? fixed_h_ : height_;
+    const int size = std::clamp(std::min(w, h) / 22, 24, 64);  // app pixels: about as tall as an arrow on a phone
+    if (size != cursor_icon_size_) { cursor_icon_ = pad_cursor_bitmap(size); cursor_icon_size_ = size; cursor_icon_x_ = -1; }
+    const int ix = int(x), iy = int(y);
+    if (cursor_visible_ && ix == cursor_icon_x_ && iy == cursor_icon_y_) return;
+    if (show_popup(kCursorLayer, ix, iy, size, size, cursor_icon_.data()) == 0) {
+      cursor_visible_ = true; cursor_icon_x_ = ix; cursor_icon_y_ = iy;
+    }
+  }
+  void hide_cursor() {
+    if (!cursor_visible_) return;
+    remove_popup(kCursorLayer);
+    cursor_visible_ = false; cursor_icon_x_ = cursor_icon_y_ = -1;
+  }
+  // Tell every pad's game that `button` is up, if it saw it go down.
+  void release_game_button(int button, int64_t time_ms) {
+    const int key = android_gamepad_key(button);
+    for (Pad &pad : pads_) {
+      const uint32_t bit = 1u << button;
+      if (!key || !(pad.held & bit)) continue;
+      pad.held &= ~bit;
+      AndroidWindowGamepad payload{};
+      payload.kind = BIFROST_GAMEPAD_BUTTON; payload.device = pad.device; payload.key_code = key; payload.action = 1;
+      queue_gamepad(payload, time_ms);
+    }
+  }
+  void center_game_axes(int64_t time_ms) {
+    static const int kSlots[] = {BIFROST_GAMEPAD_AXIS_X, BIFROST_GAMEPAD_AXIS_Y, BIFROST_GAMEPAD_AXIS_LTRIGGER,
+                                 BIFROST_GAMEPAD_AXIS_RTRIGGER};
+    for (Pad &pad : pads_) {
+      bool changed = false;
+      for (int slot : kSlots) if (pad.axes[slot] != 0.0f) { pad.axes[slot] = 0.0f; changed = true; }
+      if (!changed) continue;
+      AndroidWindowGamepad payload{};
+      payload.kind = BIFROST_GAMEPAD_AXES; payload.device = pad.device;
+      std::copy(std::begin(pad.axes), std::end(pad.axes), payload.axes);
+      queue_gamepad(payload, time_ms);
+    }
+  }
+  void queue_gamepad(const AndroidWindowGamepad &payload, int64_t time_ms) {
+    gamepad_.push_back(payload);
+    AndroidWindowEvent event{};
+    event.type = BIFROST_WINDOW_GAMEPAD;
+    event.time_ms = time_ms;
+    pending_.push_back(event);
   }
   // Mouse wheel, trackpad pinch and middle-button drag as two-finger touch gestures (WheelGestures), queued in
   // pending_. True when the event was used up here; a button press only lifts the fingers and goes on.
@@ -1648,10 +1764,26 @@ private:
   int32_t orientation_axis_ = 0;
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;
+  // The gamepad's pointer for touch-only apps (PadCursor), its picture in a popup layer, and what it queued this poll.
+  static constexpr uint32_t kCursorLayer = 0xFFFFFF01u;
+  static constexpr int64_t kCursorIdleMs = 4000;  // the picture goes away when the pointer has not moved this long
+  PadCursor cursor_{current_pad_cursor_mode()};
+  std::vector<PadCursor::Output> cursor_out_;
+  std::vector<uint32_t> cursor_icon_;
+  int cursor_icon_size_ = 0, cursor_icon_x_ = -1, cursor_icon_y_ = -1;
+  bool cursor_visible_ = false;
+  int64_t cursor_moved_ms_ = 0;
 #endif
 };
 } // namespace
 std::unique_ptr<AndroidWindowBackend> make_sdl_android_window_backend() {
   return std::make_unique<SdlAndroidWindowBackend>();
+}
+void set_pad_cursor_mode(int mode) { g_pad_cursor_mode.store(mode); }
+int pad_cursor_mode_for_name(const std::string &name) {
+  if (name == "auto") return 0;
+  if (name == "gamepad") return 1;
+  if (name == "cursor") return 2;
+  return -1;
 }
 } // namespace frost

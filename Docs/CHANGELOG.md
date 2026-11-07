@@ -36,6 +36,17 @@ there (guided provisioning, update/reinstall) remain in progress.
   Using a pad hides the pointer until the mouse moves, as Steam does. The maintainer plays Subway Surfers with the 2026
   Steam Controller (2026-11-06). Rumble, back paddles and remapping are not implemented.
 
+### Added (touch cursor for gamepads)
+
+- A gamepad can drive a touch pointer for apps that only take touch, for pads that have no trackpad (a Steam Controller's trackpads
+  already act as a mouse). Start and Select pressed together turn it on and off; the left stick moves it (the triggers slow and
+  speed it), A is a touch and X a second finger, and an arrow drawn in code follows it above the game. B, the d-pad, Y, the
+  shoulders and the right stick still reach the game. The per-app `controller` setting (`auto`, the default; `gamepad`, never;
+  `cursor`, on from the start) is in the settings dialog, the gamepad settings page and `asgard config`, and `[android]
+  controller` / `BIFROST_ANDROID_CONTROLLER` set it for a run. The logic is SDL-free and has its own test
+  (`make test-android-pad-cursor`); `make test-android-sdl-backend` plays the chord, A, X and the modes through the real handler
+  with a fake SDL3. Not tried with a real pad or display; scrolling with the right stick is not done.
+
 ### Added (per-app Window setting)
 
 - Fixed: a fixed-size Android app (SpongeBob, Roblox, Battle Cats: `resizeableActivity=false`) could not be snapped to the left or

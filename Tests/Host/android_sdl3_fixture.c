@@ -197,6 +197,7 @@ static bool pad_event(const char *script, SDL_Event *event) {
         {"a", SDL_GAMEPAD_BUTTON_SOUTH}, {"guide", SDL_GAMEPAD_BUTTON_GUIDE},
         {"paddle", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1}, {"left", SDL_GAMEPAD_BUTTON_DPAD_LEFT},
         {"right", SDL_GAMEPAD_BUTTON_DPAD_RIGHT}, {"unknown", SDL_GAMEPAD_BUTTON_SOUTH},
+        {"start", SDL_GAMEPAD_BUTTON_START}, {"select", SDL_GAMEPAD_BUTTON_BACK}, {"x", SDL_GAMEPAD_BUTTON_WEST},
     };
     static const struct { const char *name; SDL_GamepadAxis axis; } axes[] = {
         {"leftx", SDL_GAMEPAD_AXIS_LEFTX}, {"lefty", SDL_GAMEPAD_AXIS_LEFTY}, {"lt", SDL_GAMEPAD_AXIS_LEFT_TRIGGER},
