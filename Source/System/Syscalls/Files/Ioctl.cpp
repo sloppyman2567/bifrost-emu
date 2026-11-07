@@ -39,6 +39,15 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF));
                 return 0;
             }
+            // FIOCLEX/FIONCLEX change the descriptor's close-on-exec flag on any fd type, as Linux
+            // does before any driver sees the request. The flag lives in the guest FdTable.
+            const uint32_t request = static_cast<uint32_t>(a1);
+            if (request == yggdrasil::ioctl_num::REQ_FIOCLEX ||
+                request == yggdrasil::ioctl_num::REQ_FIONCLEX) {
+                fds_.set_cloexec(static_cast<int>(a0), request == yggdrasil::ioctl_num::REQ_FIOCLEX);
+                cpu.regs[0] = 0;
+                return 0;
+            }
             // A host-identity process (fork child, Binder-realm app) has real session ids, so its
             // terminal's session is the host's answer; the PID-1 model answers 1 in the terminal helper.
             if (static_cast<uint32_t>(a1) == yggdrasil::ioctl_num::REQ_TIOCGSID &&

@@ -76,3 +76,8 @@
   (it would detach the emulator's own terminal); TIOCSCTTY is, and a plain run's EPERM (not a host session leader) counts as success because its
   session is virtual. A host-identity process answers TIOCGSID from the host so it agrees with `getsid`. `test_pty` (raw ABI, checked against a native
   x86-64 build on the real kernel) and `test_forkpty` (libc `openpty`/`forkpty` + exec) cover it.
+  `dispatch_terminal_ioctl` answers a NULL argument with EFAULT only for the requests it handles that use the
+  pointer; any other request falls through to the node (ENOTTY when nobody implements it). FIOCLEX/FIONCLEX
+  change the guest descriptor's close-on-exec flag in the syscall layer, for every fd type, before a node sees
+  them (CPython calls `ioctl(fd, FIOCLEX, NULL)` after each `fopen` and fails the open on EFAULT).
+  `test_fcntl_owner` covers both, natively as well.

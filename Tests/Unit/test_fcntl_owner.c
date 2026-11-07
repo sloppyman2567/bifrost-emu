@@ -12,6 +12,11 @@
 // "hostile environment". Newer kernels refuse (simple_nosetlease): run natively, that one check is
 // tolerated; the emulator is run with the argument "emu" and implements the older, wider behaviour.
 //
+// ioctl(FIOCLEX/FIONCLEX, NULL) sets and clears close-on-exec on any descriptor, and a request a file
+// does not implement is ENOTTY even with a NULL argument. CPython calls ioctl(fd, FIOCLEX, NULL) after
+// every fopen and treats any other error as a failed open: an EFAULT made Ren'Py (Doki Doki Literature
+// Club) report "can't open file 'main.py': [Errno 14] Bad address".
+//
 // Plain C: build it natively as well to compare with the host kernel.
 #define _GNU_SOURCE
 #include <errno.h>
@@ -20,6 +25,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -128,6 +134,26 @@ int main(int argc, char **argv) {
     errno = 0;
     CHECK(dir >= 0 && fcntl(dir, F_SETLEASE, F_RDLCK) == -1 && errno == EINVAL, "a directory takes no lease");
     close(dir);
+
+    // Close-on-exec through ioctl, on a regular file and a pipe; an unknown argument-free request is ENOTTY.
+    char cx[] = "/tmp/test_fcntl_owner_cx.XXXXXX";
+    int file = mkstemp(cx);
+    int pipe_fds[2];
+    CHECK(file >= 0 && pipe(pipe_fds) == 0, "a file and a pipe for FIOCLEX");
+    int targets[] = {file, pipe_fds[0]};
+    for (int i = 0; i < 2; i++) {
+        int t = targets[i];
+        CHECK(ioctl(t, FIOCLEX, NULL) == 0 && (fcntl(t, F_GETFD) & FD_CLOEXEC), "FIOCLEX sets close-on-exec");
+        CHECK(ioctl(t, FIONCLEX, NULL) == 0 && !(fcntl(t, F_GETFD) & FD_CLOEXEC), "FIONCLEX clears it");
+    }
+    errno = 0;
+    CHECK(ioctl(file, 0x5490, NULL) == -1 && errno == ENOTTY, "an unknown request on a file is ENOTTY, not EFAULT");
+    errno = 0;
+    CHECK(ioctl(-1, FIOCLEX, NULL) == -1 && errno == EBADF, "FIOCLEX on a bad fd is EBADF");
+    close(file);
+    close(pipe_fds[0]);
+    close(pipe_fds[1]);
+    unlink(cx);
 
     if (failures) { printf("test_fcntl_owner: %d FAILED\n", failures); return 1; }
     printf("test_fcntl_owner: ALL PASS\n");

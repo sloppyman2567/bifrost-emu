@@ -88,6 +88,10 @@ namespace ioctl_num {
     constexpr uint32_t REQ_TIOCGPTLCK = 0x80045439;  // is the slave locked
     constexpr uint32_t REQ_TIOCGEXCL  = 0x80045440;  // is the terminal opened exclusively
     constexpr uint32_t REQ_TIOCGPTPEER = 0x5441;     // open the slave of a master: returns an fd
+    // Descriptor flags, valid on every fd and argument-free (fs/ioctl.c do_vfs_ioctl): the syscall
+    // layer applies them to the guest descriptor before any node sees the request.
+    constexpr uint32_t REQ_FIONCLEX   = 0x5450;  // clear close-on-exec
+    constexpr uint32_t REQ_FIOCLEX    = 0x5451;  // set close-on-exec
 }  // namespace ioctl_num
 // ── dispatch_terminal_ioctl — shared ioctl handler ─────────────────────
 // Forward terminal-related ioctls to the host fd, marshalling the
@@ -104,13 +108,24 @@ namespace ioctl_num {
 // host fds but not on stdin/stdout/stderr).
 inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
                                     uint64_t argp, Memory& mem) {
-    // TCFLSH, TCSBRK, TCXONC, TCSBRKP and the exclusive-mode requests take a value (often 0), not a pointer.
-    const bool value_argument =
-        request == ioctl_num::REQ_TCSBRK || request == ioctl_num::REQ_TCXONC ||
-        request == ioctl_num::REQ_TCFLSH || request == ioctl_num::REQ_TCSBRKP ||
-        request == ioctl_num::REQ_TIOCEXCL || request == ioctl_num::REQ_TIOCNXCL ||
-        request == ioctl_num::REQ_TIOCSCTTY || request == ioctl_num::REQ_TIOCNOTTY;
-    if (argp == 0 && !value_argument) return -EFAULT;
+    // A NULL pointer is EFAULT only for the requests below that read or write through argp; a
+    // request this helper does not handle falls through (IOCTL_NOT_HANDLED), and TCFLSH, TCSBRK,
+    // TCXONC, TCSBRKP and the exclusive-mode requests take a value (often 0), not a pointer.
+    // Answering every NULL with EFAULT turned an unrelated argument-free request into EFAULT
+    // (CPython's ioctl(fd, FIOCLEX, NULL) after fopen: "can't open file ... Bad address").
+    // Keep this list in step with the pointer cases of the switch.
+    using namespace ioctl_num;
+    switch (request) {
+        case REQ_TIOCGPTN: case REQ_TIOCGPTLCK: case REQ_TIOCGEXCL: case REQ_TIOCOUTQ:
+        case REQ_TIOCSPTLCK: case REQ_TIOCPKT: case REQ_TCGETS: case REQ_TCSETS: case REQ_TCSETSW:
+        case REQ_TCSETSF: case REQ_TCGETS2: case REQ_TCSETS2: case REQ_TCSETSW2: case REQ_TCSETSF2:
+        case REQ_FIONREAD: case REQ_FIONBIO: case REQ_TIOCGPGRP: case REQ_TIOCSPGRP:
+        case REQ_TIOCGSID: case REQ_TIOCGWINSZ: case REQ_TIOCSWINSZ:
+            if (argp == 0) return -EFAULT;
+            break;
+        default:
+            break;
+    }
     switch (request) {
         case ioctl_num::REQ_TIOCGWINSZ: {
             struct winsize ws;

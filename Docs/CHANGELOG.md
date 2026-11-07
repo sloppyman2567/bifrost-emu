@@ -10,6 +10,14 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased]
 
+### Fixed (system calls)
+
+- `ioctl(fd, FIOCLEX/FIONCLEX, NULL)` returned EFAULT: the terminal helper rejected every NULL argument before
+  checking whether it handled the request at all. CPython calls it after each `fopen` and fails the open on any error
+  but ENOTTY/EACCES, so Ren'Py (Doki Doki Literature Club) quit with "can't open file 'main.py': [Errno 14] Bad
+  address". The two requests now set and clear the guest descriptor's close-on-exec flag for every fd type, and an
+  unhandled argument-free request is ENOTTY. `test_fcntl_owner` covers it and passes natively on the host kernel.
+
 ### Fixed (guest memory)
 
 - **A 16 GiB reservation failed with ENOMEM while most of a 512 GiB realm window was empty, and Zenless Zone Zero's
