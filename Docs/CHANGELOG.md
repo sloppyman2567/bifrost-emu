@@ -50,6 +50,12 @@ there (guided provisioning, update/reinstall) remain in progress.
 
 ### Added (library gamepad control)
 
+- Fixed: moving past the end of a list in a window Qt itself made (the file dialog behind "Install APK…") raised
+  `RuntimeError: no access to protected functions or signals for objects not created from Python`, and that switched gamepad
+  control off for the whole session. Focus now moves along the public focus chain, and an error on one press is reported on
+  stderr while the pad stays on. That file dialog is still a window of its own, so the pad only does what a keyboard would there
+  (arrows, Return, Escape).
+
 - In the gamepad layout, and from the keyboard's Menu key, the card menu, the Start menu, the Clear data and Uninstall
   confirmations and the settings page are drawn inside the library window (a dimmed backdrop and large rows, the cards
   underneath disabled), not as popup menus, message boxes and dialogs. Those are windows of their own, and on the maintainer's

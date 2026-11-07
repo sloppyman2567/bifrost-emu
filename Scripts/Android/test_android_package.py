@@ -1342,6 +1342,38 @@ class LauncherLibraryTests(unittest.TestCase):
         window.pad_tick(); self.settle()
         self.assertNotIn("connected", window.summary.text())
 
+    def test_a_press_that_fails_is_reported_and_the_pad_keeps_working(self):
+        """A file dialog Qt made raised in the pad glue, and that switched the pad off for the session."""
+        import android_gamepad as pads
+        window = self.pad_window(layout="big")
+        self.press(window, pads.DPAD_DOWN)                          # wake: a card has the focus
+        calls = []
+        real = window.pad_action
+        def failing(action):
+            calls.append(action)
+            if len(calls) == 1: raise RuntimeError("no access to protected functions or signals for objects not created from Python")
+            return real(action)
+        with patch.object(window, "pad_action", failing), patch("sys.stderr"):
+            self.press(window, pads.DPAD_RIGHT)                     # raises inside the glue
+            self.assertTrue(window.pad_timer.isActive())            # still on
+            self.press(window, pads.DPAD_RIGHT)                     # and the next press works
+        self.assertEqual(self.qt.focusWidget(), window.cards[window.order[1]])
+
+    def test_focus_leaves_a_table_by_the_public_focus_chain(self):
+        """focusNextChild is protected, so it cannot be called on a window Qt created; the chain is walked instead."""
+        import android_gamepad as pads
+        from PyQt6.QtWidgets import QDialog, QPushButton, QTableWidget, QVBoxLayout
+        dialog = QDialog(); layout = QVBoxLayout(dialog)
+        before, table, after = QPushButton("before"), QTableWidget(2, 1), QPushButton("after")
+        for widget in (before, table, after): layout.addWidget(widget)
+        dialog.show(); dialog.activateWindow(); table.setFocus(); self.settle()
+        self.assertTrue(pads.focus_step(table, True))
+        self.assertIs(self.qt.focusWidget(), after)
+        table.setFocus(); self.settle()
+        self.assertTrue(pads.focus_step(table, False))
+        self.assertIs(self.qt.focusWidget(), before)
+        dialog.close()
+
     def test_a_failing_pad_switches_itself_off_instead_of_aborting_the_library(self):
         import android_gamepad as pads
         window = self.pad_window()

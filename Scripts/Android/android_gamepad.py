@@ -215,6 +215,23 @@ def open_backend():
     return backend
 
 
+def focus_step(widget, forward):
+    """Give the focus to the next (or previous) widget in the focus chain that takes it, leaving `widget` and everything inside
+    it. Public API only: focusNextChild is protected, and PyQt cannot call it on a window that Qt created, such as the file
+    dialog behind "Install APK…" (that raised, and switched the pad off). True if something took the focus."""
+    from PyQt6.QtCore import Qt
+    step = (lambda w: w.nextInFocusChain()) if forward else (lambda w: w.previousInFocusChain())
+    candidate = step(widget)
+    for _ in range(2000):
+        if candidate is None or candidate is widget: return False
+        if (candidate.isVisible() and candidate.isEnabled() and candidate.focusPolicy().value & Qt.FocusPolicy.TabFocus.value
+                and not widget.isAncestorOf(candidate)):
+            candidate.setFocus(Qt.FocusReason.TabFocusReason)
+            return True
+        candidate = step(candidate)
+    return False
+
+
 ACTIVE_INTERVAL, IDLE_INTERVAL, SEARCH_INTERVAL = 16, 300, 500  # ms: pad connected and window in front, not in front, no pad
 
 
@@ -273,10 +290,9 @@ def connect(window, application, backend):
         # Whatever is in a popup (a combo box's list, a menu) takes the arrows and Return itself.
         where = "menu" if popup else kind(widget, action)
         if where == "edge" and action in ("up", "down"):
-            # Not a Tab key, and not the table's own focusNextChild: a table steps between cells with both. The window's
-            # focus chain is what gets out.
-            window_ = application.activeWindow() or widget
-            (window_.focusPreviousChild if action == "up" else window_.focusNextChild)(); return
+            # Not a Tab key, and not the table's own focusNextChild: a table steps between cells with both. The focus chain
+            # is what gets out.
+            focus_step(widget, action == "down"); return
         inside = application.activeModalWidget() is not None or (hasattr(window, "sheet_active") and window.sheet_active())
         keys = keys_for(action, where, inside)
         trace(action, "-> keys", keys or "none", "to", type(widget).__name__, "(" + where + ")")
@@ -297,7 +313,12 @@ def connect(window, application, backend):
                 reader.reset(); timer.setInterval(IDLE_INTERVAL); return
             if front[0] is not True: trace("a window is in front: reading the pad")
             front[0] = True
-            for action in reader.poll(): handle(action)
+            for action in reader.poll():
+                try: handle(action)
+                except Exception:
+                    # Something this press did failed (a window Qt made, a widget that went away): say so, and keep the pad.
+                    traceback.print_exc()
+                    print("Asgard: gamepad action %r failed; the pad stays on." % action, file=sys.stderr)
             if reader.name != shown[0]:
                 trace("controller:", reader.name or "none")
                 shown[0] = reader.name
