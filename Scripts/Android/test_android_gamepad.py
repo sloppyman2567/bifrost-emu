@@ -99,9 +99,11 @@ class PadReaderTests(unittest.TestCase):
         self.assertEqual(self.reader.label(pads.EAST, "B"), "Circle")
         self.assertEqual(self.reader.label(pads.WEST, "X"), "X")              # unreported: the default
         self.assertTrue(self.reader.connected)
+        self.assertEqual(self.reader.name, "one")
         self.backend.pads = []
         self.reader.poll()
         self.assertFalse(self.reader.connected)
+        self.assertEqual(self.reader.name, "")
 
 
 class KeysTests(unittest.TestCase):
@@ -134,6 +136,11 @@ class BackendTests(unittest.TestCase):
     def test_without_sdl3_there_is_no_backend_and_no_error(self):
         with patch.object(pads, "find_sdl3", return_value=None):
             self.assertIsNone(pads.open_backend())
+
+    def test_a_missing_sdl3_says_why(self):
+        with patch.object(pads, "find_sdl3", return_value=None):
+            pads.open_backend()
+        self.assertIn("libSDL3", pads.STATUS["reason"])
 
     def test_the_opt_out_opens_nothing(self):
         with patch.dict(os.environ, {"BIFROST_NO_GAMEPAD": "1"}), patch.object(pads, "Sdl3Backend") as backend:

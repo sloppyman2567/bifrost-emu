@@ -390,6 +390,12 @@ asks for the focus back.
 Only a library window in front reacts: a game started from the library reads the same pad, so a press there never also launches
 or stops something here, and a button still held when the library returns is ignored until it is released. A pad that fails is
 switched off for the session with its error on stderr; `BIFROST_NO_GAMEPAD=1` turns gamepad control off.
+
+To see whether the library sees a controller, look beside the app count in its header: it reads "6 apps · Steam Controller
+connected" while one is in use. If gamepad control is off, `asgard launcher` says why on stderr (SDL3 missing, no gamepad support,
+the opt-out). `python3 Scripts/Android/android_gamepad.py` is a live diagnostic: it lists the controllers SDL3 finds and prints
+each button or stick change and the library action it makes, so it shows which step fails (no controller found, a controller
+whose presses never arrive, or presses that do arrive).
 On SteamOS, add the launcher as a non-Steam game and give it a **gamepad** controller layout: Steam's default for such
 shortcuts is keyboard and mouse, and the library then sees no pad at all. This was built and tested with a fake pad on Qt's
 offscreen platform only; it has not been tried with a real pad, Game Mode or gamescope.

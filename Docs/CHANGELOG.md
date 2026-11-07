@@ -54,6 +54,11 @@ there (guided provisioning, update/reinstall) remain in progress.
   and leaves out the device-property table, which needs a keyboard. The desktop dialog also takes the pad (Up and Down walk
   the controls, A toggles or opens a combo box's list, LB and RB switch tabs, the property table lets focus out at its
   first and last row) and draws a ring around the focused control, which check boxes and combo boxes did not show.
+- The library shows which controller it sees ("6 apps · Steam Controller connected"), says on stderr why gamepad control is off
+  when it is, and `python3 Scripts/Android/android_gamepad.py` prints what SDL3 reports and the action each press makes. It also
+  counts an open popup menu or dialog as the application being in front. Written because gamepad control did not respond for the
+  maintainer on a Steam Controller, the cause was not found (SDL3 lists the controller and its raw reports arrive, but no press
+  was observed from here), and these show which step fails.
 - Fixed: the library keeps the focused card focused when the grid is rebuilt (sorting dropped the focus), and `reflow` skips an
   order entry that has no card; a resize during the layout switch hit that and aborted the process with a `KeyError`.
 

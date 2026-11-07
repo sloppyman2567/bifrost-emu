@@ -1098,7 +1098,7 @@ def build(state, application, settings=None, pads=None):
             self.order, self.announce = [], None
             self.settings = settings or QSettings("Asgard", "Library")
             # layout: auto follows the input (a pad press switches to the gamepad layout), or big, or desktop.
-            self.big, self.pad_layout, self.pad_reader = False, str(self.settings.value("layout", "auto")), None
+            self.big, self.pad_layout, self.pad_reader, self.pad_name = False, str(self.settings.value("layout", "auto")), None, ""
             self.card_limits, self.fullscreen_wanted, self.was_active = (MIN_CARD, MAX_CARD), False, set()
             self.metrics, self.polled, self.install_queue, self.install_batch = None, 0.0, [], None
             self.setWindowTitle("Asgard"); self.setMinimumSize(720, 480); self.setAcceptDrops(True)
@@ -1417,8 +1417,7 @@ def build(state, application, settings=None, pads=None):
             order = [a["package"] for a in visible]
             if relayout or order != self.order: self.reflow(order)
             self.update_hints()
-            running = sum(a["session"].get("state") in ACTIVE for a in self.apps)
-            self.summary.setText(f"{len(self.apps)} app{'s' * (len(self.apps) != 1)}" + (f" · {running} running" if running else ""))
+            self.update_summary()
             if not self.apps:
                 self.empty_title.setText("No apps yet")
                 self.empty_hint.setText("Install an APK, APKM, APKS or XAPK file, or drop one anywhere in this window.")
@@ -1431,6 +1430,15 @@ def build(state, application, settings=None, pads=None):
                 self.empty_install.hide(); self.pages.setCurrentIndex(1)
             else:
                 self.pages.setCurrentIndex(0)
+
+        def update_summary(self):
+            running = sum(a["session"].get("state") in ACTIVE for a in self.apps)
+            self.summary.setText(f"{len(self.apps)} app{'s' * (len(self.apps) != 1)}" + (f" · {running} running" if running else "")
+                                 + (f" · {self.pad_name} connected" if self.pad_name else ""))
+
+        def pad_status(self, name):
+            """The controller the library sees, shown beside the app count so that it is plain whether one is in use."""
+            self.pad_name = name; self.update_summary()
 
         def reflow(self, order=None):
             if order is not None: self.order = order
@@ -1768,6 +1776,7 @@ def build(state, application, settings=None, pads=None):
     window = Library()
     backend = android_gamepad.open_backend() if pads is None else (pads or None)
     if backend: android_gamepad.connect(window, application, backend)
+    elif pads is None: print("Asgard: gamepad control is off: " + android_gamepad.STATUS["reason"], file=sys.stderr)
     window.apply_theme(); window.update_hints()
     return window
 

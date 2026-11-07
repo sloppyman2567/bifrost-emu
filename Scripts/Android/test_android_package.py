@@ -1136,6 +1136,13 @@ class LauncherLibraryTests(unittest.TestCase):
         window.reflow()
         self.assertNotIn("org.fixture.gone", window.order)
 
+    def test_the_library_says_which_controller_it_sees(self):
+        window = self.pad_window()                                  # its first poll has found the pad
+        self.assertTrue(window.summary.text().endswith("· Fake pad connected"), window.summary.text())
+        self.pad.read = lambda: []
+        window.pad_tick(); self.settle()
+        self.assertNotIn("connected", window.summary.text())
+
     def test_a_failing_pad_switches_itself_off_instead_of_aborting_the_library(self):
         import android_gamepad as pads
         window = self.pad_window()

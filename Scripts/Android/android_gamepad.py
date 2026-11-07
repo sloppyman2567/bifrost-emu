@@ -44,7 +44,7 @@ class PadReader:
         self.seen = set()     # actions that were down at the previous poll
         self.stick = None     # the direction the left stick is holding, with hysteresis
         self.baseline = True  # the next poll only records what is already held
-        self.labels, self.connected = {}, False
+        self.labels, self.connected, self.name = {}, False, ""
 
     def reset(self):
         """Forget what is held; whatever is down now is ignored until it is released."""
@@ -69,6 +69,7 @@ class PadReader:
         """The actions that begin now, plus held directions as they repeat, in a stable order."""
         pads = self.backend.read()
         self.labels, self.connected = (pads[0]["labels"] if pads else {}), bool(pads)
+        self.name = pads[0]["name"] if pads else ""
         now, down = self.clock(), self.down(pads)
         if self.baseline:
             self.baseline, self.seen = False, down
@@ -180,14 +181,22 @@ def in_game_mode(environment=None):
     return environment.get("SteamGamepadUI") == "1" or bool(environment.get("GAMESCOPE_WAYLAND_DISPLAY"))
 
 
+STATUS = {"reason": ""}  # why open_backend() returned None
+
+
 def open_backend():
-    """An `Sdl3Backend`, or None when SDL3 is missing or has no gamepad support: the launcher then works as before."""
+    """An `Sdl3Backend`, or None when SDL3 is missing or has no gamepad support: the launcher then works as before.
+    STATUS["reason"] says why not."""
     if os.environ.get("BIFROST_NO_GAMEPAD") == "1":
+        STATUS["reason"] = "BIFROST_NO_GAMEPAD=1"
         return None
     try:
-        return Sdl3Backend()
-    except (OSError, AttributeError):
+        backend = Sdl3Backend()
+    except (OSError, AttributeError) as error:
+        STATUS["reason"] = str(error) or type(error).__name__
         return None
+    STATUS["reason"] = ""
+    return backend
 
 
 ACTIVE_INTERVAL, IDLE_INTERVAL, SEARCH_INTERVAL = 16, 300, 500  # ms: pad connected and window in front, not in front, no pad
@@ -210,7 +219,7 @@ def connect(window, application, backend):
              "Escape": (key.Key_Escape, Qt.KeyboardModifier.NoModifier), "Menu": (key.Key_Menu, Qt.KeyboardModifier.NoModifier),
              "Ctrl+Tab": (key.Key_Tab, Qt.KeyboardModifier.ControlModifier),
              "Ctrl+Backtab": (key.Key_Backtab, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)}
-    reader, timer = PadReader(backend), QTimer(window)
+    reader, timer, shown = PadReader(backend), QTimer(window), [None]   # shown: the pad name the window was last told of
 
     def kind(widget, action):
         if widget is not None and widget.objectName() == "card": return "card"
@@ -261,6 +270,9 @@ def connect(window, application, backend):
             if not in_front():
                 reader.reset(); timer.setInterval(IDLE_INTERVAL); return
             for action in reader.poll(): handle(action)
+            if reader.name != shown[0]:
+                shown[0] = reader.name
+                if hasattr(window, "pad_status"): window.pad_status(reader.name)
             timer.setInterval(ACTIVE_INTERVAL if reader.connected else SEARCH_INTERVAL)
         except Exception:
             traceback.print_exc()
@@ -309,3 +321,37 @@ def focus_ring(dialog):
     application.focusChanged.connect(place)
     dialog.finished.connect(release)
     return ring
+
+
+def main():
+    """`python3 android_gamepad.py`: what the launcher's gamepad control sees, live. Press buttons and move the left stick;
+    each line is a button or stick change as SDL3 reports it, and the launcher action it makes. Ctrl-C stops."""
+    sys.stdout.reconfigure(line_buffering=True)
+    backend = open_backend()
+    if backend is None:
+        print("Gamepad control is off: " + STATUS["reason"])
+        return 1
+    reader, last, announced = PadReader(backend), None, None
+    print("SDL3 is loaded. Looking for a controller; press buttons and move the left stick. Ctrl-C stops.")
+    try:
+        while True:
+            pads = backend.read()
+            names = [pad["name"] for pad in pads]
+            if names != announced:
+                announced = names
+                print("Controllers: " + (", ".join(names) if names else "none found yet"))
+            state = [(pad["name"], sorted(pad["buttons"]), {axis: round(value, 2) for axis, value in pad["axes"].items() if abs(value) > 0.2})
+                     for pad in pads]
+            if pads and state != last:
+                print("  held:", [(name, buttons, axes) for name, buttons, axes in state if buttons or axes] or "nothing")
+            last = state
+            actions = reader.poll()
+            if actions: print("  -> launcher action: " + ", ".join(actions))
+            time.sleep(0.016)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
