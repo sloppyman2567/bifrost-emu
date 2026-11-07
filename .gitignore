@@ -44,6 +44,8 @@ Tools/sdl2-debs/
 # SDL2 SDK (extracted by Tools/Fetch/fetch-sdl2-headers.sh)
 Tools/sdl2-sdk/
 Tools/android-tools/
+Tools/sdl3/
+Tools/.sdl3-build-*/
 Tools/android-runtime/
 android-state/
 Tools/graphics-smoke/

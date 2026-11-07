@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Install a pinned official Linux AAPT2; no Android runtime is installed."""
-import hashlib
 import io
 import os
 from pathlib import Path
 import tempfile
-import urllib.request
 import zipfile
 
 import download_progress
@@ -18,11 +16,11 @@ URL = ("https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/"
 
 def main():
     destination = Path(__file__).resolve().parent.parent / "android-tools"
-    with urllib.request.urlopen(URL, timeout=30) as response:
-        archive = download_progress.read(response, 8 * 1024 * 1024, "AAPT2")
-    if len(archive) > 8 * 1024 * 1024 or hashlib.sha256(archive).hexdigest() != SHA256:
-        raise SystemExit("AAPT2 archive does not match the pinned SHA-256")
     destination.mkdir(exist_ok=True)
+    jar = download_progress.fetch(URL, destination / f"aapt2-{VERSION}-linux.jar", "AAPT2", 8 * 1024 * 1024,
+                                  check=download_progress.sha256_check(SHA256, "AAPT2 archive"), timeout=30)
+    archive = jar.read_bytes()
+    jar.unlink()
     with zipfile.ZipFile(io.BytesIO(archive)) as source:
         for name in ("aapt2", "NOTICE"):
             with tempfile.NamedTemporaryFile(dir=destination, delete=False) as temporary:

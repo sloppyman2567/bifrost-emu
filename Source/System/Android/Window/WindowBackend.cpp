@@ -10,6 +10,7 @@
 #include <deque>
 #include <dlfcn.h>
 #include <map>
+#include <string>
 #include <vector>
 #if defined(BIFROST_USE_SDL3)
 #include <SDL3/SDL.h>
@@ -48,6 +49,23 @@ namespace {
   X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio) X(GetModState) \
   X(CreateSystemCursor) X(SetCursor) X(DestroyCursor) X(ShowCursor) X(HideCursor) \
   X(OpenGamepad) X(CloseGamepad) X(GetGamepadName) X(GetGamepadVendor) X(GetGamepadProduct)
+// libSDL3.so.0 from the system; else the copy Tools/Fetch/fetch-sdl3.py builds for hosts without SDL3:
+// <prefix>/lib/bifrost beside an installed emulator, or Tools/sdl3/lib in the checkout above the executable.
+void *open_sdl3() {
+  if (void *system = dlopen("libSDL3.so.0", RTLD_NOW | RTLD_LOCAL)) return system;
+  char exe[PATH_MAX];
+  const ssize_t length = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (length <= 0) return nullptr;
+  std::string directory(exe, static_cast<size_t>(length));
+  for (int depth = 0; depth < 5; ++depth) {
+    const size_t slash = directory.rfind('/');
+    if (slash == std::string::npos || slash == 0) break;
+    directory.resize(slash);
+    for (const char *relative : {"/lib/bifrost/libSDL3.so.0", "/Tools/sdl3/lib/libSDL3.so.0"})
+      if (void *local = dlopen((directory + relative).c_str(), RTLD_NOW | RTLD_LOCAL)) return local;
+  }
+  return nullptr;
+}
 struct Sdl3 {
 #define DECLARE(fn) decltype(&SDL_##fn) fn = nullptr;
   SDL3_FUNCTIONS(DECLARE)
@@ -55,7 +73,7 @@ struct Sdl3 {
   ~Sdl3() { if (module) dlclose(module); }
   bool load() {
     if (module) return true;
-    void *candidate = dlopen("libSDL3.so.0", RTLD_NOW | RTLD_LOCAL);
+    void *candidate = open_sdl3();
     if (!candidate) return false;
 #define RESOLVE(fn) fn = reinterpret_cast<decltype(fn)>(dlsym(candidate, "SDL_" #fn)); \
     if (!fn) { dlclose(candidate); return false; }

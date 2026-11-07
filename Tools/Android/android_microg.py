@@ -14,11 +14,10 @@ from http.client import HTTPException
 from pathlib import Path
 import re
 import shutil
-import tempfile
-import urllib.request
 import zipfile
 
-from android_media import ROOT, copy_bytes, digest
+import download_progress
+from android_media import ROOT, digest
 
 VERSION = "v0.3.17.252432"
 URL = f"https://github.com/microg/GmsCore/releases/download/{VERSION}/"
@@ -39,20 +38,9 @@ def archive(package, cache=ROOT / "build/microg"):
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / name
     if not path.is_file() or path.stat().st_size != size:
-        with tempfile.NamedTemporaryFile(dir=cache, delete=False) as stream:
-            temporary = Path(stream.name)
-            try:
-                with urllib.request.urlopen(URL + name, timeout=60) as response:
-                    copy_bytes(response, stream, size, f"microG {name}")
-                    if response.read(1):
-                        raise ValueError(f"Oversized microG download: {name}")
-                stream.close()
-                if digest(temporary) != sha256:
-                    raise ValueError(f"microG SHA-256 mismatch: {name}")
-                temporary.chmod(0o644)  # NamedTemporaryFile is 0600; installs share this file
-                temporary.replace(path)
-            finally:
-                temporary.unlink(missing_ok=True)
+        download_progress.fetch(URL + name, path, f"microG {name}", size,
+                                check=download_progress.sha256_check(sha256, f"microG {name}"))
+        path.chmod(0o644)  # installs share this file
     if path.stat().st_size != size or digest(path) != sha256:
         raise ValueError(f"Pinned microG SHA-256 mismatch: {name}")
     return path

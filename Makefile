@@ -28,6 +28,13 @@
 #   Include/             — public Bifrost/ API + Generated/ opgen tables
 # Includes are spelled relative to Source/ or Include/.
 
+# Host tools found off PATH (Scripts/Setup/find-host-tools.sh links them into build/host-bin, e.g. debugfs
+# from /usr/sbin) and the SDL3 that Tools/Fetch/fetch-sdl3.py builds into Tools/sdl3 are visible to every
+# recipe and pkg-config call. Both come last: a tool on PATH wins, and the SDL3 build exists only when the
+# system has none.
+export PATH := $(PATH):$(CURDIR)/build/host-bin
+export PKG_CONFIG_PATH := $(if $(PKG_CONFIG_PATH),$(PKG_CONFIG_PATH):)$(CURDIR)/Tools/sdl3/lib/pkgconfig
+
 CXX      ?= g++
 INCDIR   := Include
 CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra -I$(INCDIR) -ISource -MMD -MP
@@ -438,11 +445,18 @@ PREFIX ?= /usr/local
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/
+	@if [ -e Tools/sdl3/lib/libSDL3.so.0 ]; then \
+		install -d $(DESTDIR)$(PREFIX)/lib/bifrost; \
+		cp -a Tools/sdl3/lib/libSDL3.so* $(DESTDIR)$(PREFIX)/lib/bifrost/; \
+		echo "Installed the SDL3 built by Tools/Fetch/fetch-sdl3.py to $(PREFIX)/lib/bifrost."; \
+	fi
 	@echo "Dynamic programs also need a rootfs: make install-rootfs (system) or Scripts/Setup/install-rootfs.sh (user)."
 	@echo "Android apps need Asgard: make install-asgard (system) or Scripts/Setup/install-asgard.py (user)."
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/bifrost-emu
+	rm -f $(DESTDIR)$(PREFIX)/lib/bifrost/libSDL3.so*
+	-rmdir $(DESTDIR)$(PREFIX)/lib/bifrost 2>/dev/null
 
 # Debian/Ubuntu package (needs build-essential, debhelper and the Build-Depends in debian/control):
 # writes ../bifrost-emu_<version>_amd64.deb. Install it with `sudo apt install ../bifrost-emu_*.deb`.
@@ -482,6 +496,7 @@ bootstrap:
 	fi
 	Scripts/Setup/install-asgard.py --prefix "$(DESTDIR)$(BOOTSTRAP_PREFIX)" --check-prefix
 	Scripts/Setup/install-deps.sh
+	python3 Tools/Fetch/fetch-sdl3.py || echo "warning: SDL3 could not be built; Android apps will have no host window"
 	$(MAKE) -j$$(nproc) install PREFIX="$(BOOTSTRAP_PREFIX)"
 	$(MAKE) provision-asgard PREFIX="$(BOOTSTRAP_PREFIX)"
 	@case ":$$PATH:" in *":$(BOOTSTRAP_PREFIX)/bin:"*) ;; \
@@ -493,12 +508,7 @@ provision-asgard:
 	Scripts/Setup/install-asgard.py --prefix "$(DESTDIR)$(PREFIX)"
 
 android-provision:
-	@missing=""; for tool in $(ASGARD_TOOLS); do command -v "$$tool" >/dev/null 2>&1 || missing="$$missing $$tool"; done; \
-	if [ -n "$$missing" ]; then \
-		echo "error: missing tools:$$missing" >&2; \
-		echo "  make deps installs them" >&2; \
-		exit 1; \
-	fi
+	Scripts/Setup/find-host-tools.sh $(ASGARD_TOOLS)
 	python3 Tools/Android/fetch-android-runtime.py
 	python3 Tools/Android/fetch-aapt2.py
 	python3 Tools/Android/fetch-android-package-tools.py

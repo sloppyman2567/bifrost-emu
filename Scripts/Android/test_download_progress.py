@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
-"""download_progress.py: the progress lines of the Android setup's downloads (terminal and piped), and the helpers."""
+"""download_progress.py: the progress lines of the Android setup's downloads (terminal and piped), the helpers, and
+fetch, which keeps and resumes an interrupted download (against a local HTTP server that can honour or ignore Range)."""
+import hashlib
+import http.server
 import io
 from pathlib import Path
+import re
+import shutil
 import sys
+import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
@@ -112,6 +121,158 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(sink.getvalue(), data)
         with self.assertRaisesRegex(ValueError, "Truncated Android image"):
             android_media.copy_bytes(io.BytesIO(data[:100]), io.BytesIO(), len(data), "download")
+
+
+class Server:
+    """Serves `data` at /file. `ranges` False ignores Range; `cut` ends the first response after that many bytes."""
+
+    def __init__(self, data, ranges=True, cut=None):
+        self.data, self.requests = data, []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *arguments):
+                pass
+
+            def do_GET(self):
+                outer.requests.append(self.headers.get("Range"))
+                match = re.fullmatch(r"bytes=(\d+)-", self.headers.get("Range") or "")
+                start = int(match.group(1)) if match and ranges else 0
+                if start >= len(data):
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{len(data)}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(206 if match and ranges else 200)
+                if match and ranges:
+                    self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+                body = data[start:]
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    if cut is not None and len(outer.requests) == 1:
+                        self.wfile.write(body[:cut])
+                        self.close_connection = True
+                    else:
+                        self.wfile.write(body)
+                except ConnectionError:
+                    pass  # the client gave up (Ctrl-C, size limit)
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_port}/file"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def interrupted_after(blocks):
+    """An opener whose download raises KeyboardInterrupt (Ctrl-C) once `blocks` reads have returned."""
+    def opener(request, timeout):
+        response = urllib.request.urlopen(request, timeout=timeout)
+        read, count = response.read, [0]
+
+        def limited(amount):
+            count[0] += 1
+            if count[0] > blocks:
+                raise KeyboardInterrupt
+            return read(amount)
+        response.read = limited
+        return response
+    return opener
+
+
+DATA = bytes(range(256)) * 4096 * 3 + b"tail"  # 3 MiB and a bit: four reads of at most 1 MiB
+
+
+class FetchTests(unittest.TestCase):
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp(prefix="bifrost-fetch."))
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        self.target = self.work / "image.zip"
+        self.part = self.work / "image.zip.part"
+        self.check = progress.sha256_check(hashlib.sha256(DATA).hexdigest(), "image")
+
+    def serve(self, **options):
+        server = Server(options.pop("data", DATA), **options)
+        self.addCleanup(server.close)
+        return server
+
+    def fetch(self, server, **options):
+        stream = options.setdefault("stream", Stream(False))
+        options.setdefault("check", self.check)
+        options.setdefault("pause", 0)
+        progress.fetch(server.url, self.target, "image", options.pop("limit", len(DATA)), **options)
+        return stream.getvalue()
+
+    def test_a_complete_download_replaces_the_destination_and_leaves_no_part(self):
+        self.fetch(self.serve())
+        self.assertEqual(self.target.read_bytes(), DATA)
+        self.assertFalse(self.part.exists())
+
+    def test_ctrl_c_keeps_the_partial_file_and_the_next_run_resumes_it(self):
+        server = self.serve()
+        stream = Stream(False)
+        with self.assertRaises(SystemExit) as raised:
+            self.fetch(server, opener=interrupted_after(2), stream=stream)
+        self.assertEqual(raised.exception.code, 130)
+        self.assertEqual(self.part.read_bytes(), DATA[:2 * MIB])
+        self.assertFalse(self.target.exists())
+        self.assertIn("kept in", stream.getvalue())
+        output = self.fetch(server)
+        self.assertEqual(server.requests, [None, f"bytes={2 * MIB}-"])  # only the missing end was requested
+        self.assertEqual(self.target.read_bytes(), DATA)
+        self.assertFalse(self.part.exists())
+        self.assertIn("resuming at 2.0 MiB", output)
+
+    def test_a_server_that_ignores_range_restarts_the_download(self):
+        server = self.serve(ranges=False)
+        self.part.write_bytes(DATA[:MIB])
+        self.fetch(server)
+        self.assertEqual(self.target.read_bytes(), DATA)
+
+    def test_a_dropped_connection_resumes_by_itself(self):
+        server = self.serve(cut=MIB + 5)
+        output = self.fetch(server)
+        self.assertEqual(self.target.read_bytes(), DATA)
+        self.assertEqual(server.requests, [None, f"bytes={MIB + 5}-"])
+        self.assertIn("resuming", output)
+
+    def test_a_part_that_already_holds_every_byte_is_finished_without_a_transfer(self):
+        server = self.serve()
+        self.part.write_bytes(DATA)
+        self.fetch(server)
+        self.assertEqual(self.target.read_bytes(), DATA)
+        self.assertEqual(len(server.requests), 1)  # the 416 answer only
+
+    def test_a_corrupt_part_is_dropped_and_downloaded_again_once(self):
+        server = self.serve()
+        self.part.write_bytes(b"x" * MIB)
+        output = self.fetch(server)
+        self.assertEqual(self.target.read_bytes(), DATA)
+        self.assertEqual(server.requests, [f"bytes={MIB}-", None])
+        self.assertIn("downloading it again", output)
+
+    def test_a_download_that_fails_its_check_is_removed_and_never_installed(self):
+        server = self.serve(data=DATA[:-1] + b"X")
+        with self.assertRaisesRegex(ValueError, "image SHA-256 mismatch"):
+            self.fetch(server)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_the_size_limit_stops_the_download_and_keeps_nothing(self):
+        with self.assertRaisesRegex(ValueError, "exceeds the download bound"):
+            self.fetch(self.serve(), limit=MIB)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_a_missing_file_is_an_error_not_a_retry(self):
+        server = self.serve()
+        server.url += "-missing"
+        server.httpd.RequestHandlerClass.do_GET = lambda handler: handler.send_error(404)
+        with self.assertRaises(urllib.error.HTTPError):
+            self.fetch(server)
+        self.assertEqual(list(self.work.iterdir()), [])
 
 
 if __name__ == "__main__":

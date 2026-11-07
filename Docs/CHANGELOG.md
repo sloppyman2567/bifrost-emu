@@ -36,6 +36,26 @@ there (guided provisioning, update/reinstall) remain in progress.
   Using a pad hides the pointer until the mouse moves, as Steam does. The maintainer plays Subway Surfers with the 2026
   Steam Controller (2026-11-06). Rumble, back paddles and remapping are not implemented.
 
+### Added (setup without root)
+
+- `make bootstrap` finds what is already installed instead of failing at a generic check. `Scripts/Setup/find-host-tools.sh`
+  looks for each Android setup tool off `PATH` too: `debugfs` in `/usr/sbin` (what stopped a fresh Debian 13 install, where
+  an ordinary user's `PATH` has no sbin), JDKs under `/usr/lib/jvm`, versioned `clang-N`, `~/.local/bin`, `/opt`, Nix,
+  Homebrew, conda, SDKMAN and `BIFROST_TOOL_DIRS`. A tool found there is linked into `build/host-bin`, which the Makefile
+  appends to `PATH`; one that cannot be found is named with the package that provides it. `install-deps.sh` likewise counts
+  a tool, a `pkg-config` library or PyQt6 found without its package as present, so it asks for `sudo` only for what is
+  really missing, and its dry run shows what a real run would install.
+- Where the distribution has no SDL3 package, `make bootstrap` builds SDL 3.4.18 (`Tools/Fetch/fetch-sdl3.py`, pinned
+  SHA-256) into `Tools/sdl3` after `install-deps.sh` has installed what building it needs on apt systems, and fails the
+  build when it would have no X11 or Wayland support. The Makefile finds it through `PKG_CONFIG_PATH`, `make install`
+  copies it to `PREFIX/lib/bifrost`, and the Android window loads `libSDL3.so.0` from there or from the checkout when the
+  system has none.
+- Downloads of the Android setup are resumable. `download_progress.fetch` keeps an interrupted download (Ctrl-C, a lost
+  connection, a crash) as `NAME.part`, resumes it with an HTTP range request, restarts it where the server ignores ranges,
+  retries a dropped connection by resuming, and replaces the destination only after the pinned SHA-256 matches (a resumed
+  file that fails it is downloaded once more from the start). The Android 15 system image, microG, AAPT2, the Bionic
+  runtime and the package tools use it; before, Ctrl-C deleted a 734 MB image download.
+
 ### Added (project page)
 
 - A minimal project site for GitHub Pages, a home page and a games page with the full compatibility list,

@@ -5,7 +5,6 @@ import base64
 import hashlib
 from pathlib import Path
 import tempfile
-import urllib.request
 
 import download_progress
 
@@ -35,15 +34,14 @@ def install(destination):
             if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
                 raise ValueError(f"Refusing modified tool: {target}")
             continue
-        with urllib.request.urlopen(
-            BASE + remote + "?format=TEXT", timeout=60
-        ) as response:
-            encoded = download_progress.read(response, 48 * 1024 * 1024, name)
-        if len(encoded) > 48 * 1024 * 1024:
-            raise ValueError("Tool exceeds download bound")
-        data = base64.b64decode(encoded, validate=True)
-        if hashlib.sha256(data).hexdigest() != digest:
-            raise ValueError(f"Hash mismatch: {name}")
+        # The server sends base64 text; an interrupted download resumes from the text kept in the destination.
+        def check(path, name=name, digest=digest):
+            if hashlib.sha256(base64.b64decode(path.read_bytes(), validate=True)).hexdigest() != digest:
+                raise ValueError(f"Hash mismatch: {name}")
+        encoded = download_progress.fetch(BASE + remote + "?format=TEXT", destination / f".{name}.b64", name,
+                                          48 * 1024 * 1024, check=check)
+        data = base64.b64decode(encoded.read_bytes(), validate=True)
+        encoded.unlink()
         with tempfile.NamedTemporaryFile(dir=destination, delete=False) as output:
             temporary = Path(output.name)
             try:

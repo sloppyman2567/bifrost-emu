@@ -41,8 +41,12 @@ such as "misc", "common" or "core". The current version lives in
   The icon and social preview card live in `Assets/Branding/`; the card is also uploaded by hand in the repository's
   Settings, Social preview, so re-upload it when it changes. Its build fails when a playable or blocked app in `compatibility.json` has no matching README row
   or a different status, so record a compatibility change in both.
-- Downloads in the setup tools read through `Tools/Android/download_progress.py` (progress on a terminal, sparse
-  lines in a log) so a long fetch never looks hung; a new fetcher uses it too.
+- Downloads in the setup tools go through `download_progress.fetch` in `Tools/Android/download_progress.py` (progress on a
+  terminal, sparse lines in a log; an interrupted download stays as `NAME.part` and resumes, and only a verified file replaces
+  the destination), so a long fetch never looks hung and Ctrl-C never costs it; a new fetcher uses it too.
+- Setup scripts find host tools through `Scripts/Setup/find-host-tools.sh` (sbin, JDK and LLVM directories, `~/.local/bin`,
+  `BIFROST_TOOL_DIRS`), never a bare `command -v`: `debugfs` is off an ordinary Debian user's `PATH`. Hosts without SDL3 build
+  it with `Tools/Fetch/fetch-sdl3.py` into `Tools/sdl3`.
 - Preserve existing uncommitted work. Keep changes scoped; work on the current
   branch unless asked otherwise. Commit related code and docs only; never push
   without explicit approval.

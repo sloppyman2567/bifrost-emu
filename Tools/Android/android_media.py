@@ -12,7 +12,6 @@ import shutil
 import struct
 import subprocess
 import tempfile
-import urllib.request
 import zipfile
 
 import android_super
@@ -160,19 +159,9 @@ def image_archive(archive):
         cache.mkdir(parents=True, exist_ok=True)
         archive = cache / "arm64-v8a-35_r02.zip"
         if not archive.exists():
-            with tempfile.NamedTemporaryFile(dir=cache, delete=False) as stream:
-                temporary = Path(stream.name)
-                try:
-                    with urllib.request.urlopen(URL, timeout=60) as response:
-                        copy_bytes(response, stream, IMAGE_SIZE, "Android 15 system image")
-                        if response.read(1):
-                            raise ValueError("Oversized Android image download")
-                    stream.close()
-                    if digest(temporary) != IMAGE_SHA256:
-                        raise ValueError("Android image SHA-256 mismatch")
-                    temporary.replace(archive)
-                finally:
-                    temporary.unlink(missing_ok=True)
+            # An interrupted download stays in arm64-v8a-35_r02.zip.part and is resumed by the next run.
+            download_progress.fetch(URL, archive, "Android 15 system image", IMAGE_SIZE,
+                                    check=download_progress.sha256_check(IMAGE_SHA256, "Android image"))
     if archive.stat().st_size != IMAGE_SIZE or digest(archive) != IMAGE_SHA256:
         raise ValueError("Pinned Android image SHA-256 mismatch")
     return archive

@@ -86,7 +86,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Testing/test_guest_cwd.sh         # getcwd/cd follow the host cwd without a sandbox
 ./Scripts/Android/test_android_super.py        # dynamic-partition unpacker vs a synthetic image (--compare SUPER.img: vs lpunpack)
 ./Scripts/Android/test_android_adapter_exports.py # the built managed libGLESv2.so exports every core ES 2.0-3.2 command and libandroid.so exports ASurfaceControl_createFromWindow (an app library's missing import fails its whole dlopen)
-./Scripts/Android/test_download_progress.py    # asgard-setup's download progress lines (terminal and piped), injected clock
+./Scripts/Android/test_download_progress.py    # asgard-setup's download progress lines (terminal and piped), and resumable fetch against a local HTTP server
 ./Scripts/Android/test_asgard_stale_broker.py  # a broker an upgrade left running: restarted when idle, refused when busy; realm stop --force
 ./Scripts/Android/test_asgard_process_host.py   # service children carry --asgard-service-parent and die with a killed supervisor (real emulator, plus a control)
 make test-shader-index-conversion               # the int() rewrite glCompileShader retries a rejected ES 3.x source with; gles_uint_index (run_tests.sh) checks it through the thunk on the host driver
@@ -100,7 +100,7 @@ make test-android-wheel-gestures               # wheel/pinch/middle-drag as two-
 ./Scripts/Testing/test_host_cpu_models.sh   # JIT fixtures on older x86-64 CPUs under qemu-x86_64; exit 77 if it cannot run
 make test-audio-declick                     # a stream leaving or rejoining the mix never steps the output (no sound device needed)
 ./Scripts/Testing/test_asgard_install.py    # install-asgard.py install, update, removal, provisioning checks and microG download (fake checkout, offline)
-./Scripts/Testing/test_install_deps.py      # install-deps.sh per package manager, with fake managers (offline)
+./Scripts/Testing/test_install_deps.py      # install-deps.sh per package manager, with fake managers (offline); tools/libraries found without their package, find-host-tools.sh, fetch-sdl3.py's window-system check
 ./Scripts/Testing/test_rootfs_library_fetch.py # the rootfs library fetchers and install-rootfs.sh --full against a broken or changed mirror (fake curl, offline)
 ./Scripts/Testing/test_late_tls.sh          # late GD/TLSDESC and rejected initial-exec
 ./Scripts/Testing/test_late_tls_pthread.sh  # existing/new threads, reuse, pointer/alignment/weak cases

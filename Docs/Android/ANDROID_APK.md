@@ -24,14 +24,24 @@ require guest ART and Android framework startup.
 On Debian and Ubuntu the `bifrost-emu-asgard` package does all of the provisioning below: install it and run `asgard-setup`
 (see the README). It prints a numbered heading for each of its nine steps, and every download shows its progress:
 on a terminal one line updates in place (`Android 15 system image  [=====>   ]  33%  8.0 MiB/24.0 MiB  6.4 MiB/s  ETA 0:02`),
-and piped into a log it prints a line per ten percent. The rest of this section is the route from a source
+and piped into a log it prints a line per ten percent. An interrupted download (Ctrl-C, a lost connection, a crash)
+is kept as `NAME.part` beside its destination, and the next run resumes it with an HTTP range request, or starts that file
+again where the server cannot resume; a finished file replaces the destination only after its SHA-256 matches, and a
+resumed file that fails the check is downloaded once more from the start. The rest of this section is the route from a source
 checkout.
 
 Provision Python 3.12 or newer, Clang/LLD, `debugfs` from e2fsprogs and a JDK containing
 `java` and `keytool`. Building the managed launcher also needs `javac`, found through `JAVAC`, `PATH`,
 `JAVA_HOME`, then the newest JDK under `/usr/lib/jvm`, `/usr/lib64/jvm` or `/usr/java`. The signing and manifest tools are checksum-pinned AOSP
 downloads; no full Android SDK installation is required. `make deps` (`Scripts/Setup/install-deps.sh`) installs all of
-these with apt, dnf, zypper or pacman, and asks for `sudo` only if something is missing. It keeps a JDK you already have. Python
+these with apt, dnf, zypper or pacman, and asks for `sudo` only if something is missing. It keeps a JDK you already have, and
+counts a tool or a `pkg-config` library as present wherever it is. `make android-provision` finds these tools without root
+too (`Scripts/Setup/find-host-tools.sh`): `debugfs` in `/usr/sbin`, `javac` and `keytool` under `/usr/lib/jvm`, versioned
+`clang-N`, `~/.local/bin`, `/opt`, Nix, Homebrew, conda, SDKMAN and `BIFROST_TOOL_DIRS`. A tool found off `PATH` is linked into
+`build/host-bin`, which the Makefile appends to `PATH`, so a tool on `PATH` is never shadowed; what is missing is named with the
+package that provides it. Without an SDL3 package, `make bootstrap` builds SDL 3.4.18 into `Tools/sdl3`
+(`Tools/Fetch/fetch-sdl3.py`, pinned SHA-256, CMake) and refuses a build that has neither X11 nor Wayland; the emulator
+loads it from `PREFIX/lib/bifrost` or the checkout's `Tools/sdl3/lib` when the system has no `libSDL3.so.0`. Python
 comes from the distribution and `make deps` does not check its version: Debian 12's 3.11, for one, is too old. Not every
 distribution has been shown to work; see the [support matrix](../SUPPORT.md).
 

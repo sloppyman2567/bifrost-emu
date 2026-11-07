@@ -8,7 +8,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import urllib.request
 import zipfile
 
 import download_progress
@@ -51,11 +50,15 @@ def install(destination, archive=None):
             raise ValueError("Runtime archive exceeds the download bound")
         data = archive.read_bytes()
     else:
-        with urllib.request.urlopen(URL, timeout=60) as response:
-            encoded = download_progress.read(response, 32 * 1024 * 1024, "Bionic runtime")
-        if len(encoded) > 32 * 1024 * 1024:
-            raise ValueError("Runtime download exceeds the download bound")
-        data = base64.b64decode(encoded, validate=True)
+        # The server sends base64 text of the APEX; an interrupted download resumes from the text kept
+        # beside the destination.
+        def check(path):
+            if hashlib.sha256(base64.b64decode(path.read_bytes(), validate=True)).hexdigest() != SHA256:
+                raise ValueError("Pinned runtime SHA-256 mismatch")
+        encoded = download_progress.fetch(URL, destination.parent / ".bionic-runtime.b64", "Bionic runtime",
+                                          32 * 1024 * 1024, check=check)
+        data = base64.b64decode(encoded.read_bytes(), validate=True)
+        encoded.unlink()
     if hashlib.sha256(data).hexdigest() != SHA256:
         raise ValueError("Pinned runtime SHA-256 mismatch")
     destination.parent.mkdir(parents=True, exist_ok=True)

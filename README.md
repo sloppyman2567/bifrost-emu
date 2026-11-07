@@ -147,6 +147,13 @@ make bootstrap                         # about 1.5 GB of pinned downloads; PREFI
 `make bootstrap` and `make deps` need `make`, and bootstrap also needs Python. On a minimal system without them, run
 `Scripts/Setup/install-deps.sh` first: it needs only bash and installs both.
 
+Nothing here needs root for what is already installed. A tool that is present but not on your `PATH` is found anyway
+(`debugfs` lives in `/usr/sbin`, which an ordinary Debian user's `PATH` lacks; JDKs under `/usr/lib/jvm`, LLVM, `~/.local/bin`,
+Nix and Homebrew are searched too, and `BIFROST_TOOL_DIRS=DIR` adds a directory), and a library `pkg-config` finds is not
+installed again. Where the distribution has no SDL3 (Debian 12 and 13, Ubuntu 24.04), bootstrap installs what building it
+needs and builds SDL 3.4.18 from the pinned release into `Tools/sdl3`; it installs it beside the emulator
+(`PREFIX/lib/bifrost`). An interrupted download (Ctrl-C included) is kept as `NAME.part` and the next run resumes it.
+
 This is new and not yet confirmed end to end, and `make deps` has only been shown to work on some distributions: see the
 [support matrix](Docs/SUPPORT.md). If Bifrost is already installed elsewhere, such as `/usr/local`, this makes a second copy of
 about 1.1 GB, which takes over if `~/.local/bin` comes first on your `PATH`. To update an existing install instead, see
