@@ -110,6 +110,9 @@ app exit leaves the library and the other apps usable.
   runtime, not with a real app that needs it. It does not explain YouTube, which declares orientation, size and layout in
   `configChanges` and so is never relaunched. Open: trace why YouTube keeps its landscape layout when narrowed (what its
   `onConfigurationChanged` receives, the metrics it reads).
+- YouTube's first video codec on each new `SurfaceView` fails and is restarted: the queue is RGBA, the codec queues YUV and
+  `rearm` abandons the queue it holds ([details](Android/ANDROID_RUNTIME.md#host-media-decoding-2026-10-14)); playback recovers after about a
+  second. Open: read the frame from an opaque `ImageReader`'s `HardwareBuffer` (no rearm), or a per-app default queue format.
 - Measure frame pacing around ads before choosing a rendering fix: an ad-heavy session with the window-stats overlay on and an
   opt-in frame-time log (not written yet), split into the ad showing, the game while the ad loads, and closing it. The
   stall data below covers only main-thread blocks of about 1.5 s or more.

@@ -166,6 +166,9 @@ public final class FrameworkPackagesProbe {
         invalid(() -> pm.setComponentEnabledSetting(service, 99, PackageManager.DONT_KILL_APP));
         check(pm.getComponentEnabledSetting(service) == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
                 "rejected state update changed installed state");
+        // The client turns IPackageManager's "Unknown target package" into NameNotFoundException; YouTube asks from onStop.
+        check(!pm.isPackageSuspended(NAME), "installed package reported suspended");
+        missing(() -> pm.isPackageSuspended(NAME + ".missing"));
         missing(() -> pm.getReceiverInfo(new ComponentName(NAME, NAME + ".Missing"), 0));
         missing(() -> pm.getProviderInfo(new ComponentName(NAME, NAME + ".Missing"), 0));
         check(pm.resolveContentProvider(NAME + ".missing", 0) == null, "unknown authority found");

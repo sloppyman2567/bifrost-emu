@@ -977,6 +977,17 @@ decoded on the host; there are no Java or JNI codec substitutes.
   visible region and presents it: packing the `int[]` in the guest cost about
   150 ms for 1600×900 per frame, while the host path measures 1.5–3.2 ms and
   leaves the frame rate guest-render-bound.
+  **A producer of the other format ends its first codec (2026-11-08).** YouTube's video `SurfaceView` reports `format=4`, which is
+  `SurfaceView`'s default and is what every game reports too, so the format cannot say that a codec will connect. The queue is
+  then RGBA, the VP9 decoder (`c2.goldfish.vp9.decoder`) connects with `api:3` (media) and queues YUV, and
+  [`ImageReader_imageSetup`](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/media/jni/android_media_ImageReader.cpp)
+  (checked only for a non-opaque reader) releases that buffer and throws `UnsupportedOperationException`. `rearm` then replaces the
+  reader, which abandons the queue the codec holds: its `dequeueBuffer` returns -19, `GraphicsTracker` reports `allocate error(14)`,
+  Codec2 fails the work with `C2_CORRUPTED`, `MediaCodec` reports `0xe` and ExoPlayer creates a second codec on the rebuilt queue,
+  which works. Seen in 7 `APP_SURFACE_REARM` lines over 29 YouTube sessions (a new `SurfaceView` pays it again) and in no
+  other app; the second codec ran for seconds to minutes in the host media log. The cost is one failed codec and a restart per
+  new video view, not a failed video. Not fixed: a reader chosen up front needs a signal that does not exist before the
+  producer connects, and an opaque reader (no format check) needs the frame read from its `HardwareBuffer` natively.
   Binding seeds the host surface with the BufferQueue's creation dimensions;
   subsequent SurfaceView geometry controls its size. For an aliased native
   window, `ANativeWindow_getWidth/Height` report that host surface size,

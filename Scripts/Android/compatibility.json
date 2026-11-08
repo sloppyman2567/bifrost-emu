@@ -142,7 +142,7 @@
       "status": "title",
       "checked": "2026-10-28",
       "evidence": "The maintainer's screenshot shows the home screen (logo, search bar and the Home, Shorts, Subscriptions and You tabs). Later sessions that day searched and played video while its frame conversion was profiled. The maintainer has not reported it as playable.",
-      "notes": ["Shorts in a landscape window and the signed-in feed are not confirmed."]
+      "notes": ["Shorts in a landscape window and the signed-in feed are not confirmed.", "The first video codec on each new video view fails and is restarted (a session log of 2026-11-07), and its onStop ended the app until isPackageSuspendedForUser was answered (fixed, not yet run in YouTube)."]
     },
     "com.HoYoverse.Nap": {
       "name": "Zenless Zone Zero",

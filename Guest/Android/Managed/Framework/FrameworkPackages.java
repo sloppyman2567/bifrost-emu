@@ -471,6 +471,13 @@ final class FrameworkPackages {
                     if (state == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT) componentStates.remove(component);
                     else componentStates.put(component, state);
                     return null;
+                // IPackageManagerBase.isPackageSuspendedForUser (android-15.0.0_r1) reads the package's user state and
+                // reports an uninstalled package as "Unknown target package"; nothing is suspended here. YouTube asks
+                // from MainActivity.onStop, so the unsupported call ended the app whenever its window stopped.
+                case "isPackageSuspendedForUser":
+                    if (!packageMatches((String) a[0], 0, (Integer) a[1]))
+                        throw new IllegalArgumentException("Unknown target package: " + a[0]);
+                    return false;
                 default: throw new UnsupportedOperationException("package." + method);
             }
         });

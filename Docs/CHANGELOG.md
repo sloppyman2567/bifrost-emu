@@ -42,6 +42,15 @@ from the library, built-in per-app settings, 4 GiB packages, a realm idle timeou
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (YouTube ended when its window stopped)
+
+- YouTube's `MainActivity.onStop` asks `PackageManager.isPackageSuspended`, which reached `IPackageManager.isPackageSuspendedForUser`
+  and threw `UnsupportedOperationException: package.isPackageSuspendedForUser`; the exception ended the app with status 1 when its
+  window was closed (seen 2026-11-07), and would now end it whenever a minimised window stops it. The call answers as
+  `IPackageManagerBase` in android-15.0.0_r1 does: `false` for an installed package, `IllegalArgumentException("Unknown target
+  package: …")` (a `NameNotFoundException` to the client) for another. `FrameworkPackagesProbe` checks both on the real runtime and
+  fails on the old code. Not run in YouTube itself.
+
 ### Added (gamepads)
 
 - Android apps see host gamepads as Android 15 does an Xbox 360 pad. The SDL3 window opens SDL's gamepads with
