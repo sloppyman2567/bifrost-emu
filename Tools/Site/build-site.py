@@ -178,6 +178,9 @@ def main():
         "codeRepository": REPO, "license": "https://unlicense.org/", "isAccessibleForFree": True,
         "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
     }
+    panel = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
+             'stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/>'
+             '<path d="M9.5 4v16"/></svg>')
     pages = (("", "Home"), ("install/", "Install"), ("games/", "Games"), ("screenshots/", "Screenshots"))
 
     def render(name, title, path, description, structured, **values):
@@ -186,7 +189,7 @@ def main():
         main = string.Template(Path(__file__).with_name(name).read_text()).substitute(url=url, repo=REPO, **values)
         page = string.Template(Path(__file__).with_name("layout.html").read_text()).substitute(
             title=html.escape(title), description=html.escape(description), canonical=url + path, url=url, repo=REPO,
-            og_image=url + "social-preview.png", icon=icon, nav=nav, json_ld=json.dumps(structured, separators=(",", ":")).replace("</", "<\\/"),
+            og_image=url + "social-preview.png", icon=icon, nav=nav, panel=panel, json_ld=json.dumps(structured, separators=(",", ":")).replace("</", "<\\/"),
             version=html.escape(version), main=main)
         target = args.output / path / "index.html"
         target.parent.mkdir(parents=True, exist_ok=True)

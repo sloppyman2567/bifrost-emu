@@ -34,7 +34,7 @@ such as "misc", "common" or "core". The current version lives in
 
 - Start with the concrete failure, trace the first wrong value and compare
   with a trusted reference. Prefer primary sources and reproducible commands.
-- The project site (home, install, games and screenshots pages, with a sidebar; `Tools/Site/build-site.py`, deployed by `.github/workflows/pages.yml`) is generated from the
+- The project site (home, install, games and screenshots pages, with a collapsible sidebar; `Tools/Site/build-site.py`, deployed by `.github/workflows/pages.yml`) is generated from the
   README's "What runs" summary, table and screenshots, `compatibility.json` and `Version.hpp`; edit those, never the
   generated pages. It is for players: plain language, technical detail behind links or the games page's Details;
   its own copy is in `Tools/Site/home.html`, `install.html`, `games.html` and `screenshots.html` (the install steps are

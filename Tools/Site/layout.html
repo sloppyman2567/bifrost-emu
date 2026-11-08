@@ -21,6 +21,15 @@
 <meta name="theme-color" content="#111214" media="(prefers-color-scheme: dark)">
 <link rel="icon" type="image/svg+xml" href="${url}icon.svg">
 <script type="application/ld+json">$json_ld</script>
+<script>
+(function () {
+  var root = document.documentElement;
+  root.classList.add("js");
+  try {
+    if (localStorage.getItem("side") === "closed" && matchMedia("(min-width: 761px)").matches) root.dataset.side = "closed";
+  } catch (e) {}
+})();
+</script>
 <style>
 :root {
   --bg: #f7f7f5; --surface: #ffffff; --text: #17181a; --muted: #5d6166; --line: #e3e3df;
@@ -42,12 +51,36 @@ body {
 }
 a { color: var(--accent); text-underline-offset: 2px; }
 .shell { display: grid; grid-template-columns: 210px minmax(0, 1fr); max-width: 1100px; margin: 0 auto; }
-.side { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; padding: 22px 20px;
-  border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 22px; }
-.content { padding: 0 28px; min-width: 0; }
-.brand { display: flex; gap: 10px; align-items: center; font-weight: 650; color: var(--text); text-decoration: none; }
+.side { position: sticky; top: 0; align-self: start; height: 100vh; overflow: hidden; border-right: 1px solid var(--line); }
+.side-in { width: 209px; height: 100%; overflow-y: auto; padding: 22px 16px; display: flex; flex-direction: column; gap: 22px; }
+.side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.side-links { display: flex; flex-direction: column; gap: 22px; flex: 1; min-height: 0; }
+.content { position: relative; padding: 0 28px; min-width: 0; }
+.toggle { display: none; flex: none; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; cursor: pointer;
+  color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 6px; }
+.toggle:hover { color: var(--text); background: var(--code); }
+.toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.toggle svg { width: 18px; height: 18px; display: block; }
+.js .toggle { display: inline-flex; }
+.toggle.open { position: absolute; top: 12px; left: 28px; opacity: 0; visibility: hidden; }
+.brand { display: flex; gap: 10px; align-items: center; white-space: nowrap; font-weight: 650; color: var(--text); text-decoration: none; }
 .brand svg { width: 26px; height: 26px; }
 .side nav { display: flex; flex-direction: column; gap: 2px; }
+/* Closing the sidebar slides it away while the page glides over; nothing animates on first load or for reduced motion. */
+.ready .shell { transition: grid-template-columns 0.28s ease; }
+.ready .side { transition: border-color 0.28s ease; }
+.ready .side-in { transition: opacity 0.2s ease, transform 0.28s ease, visibility 0s; }
+.ready .content { transition: padding-top 0.28s ease; }
+.ready .toggle.open { transition: opacity 0.2s ease 0.1s, visibility 0s; }
+[data-side="closed"] .shell { grid-template-columns: 0 minmax(0, 1fr); }
+[data-side="closed"] .side { border-color: transparent; }
+[data-side="closed"] .side-in { opacity: 0; visibility: hidden; transform: translateX(-24px); }
+.ready [data-side="closed"] .side-in { transition: opacity 0.2s ease, transform 0.28s ease, visibility 0s 0.28s; }
+[data-side="closed"] .content { padding-top: 48px; }
+[data-side="closed"] .toggle.open { opacity: 1; visibility: visible; }
+@media (prefers-reduced-motion: reduce) {
+  .ready .shell, .ready .side, .ready .side-in, .ready .content, .ready .toggle.open { transition: none !important; }
+}
 .side nav a { color: var(--muted); text-decoration: none; font-size: 15px; padding: 5px 10px; margin: 0 -10px;
   border-radius: 6px; }
 .side nav a:hover { color: var(--text); }
@@ -112,11 +145,20 @@ footer { padding: 28px 0 44px; color: var(--muted); font-size: 14px; display: fl
 footer a { color: var(--muted); }
 @media (max-width: 760px) {
   .shell { display: block; }
-  .side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px 20px; gap: 10px; }
+  .side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .side-in { width: auto; height: auto; overflow: visible; padding: 14px 20px; gap: 10px; }
+  .side-links { gap: 10px; max-height: 120px; overflow: hidden; }
+  .ready .side-links { transition: max-height 0.28s ease, opacity 0.2s ease; }
   .side nav { flex-direction: row; flex-wrap: wrap; gap: 4px 14px; }
   .side nav a { margin: 0; padding: 3px 8px; }
   .side .small { display: none; }
   .content { padding: 0 20px; }
+  .toggle.open { display: none !important; }
+  /* On a phone the toggle folds away the links; the brand row stays. */
+  [data-side="closed"] .shell { grid-template-columns: none; }
+  [data-side="closed"] .side-in { opacity: 1; visibility: visible; transform: none; }
+  [data-side="closed"] .side-links { max-height: 0; opacity: 0; }
+  [data-side="closed"] .content { padding-top: 0; }
   .table thead { display: none; }
   .table tr { display: block; padding: 12px 0; border-bottom: 1px solid var(--line); }
   .table td { display: block; border: 0; padding: 2px 0; }
@@ -125,8 +167,13 @@ footer a { color: var(--muted); }
 </head>
 <body>
 <div class="shell">
-<aside class="side">
-  <a class="brand" href="$url">$icon bifrost-emu</a>
+<aside class="side" id="side">
+ <div class="side-in">
+  <div class="side-head">
+    <a class="brand" href="$url">$icon bifrost-emu</a>
+    <button class="toggle close" type="button" aria-controls="side-links" aria-expanded="true" aria-label="Hide sidebar" title="Hide sidebar">$panel</button>
+  </div>
+  <div class="side-links" id="side-links">
   <nav aria-label="Site">$nav</nav>
   <nav class="ext" aria-label="Project">
     <a href="$repo">Source</a>
@@ -136,11 +183,29 @@ footer a { color: var(--muted); }
     <a href="$repo/issues">Issues</a>
   </nav>
   <p class="small">Version $version<br>Unlicense</p>
+  </div>
+ </div>
 </aside>
 <div class="content">
+<button class="toggle open" type="button" aria-controls="side" aria-expanded="false" aria-label="Show sidebar" title="Show sidebar">$panel</button>
 <main>
 $main</main>
 </div>
 </div>
+<script>
+(function () {
+  var root = document.documentElement;
+  var closers = document.querySelectorAll(".toggle");
+  function set(closed) {
+    if (closed) root.dataset.side = "closed"; else delete root.dataset.side;
+    for (var i = 0; i < closers.length; i++) closers[i].setAttribute("aria-expanded", closed ? "false" : "true");
+    var phone = matchMedia("(max-width: 760px)").matches;
+    if (!phone) { try { localStorage.setItem("side", closed ? "closed" : "open"); } catch (e) {} }
+  }
+  for (var i = 0; i < closers.length; i++) closers[i].addEventListener("click", function () { set(root.dataset.side !== "closed"); });
+  if (root.dataset.side === "closed") set(true);
+  setTimeout(function () { root.classList.add("ready"); }, 50);
+})();
+</script>
 </body>
 </html>
