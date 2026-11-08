@@ -847,3 +847,4 @@ test-nb: lib $(TARGET) $(NB_TESTLIB)
 
 # Hardware telemetry uses the vendored Vulkan ABI without a host SDK dependency.
 $(OBJDIR)/Source/System/Graphics/Display/WindowStats.o: CXXFLAGS += -IThirdParty/VulkanHeaders/include
+$(OBJDIR)/Source/System/Graphics/Thunks/DisplayThunk/VulkanAstc.o: CXXFLAGS += -IThirdParty/VulkanHeaders/include

@@ -142,6 +142,22 @@
   else (no extension, unaligned allocation size, unknown allocation) keeps the bounce below;
   `BIFROST_VK_NO_PLACED=1` forces it. Not handled: a guest munmap/MAP_FIXED over a placed range
   (the driver memory would be reused as plain memory) and a forked child inheriting the mapping.
+- ASTC LDR for Vulkan guests on a host without it (`DisplayThunk/VulkanAstc.cpp`, codecs in
+  [TextureCodec](TextureCodec/AGENTS.md)): when the host reports no `textureCompressionASTC_LDR` but has
+  `textureCompressionBC` and sampleable BC7, the guest is told ASTC works. Hooks are chosen per symbol at registration
+  (`SymbolEntry::vk_hook`) and run on the staged arguments: feature and format queries answer for the BC7 equivalent
+  (`vkGetPhysicalDeviceFeatures`/`Features2`, `FormatProperties`(2), `ImageFormatProperties`(2)); `vkCreateDevice`
+  drops the ASTC feature and enables BC; `vkCreateImage`/`vkCreateImageView` (and a view-format list) use the BC7
+  format and the image is recorded; `vkCmdCopyBufferToImage`(2) is redirected to a BC7 scratch buffer (a few 32 MiB
+  host-visible blocks per device, one `VkBuffer` each) and the ASTC regions are transcoded at `vkQueueSubmit`(2),
+  after `vk_sync_push_all`, from the staging memory's host mapping (the memory is mapped briefly when the guest
+  has already unmapped it). Scratch lives while the command buffer's pending list does: it ends at begin, reset,
+  free, pool reset or destroy, device destroy; `vkCmdExecuteCommands` adopts a secondary's copies. Regions need
+  4-texel alignment (or the mip edge) and are dropped with a once-only note otherwise. Not covered: reading back,
+  copying or blitting an ASTC image, ASTC render targets, 3D/HDR ASTC, resubmitting an upload command buffer while the
+  first submit still runs, and the GL/GLES path. `BIFROST_VK_NO_ASTC=1` turns it off, `BIFROST_ASTC_THREADS` sets the
+  transcoder's threads. The hand arm for `vkGetPhysicalDevice*Properties2/Features2` takes only the two-argument
+  shapes. Covered by `vulkan_astc` (guest, through the thunk) and `test-astc-bc7-transcode` (host).
 - GL/GLES and Vulkan mapping APIs return guest bounces, never raw host mapping
   pointers. Preserve mapping lifetime, explicit flush/invalidate, pre-submit
   writeback and post-wait readback. A GL bounce mirrors a real host mapping of

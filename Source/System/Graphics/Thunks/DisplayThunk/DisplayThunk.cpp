@@ -114,6 +114,7 @@ void DisplayThunk::register_function_(const std::string& lib,
                            static_cast<uint16_t>(DisplayThunk::SYSCALL_NUMBER));
     lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args,
                            n_stack, n_float, flags, spec});
+    if (spec && spec->lib == thunk::LibFamily::VK) lt->entries.back().vk_hook = VulkanAstc::hook_for(sym);
     impl_->id_to_idx_.push_back({
         static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)

@@ -306,7 +306,6 @@ void test_bc7_modes_pack_correctly() {
             int px[16][4];
             for (int i = 0; i < 16; i++) for (int c = 0; c < 4; c++) px[i][c] = rgba[i * 4 + c];
             const int partition = static_cast<int>(rng() % partitions);
-            if (m.ns == 2 && partition == kUnusedPartition) continue;
             Candidate cand;
             try_mode(mode, partition, px, alpha_mode ? 4 : 3, 3, cand);
             uint8_t blk[16];

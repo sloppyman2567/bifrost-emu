@@ -14,9 +14,10 @@ guest-memory types here; the Vulkan thunk calls these.
 - The decoder follows the specification, not another decoder's quirks: sRGB mode expands endpoints with `0x80`,
   results are the top 8 bits of the UNORM16 interpolation, HDR endpoint modes, HDR void extents and every illegal
   encoding give opaque magenta and a `false` return. It is LDR and 2D only; 3D and HDR formats are not offered.
-- `Bc7Tables.hpp` is generated from the BPTC chapter's tables and not edited by hand. The specification's marks
-  disagree with its own anchor table for two-subset partition 35, so the encoder never emits that partition
-  (`kUnusedPartition`). Do not use the table's anchors for a decoder without checking this.
+- `Bc7Tables.hpp` is generated from the BPTC chapter's tables and not edited by hand. The specification's bold mark
+  for two-subset partition 35 disagrees with its anchor table (pixel 2 against 8); the anchor table is right: a real
+  GPU (RADV) decoded blocks of every mode and all 64 partitions, partition 35 included, exactly as an independent
+  decoder does.
 - The encoder produces modes 0, 1, 2, 3, 6 and 7 from one mode table and one fitter. An opaque block never gains
   transparency (mode 6 forces its p-bits). A flat colour is within one level per channel, not exact: a p-bit is shared
   by all channels of an endpoint. `Bc7Options::accept_error` trades speed for quality; the defaults were chosen from a

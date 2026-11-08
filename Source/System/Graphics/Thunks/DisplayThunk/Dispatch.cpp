@@ -1267,6 +1267,18 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    // ASTC textures through BC7 on a host without ASTC (VulkanAstc.cpp): patch the staged arguments, or answer a
+    // copy that has nothing left to do.
+    VulkanAstc::Call astc_call;
+    VulkanAstc* astc = nullptr;
+    if (entry.vk_hook && impl_->mem && entry.host_fn) {
+        astc = impl_->astc();
+        if (!astc->before(entry.vk_hook, args, astc_call)) {
+            cpu.regs[0] = astc_call.result;
+            return 0;
+        }
+    }
+
     // vkCreateDevice: ask for placed memory maps when the device has them
     // (VulkanPlacedMemory.cpp). args[1] is the staged host create info here;
     // `placed_request` owns the extended copy until the host call returns.
@@ -1464,6 +1476,8 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             impl_->vk_placed_register(*reinterpret_cast<const uint64_t*>(args[3]),
                                       placed_request.alignment);
     }
+
+    if (astc) astc->after(entry.vk_hook, args, ret, astc_call);
 
     // Completion waits pull host mappings back into the bounces so the
     // guest sees GPU readback results (vkMapMemory PCWFC discipline).

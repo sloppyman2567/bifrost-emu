@@ -826,6 +826,24 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   The node now asks `Memory::page_kinds` (one lock, a walk of only the pages read, unmapped gaps skipped) through
   `Yggdrasil::set_pagemap_provider`; a 20,000-read fixture went from 1,240 µs to 0.1 µs per read. `test_proc_mem_pagemap` also
   checks a range read across a hole.
+- **ASTC LDR textures for Vulkan guests on a host without ASTC.** The RX 7600's driver (RADV) reports no
+  `textureCompressionASTC_LDR` but has BC7, so an Android engine such as Zenless Zone Zero's Unity fell back to
+  uncompressed textures. When the host has BC7 and no ASTC the thunk now tells the guest ASTC works, keeps each ASTC
+  image as a BC7 image, and transcodes the guest's blocks when the upload is submitted (`VulkanAstc.cpp`; decoder,
+  encoder and strip transcoder in `Source/System/Graphics/TextureCodec`). BC7 is the same 8 bits per texel as ASTC 4x4
+  and 2.2 to 4 times the size of ASTC 6x6 to 8x8; it is about a quarter of RGBA8. The encoder runs at roughly 4.5 to
+  5.5 Mpix/s per thread (half the cores by default, `BIFROST_ASTC_THREADS`) at 46 to 52 dB against the decoded source on
+  game screenshots; `BIFROST_VK_NO_ASTC=1` turns the feature off. Checked: a host test (hand-built ASTC blocks,
+  table properties, fuzz, every BC7 mode through an independent decoder, the transcoder over all 14 footprints);
+  a guest test through the thunk on the real GPU (`vulkan_astc`: queries, both device-creation forms, four footprints
+  with mips and edge blocks, staging memory mapped and unmapped); and the GPU's own BC7 decode of 2,232 blocks in
+  modes 0, 1, 2, 3, 6 and 7 across all 64 partitions, which matches the independent decoder exactly. Not checked: ARM's
+  reference ASTC decoder (none was available to run, so multi-partition and dual-plane blocks are checked only for
+  self-consistency) or any game. Not covered: reading back, copying or blitting an ASTC image, 3D and HDR ASTC, and the
+  GL/GLES path.
+- **`vkGetPhysicalDeviceImageFormatProperties2` took the `Properties2` shortcut.** The hand arm for the
+  `vkGetPhysicalDevice*Properties2` and `*Features2` queries matched by name and passed two arguments to the host, but
+  this command takes three. It now takes only the two-argument commands; the rest go through their own plans.
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 

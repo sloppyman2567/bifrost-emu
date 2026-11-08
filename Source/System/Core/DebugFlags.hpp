@@ -72,6 +72,8 @@ struct DebugFlags {
     // process returns from main, and a managed app's emulator is ended by a signal.
     std::string audio_dump_raw;
     bool vk_no_placed = false; // BIFROST_VK_NO_PLACED — keep vkMapMemory bounces (A/B control for placed maps)
+    bool vk_no_astc = false;   // BIFROST_VK_NO_ASTC — do not offer ASTC to Vulkan guests (A/B control for the BC7 transcoder)
+    unsigned astc_threads = 0; // BIFROST_ASTC_THREADS — transcoder threads per upload (1..64; 0 = half the host's cores, at most 8)
     // BIFROST_TEXT_SCRIPT — key and text events pushed into the Android window's SDL queue once
     // text input starts: "down:H,text:h;up:H;edit:ni;text:..." (steps by ';' 100 ms apart, items
     // in a step pushed together; down:/up: take an SDL scancode name). For input tests.
@@ -235,6 +237,12 @@ struct DebugFlags {
             else if (dump[0] == '/') f.audio_dump_raw = dump;
         }
         f.vk_no_placed = env("BIFROST_VK_NO_PLACED");
+        f.vk_no_astc = env("BIFROST_VK_NO_ASTC");
+        if (const char* threads = std::getenv("BIFROST_ASTC_THREADS")) {
+            char* end = nullptr;
+            unsigned long n = std::strtoul(threads, &end, 10);
+            if (end != threads && *end == '\0' && n >= 1 && n <= 64) f.astc_threads = static_cast<unsigned>(n);
+        }
         if (const char* script = std::getenv("BIFROST_TEXT_SCRIPT")) f.text_script = script;
         f.input_trace = all || env("BIFROST_INPUT_TRACE");
         f.android_logical_pixels = env("BIFROST_ANDROID_LOGICAL_PIXELS");

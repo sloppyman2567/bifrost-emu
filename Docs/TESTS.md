@@ -108,6 +108,7 @@ make test-android-window-size                  # the remembered window size file
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
 ./Scripts/Testing/test_host_cpu_models.sh   # JIT fixtures on older x86-64 CPUs under qemu-x86_64; exit 77 if it cannot run
 make test-audio-declick                     # a stream leaving or rejoining the mix never steps the output (no sound device needed)
+./Scripts/Testing/run_tests.sh --filter vulkan_astc  # ASTC textures through the Vulkan thunk, headless: queries, device creation, uploads of four footprints with mips and edge blocks, sampled back (needs a Vulkan driver; exit 77 without ASTC and BC7)
 make test-astc-bc7-transcode                # ASTC LDR decoder (hand-built blocks, unquantization tables, fuzz), BC7 encoder (every mode packed and decoded by an independent decoder) and the strip transcoder; not compared with ARM's decoder or a GPU
 ./Scripts/Testing/test_asgard_install.py    # install-asgard.py install, update, removal, provisioning checks and microG download (fake checkout, offline)
 ./Scripts/Testing/test_install_deps.py      # install-deps.sh per package manager, with fake managers (offline); tools/libraries found without their package, find-host-tools.sh, fetch-sdl3.py's window-system check

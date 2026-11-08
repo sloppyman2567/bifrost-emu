@@ -22,7 +22,6 @@ constexpr uint8_t kWeight2[4] = {0, 21, 43, 64};
 constexpr uint8_t kWeight3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
 constexpr uint8_t kWeight4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
 const uint8_t* weights(int ib) { return ib == 2 ? kWeight2 : ib == 3 ? kWeight3 : kWeight4; }
-constexpr int kUnusedPartition = 35;  // the specification's marks disagree with its anchor table here: never written
 
 // An n-bit endpoint value expanded to 8 bits by replicating its top bits.
 struct Dequant {
@@ -326,7 +325,6 @@ int rank_partitions(const int (*px)[4], int channels, int ns, int keep, int* out
     keep = std::min(keep, 8);
     const int partitions = 1 << kModes[ns == 2 ? 1 : 2].pb;
     for (int p = 0; p < partitions; p++) {
-        if (ns == 2 && p == kUnusedPartition) continue;
         const double score = partition_estimate(px, channels, ns == 2 ? kPartition2[p] : kPartition3[p], ns);
         if (have < keep || score < top[have - 1].score) {
             int at = have < keep ? have++ : have - 1;

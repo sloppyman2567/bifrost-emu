@@ -722,6 +722,9 @@ INTEGRATION_TESTS=(
     # CC0 cat meow via the ALSA arm. Needs DISPLAY + host Vulkan;
     # exit 77 = skip without them.
     "vulkan_texture|Tests/Apps/test_vulkan_texture.elf||40|VULKAN TEXTURE TEST PASSED"
+    # ASTC LDR textures through the Vulkan thunk (BC7 transcoding where the host has no ASTC), headless;
+    # exit 77 = skip without a Vulkan driver or with neither ASTC nor BC7.
+    "vulkan_astc|Tests/Apps/test_vulkan_astc.elf||60|VULKAN ASTC TEST PASSED"
     # Wayland host bridge: real compositor connect + fd + flush +
     # roundtrip + dispatch_pending + disconnect. Needs WAYLAND_DISPLAY;
     # exit 77 = skip headless.

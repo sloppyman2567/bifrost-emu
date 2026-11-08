@@ -88,6 +88,8 @@ struct SymbolEntry {
     // tracked-state set? dispatch() tests this bool instead of hashing
     // the name string on every one of the ~1.5M thunk calls/s.
     bool        tracks_state = false;
+    // Vulkan only: which ASTC-emulation hook (VulkanAstc::Hook) this command takes, 0 for none.
+    uint8_t     vk_hook = 0;
 };
 // Write a 16-byte trampoline at the given guest address for the given
 // sym_id. Used by all three thunks.

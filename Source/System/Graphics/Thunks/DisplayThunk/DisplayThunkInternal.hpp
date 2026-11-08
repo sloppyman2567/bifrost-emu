@@ -4,6 +4,7 @@
 #include "System/Graphics/Display/WindowStats.hpp"
 #include "System/Graphics/Thunks/DisplayThunk.hpp"
 #include "System/Graphics/Thunks/VulkanMappedSync.hpp"
+#include "System/Graphics/Thunks/DisplayThunk/VulkanAstc.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"  // for SYSCALL_NUMBER
 #include "System/Graphics/Display/DisplayProxy.hpp"
 #include "System/Android/Surface/Surface.hpp"
@@ -90,6 +91,13 @@ struct DisplayThunkImpl {
     struct VkPlacedDevice { void* map2; void* unmap2; uint64_t alignment; };
     std::unordered_map<uint64_t, VkPlacedDevice> vk_placed_devices_;
     void* vk_lib_ = nullptr;  // host libvulkan handle (resolved at registration)
+    // ASTC textures through BC7 for hosts without ASTC (VulkanAstc.cpp), made on first use.
+    std::once_flag vk_astc_once_;
+    std::unique_ptr<VulkanAstc> vk_astc_;
+    VulkanAstc* astc() {
+        std::call_once(vk_astc_once_, [this] { vk_astc_ = std::make_unique<VulkanAstc>(*this); });
+        return vk_astc_.get();
+    }
     // Storage for a vkCreateDevice create info extended with the placed
     // extension; it must outlive the host call.
     struct VkPlacedDeviceRequest {

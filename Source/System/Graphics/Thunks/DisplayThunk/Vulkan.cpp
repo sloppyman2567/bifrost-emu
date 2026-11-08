@@ -790,6 +790,9 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // caller sees the node untouched instead of garbage).
     if (entry.spec &&
         entry.name.rfind("vkGetPhysicalDevice", 0) == 0 &&
+        // (physical, pStruct) only: vkGetPhysicalDeviceImageFormatProperties2 and the queue family queries take more
+        // arguments and go through their own plans.
+        std::strlen(entry.spec->args) == 2 &&
         (entry.name.find("Properties2") != std::string::npos ||
          entry.name.find("Features2") != std::string::npos)) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
@@ -801,6 +804,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         if (!nnodes) return false;  // not our shape — generic path
         uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*)>(entry.host_fn)(
             cpu.regs[0], nodes[0].host);
+        if (entry.name.find("Features2") != std::string::npos && !dbg().vk_no_astc)
+            for (uint32_t i = 0; i < nnodes; i++) impl_->astc()->patch_features2(cpu.regs[0], nodes[i].host);
         vk_writeback_pnext_chain(mem, nodes, nnodes);
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
         if (trace)
@@ -904,6 +909,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // (56 bytes: handles + pNext) that the driver derefs.
     if (entry.spec && entry.name == "vkBeginCommandBuffer") {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        if (!dbg().vk_no_astc) impl_->astc()->begin_command_buffer(cpu.regs[0]);  // a reset: pending ASTC copies end
         VkStage st;
         uint8_t* top = reinterpret_cast<uint8_t*>(st.bytes(32, 8));
         read_guest_bytes(mem, cpu.regs[1], top, 32);
