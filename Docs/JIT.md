@@ -1864,6 +1864,8 @@ region itself stays cached.
 
 ## CoreMark checkpoint (2026-10-27)
 
+Superseded by the [2026-11-08 re-measurement](#coremark-re-measurement-2026-11-08); kept as the record of the alpha.3 numbers.
+
 `Tests/Unit/coremark.elf` (GCC 15.2.0, `-O2 -static -O3`, an ignored guest fixture) run as
 `coremark.elf 0 0 0 160000` on a Ryzen 7 5800X3D desktop. Each binary had one warmup and three measured
 runs, interleaved. Every run printed the expected CRCs (`crclist` 0xe714, `crcmatrix` 0x1fd7, `crcstate`
@@ -1899,6 +1901,35 @@ iterations/s, every CRC valid. That is about 39% of native. A first native run o
 so a CoreMark comparison is only meaningful with the governor fixed. The native build is gcc `-O2`; the AArch64 guest was
 built with `-O3`, and a tuned native build would score higher. The Ryzen 5 9600X (5.68 GHz overclock) that measured about
 24,000 iterations/s on November 4 is at roughly 40% of its own native score. Pinned and `BIFROST_TIER2=1` runs were not made here.
+
+### CoreMark re-measurement (2026-11-08)
+
+The October 27 method on the same Ryzen 7 5800X3D desktop, now with the CPU governor on `performance` (boost on, checked in
+`/sys`). `Tests/Unit/coremark.elf` as `coremark.elf 0 0 0 160000`, one warmup and three measured runs interleaved across the four
+binaries, every run with the expected CRCs (`crclist` 0xe714, `crcmatrix` 0x1fd7, `crcstate` 0x8e3a, `crcfinal` 0xa14c). The
+runs started after the 1-minute load average had dropped below 2.5, so the compile that built the binaries was not measured. Each
+bifrost-emu binary was built from `git archive` in a temporary directory (the shipped one with `USE_SDL2=1 USE_THUNK_GL=1`, the
+headless ones with `USE_SDL2=0 USE_SDL3=0 USE_THUNK_GL=0 USE_MEDIA=0`), so no shared build was replaced.
+
+| Build | Runs (iterations/s) | Median |
+|---|---|---|
+| tree at `ecbd7dd1`, shipped SDL/GL build | 14,507 / 14,874 / 14,884 | 14,874 |
+| same source, headless build | 14,663 / 14,753 / 14,857 | 14,753 |
+| 2.0.0-alpha.2 release commit (`556557b0`), headless build | 12,534 / 12,711 / 12,718 | 12,711 |
+| QEMU 11.1.1 user mode | 7,992 / 7,981 / 8,065 | 7,992 |
+
+The shipped build is 1.86 times QEMU; the headless build is 1.16 times alpha.2 (alpha.3 measured 1.05 times in the October
+session). The `bench_*` table in the README comes from `Scripts/Bench/run_benchmarks.py --mode both --warmups 1 --runs 3` on the
+shipped build for `bench_mips` (process wall time: JIT 0.177 s, interpreter 15.79 s, so 800M instructions, 8 per loop
+iteration by disassembly, are about 4,515 and 51 MIPS), and three direct runs per mode of each other program for its own timer
+(the runner keeps only the last run's output).
+
+Limits: one host and one benchmark. The desktop was in use: a QEMU system VM (about 14% of one core) and an idle Asgard realm
+(under 1%) ran throughout, so a few percent is noise even though these runs spread only 1% to 2.5%. The alpha.2 binary scored
+3% higher than on October 27 (12,711 against 12,332), so numbers are comparable within a table, not across dates. At 160,000
+iterations the shipped build runs 10.8 s, 8% over CoreMark's ten-second minimum; a build above about 16,000 iterations/s needs a
+larger count, and the CRC for a new count has to be taken from QEMU again. Not pinned to a core, and no `BIFROST_TIER2=1` run.
+The November 7 native reference (37,951 iterations/s) puts this at about 39%. CoreMark does not predict game frame rates.
 
 ## Recorded changes
 

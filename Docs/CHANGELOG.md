@@ -34,6 +34,9 @@ from the library, built-in per-app settings, 4 GiB packages, a realm idle timeou
   compared, requirements), structured data for the site, the software and each page's breadcrumb, social image size and alt
   text, descriptive screenshot alt text, and a sitemap date taken from the newest commit instead of the build day. The README
   games badge now says 16 playable.
+- The README's performance tables are re-measured (2026-11-08): CoreMark 14,874 iterations/s (shipped build) and 14,753
+  (headless) against 12,711 for alpha.2 and 7,992 for QEMU 11.1.1, every CRC valid, and the `bench_*` speedups are 55x to 97x.
+  Method, limits and the near-limit 160,000 iteration count are in [JIT.md](JIT.md#coremark-re-measurement-2026-11-08).
 
 ### Added (gamepads)
 

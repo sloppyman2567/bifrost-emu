@@ -431,36 +431,37 @@ BIFROST_THUNK_TRACE=1           # trace host GL/audio/display calls
 
 ## Performance
 
-CoreMark (October 27, 2026), measured on a Ryzen 7 5800X3D: 160,000 iterations,
-one warmup and three interleaved measured runs per binary, every CRC validated
-(`crcfinal` 0xa14c, the same value QEMU reports) and no CoreMark validity error.
-The iteration count was raised from 110,000, which the current build finishes in
-8.4 s, under CoreMark's ten-second minimum. See [the method and
-limits](Docs/JIT.md#coremark-checkpoint-2026-10-27).
+CoreMark (November 8, 2026), measured on a Ryzen 7 5800X3D with the CPU governor on `performance` (boost on): 160,000
+iterations, one warmup and three interleaved measured runs per binary, every CRC validated (`crcfinal` 0xa14c, the same value
+QEMU reports) and no CoreMark validity error. The bifrost-emu builds come from `git archive` of the tree at `ecbd7dd1` and of
+the 2.0.0-alpha.2 release commit. At this count the current build runs about 10.8 s, just over CoreMark's ten-second minimum,
+so a build faster than about 16,000 iterations/s needs a higher count. See [the method and
+limits](Docs/JIT.md#coremark-re-measurement-2026-11-08).
 
 | Build | Median iterations/s |
 |---|---|
-| bifrost-emu 2.0.0-alpha.3 (JIT, shipped SDL/GL build) | 13,156 |
-| same code, headless build | 12,981 |
-| bifrost-emu 2.0.0-alpha.2 (JIT, headless build) | 12,332 |
-| QEMU 11.1.1 user mode (TCG) | 7,710 |
+| bifrost-emu 2.0.0-beta.1 tree (JIT, shipped SDL/GL build) | 14,874 |
+| same code, headless build | 14,753 |
+| bifrost-emu 2.0.0-alpha.2 (JIT, headless build) | 12,711 |
+| QEMU 11.1.1 user mode (TCG) | 7,992 |
 
-On this integer/control-flow benchmark the shipped build is about 71% faster than
-QEMU, and the headless build of the same code is about 5% faster than the
-alpha.2 release built the same way. Neither predicts game FPS. QEMU's runs
-spread 9% (7,182 to 7,817) on this shared desktop, so differences of a few
-percent are within noise. Measurements from the `bench_*` programs
+On this integer/control-flow benchmark the shipped build is about 86% faster than
+QEMU, and the headless build of the same code is about 16% faster than the
+alpha.2 release built the same way. Neither predicts game FPS. The runs spread 1% to 2.5%
+(QEMU's 7,981 to 8,065) on a desktop with a QEMU virtual machine and an idle Asgard realm running, so differences of a
+few percent are within noise; the alpha.2 binary itself measured 3% higher than in the October 27 session, so compare
+numbers within one table, not across dates. Measurements from the `bench_*` programs
 (same host, median of three runs; each program's own timer, except `bench_mips`,
 which is process wall time; JIT compilation is included, so the millisecond-scale
 JIT times are coarse):
 
 | Benchmark | Interpreter | JIT | Speedup |
 |---|---|---|---|
-| fib(35) | 6.98 s | 0.074 s | ~94x |
-| memcpy 256 MiB | 194 MiB/s | ~9,570 MiB/s | ~49x |
-| qsort 100K ints | 4.27 s | 0.079 s | ~54x |
-| matrix 256×256 | 12.1 MFLOPS | ~1,119 MFLOPS | ~92x |
-| bench_mips (800M instructions) | ~51 MIPS | ~4,280 MIPS | ~84x |
+| fib(35) | 7.35 s | 0.076 s | ~97x |
+| memcpy 256 MiB | 171 MiB/s | ~9,390 MiB/s | ~55x |
+| qsort 100K ints | 4.51 s | 0.076 s | ~59x |
+| matrix 256×256 | 11.9 MFLOPS | ~1,129 MFLOPS | ~95x |
+| bench_mips (800M instructions) | ~51 MIPS | ~4,515 MIPS | ~89x |
 
 Repeatable runs with checksums and host metadata: `Scripts/Bench/run_benchmarks.py`.
 The JIT uses AVX-512, AVX2, SSE4.2, AES-NI/PCLMULQDQ/SHA-NI, BMI1/BMI2 and
