@@ -958,36 +958,34 @@ decoded on the host; there are no Java or JNI codec substitutes.
   guest's stale output size. The plane order is YV12 (Y, V, U), because
   that is what this binary copies into its YV12 block.
 - **Surface output.** `FrameworkSurfaces` presents decoded frames through a
-  genuine YUV `ImageReader` BufferQueue and `Surface.transferFrom`. The
+  genuine `ImageReader` BufferQueue and `Surface.transferFrom`. The
   native adapter returns real `ANativeWindow`s. `bifrost_surface_prepare`
   binds a managed window to a separate host surface below the framework
   windows; the GraphicThunk EGL path resolves that alias to its host
-  backing.  SDR YUV is converted to ARGB on the Java UI thread (matrix and
-  range from the dataspace, crop, stride). HDR is reported unsupported.
-  **Queue format follows the producer.** The queue's `ImageReader` is
-  created for the holder's requested format: `YUV_420_888` for a video view
-  (a YUV/NV21 request) and `RGBA_8888` otherwise. A GPU producer — Unity's
-  Vulkan HAL hands the loader RGBA_8888 gralloc buffers — then matches the
-  queue, and `FrameworkSurfaces` converts the visible region of each image to
-  ARGB (producer row and pixel stride, not `width * 4`) and presents it.
-  Creating every queue as YUV made `acquireLatestImage` throw on the frame
-  thread and killed the process; a mismatch is now logged once as
-  `APP_SURFACE_UNREADABLE` and that surface stops consuming rather than taking the
-  app down. The plane itself goes to the host (op 26), which swizzles the
-  visible region and presents it: packing the `int[]` in the guest cost about
-  150 ms for 1600×900 per frame, while the host path measures 1.5–3.2 ms and
-  leaves the frame rate guest-render-bound.
-  **A producer of the other format ends its first codec (2026-11-08).** YouTube's video `SurfaceView` reports `format=4`, which is
-  `SurfaceView`'s default and is what every game reports too, so the format cannot say that a codec will connect. The queue is
-  then RGBA, the VP9 decoder (`c2.goldfish.vp9.decoder`) connects with `api:3` (media) and queues YUV, and
-  [`ImageReader_imageSetup`](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/media/jni/android_media_ImageReader.cpp)
-  (checked only for a non-opaque reader) releases that buffer and throws `UnsupportedOperationException`. `rearm` then replaces the
-  reader, which abandons the queue the codec holds: its `dequeueBuffer` returns -19, `GraphicsTracker` reports `allocate error(14)`,
-  Codec2 fails the work with `C2_CORRUPTED`, `MediaCodec` reports `0xe` and ExoPlayer creates a second codec on the rebuilt queue,
-  which works. Seen in 7 `APP_SURFACE_REARM` lines over 29 YouTube sessions (a new `SurfaceView` pays it again) and in no
-  other app; the second codec ran for seconds to minutes in the host media log. The cost is one failed codec and a restart per
-  new video view, not a failed video. Not fixed: a reader chosen up front needs a signal that does not exist before the
-  producer connects, and an opaque reader (no format check) needs the frame read from its `HardwareBuffer` natively.
+  backing. HDR is reported unsupported.
+  **The queue takes any producer (2026-11-08).** Each SurfaceView's reader is opaque
+  (`FrameworkSurfaces.newReader`: `ImageFormat.PRIVATE`, `USAGE_CPU_READ_OFTEN`). `ImageReader_imageSetup`
+  ([android-15.0.0_r1](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/media/jni/android_media_ImageReader.cpp))
+  checks a buffer's format only for a non-opaque reader, so the queue never throws or needs replacing whatever connects:
+  a codec's YUV, a GPU producer's RGBA (Unity's Vulkan HAL), a CPU producer that names no format (`lockCanvas` gets the
+  queue's default, `IMPLEMENTATION_DEFINED`, which this allocator makes linear RGBA), or one producer after another. A
+  reader fixed to one format could not know the producer before it connected (a SurfaceView's requested format is
+  `RGB_565` for every app by default), and replacing it abandoned the queue a codec was connected to: its `dequeueBuffer`
+  returned -19, Codec2 failed the work with `C2_CORRUPTED` and YouTube's player restarted the codec (seen 7 times in 29
+  sessions, and in no other app). An opaque Image has no planes, so the frame is read from its `HardwareBuffer`.
+  The frame thread acquires the latest Image, waits for its acquire fence (`Image.getFence()`; wait only when it
+  `isValid()`, because an empty fence answers false to `awaitForever()` in android-15.0.0_r1), locks the buffer with
+  `lockBuffer` (`surface_buffers.c`: `AHardwareBuffer_lockPlanes`, the call a non-opaque reader's CPU consumer makes, giving
+  Y, U, V or one RGBA plane with their strides) and passes the plane addresses to the host with `presentPlanes`: op 26
+  swizzles RGBA and op 25 converts YUV (matrix and range from the dataspace, producer row and pixel stride), for the
+  visible region only. The crop an acquired Image reports is its whole buffer, which is what is presented. A format that is
+  neither RGBA nor YUV 4:2:0, or HDR, is logged once as `APP_SURFACE_UNREADABLE` and that surface stops consuming rather
+  than taking the app down; each change of the frames' HAL format is logged as `APP_SURFACE_FRAME_FORMAT`. Packing an
+  `int[]` in the guest cost about 150 ms for 1600×900 per frame, while the host path measures 1.5–3.2 ms and leaves the
+  frame rate guest-render-bound. Checked with `FrameworkSurfaceBuffersProbe` (known YUV and RGBA frames read back pixel
+  for pixel, the producer switching on one reader, `lockCanvas`, an RGB_565 refusal) and `ManagedSurfaceFormats` (a real VP9
+  decode, then each producer, into a SurfaceView in a window; it fails on the old reader with the abandoned queue).
+  Not run with a real Vulkan game or in YouTube itself.
   Binding seeds the host surface with the BufferQueue's creation dimensions;
   subsequent SurfaceView geometry controls its size. For an aliased native
   window, `ANativeWindow_getWidth/Height` report that host surface size,

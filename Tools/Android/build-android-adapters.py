@@ -438,6 +438,7 @@ def build(runtime, output):
         subprocess.run(common + ["-std=c2x", "-mno-outline-atomics", "-fPIC", "-shared", "-Wl,-soname,libbifrost-activity.so",
                                  str(ROOT / "Guest/Android/Adapters/activity_window.c"),
                                  str(ROOT / "Guest/Android/Adapters/gralloc_probe.c"),
+                                 str(ROOT / "Guest/Android/Adapters/surface_buffers.c"),
                                  str(ROOT / "Guest/Android/Adapters/audio_track.c"),
                                  str(staging / "libandroid.so"), str(bionic / "libc.so"),
                                  str(bionic / "libdl.so"), str(bionic / "libdl_android.so"),

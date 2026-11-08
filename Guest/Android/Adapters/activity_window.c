@@ -360,42 +360,31 @@ JNIEXPORT jint JNICALL Java_FrameworkSurfaces_present(JNIEnv *env, jclass type, 
     (*env)->ReleasePrimitiveArrayCritical(env, pixels, argb, JNI_ABORT);
     return result;
 }
-// A GPU producer's RGBA_8888 plane goes to the host, which swizzles the visible
-// region and presents it (op 26). One call per frame, no int[] crosses the guest.
-JNIEXPORT jint JNICALL Java_FrameworkSurfaces_presentRgba(JNIEnv *env, jclass type, jlong window,
-        jint x, jint y, jint width, jint height, jint layerWidth, jint layerHeight,
-        jint left, jint top, jint cropLeft, jint cropTop, jint cropWidth, jint cropHeight,
-        jobject pixels, jint rowStride, jint pixelStride) {
-    (void)type;
-    if (!pixels) return -22;
-    char *base = (*env)->GetDirectBufferAddress(env, pixels);
-    jlong capacity = (*env)->GetDirectBufferCapacity(env, pixels);
-    if (!base || capacity <= 0) return -22;
-    int64_t record[17] = {window, x, y, width, height, layerWidth, layerHeight, left, top,
-            cropLeft, cropTop, cropWidth, cropHeight, (intptr_t)base, capacity, rowStride, pixelStride};
-    return (jint)bifrost_window(26, (long)record, 0);
-}
-// A video frame: the image's three planes (direct buffers) go to the host, which converts the visible region of the
-// layer to ARGB and presents it (op 25). One call per frame, no pixel array crosses the guest.
-JNIEXPORT jint JNICALL Java_FrameworkSurfaces_presentYuv(JNIEnv *env, jclass type, jlong window, jint x, jint y,
+// A frame's locked planes (FrameworkSurfaces.lockBuffer's result array: format, width, height, plane count, then per plane
+// the address, row stride, pixel stride and readable bytes) go to the host, which converts or swizzles the visible region of
+// the layer and presents it. One RGBA plane is op 26; three YUV 4:2:0 planes (Y, U, V) are op 25, with the matrix and range
+// from the image's dataspace. One call per frame: no pixel array crosses the guest.
+JNIEXPORT jint JNICALL Java_FrameworkSurfaces_presentPlanes(JNIEnv *env, jclass type, jlong window, jint x, jint y,
         jint width, jint height, jint layerWidth, jint layerHeight, jint left, jint top,
-        jint cropLeft, jint cropTop, jint cropWidth, jint cropHeight, jobject yPlane, jobject uPlane, jobject vPlane,
-        jint yRow, jint uRow, jint vRow, jint yPixel, jint uPixel, jint vPixel, jint matrix, jint fullRange) {
+        jint cropLeft, jint cropTop, jint cropWidth, jint cropHeight, jlongArray planes, jint matrix, jint fullRange) {
     (void)type;
-    jobject planes[3] = {yPlane, uPlane, vPlane};
-    int64_t addresses[3], sizes[3];
-    for (int i = 0; i < 3; ++i) {
-        if (!planes[i]) return -22;
-        char *base = (*env)->GetDirectBufferAddress(env, planes[i]);
-        jlong capacity = (*env)->GetDirectBufferCapacity(env, planes[i]);
-        if (!base || capacity <= 0) return -22;
-        addresses[i] = (intptr_t)base;
-        sizes[i] = capacity;
+    jlong v[16];
+    if (!planes || (*env)->GetArrayLength(env, planes) != 16) return -22;
+    (*env)->GetLongArrayRegion(env, planes, 0, 16, v);
+    for (int i = 0, count = (int)v[3]; i < count && i < 3; ++i)
+        if (!v[4 + i * 4] || v[7 + i * 4] <= 0) return -22;
+    if (v[3] == 1) {
+        int64_t record[17] = {window, x, y, width, height, layerWidth, layerHeight, left, top,
+                cropLeft, cropTop, cropWidth, cropHeight, v[4], v[7], v[5], v[6]};
+        return (jint)bifrost_window(26, (long)record, 0);
     }
-    int64_t record[27] = {window, x, y, width, height, layerWidth, layerHeight, left, top,
-            cropLeft, cropTop, cropWidth, cropHeight, addresses[0], addresses[1], addresses[2],
-            sizes[0], sizes[1], sizes[2], yRow, uRow, vRow, yPixel, uPixel, vPixel, matrix, fullRange};
-    return (jint)bifrost_window(25, (long)record, 0);
+    if (v[3] == 3) {
+        int64_t record[27] = {window, x, y, width, height, layerWidth, layerHeight, left, top,
+                cropLeft, cropTop, cropWidth, cropHeight, v[4], v[8], v[12], v[7], v[11], v[15],
+                v[5], v[9], v[13], v[6], v[10], v[14], matrix, fullRange};
+        return (jint)bifrost_window(25, (long)record, 0);
+    }
+    return -22;
 }
 JNIEXPORT jint JNICALL Java_FrameworkSurfaces_geometry(JNIEnv *env, jclass type, jlong window,
         jint x, jint y, jint width, jint height) {

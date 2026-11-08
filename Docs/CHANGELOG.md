@@ -42,6 +42,16 @@ from the library, built-in per-app settings, 4 GiB packages, a realm idle timeou
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (a video's first codec on a view failed)
+
+- A SurfaceView's queue was an RGBA `ImageReader`, rebuilt when a producer turned out to write something else. A video app's
+  decoder writes YUV, so YouTube's first codec on each new video view lost its queue (`BufferQueue has been abandoned`, C2
+  status 14) and the player restarted it (7 times in 29 recorded sessions, in no other app). The queue's reader is now opaque
+  and takes any producer: the frame is read from its `HardwareBuffer` (`AHardwareBuffer_lockPlanes`, after the acquire fence)
+  and goes to the same host ops (25 for YUV, 26 for RGBA). Checked with a probe that reads known YUV and RGBA frames back pixel
+  for pixel through a producer that switches, and a window fixture that decodes a real VP9 frame, then each producer, into a
+  SurfaceView (it fails on the old code with the abandoned queue). Not run with a real Vulkan game or in YouTube itself.
+
 ### Fixed (YouTube ended when its window stopped)
 
 - YouTube's `MainActivity.onStop` asks `PackageManager.isPackageSuspended`, which reached `IPackageManager.isPackageSuspendedForUser`

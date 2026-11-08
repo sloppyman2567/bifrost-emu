@@ -15,6 +15,8 @@
 import android.graphics.PixelFormat;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
+import android.hardware.SyncFence;
 import android.media.Image;
 import android.media.ImageReader;
 import android.os.Handler;
@@ -25,6 +27,7 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -44,7 +47,7 @@ final class FrameworkSurfaces {
         final SurfaceView view;
         final Object owner;  // the framework window holding the view
         final Handler thread;  // the window's ViewRootImpl handler, kept past detach
-        long window;       // replaced when the reader is re-armed for a new format
+        final long window;
         ImageReader reader;
         int width, height, format;  // guarded by FrameworkSurfaces
         int x = Integer.MIN_VALUE, y = Integer.MIN_VALUE;
@@ -53,7 +56,7 @@ final class FrameworkSurfaces {
         int clipLeft, clipTop, clipRight, clipBottom;
         boolean cpu;  // frames arrive through the ImageReader (a video), not a native window
         boolean gpu;  // producer's buffers are not CPU-lockable: nothing can be shown
-        boolean rearmed;  // the reader was rebuilt once for the producer's real format
+        int frameFormat;  // the HAL format of the last frame shown, to log a change once
         boolean closed;
         Entry(SurfaceView view, Object owner, long window, ImageReader reader) {
             this.view = view; this.owner = owner; this.window = window; this.reader = reader;
@@ -73,14 +76,15 @@ final class FrameworkSurfaces {
     private final Map<SurfaceView, Entry> entries = new IdentityHashMap<>();
     private boolean stopped;  // ViewRootImpl.setWindowStopped: no surface is created again
     private static native int present(long window, int x, int y, int width, int height, int[] argb);
-    // Op 26: a GPU producer's RGBA_8888 plane; the host swizzles the visible region and presents it.
-    private static native int presentRgba(long window, int x, int y, int width, int height,
-            int layerWidth, int layerHeight, int left, int top, int cropLeft, int cropTop,
-            int cropWidth, int cropHeight, ByteBuffer pixels, int rowStride, int pixelStride);
-    // Op 25: the visible region of a width x height layer from a YUV_420_888 image's planes, converted by the host.
-    private static native int presentYuv(long window, int x, int y, int width, int height, int layerWidth, int layerHeight,
-            int left, int top, int cropLeft, int cropTop, int cropWidth, int cropHeight, ByteBuffer yPlane, ByteBuffer uPlane,
-            ByteBuffer vPlane, int yRow, int uRow, int vRow, int yPixel, int uPixel, int vPixel, int matrix, int fullRange);
+    // Locks an acquired Image's HardwareBuffer for CPU reads and describes its planes in `planes` (surface_buffers.c):
+    // format, width, height, plane count, then per plane the address, row stride, pixel stride and readable bytes. RGBA is
+    // one plane, YUV 4:2:0 is Y, U and V. 0, or a negative errno: -ENOTSUP (-95) for any other format. Unlock it after use.
+    static native int lockBuffer(HardwareBuffer buffer, long[] planes);
+    static native void unlockBuffer(HardwareBuffer buffer);
+    static final int PLANE_VALUES = 16;
+    // Ops 26 and 25: the visible region of a width x height layer from the locked planes, converted by the host.
+    private static native int presentPlanes(long window, int x, int y, int width, int height, int layerWidth, int layerHeight,
+            int left, int top, int cropLeft, int cropTop, int cropWidth, int cropHeight, long[] planes, int matrix, int fullRange);
     private static native int geometry(long window, int x, int y, int width, int height);
 
     FrameworkSurfaces(Host host) {
@@ -227,15 +231,10 @@ final class FrameworkSurfaces {
                 // Keep the pinned framework's real BufferQueue, GraphicBuffer
                 // ownership and acquire/release fences. A host token cannot
                 // stand in for android::Surface in MediaCodec or the NDK.
-                // The queue must be configured for what its producer writes:
-                // a Vulkan/GL surface (Unity) hands the loader RGBA_8888
-                // gralloc buffers, a codec writes YUV. The holder's requested
-                // format is the only signal available before the first frame,
-                // and only a video view asks for YUV. A mismatch here throws in
-                // nativeImageSetup on the frame thread, which killed the app.
-                int layerFormat = format == ImageFormat.YUV_420_888 || format == ImageFormat.NV21
-                        ? ImageFormat.YUV_420_888 : PixelFormat.RGBA_8888;
-                ImageReader reader = ImageReader.newInstance(width, height, layerFormat, 3);
+                // The queue's reader takes any format (see newReader): the
+                // producer is not known before it connects, and a reader
+                // configured for one format throws on another.
+                ImageReader reader = newReader(width, height);
                 Surface target = view.getHolder().getSurface();
                 long window;
                 try {
@@ -299,50 +298,62 @@ final class FrameworkSurfaces {
     }
 
 
-    // CpuConsumer has already waited for the producer's acquire fence before
-    // exposing planes. Closing the Image returns its buffer even on failure.
-    // Presents the visible region [left,right) x [top,bottom) of the width x height layer from the image: the host
-    // converts only that region, so a video far larger than the window costs what shows.
-    private static int present(long window, int x, int y, Image image, int width, int height, int left, int top, int right,
-            int bottom) {
-        Rect crop = image.getCropRect();
+    // The reader behind every SurfaceView's Surface. It is opaque (PRIVATE), so it checks nothing about a buffer's format and
+    // never abandons its queue over one: a codec's YUV, a GPU or CPU producer's RGBA, and a producer that switches between
+    // them all reach it. (A reader configured for one format throws on the other, and replacing it abandoned the queue a
+    // codec was connected to.) CPU reads are requested so that producers allocate buffers that lockBuffer can map.
+    static ImageReader newReader(int width, int height) {
+        return ImageReader.newInstance(width, height, ImageFormat.PRIVATE, 3, HardwareBuffer.USAGE_CPU_READ_OFTEN);
+    }
+
+    // Presents the visible region [left,right) x [top,bottom) of the width x height layer from the image: the host converts
+    // only that region, so a video far larger than the window costs what shows. An opaque Image has no planes; its
+    // HardwareBuffer is locked for the call and read as RGBA or YUV 4:2:0. The lock does not wait for the producer, so its
+    // acquire fence is waited for first (a non-opaque reader's lock did that itself). Closing the Image returns its buffer
+    // even on failure. The crop an acquired Image reports is its whole buffer, which is what is presented.
+    private int present(Entry entry, int x, int y, Image image, int width, int height, int left, int top, int right, int bottom) {
         int regionWidth = right - left, regionHeight = bottom - top;
-        if (crop.width() <= 0 || crop.height() <= 0 || width <= 0 || height <= 0 || regionWidth <= 0 || regionHeight <= 0
-                || regionWidth > 4096 || regionHeight > 4096)
+        if (width <= 0 || height <= 0 || regionWidth <= 0 || regionHeight <= 0 || regionWidth > 4096 || regionHeight > 4096)
             throw new IllegalArgumentException("Surface image dimensions");
-        if (image.getFormat() == PixelFormat.RGBA_8888) {
-            // A GPU producer: Unity's Vulkan HAL hands the loader RGBA_8888
-            // gralloc buffers, which reach this window's queue. The plane goes
-            // to the host, which swizzles the visible region and presents it:
-            // packing the int[] here cost about 150 ms per 1600x900 frame on the
-            // UI thread, the largest measured cost of the video path.
-            Image.Plane plane = image.getPlanes()[0];
-            ByteBuffer pixels = plane.getBuffer();
-            if (!pixels.isDirect()) throw new UnsupportedOperationException("Surface image plane is not a direct buffer");
-            return presentRgba(window, x, y, regionWidth, regionHeight, width, height, left, top,
-                    crop.left, crop.top, crop.width(), crop.height(), pixels,
-                    plane.getRowStride(), plane.getPixelStride());
+        // Wait only on a valid fence: an empty one (a producer that had nothing to wait for) answers false to awaitForever()
+        // in android-15.0.0_r1, whatever its documentation says (SyncFence.await is "mNativePtr != 0 && nWait(...)").
+        try (SyncFence fence = image.getFence()) {
+            if (fence.isValid() && !fence.awaitForever()) throw new IllegalStateException("Surface image acquire fence");
+        } catch (IOException error) {
+            throw new IllegalStateException("Surface image acquire fence", error);
         }
-        Image.Plane[] planes = image.getPlanes();
-        if (image.getFormat() != ImageFormat.YUV_420_888 || planes.length != 3)
-            throw new UnsupportedOperationException("Surface image format: " + image.getFormat());
-        int dataspace;
-        try { dataspace = (Integer)Image.class.getMethod("getDataSpace").invoke(image); }
-        catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
-        int standard = (dataspace >> 16) & 63, transfer = (dataspace >> 22) & 31;
-        if (transfer == 6 || transfer == 7) throw new UnsupportedOperationException("HDR Surface output");
-        if (standard != 0 && standard != 1 && standard != 2 && standard != 4 && standard != 6)
-            throw new UnsupportedOperationException("Surface color standard: " + standard);
-        // BT.709 (1) and BT.2020 (6) have their own weights; everything else the SDK reports is BT.601.
-        int matrix = standard == 1 ? 1 : standard == 6 ? 2 : 0;
-        boolean full = ((dataspace >> 27) & 7) == 1;
-        ByteBuffer[] bytes = {planes[0].getBuffer(), planes[1].getBuffer(), planes[2].getBuffer()};
-        for (ByteBuffer buffer : bytes)
-            if (!buffer.isDirect() || buffer.position() != 0) throw new UnsupportedOperationException("Surface image planes are not direct buffers");
-        return presentYuv(window, x, y, regionWidth, regionHeight, width, height, left, top, crop.left, crop.top,
-                crop.width(), crop.height(), bytes[0], bytes[1], bytes[2], planes[0].getRowStride(), planes[1].getRowStride(),
-                planes[2].getRowStride(), planes[0].getPixelStride(), planes[1].getPixelStride(), planes[2].getPixelStride(),
-                matrix, full ? 1 : 0);
+        long[] planes = new long[PLANE_VALUES];
+        try (HardwareBuffer buffer = image.getHardwareBuffer()) {
+            int locked = lockBuffer(buffer, planes);
+            if (locked == -95)
+                throw new UnsupportedOperationException("Surface image format: 0x" + Integer.toHexString(buffer.getFormat()));
+            if (locked != 0) throw new IllegalStateException("Surface image lock: " + locked);
+            try {
+                if (planes[0] != entry.frameFormat) {  // a producer that changes format shows up here once per change
+                    entry.frameFormat = (int) planes[0];
+                    System.out.println("APP_SURFACE_FRAME_FORMAT 0x" + Integer.toHexString(entry.frameFormat) + " "
+                            + planes[1] + "x" + planes[2]);
+                }
+                int matrix = 0;
+                boolean full = false;
+                if (planes[3] == 3) {
+                    int dataspace;
+                    try { dataspace = (Integer)Image.class.getMethod("getDataSpace").invoke(image); }
+                    catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
+                    int standard = (dataspace >> 16) & 63, transfer = (dataspace >> 22) & 31;
+                    if (transfer == 6 || transfer == 7) throw new UnsupportedOperationException("HDR Surface output");
+                    if (standard != 0 && standard != 1 && standard != 2 && standard != 4 && standard != 6)
+                        throw new UnsupportedOperationException("Surface color standard: " + standard);
+                    // BT.709 (1) and BT.2020 (6) have their own weights; everything else the SDK reports is BT.601.
+                    matrix = standard == 1 ? 1 : standard == 6 ? 2 : 0;
+                    full = ((dataspace >> 27) & 7) == 1;
+                }
+                return presentPlanes(entry.window, x, y, regionWidth, regionHeight, width, height, left, top, 0, 0,
+                        (int) planes[1], (int) planes[2], planes, matrix, full ? 1 : 0);
+            } finally {
+                unlockBuffer(buffer);
+            }
+        }
     }
 
     // The frame thread. The view's position comes from its last update, made on
@@ -356,86 +367,22 @@ final class FrameworkSurfaces {
             int w = entry.clipRight - entry.clipLeft, h = entry.clipBottom - entry.clipTop;
             if (w <= 0 || h <= 0) return;  // scrolled out: the layer shows nothing
             long acquired = System.nanoTime();
-            int result = present(entry.window, entry.x + entry.clipLeft, entry.y + entry.clipTop, image, entry.width,
+            int result = present(entry, entry.x + entry.clipLeft, entry.y + entry.clipTop, image, entry.width,
                     entry.height, entry.clipLeft, entry.clipTop, entry.clipRight, entry.clipBottom);
             long presented = System.nanoTime();
             if (result != 0 && result != -11) throw new IllegalStateException("Surface presentation: " + result);
             note(acquired - start, presented - acquired, (long) w * h);
         } catch (UnsupportedOperationException error) {
-            // A producer whose format does not match this queue: acquire
-            // throws, and an uncaught exception on the frame thread previously
-            // killed the process. The queue is created for the holder's
-            // format (see update), so this is a last-resort guard: log once
-            // and stop consuming rather than take the app down.
-            if (entry.rearmed) {
-                synchronized (this) {
-                    if (entry.closed) return;
-                    entry.gpu = true;
-                    entry.reader.setOnImageAvailableListener(null, frames());
-                }
-                System.out.println("APP_SURFACE_UNREADABLE " + error.getMessage());
-                return;
+            // A frame this path cannot show (a format that is neither RGBA nor YUV 4:2:0, HDR, or an unknown colour
+            // standard). An uncaught exception on the frame thread previously killed the process: log once and stop
+            // consuming rather than take the app down.
+            synchronized (this) {
+                if (entry.closed) return;
+                entry.gpu = true;
+                entry.reader.setOnImageAvailableListener(null, frames());
             }
-            entry.rearmed = true;
-            if (!rearm(entry, producerFormat(error.getMessage()))) {
-                synchronized (this) {
-                    if (entry.closed) return;
-                    entry.gpu = true;
-                    entry.reader.setOnImageAvailableListener(null, frames());
-                }
-                System.out.println("APP_SURFACE_UNREADABLE " + error.getMessage());
-            }
+            System.out.println("APP_SURFACE_UNREADABLE " + error.getMessage());
         }
-    }
-
-    // The producer's format from ImageReader's own message: "The producer
-    // output buffer format 0x1 doesn't match ...". 0 when it cannot be read.
-    private static int producerFormat(String message) {
-        if (message == null) return 0;
-        int at = message.indexOf("format 0x");
-        if (at < 0) return 0;
-        int start = at + 9, end = start;
-        while (end < message.length() && Character.digit(message.charAt(end), 16) >= 0) end++;
-        if (end == start) return 0;
-        try { return Integer.parseInt(message.substring(start, end), 16); }
-        catch (NumberFormatException error) { return 0; }
-    }
-
-    // Replace an entry's reader with one configured for `format`, keeping the
-    // same window: the SurfaceView's Surface is re-pointed at the new queue and
-    // the host window is rebuilt for it. Runs on the frame thread.
-    private boolean rearm(Entry entry, int format) {
-        if (format <= 0) return false;
-        ImageReader reader;
-        try { reader = ImageReader.newInstance(entry.width, entry.height, format, 3); }
-        catch (RuntimeException error) { return false; }
-        Surface target = entry.view.getHolder().getSurface();
-        long window;
-        try {
-            Surface.class.getMethod("transferFrom", Surface.class).invoke(target, reader.getSurface());
-            window = host.prepare(target, !PixelFormat.formatHasAlpha(entry.format));
-        } catch (Exception error) {
-            reader.close();
-            return false;
-        }
-        if (window <= 0) { reader.close(); return false; }
-        ImageReader old;
-        long oldWindow;
-        synchronized (this) {
-            if (entry.closed) { host.release(window); reader.close(); return false; }
-            old = entry.reader;
-            oldWindow = entry.window;
-            entry.reader = reader;
-            entry.window = window;
-            entry.gpu = false;
-            entry.cpu = false;
-            reader.setOnImageAvailableListener(available -> consume(entry), frames());
-        }
-        old.setOnImageAvailableListener(null, frames());
-        old.close();
-        host.release(oldWindow);
-        System.out.println("APP_SURFACE_REARM format=" + format);
-        return true;
     }
 
     // One APP_SURFACE_FRAMES line per 10 s while video frames are shown: how many, how long each stage took on average

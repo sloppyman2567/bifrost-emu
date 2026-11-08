@@ -2543,6 +2543,25 @@ class FrameworkDisplayContractTests(FrameworkPackageContractTests):
     marker = "FRAMEWORK_DISPLAY_CONTRACT_OK"
 
 
+class FrameworkSurfaceBuffersTests(FrameworkPackageContractTests):
+    # A SurfaceView's opaque ImageReader read through the Image's HardwareBuffer: known YUV and RGBA frames, a producer that
+    # switches between them on one reader, and one that names no format.
+    probe_class = "FrameworkSurfaceBuffersProbe"
+    output_name = "android-framework-surface-buffers"
+    marker = "FRAMEWORK_SURFACE_BUFFERS_OK"
+
+    def check_mode(self, mode):
+        from test_android_framework import run
+        output = ROOT / "build" / self.output_name / mode
+        # Buffers come from the realm's gralloc, which the managed graphics adapters (the mapper) provide.
+        passed = run(ARGS.emu.resolve(), self.runtime, self.art, self.probe / "classes.dex",
+                     mode, output, 120, services=True, main_class=self.probe_class,
+                     managed_graphics=ROOT / "build/android-adapters/managed",
+                     libraries=(ROOT / "build/android-adapters/libbifrost-activity.so",))
+        self.assertTrue(passed, f"{mode} surface buffers failed; see {output}")
+        self.assertIn(self.marker, (output / (mode + ".log")).read_text())
+
+
 class FrameworkCompatibilityTests(FrameworkPackageContractTests):
     probe_class = "FrameworkCompatibilityProbe"
     output_name = "android-framework-compatibility"
@@ -4690,6 +4709,32 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(text.count("MANAGED_VIEWS_SURFACE_DESTROYED"), 2)
         # A legacy view animation ends: the window's draw time advances with each draw.
         self.assertIn("MANAGED_VIEWS_ANIMATION_END", text)
+
+    def test_managed_surface_view_takes_every_producer_format(self):
+        # A SurfaceView's queue is an opaque ImageReader read through the HardwareBuffer, so a producer that changes format
+        # (YUV from a codec, RGBA from a GPU or CPU producer, and one naming no format) keeps one queue: YouTube's first video
+        # on a view abandoned the queue its codec was connected to (the reader was rebuilt for the producer's format).
+        # The frame thread presents each frame through host ops 25 and 26; a failed op would be fatal there.
+        state = self.work / "formats-state"
+        bundle = self.work / "formats.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("formats", managed="ManagedSurfaceFormats"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|AssertionError")
+        self.assertIn("SURFACE_FORMATS_DONE", text, text[-30000:])
+        self.assertNotIn("SURFACE_FORMATS_FAILED", text)
+        # The first producer is a real VP9 decoder, as in a video app: it decoded and rendered frames into the view.
+        self.assertRegex(text, r"SURFACE_FORMATS_CODEC frames=[1-9]", text[-30000:])
+        for marker in ("APP_SURFACE_REARM", "APP_SURFACE_UNREADABLE", "has been abandoned"):
+            self.assertNotIn(marker, text, marker)
+        # The consumer logs each change of the frames' HAL format: YUV_420_888 (0x23) from the decoder and the YUV writer,
+        # RGBA_8888 (0x1), then both again.
+        formats = re.findall(r"APP_SURFACE_FRAME_FORMAT 0x([0-9a-f]+) \d+x\d+", text)
+        self.assertEqual(formats[:4], ["23", "1", "23", "1"], text[-30000:])
 
     def launch_relaunch_fixture(self, name):
         state = self.work / (name + "-state")

@@ -132,6 +132,12 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   Looper; a new frame path keeps `APP_SURFACE_FRAMES` honest. `Yuv420.cpp` is the one YUV converter (SurfaceView layers
   and the EGL buffer images of `Graphics/`): its AVX2 kernel is runtime-gated, must stay bit-identical to the scalar
   `pixel()` and never load past a plane's `size`. `make test-android-yuv420` covers all three (guard-page planes).
+- A SurfaceView's queue reader is opaque (`FrameworkSurfaces.newReader`), never one configured for a format, and is never
+  replaced: it takes whatever connects (a codec's YUV, a GPU producer's RGBA, `lockCanvas`'s default), and replacing it
+  abandons the queue a codec holds. Frames are read from the Image's `HardwareBuffer` (`lockBuffer` in `surface_buffers.c`,
+  after the acquire fence and only when `Image.getFence()` is valid) and go to op 25 (YUV) or 26 (RGBA); a new producer
+  format is a case there, not a new reader. `FrameworkSurfaceBuffersProbe` and
+  `test_managed_surface_view_takes_every_producer_format` cover it (the second fails on a reader that is rebuilt).
 - Gralloc5 uses the realm-owned native allocator in `Services/GraphicsAllocator.cpp`
   and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
   libui caches its Binder, which must survive other apps exiting. Preserve the
