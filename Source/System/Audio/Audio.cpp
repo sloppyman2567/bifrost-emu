@@ -9,6 +9,7 @@
 // design starved sfx whenever music kept the global level pinned, and
 // ClearQueuedAudio wiped every device at once).
 #include "System/Audio/Audio.hpp"
+#include "System/Core/DebugFlags.hpp"
 #if defined(BIFROST_USE_SDL2)
 #  include <SDL2/SDL.h>
 #endif
@@ -330,12 +331,15 @@ ssize_t Audio::push_frames_locked_(Stream& s, uint32_t fmt, uint32_t rate,
     bytes_pushed_.fetch_add(accept_in * frame_sz_in, std::memory_order_relaxed);
     // Optional WAV dump records the guest's own bytes (pre-conversion),
     // matching the old headless behavior.
-    static const bool wav_dump = [] {
-        const char* e = getenv("BIFROST_AUDIO_DUMP");
-        return e && e[0] == '1';
-    }();
-    if (wav_dump)
+    static const auto& debug = dbg();
+    if (debug.audio_dump)
         buffer_.insert(buffer_.end(), data, data + accept_in * frame_sz_in);
+    // The same bytes, written as they arrive (DebugFlags::audio_dump_raw).
+    static FILE* const raw_dump = debug.audio_dump_raw.empty() ? nullptr : fopen(debug.audio_dump_raw.c_str(), "wb");
+    if (raw_dump) {
+        fwrite(data, 1, accept_in * frame_sz_in, raw_dump);
+        fflush(raw_dump);
+    }
     return static_cast<ssize_t>(accept_in);
 }
 

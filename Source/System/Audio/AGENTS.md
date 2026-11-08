@@ -22,7 +22,8 @@
   `src/libaaudio.map.txt`; strings returned to the guest live in guest memory.
   A buffer capacity request sizes the stream ring (`Audio::stream_open`
   `min_frames`) rather than failing: FMOD fails its output init on a refusal.
-  `BIFROST_AUDIO_TRACE` (a `DebugFlags.hpp` switch) traces audio thunk calls.
+  `BIFROST_AUDIO_TRACE` (a `DebugFlags.hpp` switch) traces audio thunk calls, and `BIFROST_AUDIO_DUMP` (`1` keeps the PCM for
+  `--audio-dump`'s WAV at exit; an absolute path writes it raw as it arrives, for a managed app that a signal ends) dumps it.
 - Native `AudioTrack` clients (Java AudioTrack, SoundPool, MediaPlayer) play through
   `Guest/Android/Adapters/audio_track.c`, the server side of AudioFlinger's
   control-block protocol (`createTrack` in `FrameworkAudioTracks`): one AAudio

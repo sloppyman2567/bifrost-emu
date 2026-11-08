@@ -67,6 +67,10 @@ struct DebugFlags {
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     bool audio_trace = false;  // BIFROST_AUDIO_TRACE — audio thunk calls with arguments and results
+    bool audio_dump = false;   // BIFROST_AUDIO_DUMP=1 — keep the guest's PCM for the WAV that --audio-dump writes at exit
+    // BIFROST_AUDIO_DUMP=/path — write the guest's PCM to the file as it arrives. The WAV above is written only when the
+    // process returns from main, and a managed app's emulator is ended by a signal.
+    std::string audio_dump_raw;
     bool vk_no_placed = false; // BIFROST_VK_NO_PLACED — keep vkMapMemory bounces (A/B control for placed maps)
     // BIFROST_TEXT_SCRIPT — key and text events pushed into the Android window's SDL queue once
     // text input starts: "down:H,text:h;up:H;edit:ni;text:..." (steps by ';' 100 ms apart, items
@@ -226,6 +230,10 @@ struct DebugFlags {
         f.jit_verify = std::getenv("BIFROST_JIT_VERIFY") != nullptr;
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.audio_trace = all || env("BIFROST_AUDIO_TRACE");
+        if (const char* dump = std::getenv("BIFROST_AUDIO_DUMP")) {
+            if (dump[0] == '1') f.audio_dump = true;
+            else if (dump[0] == '/') f.audio_dump_raw = dump;
+        }
         f.vk_no_placed = env("BIFROST_VK_NO_PLACED");
         if (const char* script = std::getenv("BIFROST_TEXT_SCRIPT")) f.text_script = script;
         f.input_trace = all || env("BIFROST_INPUT_TRACE");

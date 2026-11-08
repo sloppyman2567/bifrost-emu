@@ -46,6 +46,8 @@ Thunk switches (all thunking is on by default):
 ```bash
 BIFROST_THUNK_TRACE=1            # Trace graphic/audio/display thunk calls
 BIFROST_AUDIO_TRACE=1            # Trace only audio thunk calls: x0-x3 and the result
+BIFROST_AUDIO_DUMP=1             # Keep the guest's PCM for the WAV that --audio-dump PATH writes at exit
+BIFROST_AUDIO_DUMP=/tmp/a.pcm    # Write the guest's raw PCM to that absolute path as it arrives (survives a signal-ended managed app)
 BIFROST_TEXT_SCRIPT='down:H,text:h;up:H;edit:ni;text:x'  # Android window tests: push key/text events
 BIFROST_NO_THUNK_GRAPHICS=1      # Disable GL/EGL/SDL2 thunking
 BIFROST_NO_THUNK_AUDIO=1         # Disable ALSA/PulseAudio thunking
