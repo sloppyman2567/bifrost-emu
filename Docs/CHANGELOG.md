@@ -854,6 +854,14 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   thread keeps its priority), and finished transcodes are cached under a hash of the ASTC blocks (`Bc7Cache`, 256 MiB,
   `BIFROST_ASTC_CACHE_MB`), so a texture uploaded again is copied, not encoded. `BIFROST_ASTC_STATS=1` logs the
   hit rate. Cache effect in a real session is not yet measured; the in-memory cache does not survive a restart.
+- **Every swapchain frame of an Android Vulkan app was copied through staging in both directions.**
+  `vkAcquireImageANDROID` uploaded the whole gralloc frame (a CPU `memcpy` into staging, then a GPU copy into the image)
+  and `vkQueueSignalReleaseImageANDROID` read it back (a GPU copy, a wait for the GPU, a CPU `memcpy`). The host image
+  already holds exactly what the last release wrote and the compositor only reads the buffer, so the acquire upload is
+  now skipped after an image's first release; an empty submission signals the loader's semaphore and fence. At 3440x1384
+  that is 18 MiB of copying and one GPU round trip less per frame. Built and checked to compile only: the path runs
+  only inside an Android app, so it needs a ZZZ relaunch (`APP_SURFACE_FRAMES present_ms`) to confirm. The release
+  read-back, its wait and the copy into the window remain.
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 

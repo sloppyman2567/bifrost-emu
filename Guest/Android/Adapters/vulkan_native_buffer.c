@@ -14,7 +14,11 @@
 //                          gralloc pixels through a host staging buffer, then
 //                          signals the loader's semaphore (and its fence) with
 //                          the same queue submission, so the app's first use is
-//                          ordered after the upload.
+//                          ordered after the upload. After the image's first
+//                          release the upload is skipped: the host image
+//                          already holds what the release wrote into the
+//                          gralloc buffer, and nothing else writes that buffer.
+//                          An empty submission signals the semaphore and fence.
 //   vkQueueSignalReleaseImageANDROID
 //                          submits the reverse copy on the app's queue after
 //                          the loader's wait semaphores, waits for it, writes
@@ -94,6 +98,9 @@ struct image_binding {
     void *map;
     size_t map_size;
     int32_t info[BF_GRALLOC_INTS];
+    // The host image holds exactly the gralloc pixels: set when a release has written them, so the next acquire
+    // needs no upload. Guarded by copy_mutex.
+    bool host_current;
     struct image_binding *next;
 };
 
@@ -348,6 +355,18 @@ static VkResult stage_copy(struct device_state *d, struct image_binding *b,
     if (result != VK_SUCCESS) return result;
     if (!loader_fence) reset(d->device, 1, &fence);
     return VK_SUCCESS;
+}
+
+// Signals the loader's semaphore and fence in queue order, with no copy.
+static VkResult signal_only(struct device_state *d, VkSemaphore signal, VkFence loader_fence) {
+    PFN_vkQueueSubmit submit = HOST(vkQueueSubmit);
+    if (!submit) return VK_ERROR_INITIALIZATION_FAILED;
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .signalSemaphoreCount = signal ? 1u : 0u,
+        .pSignalSemaphores = signal ? &signal : NULL,
+    };
+    return submit(d->queue, 1, &submit_info, loader_fence);
 }
 
 // ── Entry points ─────────────────────────────────────────────────────────
@@ -654,6 +673,9 @@ static VkResult acquire_image(VkDevice device, VkImage image,
     const uint32_t stride = (uint32_t)info[BF_STRIDE];
     const VkDeviceSize bytes = (VkDeviceSize)stride * height * bf_gralloc_bpp(info[BF_FORMAT]);
     struct device_state *state = binding->device;
+    // The compositor only reads the buffer, and release left the image in the layout the upload would: nothing to do
+    // but signal. This saves a full-frame copy in each direction (and the wait for it) on every frame after the first.
+    if (binding->host_current) return signal_only(state, semaphore, fence);
     VkResult result = prepare_staging(state, bytes);
     if (result != VK_SUCCESS) return result;
     memcpy(state->staging_map, (const char *)binding->map + BF_GRALLOC_OFFSET,
@@ -683,6 +705,7 @@ static VkResult release_image(VkQueue queue, uint32_t wait_count,
     if (result != VK_SUCCESS) return result;
     memcpy((char *)binding->map + BF_GRALLOC_OFFSET, state->staging_map,
            (size_t)bytes);
+    binding->host_current = true;
     // The copy already completed on the host, so there is no native fence to
     // hand the consumer; -1 is the spec's "nothing to wait for".
     if (native_fence_fd) *native_fence_fd = -1;

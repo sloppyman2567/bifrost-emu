@@ -57,7 +57,10 @@
   inside the loader's acquire/release fences and semaphores.
   `vkCreateImage` strips `VkNativeBufferANDROID`, creates an ordinary host image
   with its own memory and remembers the gralloc layout; destroy the image
-  before freeing that memory. Keep the copy serialized (`copy_mutex`).
+  before freeing that memory. Keep the copy serialized (`copy_mutex`). After an image's first release the acquire
+  upload is skipped (`host_current`): the host image already holds what the release wrote into the gralloc buffer and
+  the compositor only reads it, so an empty submission signals the loader's semaphore and fence. Anything that starts
+  writing a swapchain buffer from outside must clear that flag.
 - The instance `apiVersion` the guest requested (`VkApplicationInfo.apiVersion`,
   offset 44, read at `vkCreateInstance` before pointer translation) is the version the
   Khronos loader built the device dispatch tables for. A newer core **device** command
