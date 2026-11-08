@@ -463,6 +463,30 @@ class LauncherArgumentTests(unittest.TestCase):
         gamepads = (ROOT / "Guest/Android/Managed/Framework/FrameworkGamepads.java").read_text()
         self.assertIn("synchronized boolean hasKeys(int id, int[] keyCodes, boolean[] exists, int virtualKeyboard)", gamepads)
 
+    def test_an_apps_built_in_defaults_sit_under_its_saved_settings_and_above_nothing_else(self):
+        import android_compat, android_settings
+        data = {"statuses": {"playable": "x"}, "apps": {"org.bifrost.fixture": {
+            "settings": {"window_mode": "keep", "network": "wifi", "nonsense": "1", "property.a": "b"}}}}
+        self.assertEqual(android_settings.app_defaults("org.bifrost.fixture", data), {"window_mode": "keep"})   # only valid keys
+        self.assertEqual(android_settings.app_defaults("org.example.other", data), {})
+        with tempfile.TemporaryDirectory() as directory, patch.object(android_compat, "load", return_value=data):
+            app = Path(directory) / "org.bifrost.fixture"
+            app.mkdir()
+            apply = lambda environment={}: android_settings.apply_to_launch(app, [], environment)[1]
+            self.assertEqual(apply()["BIFROST_ANDROID_WINDOW_MODE"], "keep")                     # nothing saved: the app's default
+            android_settings.save(app, {"window_mode": "resizable"})
+            self.assertEqual(apply()["BIFROST_ANDROID_WINDOW_MODE"], "resizable")                # a saved choice wins
+            self.assertEqual(android_settings.load(app), {"window_mode": "resizable"})           # defaults are never written back
+            android_settings.save(app, {})
+            self.assertNotIn("BIFROST_ANDROID_WINDOW_MODE", apply({"BIFROST_ANDROID_WINDOW_MODE": "resizable"}))   # the environment wins
+        bad = {"statuses": {"playable": "x"}, "apps": {"org.bifrost.fixture": {
+            "status": "playable", "name": "x", "evidence": "x", "checked": "2026-11",
+            "settings": {"window_mode": "stretch", "unknown": "1"}}}}
+        self.assertEqual(len(android_compat.validate(bad, ROOT)), 2)
+        bad["apps"]["org.bifrost.fixture"]["settings"] = ["window_mode"]
+        self.assertEqual(len(android_compat.validate(bad, ROOT)), 1)
+        self.assertEqual(android_settings.app_defaults("com.serenityforge.dokidokiliteratureclub"), {"window_mode": "keep"})
+
     def test_the_window_setting_keeps_the_apps_shape_by_default_and_reaches_the_guest(self):
         import android_managed
         from android_settings import KEYS, launch_changes, parse
@@ -621,6 +645,26 @@ class LauncherArgumentTests(unittest.TestCase):
             self.assertEqual(json.loads(run("org.bifrost.fixture", "--json").stdout), {"window_stats": False})
             self.assertEqual(run("org.bifrost.fixture", "--reset").returncode, 0)
             self.assertEqual(json.loads(run("org.bifrost.fixture", "--json").stdout), {})
+
+    def test_config_shows_an_apps_built_in_default_and_a_saved_choice_overrides_it(self):
+        import json
+        package = "com.serenityforge.dokidokiliteratureclub"
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / package).mkdir()
+            (state / package / "package.json").write_text("{}")
+            def run(*arguments):
+                return subprocess.run([sys.executable, str(ROOT / "Scripts/Android/android_package.py"),
+                                       "--state-root", str(state), "config", package, *arguments],
+                                      capture_output=True, text=True)
+            self.assertEqual(run("window_mode").stdout.strip(), "keep (default for this app)")
+            self.assertIn("window_mode = keep (default for this app)", run().stdout)
+            self.assertIn("network = default", run().stdout)
+            self.assertEqual(json.loads(run("--json").stdout), {})                      # the default is not a saved setting
+            self.assertEqual(run("window_mode", "resizable").returncode, 0)
+            self.assertEqual(run("window_mode").stdout.strip(), "resizable")
+            self.assertEqual(run("--reset", "window_mode").returncode, 0)
+            self.assertEqual(run("window_mode").stdout.strip(), "keep (default for this app)")
 
     def test_library_icons_are_bounded_and_legacy_metadata_remains_readable(self):
         import json
@@ -787,6 +831,20 @@ class LauncherProfileTests(unittest.TestCase):
         dialog.reset_profile()
         self.assertEqual(dialog.window_mode.currentData(), "resizable")
         self.assertNotIn("window_mode", dialog.result_settings())
+
+    def test_an_apps_built_in_default_is_shown_but_only_a_change_is_saved(self):
+        with patch("android_settings.app_defaults", return_value={"window_mode": "keep"}):
+            dialog = self.edit({})
+            self.assertEqual(dialog.window_mode.currentData(), "keep")                  # shown as the app's default
+            self.assertNotIn("window_mode", dialog.result_settings())                   # and not written unless changed
+            dialog.window_mode.setCurrentIndex(dialog.window_mode.findData("resizable"))
+            self.assertEqual(dialog.result_settings()["window_mode"], "resizable")      # a choice against the default is explicit
+            dialog = self.edit({"window_mode": "resizable"})
+            self.assertEqual(dialog.window_mode.currentData(), "resizable")
+            self.assertEqual(dialog.result_settings()["window_mode"], "resizable")
+            dialog.reset_profile()
+            self.assertEqual(dialog.window_mode.currentData(), "keep")                  # restoring defaults means the app's own
+            self.assertNotIn("window_mode", dialog.result_settings())
 
     def test_profile_round_trip_uses_the_cli_format_and_cancel_does_not_save(self):
         from android_settings import save, load, properties

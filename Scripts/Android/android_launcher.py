@@ -444,6 +444,11 @@ def settings_dialog(window, app, settings):
     import android_settings
     from android_package import API
 
+    # The widgets show the app's built-in defaults under what is saved; only a change from what they showed is written, so a
+    # default that later changes still reaches an app whose settings were never touched.
+    saved = settings
+    defaults = android_settings.app_defaults(app["package"])
+    settings = {**defaults, **saved}
     PadRow = pad_row_class()
 
     class Settings(QDialog):
@@ -455,7 +460,7 @@ def settings_dialog(window, app, settings):
             self.backdrop = None
             self.setWindowTitle(app["label"] + " settings")
             self.resize(620, 500)
-            self.settings, self.removals = dict(settings), []
+            self.settings, self.removals = dict(saved), []
             layout = QVBoxLayout(self); layout.setContentsMargins(16, 14, 16, 14); layout.setSpacing(12)
             dim = lambda label: (label.setForegroundRole(QPalette.ColorRole.PlaceholderText), label)[1]
             intro = dim(QLabel("Saved for this app and shared with the command line. Changes apply the next time it starts."))
@@ -515,6 +520,9 @@ def settings_dialog(window, app, settings):
             self.menu_default = android_desktop.default_on(window.state)
             self.menu = QCheckBox("Show a launcher for this app in the desktop's application menu")
             self.menu.setChecked(settings.get("menu_entry", self.menu_default)); form.addRow("Application menu", self.menu)
+            self.choices = {"window_stats_mode": self.stats_mode, "back_key": self.back, "enter_key": self.enter,
+                            "jit_disk_cache": self.disk_cache, "jit_disk_cache_mb": self.disk_cache_mb, "network": self.network,
+                            "window_mode": self.window_mode, "controller": self.controller}
             form.addRow("Runtime", dim(QLabel(f"Android API {API} · bundled runtime")))
             directory = window.state / app["package"]
             folder = QPushButton("Open app folder")
@@ -692,7 +700,14 @@ def settings_dialog(window, app, settings):
             self.back.setCurrentIndex(0); self.enter.setCurrentIndex(0); self.disk_cache.setCurrentIndex(0)
             self.disk_cache_mb.setCurrentIndex(0); self.network.setCurrentIndex(0); self.window_mode.setCurrentIndex(0)
             self.controller.setCurrentIndex(0); self.menu.setChecked(self.menu_default)
-            self.initial = (False, "normal", "escape", "enter", "default", "default", "auto", "resizable", "auto", self.menu_default)
+            for key, value in defaults.items():   # the app's own defaults, not the global ones
+                if key in self.choices: self.choices[key].setCurrentIndex(max(0, self.choices[key].findData(value)))
+                elif key == "window_stats": self.stats.setChecked(value)
+                elif key == "menu_entry": self.menu.setChecked(value)
+            self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
+                            self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
+                            self.network.currentData(), self.window_mode.currentData(), self.controller.currentData(),
+                            self.menu.isChecked())
             self.emulator.setCurrentIndex(0); self.properties.setRowCount(0); self.error.hide()
 
         def result_settings(self):

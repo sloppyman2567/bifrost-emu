@@ -961,11 +961,22 @@ def compatibility_report(args):
     return 0
 
 
+def shown_setting(settings, defaults, key):
+    """A setting as `config` prints it: the saved value, else the app's built-in default marked as such, else `default`."""
+    value = settings.get(key)
+    if value is None and key in defaults:
+        value, note = defaults[key], " (default for this app)"
+    else:
+        note = ""
+    return ("default" if value is None else str(value).lower() if isinstance(value, bool) else value) + note
+
+
 def configure(args):
     app = args.state_root / args.package
     if not PACKAGE.fullmatch(args.package) or not (app / "package.json").is_file():
         raise ValueError("Package is not installed: " + args.package)
     settings = android_settings.load(app)
+    defaults = android_settings.app_defaults(args.package)
     if args.key and not android_settings.known(args.key):
         raise ValueError("Unknown setting: " + args.key)
     if args.reset:
@@ -979,8 +990,7 @@ def configure(args):
         settings[args.key] = android_settings.parse(args.key, args.value)
         android_settings.save(app, settings)
     elif args.key and not args.json:
-        value = settings.get(args.key)
-        print("default" if value is None else str(value).lower() if isinstance(value, bool) else value)
+        print(shown_setting(settings, defaults, args.key))
         return 0
     if (args.reset or args.value is not None) and args.key in (None, "menu_entry"):
         update_desktop(args.state_root, args.package)
@@ -990,8 +1000,7 @@ def configure(args):
         print("Saved; applies the next time the app starts")
     else:
         for key in (*android_settings.KEYS, *sorted(k for k in settings if android_settings.property_name(k))):
-            value = settings.get(key)
-            print(f"{key} = " + ("default" if value is None else str(value).lower() if isinstance(value, bool) else value))
+            print(f"{key} = " + shown_setting(settings, defaults, key))
     return 0
 
 

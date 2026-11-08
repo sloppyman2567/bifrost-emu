@@ -302,6 +302,11 @@ mean the game process has already launched.
 | `menu_entry` | `on`, `off` | whether the app gets a launcher in the desktop's application menu (see [Menu entries](#menu-entries-2026-11-04)); unset follows `asgard desktop --default` (off at first: nothing is added to the menu until you ask) |
 | `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_OFFLINE=1`: the app's sockets cannot reach anything beyond loopback (`ENETUNREACH`), names do not resolve, and Android reports no network |
 
+An app can carry built-in defaults: the `settings` object of its entry in `Scripts/Android/compatibility.json` (any setting above
+except `property.*`; `test_android_package.py` validates them). They apply under what the user saved: `asgard config APP` shows an
+unset one as `keep (default for this app)`, a saved value (including `resizable`) overrides it, `--reset KEY` returns to it, and
+the library's settings page shows it and writes only a change. Doki Doki Literature Club ships `window_mode=keep`.
+
 Managed apps also accept `property.NAME` settings. These override Android
 properties in this app's generated runtime, without changing the shared image:
 

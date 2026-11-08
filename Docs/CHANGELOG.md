@@ -183,6 +183,15 @@ there (guided provisioning, update/reinstall) remain in progress.
   the real launcher offscreen with a slow poll in flight and interrupts it (it fails on the old code with SIGABRT).
   An installed Asgard (`/usr/local/share/bifrost/asgard`) keeps the crash until it is reinstalled.
 
+### Added (built-in per-app settings)
+
+- An app's entry in `compatibility.json` may carry `settings`, defaults that a saved setting overrides. `asgard config APP`
+  prints an unset one as `VALUE (default for this app)`, the launcher passes it at launch, and the library's settings page shows
+  it and saves only a change (`android_settings.app_defaults`/`effective`; the data is validated by `test_android_package.py`).
+  Doki Doki Literature Club now opens with `window_mode=keep`: on an Android resize Ren'Py deletes all of its GL textures and keeps
+  drawing the old names, so images went black while text still drew; the game never sees the resize in that mode (user-confirmed
+  2026-11-08).
+
 ### Fixed (AAudio write dropped audio)
 
 - `AAudioStream_write` returned a short count, or 0, as soon as the host ring was full, whatever `timeoutNanoseconds` said.

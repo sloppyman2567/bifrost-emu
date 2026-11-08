@@ -87,6 +87,23 @@ def load(app):
     return {key: value for key, value in saved.items() if valid(key, value)}
 
 
+def app_defaults(package, data=None):
+    """What a known app starts with: the `settings` of its compatibility.json entry, below anything the user saved."""
+    try:
+        import android_compat
+        entry = android_compat.entry(data or android_compat.load(), package).get("settings", {})
+    except (OSError, ValueError, KeyError):
+        return {}
+    if not isinstance(entry, dict):
+        return {}
+    return {key: value for key, value in entry.items() if key in KEYS and valid(key, value)}
+
+
+def effective(app):
+    """Saved settings over the app's built-in defaults (the app directory is named by its package)."""
+    return {**app_defaults(app.name), **load(app)}
+
+
 def save(app, settings):
     from android_sessions import publish
     publish(app / SETTINGS, settings)
@@ -153,7 +170,7 @@ def launch_changes(settings):
 
 def apply_to_launch(app, options, environment):
     """Options and extra environment from saved choices; the command line and environment win."""
-    flags, env = launch_changes(load(app))
+    flags, env = launch_changes(effective(app))
     env["BIFROST_ANDROID_WINDOW_STATE"] = str(app / WINDOW_STATE)
     if any(option.startswith(("--window-stats", "--no-window-stats")) for option in options):
         flags = []

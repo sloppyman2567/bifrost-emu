@@ -2451,7 +2451,7 @@ Android layer (release-2.30.x `SDLSurface.surfaceChanged`, `onNativeSurfaceChang
 size-only change, which is what the runtime delivers, so the guest's own resize path produces this; no GL call is mistranslated
 (the render thread's textures are generated, deleted and bound consistently). Whether a real device with a resizable window
 behaves the same was not checked. With `window_mode=keep` Ren'Py never sees a resize and the images stay (user-confirmed
-2026-11-08).
+2026-11-08), so the app's `compatibility.json` entry carries `"settings": {"window_mode": "keep"}` as its built-in default.
 
 On a host resize the launcher recomputes the Configuration (`FrameworkDisplay`: `orientation` from the window's width and
 height, `screenWidthDp`, `screenHeightDp`, `smallestScreenWidthDp`), updates the resources, and hands every Activity to

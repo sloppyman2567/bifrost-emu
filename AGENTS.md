@@ -55,6 +55,9 @@ such as "misc", "common" or "core". The current version lives in
   that list in step with the Makefile's `android-provision` and `install-asgard.py`'s `REQUIRED`/`MANIFESTS`
   (`test_android_provisioning.py` fails when they drift). An installed copy is never set up from its own files: it is
   reinstalled.
+- Built-in per-app settings are the `settings` of an app's `compatibility.json` entry (`android_settings.app_defaults`), applied
+  under saved settings, never written back to them: a launch, `asgard config` and the library page all read `effective`/`app_defaults`,
+  and the page saves only a change, so a default that later changes still reaches an untouched app.
 - Setup scripts find host tools through `Scripts/Setup/find-host-tools.sh` (sbin, JDK and LLVM directories, `~/.local/bin`,
   `BIFROST_TOOL_DIRS`), never a bare `command -v`: `debugfs` is off an ordinary Debian user's `PATH`. Hosts without SDL3 build
   it with `Tools/Fetch/fetch-sdl3.py` into `Tools/sdl3`.
