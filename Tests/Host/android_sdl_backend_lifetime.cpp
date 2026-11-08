@@ -84,6 +84,28 @@ int main() {
     CHECK(state("", "window:restored", -1));
     unsetenv("BIFROST_TEST_SDL_WINDOW_FLAGS");
   }
+  // The desktop's colour scheme: the backend answers it, and reports a change of light and dark once, whenever the
+  // window was opened in the other one. SDL answers unknown when it cannot tell, and that changes nothing.
+  {
+    auto scheme = [&](const char *theme, int expected) {
+      setenv("BIFROST_TEST_SDL_THEME", theme, 1);
+      setenv("BIFROST_TEST_SDL_EVENT", "theme", 1);
+      const int result = first->poll(event);
+      if (expected < 0) return result == 0 && event.type == 0;
+      return result == 1 && event.type == BIFROST_WINDOW_THEME && event.action == expected;
+    };
+    CHECK(first->system_theme() == 1);                   // the fake desktop is light until told otherwise
+    setenv("BIFROST_TEST_SDL_THEME", "dark", 1);
+    CHECK(first->system_theme() == 2);
+    unsetenv("BIFROST_TEST_SDL_THEME");
+    CHECK(scheme("light", -1));                          // the window opened light: nothing changed
+    CHECK(scheme("dark", 1));
+    CHECK(scheme("dark", -1));                           // the same scheme is not reported twice
+    CHECK(scheme("unknown", -1));                        // not knowing is not a change
+    CHECK(scheme("light", 0));
+    CHECK(scheme("dark", 1));
+    unsetenv("BIFROST_TEST_SDL_THEME");
+  }
   // The left button is still down from above: a wheel step is not a pinch then.
   setenv("BIFROST_TEST_SDL_EVENT", "gesture-wheel-held:1", 1);
   CHECK(first->poll(event) == 0 && event.type == 0);

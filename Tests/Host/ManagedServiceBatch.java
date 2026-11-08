@@ -185,17 +185,18 @@ public final class ManagedServiceBatch {
         ((FrameworkServiceRuntime) launcherField("serviceRuntime")).attach(thread, context.getApplicationInfo());
         FrameworkActivities activities = (FrameworkActivities) launcherField("activities");
         Binder token = new Binder();
+        ActivityInfo info = new ActivityInfo(); info.applicationInfo = context.getApplicationInfo();
+        info.packageName = NAME; info.name = ProbeActivity.class.getName();
+        Intent launch = new Intent().setComponent(new ComponentName(NAME, info.name));
         java.util.concurrent.FutureTask<android.app.Activity> root = new java.util.concurrent.FutureTask<>(() -> {
-            ActivityInfo info = new ActivityInfo(); info.applicationInfo = context.getApplicationInfo();
-            info.packageName = NAME; info.name = ProbeActivity.class.getName();
             android.app.Activity instance = new android.app.Instrumentation().newActivity(ProbeActivity.class, context, token,
-                    (android.app.Application) context, new Intent().setComponent(new ComponentName(NAME, info.name)),
+                    (android.app.Application) context, launch,
                     info, "PendingIntent probe", null, null, null);
             FrameworkActivities.attachThread(instance, thread);
             return instance;
         });
         new android.os.Handler(Looper.getMainLooper()).post(root);
-        activities.attach(thread, loaded, new android.app.Instrumentation(), (android.app.Application) context, root.get(5, TimeUnit.SECONDS), token);
+        activities.attach(thread, loaded, new android.app.Instrumentation(), (android.app.Application) context, root.get(5, TimeUnit.SECONDS), info, launch, token);
         Object activity = endpoint("activity", "android.app.IActivityManager");
         BroadcastReceiver systemReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent intent) { }
@@ -1033,7 +1034,7 @@ public final class ManagedServiceBatch {
         check(manager.getCurrentModeType() == android.content.res.Configuration.UI_MODE_TYPE_NORMAL
                 && manager.getNightMode() == android.app.UiModeManager.MODE_NIGHT_NO
                 && manager.getContrast() == 0f, "UI mode defaults differ from AOSP resources");
-        check(FrameworkUiMode.CONFIGURATION_UI_MODE == (android.content.res.Configuration.UI_MODE_TYPE_NORMAL
+        check(FrameworkUiMode.configurationUiMode() == (android.content.res.Configuration.UI_MODE_TYPE_NORMAL
                 | android.content.res.Configuration.UI_MODE_NIGHT_NO), "configuration uiMode differs from the service");
         manager.setNightMode(android.app.UiModeManager.MODE_NIGHT_YES);
         check(manager.getNightMode() == android.app.UiModeManager.MODE_NIGHT_NO, "locked night mode changed");
@@ -1042,6 +1043,27 @@ public final class ManagedServiceBatch {
             manager.setApplicationNightMode(android.app.UiModeManager.MODE_NIGHT_YES);
             throw new AssertionError("per-app dark mode claimed without a configuration change");
         } catch (UnsupportedOperationException expected) { checks++; }
+        // The system's night mode is the desktop's colour scheme: dark makes the service, the configuration's uiMode and
+        // a request for the mode the system is in agree, and a request for the other one is still refused.
+        check(FrameworkUiMode.setNight(true) && !FrameworkUiMode.setNight(true), "night mode change was not reported once");
+        try {
+            check(manager.getNightMode() == android.app.UiModeManager.MODE_NIGHT_YES
+                    && manager.getCurrentModeType() == android.content.res.Configuration.UI_MODE_TYPE_NORMAL,
+                    "a dark desktop is not the night mode");
+            check(FrameworkUiMode.configurationUiMode() == (android.content.res.Configuration.UI_MODE_TYPE_NORMAL
+                    | android.content.res.Configuration.UI_MODE_NIGHT_YES), "dark configuration uiMode differs from the service");
+            manager.setApplicationNightMode(android.app.UiModeManager.MODE_NIGHT_YES);
+            manager.setApplicationNightMode(android.app.UiModeManager.MODE_NIGHT_AUTO);
+            manager.setNightMode(android.app.UiModeManager.MODE_NIGHT_NO);
+            check(manager.getNightMode() == android.app.UiModeManager.MODE_NIGHT_YES, "locked night mode changed while dark");
+            try {
+                manager.setApplicationNightMode(android.app.UiModeManager.MODE_NIGHT_NO);
+                throw new AssertionError("per-app light mode claimed without a configuration change");
+            } catch (UnsupportedOperationException expected) { checks++; }
+        } finally {
+            check(FrameworkUiMode.setNight(false), "night mode did not return to light");
+        }
+        check(manager.getNightMode() == android.app.UiModeManager.MODE_NIGHT_NO, "light desktop is not the default night mode");
         Object remote = endpoint("uimode", "android.app.IUiModeManager");
         invalid(() -> invoke(remote, "setNightMode", 7));
         denied(() -> invoke(remote, "getActiveProjectionTypes"));

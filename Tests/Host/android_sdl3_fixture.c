@@ -34,6 +34,13 @@ SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) {
     if (fake_fullscreen || (state && strstr(state, "fullscreen"))) flags |= SDL_WINDOW_FULLSCREEN;
     return flags;
 }
+/* BIFROST_TEST_SDL_THEME is the desktop's colour scheme: dark, unknown, or (unset) light. */
+SDL_SystemTheme SDL_GetSystemTheme(void) {
+    const char *theme = getenv("BIFROST_TEST_SDL_THEME");
+    if (theme && !strcmp(theme, "dark")) return SDL_SYSTEM_THEME_DARK;
+    if (theme && !strcmp(theme, "unknown")) return SDL_SYSTEM_THEME_UNKNOWN;
+    return SDL_SYSTEM_THEME_LIGHT;
+}
 SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window *window) { return window ? 1 : 0; }
 bool SDL_GetDisplayBounds(SDL_DisplayID display, SDL_Rect *bounds) {
     if (display != 1 || !bounds) return false;
@@ -271,6 +278,8 @@ bool SDL_PollEvent(SDL_Event *event) {
         event->key.repeat = !strncmp(mode + 5, "f11-repeat", 10);
         return true;
     }
+    /* theme is the event SDL sends when the desktop's colour scheme changed (it names no window). */
+    if (!strcmp(mode, "theme")) { event->type = SDL_EVENT_SYSTEM_THEME_CHANGED; return true; }
     /* window:NAME is a state event of the window itself, window-other:NAME of another one. */
     if (!strncmp(mode, "window:", 7) || !strncmp(mode, "window-other:", 13)) {
         static const struct { const char *name; SDL_EventType type; } names[] = {

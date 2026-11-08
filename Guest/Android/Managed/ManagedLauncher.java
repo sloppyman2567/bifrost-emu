@@ -149,6 +149,7 @@ public final class ManagedLauncher {
     // Op 24: the pointer shape over the window, a BIFROST_WINDOW_CURSOR_* value.
     private static native int setCursor(int cursor);
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
+    private static native int systemTheme(); // the desktop's colour scheme: 2 dark, 1 light, 0 unknown
     private static native int fixWindow(int width, int height); // non-resizable app: scale the host window to fit
     private static native int orientWindow(int axis);
     private static boolean fixedWindowSize;
@@ -1237,6 +1238,26 @@ public final class ManagedLauncher {
         System.out.println("APP_SETTINGS_OK");
     }
 
+    // BIFROST_ANDROID_THEME=light or dark fixes the system's night mode instead of following the desktop (null: follow it).
+    private static Boolean forcedTheme() {
+        String value = System.getenv("BIFROST_ANDROID_THEME");
+        return "dark".equals(value) ? Boolean.TRUE : "light".equals(value) ? Boolean.FALSE : null;
+    }
+
+    // The desktop's colour scheme changed: the system's night mode follows it, as UiModeManagerService does when the night
+    // mode is set. The global configuration's uiMode changes and every Resources takes it (ActivityThread applies it for
+    // the process, then tells the Application and each Activity), window contexts are told, and an Activity that does not
+    // declare uiMode in configChanges is relaunched (FrameworkActivities). A fixed theme ignores the desktop.
+    private static void themeChanged(boolean dark) throws Exception {
+        if (forcedTheme() != null || !FrameworkUiMode.setNight(dark)) return;
+        System.out.println("APP_THEME " + (dark ? "dark" : "light"));
+        Object activityThread = Class.forName("android.app.ActivityThread").getMethod("currentActivityThread").invoke(null);
+        call(activityThread, "handleConfigurationChanged",
+                new Class<?>[] {Configuration.class, int.class}, displays.processConfiguration(), 0);
+        displays.uiModeChanged();
+        activities.configurationChanged();
+    }
+
     // args: --app <package> <code dir> <launcher class> [<split>=<apk>]...
     private static void bindApplicationMetadata(Object thread, Context system, ApplicationInfo app,
                                                 Object loaded) throws Exception {
@@ -1253,7 +1274,7 @@ public final class ManagedLauncher {
         setField(binding, "appInfo", app);
         setField(binding, "info", loaded);
         Configuration bindConfig = new Configuration(system.getResources().getConfiguration());
-        bindConfig.uiMode = FrameworkUiMode.CONFIGURATION_UI_MODE;
+        bindConfig.uiMode = FrameworkUiMode.configurationUiMode();
         setField(binding, "config", bindConfig);
         setField(binding, "compatInfo", Class.forName("android.content.res.CompatibilityInfo")
                 .getField("DEFAULT_COMPATIBILITY_INFO").get(null));
@@ -1386,6 +1407,13 @@ public final class ManagedLauncher {
             width = (int) metrics[0];
             height = (int) metrics[1];
             displays.setMetrics(width, height, (int) metrics[2]);
+            // The system's night mode starts as the desktop's colour scheme: uiMode is part of every configuration built
+            // below, so an app starts in the theme it will keep (a change afterwards restarts or reconfigures its Activities).
+            Boolean forced = forcedTheme();
+            int scheme = systemTheme();
+            FrameworkUiMode.setNight(forced != null ? forced : scheme == 2);
+            System.out.println("APP_THEME " + (FrameworkUiMode.night() ? "dark" : "light")
+                    + (forced != null ? " (fixed by BIFROST_ANDROID_THEME)" : scheme == 0 ? " (the host cannot tell)" : ""));
             // ActivityThread.updateDefaultDensity: bitmaps an app creates or decodes without a density carry the display's.
             // Without it they get DisplayMetrics.DENSITY_DEVICE (ro.sf.lcd_density, unset here: 160) and an image drawable that
             // scales by density draws them at half size on a 320 dpi window (YouTube's like, dislike and comment icons).
@@ -1853,6 +1881,7 @@ public final class ManagedLauncher {
                         // A gamepad connected or removed while the task is hidden still changes the device list.
                         if (event[0] == 0x101) gamepads.deviceEvent(event, KeyCharacterMap.VIRTUAL_KEYBOARD);
                         else if (event[0] == 0x102) activities.windowVisible(event[4] != 0, event[12]);
+                        else if (event[0] == 0x103) themeChanged(event[4] != 0);
                         else if (!activities.isBackground()) dispatch(root, event);
                     }
                     activities.update();

@@ -57,7 +57,7 @@ PadCursorMode current_pad_cursor_mode() {
   X(GetWindowSize) X(GetWindowSizeInPixels) X(SyncWindow) X(GetWindowID) X(PollEvent) \
   X(GetWindowTitle) X(SetWindowTitle) X(GetWindowPosition) X(GetWindowFlags) \
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
-  X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) \
+  X(GetDisplayForWindow) X(GetDisplayBounds) X(GetTicksNS) X(GetSystemTheme) \
   X(StartTextInput) X(StopTextInput) X(SetTextInputArea) X(PeepEvents) \
   X(PushEvent) X(GetScancodeFromName) X(GetKeyFromScancode) X(SetWindowAspectRatio) X(GetModState) X(SetWindowFullscreen) \
   X(CreateSystemCursor) X(SetCursor) X(DestroyCursor) X(ShowCursor) X(HideCursor) \
@@ -826,6 +826,13 @@ public:
   }
   ~SdlAndroidWindowBackend() override { close(); }
   const char *name() const noexcept override { return "sdl3-egl"; }
+  int system_theme() override {
+#if defined(BIFROST_USE_SDL3)
+    return window_ ? static_cast<int>(sdl_.GetSystemTheme()) : 0;
+#else
+    return 0;
+#endif
+  }
   int open(const char *title, int32_t width, int32_t height) override {
     if (!title || width <= 0 || height <= 0) return -EINVAL;
 #if defined(BIFROST_USE_SDL3)
@@ -861,6 +868,7 @@ public:
     // Gamepads are optional: SDL reports the connected ones as added events.
     gamepads_ready_ = sdl_.InitSubSystem(SDL_INIT_GAMEPAD);
     if (!gamepads_ready_) std::fprintf(stderr, "[android-window] no gamepads: %s\n", sdl_.GetError());
+    dark_ = sdl_.GetSystemTheme() == SDL_SYSTEM_THEME_DARK;
     return 0;
 #else
     return -ENOSYS;
@@ -873,6 +881,7 @@ public:
     clear_binding();
     mouse_fingers_ = 0;
     visible_ = true;
+    dark_ = false;
     gestures_ = {};
     pending_.clear();
     for (Pad &pad : pads_) sdl_.CloseGamepad(pad.handle);
@@ -1149,6 +1158,16 @@ private:
         out.type = BIFROST_WINDOW_RESIZE;
         out.width = fixed_w_ ? fixed_w_ : e.window.data1;
         out.height = fixed_w_ ? fixed_h_ : e.window.data2; return 1;
+      }
+      // The desktop's colour scheme changed: report light or dark once per change. SDL answers unknown when it cannot
+      // tell, which changes nothing.
+      if (e.type == SDL_EVENT_SYSTEM_THEME_CHANGED) {
+        const SDL_SystemTheme theme = sdl_.GetSystemTheme();
+        if (theme == SDL_SYSTEM_THEME_UNKNOWN || (theme == SDL_SYSTEM_THEME_DARK) == dark_) continue;
+        dark_ = theme == SDL_SYSTEM_THEME_DARK;
+        out.type = BIFROST_WINDOW_THEME;
+        out.action = dark_ ? 1 : 0;
+        return 1;
       }
       // Shown, hidden, minimised, restored, covered or uncovered: report the window's state now, once per change.
       // X11 sends minimised and restored; Wayland has no minimise event, a compositor suspends the window instead
@@ -1697,6 +1716,7 @@ private:
   static constexpr int32_t kMouseFinger = 0, kMouseSecondFinger = 1, kFirstTouchFinger = 2;
   uint32_t mouse_fingers_ = 0; // bit per mouse finger reported down
   bool visible_ = true;        // the last BIFROST_WINDOW_VISIBILITY state reported
+  bool dark_ = false;          // the colour scheme last reported (BIFROST_WINDOW_THEME), or at open
   // Wheel, pinch and middle-drag gestures: their synthetic fingers wait in pending_ for the next polls.
   WheelGestures gestures_;
   std::deque<AndroidWindowEvent> pending_;

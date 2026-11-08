@@ -165,6 +165,16 @@ static int32_t poll_window(void *instance, bifrost_android_window_event_v2 *out)
     if (mode("poll-nan")) { out->type = BIFROST_WINDOW_POINTER; out->x = NAN; return 1; }
     if (mode("poll-key-invalid")) { out->type = BIFROST_WINDOW_KEY; out->action = 9; return 1; }
     if (mode("poll-visibility-invalid")) { out->type = BIFROST_WINDOW_VISIBILITY; out->action = 2; return 1; }
+    if (mode("poll-theme-invalid")) { out->type = BIFROST_WINDOW_THEME; out->action = 2; return 1; }
+    if (mode("poll-theme")) {
+        /* dark, then light */
+        static unsigned step;
+        if (step == 2) { step = 0; return 0; }
+        out->type = BIFROST_WINDOW_THEME;
+        out->action = step == 0 ? 1 : 0;
+        out->time_ms = 3000 + step++;
+        return 1;
+    }
     if (mode("poll-visibility")) {
         /* hidden, then shown */
         static unsigned step;

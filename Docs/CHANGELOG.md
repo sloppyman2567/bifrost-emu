@@ -44,6 +44,17 @@ names the library.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (Android apps follow the desktop's colour scheme)
+
+- The system's night mode now follows the desktop's light or dark scheme, so YouTube and other apps that read
+  `Configuration.uiMode` draw dark on a dark desktop (before, `UiModeManager` always answered light). The window plugin has a
+  new `BIFROST_WINDOW_THEME` event (existing plugins are unaffected and the app then keeps the scheme it started in); the SDL3
+  backend reports `SDL_GetSystemTheme()` at open and on each change. A change while the app runs reconfigures the process and
+  relaunches or notifies its Activities, as a phone does. `BIFROST_ANDROID_THEME=light|dark` fixes the mode. Per-app night mode
+  for the opposite scheme is still refused. The maintainer reports YouTube following the scheme after a restart; the new
+  plugin, SDL-backend and `UiModeManager` tests were reviewed but not executed here, and a live change on a running app is
+  unchecked.
+
 ### Added (what the other threads do during a long stall)
 
 - A main-thread stall that lasts 4 s now also prints, once, an `APP_STALL_THREAD <name> <state> at <top 10 frames>` line for

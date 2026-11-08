@@ -126,6 +126,23 @@ int main(int argc, char **argv) {
     manager.pump_host_events(nullptr);
     mode("");
     CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) != 0);
+    // The desktop's colour scheme changing reaches the managed launcher the same way: dark (action 1), then light (0),
+    // with the host's time; a native activity's queue never sees it.
+    mode("poll-theme");
+    manager.pump_host_events(nullptr);
+    mode("");
+    for (const int32_t dark : {1, 0}) {
+      CHECK(manager.queue_get_event(manager.input_queue_handle(), &input, true) == 0);
+      CHECK(manager.event_type(input) == frost::AndroidSurfaceManager::EVENT_TYPE_THEME);
+      CHECK(manager.motion_action(input) == dark);
+      CHECK(manager.motion_event_time(input) == (3000 + (1 - dark)) * INT64_C(1000000));
+      manager.queue_finish_event(manager.input_queue_handle(), input);
+    }
+    CHECK(manager.queue_get_event(manager.input_queue_handle(), &input, true) != 0);
+    mode("poll-theme");
+    manager.pump_host_events(nullptr);
+    mode("");
+    CHECK(manager.queue_get_event(manager.input_queue_handle(), &input) != 0);
     CHECK(!manager.install_window_backend(frost::make_sdl_android_window_backend()));
     // Destructor must close the owned window while the DSO is resident.
   }
@@ -135,7 +152,7 @@ int main(int argc, char **argv) {
   CHECK(polling);
   frost::AndroidWindowEvent event{};
   for (const char *invalid : {"poll-invalid", "poll-positive", "poll-fail", "poll-nan", "poll-key-invalid",
-                              "poll-visibility-invalid"}) {
+                              "poll-visibility-invalid", "poll-theme-invalid"}) {
     mode(invalid);
     CHECK(polling->poll(event) < 0 && event.type == 0);
   }

@@ -148,10 +148,10 @@ final class FrameworkDisplay implements FrameworkServices.Call {
     }
 
     // The system configuration with the uiMode UiModeManagerService applies
-    // to WMS's global configuration (normal type, night mode off).
+    // to WMS's global configuration (normal type, the night mode of the desktop's colour scheme).
     private static Configuration globalConfiguration() {
         Configuration config = new Configuration(android.content.res.Resources.getSystem().getConfiguration());
-        config.uiMode = FrameworkUiMode.CONFIGURATION_UI_MODE;
+        config.uiMode = FrameworkUiMode.configurationUiMode();
         // WMS derives these from the input devices' sources. The host window delivers a mouse and touch as fingers,
         // and the desktop keyboard is the virtual one: a touchscreen, and no physical keyboard or navigation device,
         // as on a phone. (The platform defaults leave all three undefined.)
@@ -371,6 +371,11 @@ final class FrameworkDisplay implements FrameworkServices.Call {
             densityDpi = newDensityDpi;
             rotation = nextRotation;
         }
+        notifyChanged();
+    }
+
+    // The global configuration changed without the display changing (the night mode): window contexts take it.
+    void uiModeChanged() {
         notifyChanged();
     }
 

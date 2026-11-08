@@ -56,6 +56,9 @@ public:
   // The pointer shape over the window, a BIFROST_WINDOW_CURSOR_* value (-EINVAL for any other).
   // The host calls it only when the shape changes.
   virtual int set_cursor(int) { return -ENOTSUP; }
+  // The desktop's colour scheme: 2 dark, 1 light (SDL_SYSTEM_THEME_*), 0 when it cannot tell. Display thread, once the
+  // window is open. The managed launcher asks before the app starts and then follows BIFROST_WINDOW_THEME events.
+  virtual int system_theme() { return 0; }
   virtual bool window_info(arm64emu::window_stats::WindowInfo &) { return false; }
   // An open window's buffer size in host pixels. open() takes the window's
   // size in desktop coordinates; on a scaled display the two differ.

@@ -137,8 +137,9 @@ public:
       const bool bad_text = event.type == BIFROST_WINDOW_TEXT && (!text_input_ || !api_.poll_text);
       const bool bad_gamepad = event.type == BIFROST_WINDOW_GAMEPAD && !api_.poll_gamepad;
       const bool bad_visibility = event.type == BIFROST_WINDOW_VISIBILITY && (event.action < 0 || event.action > 1);
-      if (event.type < BIFROST_WINDOW_CLOSE || event.type > BIFROST_WINDOW_VISIBILITY ||
-          event.time_ms < 0 || bad_key || bad_pointer || bad_text || bad_gamepad || bad_visibility ||
+      const bool bad_theme = event.type == BIFROST_WINDOW_THEME && (event.action < 0 || event.action > 1);
+      if (event.type < BIFROST_WINDOW_CLOSE || event.type > BIFROST_WINDOW_THEME ||
+          event.time_ms < 0 || bad_key || bad_pointer || bad_text || bad_gamepad || bad_visibility || bad_theme ||
           (event.type == BIFROST_WINDOW_RESIZE && (event.width <= 0 || event.height <= 0))) {
         event = {};
         return -EPROTO;

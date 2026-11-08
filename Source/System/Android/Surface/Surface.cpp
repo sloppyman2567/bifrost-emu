@@ -130,6 +130,10 @@ void AndroidSurfaceManager::display_size(int32_t& width, int32_t& height) const 
     height = known ? std::max(display_h, height_) : height_;
 }
 
+int AndroidSurfaceManager::system_theme() const {
+    return window_backend_ ? window_backend_->system_theme() : 0;
+}
+
 int AndroidSurfaceManager::set_task_visible(bool visible) {
     return window_backend_->set_task_visible(visible);
 }
@@ -836,7 +840,8 @@ int AndroidSurfaceManager::queue_get_event(uint64_t queue,
     if (!is_queue(queue)) return -9;   // -EBADF
     std::lock_guard<std::mutex> lk(mu_);
     while (!managed && !pending_.empty() &&
-           (pending_.front().type == EVENT_TYPE_DEVICE || pending_.front().type == EVENT_TYPE_VISIBILITY))
+           (pending_.front().type == EVENT_TYPE_DEVICE || pending_.front().type == EVENT_TYPE_VISIBILITY ||
+            pending_.front().type == EVENT_TYPE_THEME))
         pending_.pop_front();
     if (pending_.empty()) return -11;  // -EWOULDBLOCK
     InputEvent ev = pending_.front();
@@ -1099,8 +1104,8 @@ void AndroidSurfaceManager::translate_window_event_(const AndroidWindowEvent& e)
         return;
     }
     InputEvent ev{};
-    if (e.type == BIFROST_WINDOW_VISIBILITY) {
-        ev.type = EVENT_TYPE_VISIBILITY;
+    if (e.type == BIFROST_WINDOW_VISIBILITY || e.type == BIFROST_WINDOW_THEME) {
+        ev.type = e.type == BIFROST_WINDOW_THEME ? EVENT_TYPE_THEME : EVENT_TYPE_VISIBILITY;
         ev.action = e.action;
         ev.down_time_ns = ev.event_time_ns = e.time_ms * 1000000;
         std::lock_guard<std::mutex> lk(mu_);

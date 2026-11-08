@@ -323,6 +323,11 @@ JNIEXPORT jint JNICALL Java_ManagedLauncher_displaySize(JNIEnv *env, jclass type
         (*env)->SetLongArrayRegion(env, out, 0, 2, (const jlong *)data);
     return (jint)result;
 }
+// The desktop's colour scheme: 2 dark, 1 light, 0 when the host cannot tell (op 27).
+JNIEXPORT jint JNICALL Java_ManagedLauncher_systemTheme(JNIEnv *env, jclass type) {
+    (void)env; (void)type;
+    return (jint)bifrost_window(27, 0, 0);
+}
 // A non-resizable app keeps this pixel size; the host window is scaled to fit (op 21).
 JNIEXPORT jint JNICALL Java_ManagedLauncher_fixWindow(JNIEnv *env, jclass type, jint width, jint height) {
     (void)env; (void)type;

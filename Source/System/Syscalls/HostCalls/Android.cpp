@@ -67,8 +67,10 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                         data[12] = manager.key_event_time(event);
                         data[13] = length;
                         std::memcpy(&data[14], text, length);
-                    } else if (data[0] == static_cast<uint64_t>(frost::AndroidSurfaceManager::EVENT_TYPE_VISIBILITY)) {
-                        // The window's visibility: word 4 = 1 visible, 0 not; word 12 the host's time (CLOCK_MONOTONIC ns).
+                    } else if (data[0] == static_cast<uint64_t>(frost::AndroidSurfaceManager::EVENT_TYPE_VISIBILITY) ||
+                               data[0] == static_cast<uint64_t>(frost::AndroidSurfaceManager::EVENT_TYPE_THEME)) {
+                        // The window's visibility (word 4 = 1 visible, 0 not) or the desktop's colour scheme (1 dark,
+                        // 0 light); word 12 the host's time (CLOCK_MONOTONIC ns).
                         data[4] = manager.motion_action(event);
                         data[12] = manager.motion_event_time(event);
                     } else if (data[0] == static_cast<uint64_t>(frost::AndroidSurfaceManager::EVENT_TYPE_DEVICE)) {
@@ -203,6 +205,10 @@ int64_t syscall_android_launcher(Emulator& emu, CPU& cpu, uint64_t num) {
                 catch (const EmuError&) { ret_host(-EFAULT); return 0; }
                 emu.mem().write(cpu.regs[1], data, sizeof(data));
                 ret_host(0);
+            }
+            else if (cpu.regs[0] == 27) { // Managed display: the desktop's colour scheme, 2 dark, 1 light, 0 unknown.
+                if (!manager.ready()) { ret_host(-ENODEV); return 0; }
+                ret_host(manager.system_theme());
             }
             else if (cpu.regs[0] == 14) { // Managed process lifecycle, owned by the Binder realm.
                 ret_host(emu.vfs().report_android_process_state(static_cast<int32_t>(cpu.regs[1])));

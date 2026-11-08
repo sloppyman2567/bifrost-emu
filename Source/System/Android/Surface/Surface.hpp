@@ -116,6 +116,8 @@ public:
     // never smaller than the window; the window's own size when the backend
     // cannot report its display.
     void display_size(int32_t& width, int32_t& height) const;
+    // The desktop's colour scheme: 2 dark, 1 light, 0 unknown (the window backend's system_theme()).
+    int system_theme() const;
     int set_window_identity(const std::string& title, const uint8_t* rgba, int32_t width, int32_t height);
     // The managed launcher's text input: while active the host reports committed
     // text and composition as EVENT_TYPE_TEXT events, in order with key events.
@@ -361,6 +363,9 @@ public:
     // Private: the host window became visible (action 1) or stopped being visible (0: minimised, hidden or covered).
     // Only the managed launcher takes it, to stop and resume the app's Activities.
     static constexpr int32_t EVENT_TYPE_VISIBILITY = 0x102;
+    // Private: the desktop's colour scheme changed (action 1 dark, 0 light). Only the managed launcher takes it, to
+    // change the system's night mode and tell the app.
+    static constexpr int32_t EVENT_TYPE_THEME = 0x103;
 
  private:
     AndroidSurfaceManager();

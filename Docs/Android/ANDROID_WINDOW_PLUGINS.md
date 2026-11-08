@@ -219,6 +219,19 @@ occluded, then exposed), which a compositor may or may not do when a window is m
 minimize events from xdg-shell"; `XDG_TOPLEVEL_STATE_SUSPENDED` becomes `SDL_EVENT_WINDOW_OCCLUDED`). The guest side is in
 [window visibility](ANDROID_RUNTIME.md#window-visibility-2026-11-07).
 
+### Colour scheme (2026-11-08)
+
+A plugin may report `BIFROST_WINDOW_THEME` (value 8, no payload, no new callback): `action` 1 when the desktop's colour
+scheme became dark and 0 when it became light; any other action is `-EPROTO`. It is sent when the scheme changes. The
+scheme at open comes from the backend's `system_theme()` (`WindowBackend.hpp`: 2 dark, 1 light, 0 unknown, the default for a
+backend that cannot tell), which the managed launcher reads through host call 27. Old plugins keep loading and never send it,
+and the app then stays in the scheme it started in.
+
+The SDL3 backend reads `SDL_GetSystemTheme()` when the window opens and on each `SDL_EVENT_SYSTEM_THEME_CHANGED`, and reports
+the result only when it differs from the last one reported; SDL's unknown changes nothing. Whether SDL can read a given
+desktop's setting depends on the platform and is not checked here. The guest side
+is in [colour scheme](ANDROID_RUNTIME.md#colour-scheme-2026-11-08).
+
 ## Validation and reproduction
 
 Completed checks:

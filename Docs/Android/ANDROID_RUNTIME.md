@@ -1048,7 +1048,7 @@ server classes, for one app, user 0 and the default device:
 
 | Service | Model |
 |---|---|
-| `uimode` | Normal UI mode, night mode off and locked, contrast 0 (`config_defaultNightMode`, `config_lockDayNightMode`). Process, Activity and bind configurations carry `uiMode` 0x11. Per-app dark mode throws: it needs a configuration change. |
+| `uimode` | Normal UI mode, night mode locked and following the desktop's colour scheme ([colour scheme](#colour-scheme-2026-11-08)), contrast 0 (`config_lockDayNightMode`). Process, Activity and bind configurations carry `uiMode` 0x11 (light) or 0x21 (dark). Per-app configuration of the opposite mode throws: it needs a configuration change. |
 | `permissionmgr`, `permission_checker` | Delegate to the install-time grants (normal permissions granted, runtime permissions denied), retained framework-res/app permission definitions, no user rationale, no policy revocation, Android 15's 24 `platform.xml` split permissions, attribution registration. Proxy chains through other uids are hard-denied. |
 | `batteryproperties`, `batterystats` | The host's own battery, read from `/sys/class/power_supply` through the VFS (see Battery below). A host without a battery is a full one on AC mains: present, 100%, `FULL`, `GOOD`, plugged AC, 4200 mV, 25.0 C, Li-ion. `registerReceiver` returns the sticky `ACTION_BATTERY_CHANGED` intent. `takeUidSnapshot(s)` gives the uid's health stat layout with no measurements. |
 | `media_metrics` | `MediaMetricsManagerService`: playback, recording, transcoding, editing and bundle session ids are random 96-bit URL-safe Base64 strings; reports and `releaseSessionId` are accepted and dropped (statsd does not run here). The native `media.metrics` Binder is separate (`FrameworkNativeServices`). |
@@ -2358,6 +2358,30 @@ one `APP_VIEW_DUMP` line per visible `ImageView` of the Activities' windows (up 
 place in the window, scale, the drawable's class, intrinsic size and bounds, the scale type, and the density
 (`Configuration.densityDpi` and `DisplayMetrics.densityDpi`) and screen width/smallest width in dp its Resources see,
 then `APP_VIEW_DUMP_END <count>`, and removes the file. Create the file with `touch` while the app runs.
+
+### Colour scheme (2026-11-08)
+
+The system's night mode is the desktop's colour scheme, so an app that follows `Configuration.uiMode` (YouTube, most
+Material apps) draws dark on a dark desktop. `ManagedLauncher` reads the scheme through host call 27 (`system_theme`: 2 dark,
+1 light, 0 unknown, `-ENODEV` before the surface manager is ready) before it builds any configuration, sets
+`FrameworkUiMode.night`, and every uiMode the launcher hands out (global, process, Activity and bind configurations,
+`UiModeManager.getNightMode`, `getCurrentModeType`) derives from `FrameworkUiMode.configurationUiMode()`: `0x21` dark, `0x11`
+light. It prints `APP_THEME dark|light`, with a note when the scheme is fixed or the host cannot tell (unknown means light).
+
+A change while the app runs arrives as the private queue event `EVENT_TYPE_THEME` (`0x103`, dark in word 4 of op 3, like
+`0x102`; only the managed launcher takes it and native queues drop it). `themeChanged` then applies the new global
+configuration to the process (`ActivityThread.handleConfigurationChanged`), notifies window contexts
+(`FrameworkDisplay.uiModeChanged`) and the Activities (`FrameworkActivities.configurationChanged`), so an Activity that does not
+declare `uiMode` in `configChanges` is relaunched and one that does gets `onConfigurationChanged`, as on a phone whose night
+mode flips. `BIFROST_ANDROID_THEME=light|dark` fixes the mode and ignores the desktop. Night mode stays locked for apps:
+`setNightMode` is ignored, and `setApplicationNightMode` accepts AUTO, CUSTOM and the mode the system is already in, but still
+throws for the opposite one (a per-app configuration is not modelled).
+
+Tests written for it, reviewed but not executed when this was committed: the plugin's validation and the surface manager's
+queue (`make test-android-window-plugin`), the SDL3 backend's reports against a fake SDL (`make test-android-sdl-backend`) and
+`UiModeManager` in a dark and light system (`ManagedServiceBatch`). Observed: the maintainer reports YouTube following the
+scheme after a restart. Not checked: a live scheme change on a running app, an Activity that declares `uiMode` itself, and a
+desktop where SDL cannot read the scheme.
 
 ### Window visibility (2026-11-07)
 
