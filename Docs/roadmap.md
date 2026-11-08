@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
 Status: in progress. The current pre-release is **2.0.0-beta.1** (November 3, 2026), a version label: its own scope is
-only partly met. Updated November 7, 2026.
+only partly met. Updated November 8, 2026.
 
 Everything below is a development target, not a compatibility guarantee or a release date. "Done" means the contract is
 implemented and checked as the linked document says, not that every app using it works. Dated checkpoints, measurements
@@ -48,6 +48,10 @@ cursor driven by a pad; fixed-size apps can be tiled to a half or a corner; the 
 when interrupted, and `make bootstrap` finds host tools and libraries without root, building SDL3 where the distribution has none; a minimised or hidden game window pauses the app, F11 toggles fullscreen and the size is remembered, Activities are relaunched on a resize they do not handle, the library offers **Set up…**, packages up to 4 GiB install, a realm with no app ends after 10 minutes, and the JIT has native NEON structure loads and stores and cheaper FP compares. All of it was checked with fakes, on Qt's
 offscreen platform or in an Ubuntu 24.04 chroot, apart from what the maintainer saw on one KDE/Wayland desktop with a Steam
 Controller; none has run on a Steam Deck, in Game Mode, on a fresh Debian 13 or against a plain pad.
+On November 8: Vulkan apps get ASTC LDR textures on hosts that have BC7 but no ASTC (converted on the CPU at upload; Zenless Zone Zero's
+Unity stopped decompressing them itself), a swapchain acquire no longer re-uploads the frame, `/proc/self/pagemap` is read without
+rebuilding every mapping, and the crash line names the library. Each is checked as its changelog entry says; none is yet measured
+across a long game session.
 
 **Games:** 19 recorded, 16 of them playable (12 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
 [What runs](../README.md#what-runs) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says

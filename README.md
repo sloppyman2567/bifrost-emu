@@ -148,7 +148,14 @@ progress table and the known blockers; everything that changed is in the
 - **ASTC textures on GPUs without them (after the beta.1 label, in the tree):** a host with BC7 but no ASTC, such as AMD's
   desktop drivers, is presented to Vulkan apps as having ASTC LDR; the thunk keeps those textures as BC7 and converts the blocks
   on the CPU at upload (`BIFROST_VK_NO_ASTC=1` turns it off). Checked headless on an RX 7600 and by a GPU decode of every BC7
-  mode; not compared with ARM's decoder, and not yet measured in a game for memory or load time.
+  mode; not compared with ARM's decoder, and not yet measured in a game for memory or load time. The conversion's helper threads
+  run at the lowest priority and finished conversions are cached (`BIFROST_ASTC_CACHE_MB`), because it took most of one game's CPU
+  during story scenes.
+- **Frames, crashes and `/proc` (after the beta.1 label, in the tree):** an Android Vulkan app's swapchain no longer re-uploads
+  the frame on every acquire after its first release (not yet run in a game; the read-back on release and the copy into the window
+  remain), the one-line `[crash]` report names the library and offset of the failing address and its caller, and reading
+  `/proc/self/pagemap` one entry at a time no longer rebuilds every mapping on each read (one game's guest thread spent most of a
+  core there). The [host guide](Docs/HOST_INTEGRATION.md#diagnostic-switches) now lists every diagnostic switch.
 - **Game windows (after the beta.1 label, in the tree):** a window the desktop minimises or hides pauses the app and resumes it
   when shown, F11 toggles fullscreen, the window's size is remembered per app, and an Activity that does not handle a resize
   is relaunched as Android does. Checked with fakes and fixtures, not yet on a real compositor or in a game.
@@ -157,8 +164,8 @@ progress table and the known blockers; everything that changed is in the
   window mode that avoids a resize corruption, and an AAudio write fix removed clicks in its music.
 - **JIT (in the tree):** native NEON `LD2` to `LD4` and `ST2` to `ST4`, FP compares kept in the host flags, and scalar FP
   special cases moved out of the hot path.
-- **Open:** measured frame times, WebView interaction, window behaviour on real compositors,
-  and sustained play. A passing build or a launch is not gameplay.
+- **Open:** measured frame times, zero-copy frames, WebView interaction, window behaviour on real compositors,
+  Zenless Zone Zero's very low-resolution models, and sustained play. A passing build or a launch is not gameplay.
 
 Check an installed app's recorded status yourself with
 `python3 Scripts/Android/asgard.py compat`.

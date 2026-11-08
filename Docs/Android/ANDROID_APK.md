@@ -103,6 +103,36 @@ python3 Scripts/Android/android_package.py run org.example.package \
 (status 127; 126 for a file that is not a ZIP). `BIFROST_ROOT` is removed
 from the environment first, because it would confine every Android process.
 
+### The `asgard` command
+
+Installed, the command is `asgard`; from a checkout it is `python3 Scripts/Android/asgard.py`. `asgard COMMAND --help` lists one
+command's options, and a package name, part of one, or an app's title is enough wherever a command takes an app.
+
+| Command | What it does |
+|---|---|
+| `install` | Install an `.apk`, `.apkm`, `.apks` or `.xapk`. |
+| `run` | Run an app in the foreground (an APK file is installed first). |
+| `start` | Start apps in the background. |
+| `list` (`apps`) | Installed apps and what each is doing. |
+| `status` | Whether an app is running. |
+| `stop` | Ask a running app to stop. |
+| `resume` | Bring a backgrounded app back. |
+| `logs` | The end of an app's session log. |
+| `config` | Show or change an app's saved settings (see [per-app settings](#per-app-settings)). |
+| `uninstall` | Remove an app with its code and all its data. |
+| `clear-data` | Reset an app's saves and settings; it stays installed (see [uninstall and reset](#uninstall-and-reset)). |
+| `setup` | Download and build what Asgard needs, in a source checkout (`--check` lists what is missing). |
+| `launcher` | Open the desktop app library. |
+| `desktop` | Put installed apps in the desktop's application menu, or take them out. |
+| `refresh-icons` | Read the icons of apps installed by an older version. |
+| `compat` | What is known to work, from the compatibility records. |
+| `google` | Sign in to Google (microG) and manage accounts: `sign-in`, `settings`, `accounts`, `remove`, `games-profile` (see [Google account](#google-account)). |
+| `realm` | The shared service process apps join: `start`, `status`, `stop [--force]`, `restart [--force]`. |
+| `probe` | Load an app's native libraries without starting it, for diagnostics (`--library`, `--preload`, `--no-jit`, `--timeout`). |
+
+`--debug CHANNELS` (before the command) turns on trace channels: audio, binder, dynlink, fault, frame, futex, input, media,
+mmap, poll, process, thunk, x11 or all; a realm broker that is already running keeps the channels it started with.
+
 ### Installing Asgard
 
 `Scripts/Setup/install-asgard.py` installs a self-contained Asgard so the emulator works without

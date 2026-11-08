@@ -35,6 +35,54 @@ Run dynamically linked programs under the rootfs's own dynamic linker (experimen
 .B \-\-no\-jit
 Use the interpreter only.
 .TP
+.B \-\-jit
+Use the JIT. This is the default.
+.TP
+.BI \-\-jit\-threshold " N"
+Interpret for N instructions, then switch to the JIT.
+.TP
+.B \-\-jit\-disk\-cache[=verify]
+Experimental: reuse JIT translations across launches. The cache is under \fI$XDG_CACHE_HOME/bifrost/jit\fR (or \fI~/.cache/bifrost/jit\fR), limited per application by \fBBIFROST_JIT_DISK_CACHE_MB\fR (default 512).
+.TP
+.B \-\-no\-jit\-disk\-cache
+Do not use that cache.
+.TP
+.B \-\-window\-stats
+Show presentation statistics (off by default): frames per second, CPU, GPU and memory, in the window title and an overlay.
+.TP
+.BI \-\-window\-stats\-mode " MODE"
+1 or minimal: title only; 2 or normal: title and overlay; 3: overlay only. Turns the statistics on.
+.TP
+.B \-\-no\-window\-stats
+Turn every statistics display off.
+.TP
+.B \-\-render\-log\fR, \fB\-\-no\-render\-log
+Log the first frame presented (on by default).
+.TP
+.B \-\-raw\-tty
+Force raw terminal input: per character, no echo.
+.TP
+.BI \-\-android " PATH"
+Run a NativeActivity shared object (\fBANativeActivity_onCreate\fR). Apps installed with Asgard are started with \fBasgard\fR instead.
+.TP
+.B \-d\fR, \fB\-\-debug
+Trace every instruction to standard error.
+.TP
+.B \-v\fR, \fB\-\-verbose
+Print execution statistics on exit.
+.TP
+.B \-q\fR, \fB\-\-quiet
+Suppress BRK warnings, even with \fB\-d\fR.
+.TP
+.BI \-\-fb\-dump " PATH"
+Dump \fI/dev/fb0\fR to PATH on exit (PPM).
+.TP
+.BI \-\-audio\-dump " PATH"
+Dump \fI/dev/dsp\fR to PATH on exit (WAV).
+.TP
+.B \-\-print\-config
+Print the resolved configuration and exit.
+.TP
 .BI \-\-config " PATH"
 Read the configuration from PATH. A sample is in /usr/share/doc/bifrost\-emu/examples/.
 .TP

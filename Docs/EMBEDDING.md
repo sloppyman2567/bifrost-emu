@@ -55,7 +55,7 @@ Key features:
 
 The full API reference and semantics live in `Source/System/API/Bifrost.h`. A
 host-side test (`Tests/Unit/test_capi.c`, built via `make test-capi`, wired
-into `make check-all`) covers the API with 55 checks.
+into `make check-all`) covers the API with 57 checks.
 
 ## Android native bridge adapter
 

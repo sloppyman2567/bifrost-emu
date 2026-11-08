@@ -16,6 +16,12 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](Apps/vkquake.md).
 
+Checked on 2026-11-08 (ASTC through BC7, the swapchain acquire skip, the `/proc/self/pagemap` fix and the crash line): only focused
+checks were run (`test_proc_mem_pagemap` in the JIT, `--no-jit` and natively, `make test-astc-bc7-transcode` at `-O0`/`-O3` and
+under ASan/UBSan, `run_tests.sh --filter vulkan_astc`, the headless `vulkan` and `vulkan_pnext` fixtures, `make generated-check` and
+a build of the site). The full `--strict` suites and `make verify` were not rerun after those changes, and the acquire skip builds
+but has not run in an Android app.
+
 The fully provisioned suite was 377 runs under `run_tests.sh --strict` (2026-11-01) with the JIT and 362 with `--no-jit` (15 tests that exist only in the JIT run are not selected there), in these categories: unit
 (focused guest instruction and JIT regressions and host gates), integration (guest programs in `Tests/Apps/` and
 `Tests/Asm/`), sandbox, per-thread JIT, uncached FP registers (the by-element FP fixtures with `BIFROST_NO_VEC_CACHE=1` and
