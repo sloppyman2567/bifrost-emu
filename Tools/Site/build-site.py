@@ -127,7 +127,7 @@ def games(readme, compat):
     return summary, inline(text), "\n".join(rows), playable
 
 
-def screenshots(readme, output):
+def screenshots(readme, output, url):
     """The README's screenshots as WebP at most 960 px wide (twice their width on the page)."""
     try:
         from PIL import Image
@@ -145,7 +145,7 @@ def screenshots(readme, output):
             image.thumbnail((960, 960))
             image.save(images / f"{stem}.webp", quality=80, method=6)
             width, height = image.size
-        shots.append(f'    <figure><img src="images/{stem}.webp" alt="{html.escape(alt)} running on bifrost-emu" width="{width}" '
+        shots.append(f'    <figure><img src="{url}images/{stem}.webp" alt="{html.escape(alt)} running on bifrost-emu" width="{width}" '
                      f'height="{height}" loading="lazy" decoding="async"><figcaption>{html.escape(caption)}'
                      f"</figcaption></figure>")
     if not shots:
@@ -165,7 +165,7 @@ def main():
         shutil.rmtree(args.output)
     args.output.mkdir(parents=True)
     summary, summary_html, rows, playable = games(readme, compat)
-    shots = screenshots(readme, args.output)
+    shots = screenshots(readme, args.output, url)
     # The project icon (tab icon and header mark) and the social preview card (link previews).
     branding = ROOT / "Assets/Branding"
     shutil.copyfile(branding / "bifrost-emu-icon.svg", args.output / "icon.svg")
@@ -183,7 +183,7 @@ def main():
         "isAccessibleForFree": True, "image": url + "social-preview.png",
         "featureList": ["Run Android games and apps from an APK on Linux", "Run ARM64 (AArch64) Linux programs on x86_64",
                         "JIT compiler from ARM64 to x86_64", "OpenGL and Vulkan on the host GPU",
-                        "Gamepad, keyboard and mouse input"],
+                        "Gamepad, keyboard and mouse input, with a gamepad touch cursor for touch-only apps"],
         "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
     }]}
     def page_ld(kind, name, path, description):

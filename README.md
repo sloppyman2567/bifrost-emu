@@ -88,8 +88,9 @@ that every feature has an automated test or a recorded capture.
 
 ## Screenshots
 
-User-supplied captures, not benchmarks. The SpongeBob shot is from November 1, 2026 (Bifrost 2.0.0-alpha.3) and the
-Azur Lane shot from October 14 (2.0.0-alpha.1); the Linux games are from October 2 to 4. More are in the
+User-supplied captures, not benchmarks. The Android shots are from 2.0.0-alpha.1 to 2.0.0-beta.1 (SpongeBob, Azur Lane
+home and Umamusume November 1, Arknights November 3, Oddmar November 8, Azur Lane's login screen October 14); the Linux games are
+from October 2 to 4. More are in the
 [SpongeBob gallery](Docs/Apps/spongebob.md#screenshots-2026-11-01),
 [Azur Lane gallery](Docs/Apps/azur-lane.md#screenshots-2026-10-14) and
 [Umamusume gallery](Docs/Apps/umamusume.md#screenshots-2026-11-01).
@@ -104,6 +105,21 @@ Azur Lane shot from October 14 (2.0.0-alpha.1); the Linux games are from October
 <td><img src="Docs/Images/MinecraftWeekend-2026-10-04/daytime.png" alt="Minecraft Weekend" width="320"><br><sub>Minecraft Weekend (Linux)</sub></td>
 <td><img src="Docs/Images/Doom3-2026-10-04/hangar-npc.png" alt="Doom 3 (dhewm3)" width="320"><br><sub>Doom 3 / dhewm3 (Linux)</sub></td>
 <td><img src="Docs/Images/VkQuake-2026-10-04/gameplay.png" alt="vkQuake gameplay" width="320"><br><sub>vkQuake (Linux, Vulkan)</sub></td>
+</tr>
+<tr>
+<td><img src="Docs/Images/Oddmar-2026-11-08/cave.png" alt="Oddmar cave level" width="320"><br><sub>Oddmar, a cave level (Android)</sub></td>
+<td><img src="Docs/Images/Arknights-2026-11-03/story.png" alt="Arknights opening story scene" width="320"><br><sub>Arknights opening story (Android)</sub></td>
+<td><img src="Docs/Images/Umamusume-2026-11-01/home.png" alt="Umamusume Pretty Derby home screen" width="320"><br><sub>Umamusume: Pretty Derby home (Android)</sub></td>
+</tr>
+<tr>
+<td><img src="Docs/Images/AzurLane-2026-11-01/home.png" alt="Azur Lane home screen" width="320"><br><sub>Azur Lane home screen (Android)</sub></td>
+<td><img src="Docs/Images/SpongeBob-2026-11-01/lobby.png" alt="SpongeBob Krusty Cook-Off restaurant" width="320"><br><sub>SpongeBob: Krusty Cook-Off lobby (Android)</sub></td>
+<td><img src="Docs/Images/Doom3-2026-10-04/security-checkpoint.png" alt="Doom 3 security checkpoint" width="320"><br><sub>Doom 3 security checkpoint (Linux)</sub></td>
+</tr>
+<tr>
+<td><img src="Docs/Images/Oddmar-2026-11-08/harbour.png" alt="Oddmar harbour level" width="320"><br><sub>Oddmar, a harbour level (Android)</sub></td>
+<td><img src="Docs/Images/MinecraftWeekend-2026-10-04/nighttime.png" alt="Minecraft Weekend at night" width="320"><br><sub>Minecraft Weekend at night (Linux)</sub></td>
+<td><img src="Docs/Images/Neverball-2026-10-04/new-record.png" alt="Neverball new record screen" width="320"><br><sub>Neverball new record (Linux, SDL2/GL)</sub></td>
 </tr>
 </table>
 

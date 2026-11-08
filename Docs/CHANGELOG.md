@@ -37,6 +37,10 @@ from the library, built-in per-app settings, 4 GiB packages, a realm idle timeou
 - The README's performance tables are re-measured (2026-11-08): CoreMark 14,874 iterations/s (shipped build) and 14,753
   (headless) against 12,711 for alpha.2 and 7,992 for QEMU 11.1.1, every CRC valid, and the `bench_*` speedups are 55x to 97x.
   Method, limits and the near-limit 160,000 iteration count are in [JIT.md](JIT.md#coremark-re-measurement-2026-11-08).
+- The site's Screenshots page showed no images: its relative `images/...` paths resolved below `/screenshots/`, so every request was
+  a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
+  captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
+  table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
 ### Added (gamepads)
 
