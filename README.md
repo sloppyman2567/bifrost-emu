@@ -53,8 +53,8 @@ and how to install.
 
 ## What runs
 
-**19 games recorded (2026-11-06): 15 playable** (11 Android, 4 Linux), **2 start** without confirmed gameplay (Oddmar,
-Teeworlds) and **2 are blocked** (Roblox, TrickCal). Umamusume counts as playable through its
+**19 games recorded (2026-11-08): 16 playable** (12 Android, 4 Linux), **1 starts** without confirmed gameplay
+(Teeworlds) and **2 are blocked** (Roblox, TrickCal). Umamusume counts as playable through its
 Global client; its JP client is blocked. Apps such as YouTube and Firefox are not counted.
 
 Statuses come from the linked pages and `Scripts/Android/compatibility.json`;
@@ -74,7 +74,7 @@ that every feature has an automated test or a recorded capture.
 | Doki Doki Literature Club 1.3.11.1 | Android, Ren'Py (SDL2, GLES) | User-confirmed play into the story (2026-11-06). The audio popped at every buffer boundary until the AAudio write path was fixed (user-confirmed clean 2026-11-08), and resizing the window blacks out images while text still draws (Ren'Py deletes its textures on an Android resize; the app opens with Window set to "Keep the app's shape", which avoids it, user-confirmed 2026-11-08). |
 | Hungry Shark Evolution 14.5.0, Hungry Shark World 8.2.6 | Android | User-reported stable gameplay (2026-11-06). Hungry Shark World's Play Games sign-in does not complete. |
 | YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
-| Oddmar | Android, Unity/IL2CPP | Gets past its opening video and on to the next one (2026-11-01); gameplay is not confirmed. |
+| Oddmar | Android, Unity/IL2CPP | User-confirmed gameplay in the first level on 2.0.0-beta.1 (2026-11-08), with no stutter noticed; later levels are not confirmed. |
 | Uptodown | Android | Draws its home list, then asks for all-files access, which Bifrost cannot grant. |
 | Roblox, TrickCal | Android | Blocked: Roblox is disconnected after joining (needs real Google attestation); TrickCal's anti-cheat ends it. |
 | [Neverball 1.6.0](Docs/Apps/neverball.md) | Linux, SDL2/GL | User-confirmed stable gameplay, replays, menus and fonts. |

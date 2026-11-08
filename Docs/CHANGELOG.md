@@ -21,6 +21,8 @@ there (guided provisioning, update/reinstall) remain in progress.
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
   pages, CoreMark tables, screenshots) keep that label.
+- Oddmar is recorded as playable (2026-11-08): the maintainer reports the first level plays very well with no stutter noticed,
+  and a frame from their screen recording shows level gameplay. Later levels are not confirmed and stutter was not measured.
 
 ### Added (gamepads)
 

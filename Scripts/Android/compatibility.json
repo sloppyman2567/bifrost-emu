@@ -41,9 +41,9 @@
     },
     "com.mobge.Oddmar": {
       "name": "Oddmar",
-      "status": "runs",
-      "checked": "2026-11-01",
-      "evidence": "The maintainer reports it gets past the black screen after its splash video; a 75 s session reached its next video without an abort. Gameplay is not confirmed.",
+      "status": "playable",
+      "checked": "2026-11-08",
+      "evidence": "The maintainer reports the first level plays very well on 2.0.0-beta.1 (2026-11-08) with no stutter noticed. A frame from the maintainer's 4 minute screen recording shows level gameplay at 3440x1440; stutter was not measured. Later levels are not confirmed.",
       "notes": [
         "Needs media.extractor, POSIX timers and the Java Binder attach preload."
       ]

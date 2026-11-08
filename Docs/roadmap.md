@@ -49,7 +49,7 @@ when interrupted, and `make bootstrap` finds host tools and libraries without ro
 offscreen platform or in an Ubuntu 24.04 chroot, apart from what the maintainer saw on one KDE/Wayland desktop with a Steam
 Controller; none has run on a Steam Deck, in Game Mode, on a fresh Debian 13 or against a plain pad.
 
-**Games:** 17 recorded, 11 of them playable (7 Android, 4 Linux), 4 start without confirmed gameplay and 2 are blocked; see
+**Games:** 19 recorded, 16 of them playable (12 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
 [What runs](../README.md#what-runs) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says
 otherwise.
 
