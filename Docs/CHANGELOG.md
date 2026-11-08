@@ -885,9 +885,10 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   read-back, its wait and the copy into the window remain.
 - **Subway Surfers recorded on a Steam Deck (2026-11-08, Desktop mode).** The maintainer ran it on SteamOS at 20 to 40 FPS (mostly 30
   to 40), stable, with stutters, a hot CPU and close to 30 W of system power: the first run on a CPU other than the development
-  desktop's. Found at the same time, none fixed: quitting from the game's own dialog leaves the app running in the background with
-  no window (Return to app shows nothing); Game Mode shows a black screen; and the library cannot be added as a plain non-Steam game
-  because Steam's environment variables have to be unset first. Details are in the compatibility record, the support matrix and the
+  desktop's. Found at the same time, none fixed: Game Mode shows a black screen, and the library cannot be added as a plain non-Steam game
+  because Steam's environment variables have to be unset first. After quitting from the game's own dialog the window did not come
+  back on Return to app; the maintainer's conclusion is that this was the Deck's CPU being slow to open and close windows, not a bug
+  (not traced here). Details are in the compatibility record, the support matrix and the
   roadmap.
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)

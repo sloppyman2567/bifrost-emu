@@ -219,8 +219,8 @@ Open:
 - Steam Deck: Game Mode shows a black screen (not investigated), and a plain non-Steam shortcut to the library cannot reach the
   Android library because Steam's environment variables have to be unset first (`LD_PRELOAD` and related ones, per the maintainer; the exact set was not recorded). A per-app Steam
   shortcut helper that clears that environment and launches an app directly, full screen with a gamepad layout, would also
-  skip the Qt library. Subway Surfers quit from its own dialog stays running without a window (a service that outlives the last
-  Activity is the suspect; not traced), and the Deck's CPU ran hot at 20 to 40 FPS.
+  skip the Qt library. The Deck's CPU ran hot at 20 to 40 FPS. A window that did not return on Return to app after quitting
+  Subway Surfers is, in the maintainer's conclusion, that slow CPU and not a bug (not traced).
 - A zero-copy Android Vulkan swapchain. The HAL's `VK_ANDROID_native_buffer` reads a full frame back per present (a GPU copy,
   a wait for the GPU and a CPU copy, then another copy into the window) because the software gralloc allocator is a sealed
   memfd the host driver cannot import as image memory; it needs a dma-buf-backed allocation. Planned in two stages: dma-buf
