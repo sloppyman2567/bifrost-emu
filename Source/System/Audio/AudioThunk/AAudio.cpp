@@ -551,25 +551,50 @@ std::optional<int64_t> AudioDispatch::aaudio() {
         }
         return 0;
     }
-    if (name == "AAudioStream_write") {
-        std::lock_guard<std::mutex> pmu(I.pump_mu);
-        auto it = I.aa_streams_.find(R(0));
+    if (name == "AAudioStream_write") {  // (stream, buffer, numFrames, timeoutNanoseconds)
+        const uint64_t data = R(1);
+        const int32_t frames = (int32_t)R(2);
+        const int64_t timeout_ns = (int64_t)R(3);
         int64_t rc = -EIO;
-        if (it != I.aa_streams_.end() && I.engine) {
-            uint64_t data = R(1);
-            int32_t frames = (int32_t)R(2);
-            size_t bytes = (size_t)frames * it->second.ch * it->second.size;
-            std::vector<uint8_t> tmp(bytes);
-            I.mem->read(data, tmp.data(), bytes);
-            ssize_t fr = it->second.engine_stream
-                ? I.engine->stream_write(it->second.engine_stream,
-                                         it->second.fmt, it->second.rate,
-                                         it->second.ch, tmp.data(), bytes)
-                : -1;
-            // Honest frame count (AAudio returns frames written or a
-            // negative error): partial acceptance is a short write, so
-            // the guest retries the remainder instead of skipping it.
-            rc = (fr >= 0) ? fr : -EIO;
+        {
+            std::lock_guard<std::mutex> pmu(I.pump_mu);
+            auto it = I.aa_streams_.find(R(0));
+            if (it == I.aa_streams_.end() || !I.engine) { tr(rc); return rc; }
+            if (frames < 0) { rc = -898; tr(rc); return rc; }  // AAUDIO_ERROR_ILLEGAL_ARGUMENT
+        }
+        // AOSP AudioStreamInternal::write blocks until every frame is accepted or the
+        // timeout passes, and returns the frames written. A full ring is therefore a wait,
+        // not an immediate 0: a caller that retries a 1 ms write would spin otherwise.
+        // The pump lock is dropped while waiting, so callbacks and other streams run.
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::nanoseconds(std::max<int64_t>(timeout_ns, 0));
+        std::vector<uint8_t> tmp;
+        int32_t done = 0;
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> pmu(I.pump_mu);
+                auto it = I.aa_streams_.find(R(0));
+                if (it == I.aa_streams_.end()) { rc = done ? done : -892; break; }
+                auto& s = it->second;
+                const size_t fsz = (size_t)s.ch * s.size;
+                if (tmp.empty() && frames) {
+                    tmp.resize((size_t)frames * fsz);
+                    I.mem->read(data, tmp.data(), tmp.size());
+                }
+                ssize_t fr = s.engine_stream
+                    ? I.engine->stream_write(s.engine_stream, s.fmt, s.rate, s.ch,
+                                             tmp.data() + (size_t)done * fsz,
+                                             (size_t)(frames - done) * fsz)
+                    : -1;
+                if (fr < 0) { rc = done ? done : -EIO; break; }
+                done += (int32_t)fr;
+                if (done >= frames) { rc = done; break; }
+                if (s.stop.load() || s.paused) { rc = done; break; }  // nothing drains a stopped stream
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) { rc = done; break; }
+            std::this_thread::sleep_for(std::min<std::chrono::nanoseconds>(
+                std::chrono::microseconds(500), deadline - now));
         }
         tr(rc); return rc;
     }
