@@ -26,6 +26,11 @@ there (guided provisioning, update/reinstall) remain in progress.
 - The project site has a sidebar and separate pages: Home, Install (one-command bootstrap, Debian/Ubuntu packages, Bazzite and
   updating), Games and Screenshots, replacing the home page's install and screenshot sections (`Tools/Site`). The sidebar closes with a
   button (animated, remembered in the browser, and folded to the brand row on a phone), and reopens from a button at the page's top left.
+- The site's search and sharing metadata is rewritten: keyword-led page titles and descriptions of 130 to 160 characters, a
+  "Common questions" section on the home page (what it is, Android games on Linux without a phone, Waydroid and qemu-user
+  compared, requirements), structured data for the site, the software and each page's breadcrumb, social image size and alt
+  text, descriptive screenshot alt text, and a sitemap date taken from the newest commit instead of the build day. The README
+  games badge now says 16 playable.
 
 ### Added (gamepads)
 

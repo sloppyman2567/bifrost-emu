@@ -22,11 +22,12 @@ from pathlib import Path
 import re
 import shutil
 import string
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 REPO = "https://github.com/sloppyman2567/bifrost-emu"
-DESCRIPTION = ("bifrost-emu is a free, open-source ARM64 emulator for x86_64 Linux: run Android games (APKs) and "
-               "AArch64 Linux apps with a JIT, Android 15 and your own GPU.")
+DESCRIPTION = ("Free, open-source emulator that runs Android games from an APK and ARM64 Linux apps on x86_64 Linux. "
+               "JIT, Android 15 and your own GPU. Experimental beta.")
 
 
 def site_url():
@@ -144,7 +145,7 @@ def screenshots(readme, output):
             image.thumbnail((960, 960))
             image.save(images / f"{stem}.webp", quality=80, method=6)
             width, height = image.size
-        shots.append(f'    <figure><img src="images/{stem}.webp" alt="{html.escape(alt)}" width="{width}" '
+        shots.append(f'    <figure><img src="images/{stem}.webp" alt="{html.escape(alt)} running on bifrost-emu" width="{width}" '
                      f'height="{height}" loading="lazy" decoding="async"><figcaption>{html.escape(caption)}'
                      f"</figcaption></figure>")
     if not shots:
@@ -171,13 +172,28 @@ def main():
     shutil.copyfile(branding / "social-preview.png", args.output / "social-preview.png")
     icon = re.sub(r"<title>.*?</title>\s*", "", (branding / "bifrost-emu-icon.svg").read_text().strip())
     icon = icon.replace("<svg ", '<svg aria-hidden="true" ', 1)
-    json_ld = {
-        "@context": "https://schema.org", "@type": "SoftwareApplication", "name": "bifrost-emu",
-        "alternateName": "Bifrost", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Linux",
+    site = {"@type": "WebSite", "@id": url + "#website", "name": "bifrost-emu", "alternateName": "Bifrost", "url": url,
+            "inLanguage": "en"}
+    json_ld = {"@context": "https://schema.org", "@graph": [site, {
+        "@type": "SoftwareApplication", "@id": url + "#software", "name": "bifrost-emu",
+        "alternateName": "Bifrost", "applicationCategory": "UtilitiesApplication", "applicationSubCategory": "Emulator",
+        "operatingSystem": "Linux (x86_64)", "softwareRequirements": "x86_64 Linux with SSE4.1 and FMA3",
         "softwareVersion": version, "description": DESCRIPTION, "url": url, "downloadUrl": REPO,
-        "codeRepository": REPO, "license": "https://unlicense.org/", "isAccessibleForFree": True,
+        "installUrl": url + "install/", "codeRepository": REPO, "license": "https://unlicense.org/",
+        "isAccessibleForFree": True, "image": url + "social-preview.png",
+        "featureList": ["Run Android games and apps from an APK on Linux", "Run ARM64 (AArch64) Linux programs on x86_64",
+                        "JIT compiler from ARM64 to x86_64", "OpenGL and Vulkan on the host GPU",
+                        "Gamepad, keyboard and mouse input"],
         "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
-    }
+    }]}
+    def page_ld(kind, name, path, description):
+        """A sub-page's structured data: the page and its place under the home page."""
+        return {"@context": "https://schema.org", "@graph": [
+            {"@type": kind, "@id": url + path + "#page", "name": name, "description": description, "url": url + path,
+             "isPartOf": {"@id": url + "#website"}, "inLanguage": "en"},
+            {"@type": "BreadcrumbList", "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "bifrost-emu", "item": url},
+                {"@type": "ListItem", "position": 2, "name": name, "item": url + path}]}]}
     panel = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
              'stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/>'
              '<path d="M9.5 4v16"/></svg>')
@@ -195,35 +211,28 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(page)
     names = "\n".join(f"    <li>{html.escape(name)}</li>" for name in playable)
-    render("home.html", "bifrost-emu: run ARM64 Android games and apps on x86_64 Linux", "", DESCRIPTION, json_ld,
+    render("home.html", "Run Android Games and ARM64 Apps on Linux | bifrost-emu", "", DESCRIPTION, json_ld,
            version=html.escape(version), games=summary.group(1), playable=summary.group(3), summary=summary_html,
            playable_names=names)
-    install_description = ("Install bifrost-emu, the ARM64 emulator for x86_64 Linux: one command builds it and sets up the "
-                           "Android runtime, with Debian, Ubuntu and Bazzite steps.")
-    render("install.html", "Install bifrost-emu: ARM64 Android and Linux apps on x86_64 Linux", "install/",
-           install_description,
-           {"@context": "https://schema.org", "@type": "WebPage", "name": "Install bifrost-emu",
-            "description": install_description, "url": url + "install/",
-            "isPartOf": {"@type": "WebSite", "name": "bifrost-emu", "alternateName": "Bifrost", "url": url}})
-    shots_description = "Screenshots of Android and Linux games running on bifrost-emu, captured from real sessions."
-    render("screenshots.html", "bifrost-emu screenshots: Android and Linux games", "screenshots/", shots_description,
-           {"@context": "https://schema.org", "@type": "CollectionPage", "name": "bifrost-emu screenshots",
-            "description": shots_description, "url": url + "screenshots/",
-            "isPartOf": {"@type": "WebSite", "name": "bifrost-emu", "alternateName": "Bifrost", "url": url}},
-           shots=shots)
+    install_description = ("Install bifrost-emu on Linux: one command builds the emulator and Android runtime, plus Debian, "
+                           "Ubuntu and Bazzite steps to run Android APKs and ARM64 apps.")
+    render("install.html", "Install bifrost-emu: Android APK Emulator for Linux", "install/", install_description,
+           page_ld("WebPage", "Install bifrost-emu", "install/", install_description))
+    shots_description = ("Screenshots of Android games and Linux apps running on bifrost-emu, an ARM64 emulator for "
+                         "x86_64 Linux, captured from real sessions.")
+    render("screenshots.html", "bifrost-emu Screenshots: Android Games on Linux", "screenshots/", shots_description,
+           page_ld("CollectionPage", "bifrost-emu screenshots", "screenshots/", shots_description), shots=shots)
     # As many playable names as fit the ~160 characters a search result shows.
-    lead = (f"Which Android and Linux games run on bifrost-emu, the ARM64 emulator for x86_64 Linux: "
-            f"{summary.group(3)} of {summary.group(1)} playable, including ")
+    lead = (f"Android games that run on Linux with bifrost-emu: {summary.group(3)} of {summary.group(1)} playable, "
+            f"including ")
     def joined(names):
         return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
     listed = playable[:1]
     while len(listed) < len(playable) and len(lead + joined(playable[:len(listed) + 1])) < 159:
         listed = playable[:len(listed) + 1]
     games_description = lead + joined(listed) + "."
-    render("games.html", "bifrost-emu game compatibility: Android and Linux games", "games/", games_description,
-           {"@context": "https://schema.org", "@type": "CollectionPage", "name": "bifrost-emu game compatibility",
-            "description": games_description, "url": url + "games/",
-            "isPartOf": {"@type": "WebSite", "name": "bifrost-emu", "alternateName": "Bifrost", "url": url}},
+    render("games.html", "Android Games That Run on Linux: bifrost-emu List", "games/", games_description,
+           page_ld("CollectionPage", "bifrost-emu game compatibility", "games/", games_description),
            summary=summary_html, checked=summary.group(2), rows=rows)
     # Search Console's HTML-file verification: served as downloaded, next to the page.
     for verification in sorted(Path(__file__).parent.glob("google*.html")):
@@ -231,7 +240,14 @@ def main():
                 verification.read_text().strip() != f"google-site-verification: {verification.name}":
             raise SystemExit(f"{verification.name} is not a Search Console verification file")
         shutil.copyfile(verification, args.output / verification.name)
-    today = datetime.date.today().isoformat()
+    # The date of the newest commit to anything the pages are built from (the build date when git is unavailable).
+    try:
+        today = subprocess.run(["git", "log", "-1", "--format=%cs", "--", "README.md", "Scripts/Android/compatibility.json",
+                                "Include/Bifrost/Version.hpp", "Docs/Images", "Assets/Branding", "Tools/Site"],
+                               cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+        datetime.date.fromisoformat(today)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        today = datetime.date.today().isoformat()
     (args.output / "sitemap.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
         + "".join(f"  <url><loc>{url}{path}</loc><lastmod>{today}</lastmod></url>\n" for path, _ in pages)

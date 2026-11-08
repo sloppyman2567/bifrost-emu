@@ -26,7 +26,7 @@ and how to install.
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](Docs/SUPPORT.md)
 [![Version: 2.0.0-beta.1](https://img.shields.io/badge/version-2.0.0--beta.1-orange.svg)](Docs/CHANGELOG.md)
-[![Games: 15 playable of 19](https://img.shields.io/badge/games-15%20playable%20of%2019-brightgreen.svg)](#what-runs)
+[![Games: 16 playable of 19](https://img.shields.io/badge/games-16%20playable%20of%2019-brightgreen.svg)](#what-runs)
 
 ---
 

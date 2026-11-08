@@ -38,7 +38,8 @@ such as "misc", "common" or "core". The current version lives in
   README's "What runs" summary, table and screenshots, `compatibility.json` and `Version.hpp`; edit those, never the
   generated pages. It is for players: plain language, technical detail behind links or the games page's Details;
   its own copy is in `Tools/Site/home.html`, `install.html`, `games.html` and `screenshots.html` (the install steps are
-  hand-written: keep them in step with the README's Quick start and `make bootstrap`), and its name is bifrost-emu (Bifrost as the alternate name).
+  hand-written: keep them in step with the README's Quick start and `make bootstrap`), and its name is bifrost-emu (Bifrost as the alternate name). Keep each page's title under about 60 characters and its
+  description under 160, unique and accurate; `build-site.py` writes the page metadata, structured data and sitemap.
   The icon and social preview card live in `Assets/Branding/`; the card is also uploaded by hand in the repository's
   Settings, Social preview, so re-upload it when it changes. Its build fails when a playable or blocked app in `compatibility.json` has no matching README row
   or a different status, so record a compatibility change in both.

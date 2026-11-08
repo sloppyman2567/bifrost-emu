@@ -16,7 +16,7 @@
 </div>
 
 <section id="features" aria-labelledby="features-title">
-  <h2 id="features-title">What it does</h2>
+  <h2 id="features-title">Run Android games and ARM64 apps on Linux</h2>
   <p class="lead">Games built for ARM64 run on an ordinary x86_64 Linux PC, as if they were made for it.</p>
   <div class="features">
     <div><h3>Android games from an APK</h3><p>Run <code>bifrost-emu game.apk</code> and it installs and starts the game,
@@ -36,11 +36,32 @@
 </section>
 
 <section id="games" aria-labelledby="games-title">
-  <h2 id="games-title">Games that run</h2>
+  <h2 id="games-title">Android and Linux games that run</h2>
   <p class="lead">$summary</p>
   <ul class="names">
 $playable_names
   </ul>
   <a class="button" href="${url}games/">Full compatibility list</a>
   <a class="button" href="${url}screenshots/">Screenshots</a>
+</section>
+
+<section id="faq" aria-labelledby="faq-title">
+  <h2 id="faq-title">Common questions</h2>
+  <div class="features">
+    <div><h3>What is bifrost-emu?</h3><p>A free, open-source user-mode emulator for ARM64 (AArch64) Linux. A JIT compiler
+    translates ARM64 code to x86_64 as it runs, so Linux programs and Android apps made for ARM run on an x86_64 Linux
+    PC.</p></div>
+    <div><h3>Can I run Android games on Linux without a phone?</h3><p>Yes: <code>bifrost-emu game.apk</code> installs and starts
+    the game on a real Android 15 system (Asgard) that runs on your desktop. No phone, no virtual machine and no Android
+    image to flash. <a href="${url}install/">Install steps</a>.</p></div>
+    <div><h3>How is it different from Waydroid?</h3><p>Waydroid <a href="https://docs.waydro.id/">runs a full Android system in a
+    Linux container</a> and needs binder support in the host kernel. bifrost-emu emulates ARM64 itself and provides its own
+    virtual <code>/dev/binder</code>, so it needs no container and no Android kernel modules.</p></div>
+    <div><h3>Is it like qemu-user?</h3><p>For Linux programs, yes: it plays the part of <code>qemu-aarch64</code>
+    user-mode emulation, without needing QEMU, and adds the Android runtime and GPU, audio and input forwarding.</p></div>
+    <div><h3>Which games work?</h3><p>$playable of $games recorded games are playable, as reported by the maintainer; see the
+    <a href="${url}games/">compatibility list</a> for each game's status and what is not confirmed.</p></div>
+    <div><h3>What does it run on?</h3><p>x86_64 Linux with SSE4.1 and FMA3. ARM hosts, Windows and macOS are not supported.
+    It is experimental: games can crash, run slowly or not start.</p></div>
+  </div>
 </section>
