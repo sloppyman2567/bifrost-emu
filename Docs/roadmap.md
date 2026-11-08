@@ -47,7 +47,7 @@ confirmations and the settings page drawn inside its window); per-app `window_mo
 cursor driven by a pad; fixed-size apps can be tiled to a half or a corner; the Android setup's main downloads (the system image, microG, AAPT2, the Bionic runtime, the package tools, SDL3) resume
 when interrupted, and `make bootstrap` finds host tools and libraries without root, building SDL3 where the distribution has none; a minimised or hidden game window pauses the app, F11 toggles fullscreen and the size is remembered, Activities are relaunched on a resize they do not handle, the library offers **Set up…**, packages up to 4 GiB install, a realm with no app ends after 10 minutes, and the JIT has native NEON structure loads and stores and cheaper FP compares. All of it was checked with fakes, on Qt's
 offscreen platform or in an Ubuntu 24.04 chroot, apart from what the maintainer saw on one KDE/Wayland desktop with a Steam
-Controller; none has run on a Steam Deck, in Game Mode, on a fresh Debian 13 or against a plain pad.
+Controller; on a Steam Deck only Desktop mode has run (Subway Surfers, 2026-11-08); none has run in Game Mode (a black screen), on a fresh Debian 13 or against a plain pad.
 On November 8: Vulkan apps get ASTC LDR textures on hosts that have BC7 but no ASTC (converted on the CPU at upload; Zenless Zone Zero's
 Unity stopped decompressing them itself), a swapchain acquire no longer re-uploads the frame, `/proc/self/pagemap` is read without
 rebuilding every mapping, and the crash line names the library. Each is checked as its changelog entry says; none is yet measured
@@ -92,7 +92,7 @@ In order. Each carries into the next pre-release until its acceptance test passe
 - A clear update/reinstall flow, with routine controls outside Developer mode. Done: cards, icons, search, per-app
   Back-key, stats, Window and Controller settings, clear-data/uninstall and the last-session drawer; a library a gamepad can
   drive (gamepad layout, Select for the last session); `make bootstrap` that resumes downloads and finds tools and libraries
-  without root. Open: all of it on a real Steam Deck and Game Mode, and on a fresh Debian 13.
+  without root. Open: Game Mode on a Steam Deck (a black screen on 2026-11-08; Desktop mode ran Subway Surfers) and a fresh Debian 13.
 - Validate install → play → settings → stop/relaunch on a fresh setup, and broaden the app matrix with longer sessions and
   several apps in one realm on the supported Linux display stacks.
 
@@ -216,6 +216,11 @@ pointer-to-pointer parameters and a retry for mobile GLSL index conversions.
 
 Open:
 
+- Steam Deck: Game Mode shows a black screen (not investigated), and a plain non-Steam shortcut to the library cannot reach the
+  Android library because Steam's environment variables have to be unset first (`LD_PRELOAD` and related ones, per the maintainer; the exact set was not recorded). A per-app Steam
+  shortcut helper that clears that environment and launches an app directly, full screen with a gamepad layout, would also
+  skip the Qt library. Subway Surfers quit from its own dialog stays running without a window (a service that outlives the last
+  Activity is the suspect; not traced), and the Deck's CPU ran hot at 20 to 40 FPS.
 - A zero-copy Android Vulkan swapchain. The HAL's `VK_ANDROID_native_buffer` reads a full frame back per present (a GPU copy,
   a wait for the GPU and a CPU copy, then another copy into the window) because the software gralloc allocator is a sealed
   memfd the host driver cannot import as image memory; it needs a dma-buf-backed allocation. Planned in two stages: dma-buf

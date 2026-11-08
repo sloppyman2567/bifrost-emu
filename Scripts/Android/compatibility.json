@@ -113,8 +113,12 @@
       "name": "Subway Surfers",
       "tested_version": "3.70.3",
       "status": "playable",
-      "checked": "2026-10-29",
-      "evidence": "The maintainer reports it is playable and its ads work (APKPure 3.70.3 build); no screenshots or further detail are recorded."
+      "checked": "2026-11-08",
+      "evidence": "The maintainer reports it is playable and its ads work (APKPure 3.70.3 build). On 2026-11-08 they ran it on a Steam Deck (SteamOS, Desktop mode; the Bifrost build was not recorded): 20 to 40 FPS, mostly 30 to 40, with stutters and a hot CPU but very stable, and close to 30 W of total system power during play (maintainer-reported). Two photos of the Deck's performance overlay are the only capture.",
+      "notes": [
+        "Quitting through the game's own quit confirmation left the app running in the background on the Deck: its audio kept playing and Return to app did not show a window. Not traced and not reproduced here. After its last Activity finishes the launcher exits only once the app has no service of its own left, so a service that stays alive would explain it (unconfirmed). A photo of the overlay in that state reads about 1 FPS with a worst frame of 23 s, two CPU threads pinned (100% and 91%) at 90 C, the GPU idle and the battery at 14%.",
+        "In Game Mode on the Deck the maintainer got a black screen (not investigated). The library cannot simply be added as a non-Steam game: Steam's environment variables have to be unset first, or it cannot reach the Android library (maintainer-reported: LD_PRELOAD and related variables; the exact set was not recorded)."
+      ]
     },
     "com.robtopx.geometryjumplite": {
       "name": "Geometry Dash Lite",

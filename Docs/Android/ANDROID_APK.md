@@ -464,8 +464,11 @@ whose presses never arrive, or presses that do arrive). `BIFROST_GAMEPAD_DEBUG=1
 library does with each press: the window being in front or not, the action, and whether the library, a dialog or a key press on
 the focused widget took it. Ctrl-C ends the library cleanly.
 On SteamOS, add the launcher as a non-Steam game and give it a **gamepad** controller layout: Steam's default for such
-shortcuts is keyboard and mouse, and the library then sees no pad at all. This was built and tested with a fake pad on Qt's
-offscreen platform only; it has not been tried with a real pad, Game Mode or gamescope.
+shortcuts is keyboard and mouse, and the library then sees no pad at all. That is not enough by itself: on a Steam Deck
+(2026-11-08) the launcher could not reach the Android library from a plain shortcut, because Steam's environment variables have
+to be unset first (the maintainer's report: `LD_PRELOAD` and related variables; the exact set was not recorded), and Game Mode showed a black screen that has not
+been investigated. Desktop mode on the Deck did run Subway Surfers. The gamepad layout was built and tested with a fake pad on
+Qt's offscreen platform; it has not been tried with a real pad in Game Mode or in a gamescope session.
 
 Times on the cards follow the user's clock: GNOME, Unity, Budgie and Cinnamon keep a setting of their own (`gsettings`), and
 otherwise the time locale decides, through Qt's locale data, since `nl_langinfo` needs a generated locale on glibc and always
