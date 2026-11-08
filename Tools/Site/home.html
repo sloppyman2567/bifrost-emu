@@ -5,7 +5,7 @@
   their APK, and ARM64 Linux programs. They run on your own graphics card, sound and controllers, with no phone and no
   virtual machine. It is free and open source, and still experimental: games can crash, run slowly or not start.</p>
   <div class="actions">
-    <a class="button primary" href="#install">Get started</a>
+    <a class="button primary" href="${url}install/">Get started</a>
     <a class="button" href="$repo">View on GitHub</a>
   </div>
   <div class="facts">
@@ -42,26 +42,5 @@
 $playable_names
   </ul>
   <a class="button" href="${url}games/">Full compatibility list</a>
-</section>
-
-<section id="screenshots" aria-labelledby="screenshots-title">
-  <h2 id="screenshots-title">Screenshots</h2>
-  <p class="lead">Captures from real sessions on Bifrost, not mockups.</p>
-  <div class="shots">
-$shots
-  </div>
-</section>
-
-<section id="install" aria-labelledby="install-title">
-  <h2 id="install-title">Install</h2>
-  <p class="lead">From a fresh clone, one command installs the host packages, builds the emulator and sets up the Android
-  runtime under <code>~/.local</code> (about 1.5 GB of pinned downloads).</p>
-<pre><code>git clone $repo &amp;&amp; cd bifrost-emu
-make bootstrap</code></pre>
-  <p class="lead">Then run an Android game or an ARM64 Linux program:</p>
-<pre><code>bifrost-emu game.apk          # installs and runs an Android app
-bifrost-emu ./program-arm64   # runs an ARM64 Linux binary</code></pre>
-  <p class="small">Needs an x86_64 CPU with SSE4.1 and FMA3. Distribution support, Debian packages and Bazzite/Distrobox
-  steps are in the <a href="$repo/blob/main/Docs/SUPPORT.md">support matrix</a> and the
-  <a href="$repo#quick-start">quick start</a>.</p>
+  <a class="button" href="${url}screenshots/">Screenshots</a>
 </section>

@@ -1,0 +1,67 @@
+<div class="page-head">
+  <h1>Install bifrost-emu</h1>
+  <p class="lead">bifrost-emu runs on x86_64 Linux and is experimental. The one-command install below is new and has not been
+  confirmed on every distribution; the <a href="$repo/blob/main/Docs/SUPPORT.md">support matrix</a> says what has been checked.</p>
+</div>
+
+<section id="requirements" aria-labelledby="requirements-title">
+  <h2 id="requirements-title">Requirements</h2>
+  <p class="lead">An x86_64 Linux PC with SSE4.1 and FMA3 (the JIT refuses to start without them; <code>--no-jit</code> runs on any
+  x86-64 CPU). A GPU with OpenGL or Vulkan drivers, and about 1.5 GB to download plus about 1.1 GB on disk for the Android
+  runtime. Android windows use SDL3: where the distribution has none (Debian 12 and 13, Ubuntu 24.04) bootstrap builds it, and the
+  Debian and Ubuntu package route below needs Debian or Ubuntu 25.10 or newer for Android windows.</p>
+</section>
+
+<section id="bootstrap" aria-labelledby="bootstrap-title">
+  <h2 id="bootstrap-title">One command</h2>
+  <p class="lead">From a fresh clone this installs the host packages (apt, dnf, zypper or pacman; it asks for
+  <code>sudo</code> only if some are missing), builds the emulator, then downloads and installs the Android runtime (Asgard)
+  under <code>~/.local</code>:</p>
+<pre><code>git clone $repo &amp;&amp; cd bifrost-emu
+make bootstrap       # about 1.5 GB of pinned downloads; PREFIX=DIR to install elsewhere</code></pre>
+  <p class="small">Add <code>~/.local/bin</code> to your <code>PATH</code> for the <code>bifrost-emu</code> and
+  <code>asgard</code> commands. On a minimal system without <code>make</code> or Python, run
+  <code>Scripts/Setup/install-deps.sh</code> first. An interrupted download is kept and the next run resumes it.</p>
+</section>
+
+<section id="run" aria-labelledby="run-title">
+  <h2 id="run-title">Run something</h2>
+<pre><code>bifrost-emu game.apk          # installs and runs an Android app (.apk .apkm .apks .xapk)
+asgard launcher               # desktop library of installed apps
+bifrost-emu ./program-arm64   # runs an ARM64 Linux binary</code></pre>
+  <p class="small">Dynamically linked Linux programs need a guest root filesystem:
+  <code>bifrost-emu --setup-rootfs</code> installs one (about 235 MB), and <code>--setup-rootfs --games</code> adds the
+  libraries Linux games need. Android apps do not use it. See the
+  <a href="$repo/blob/main/Docs/ROOTFS.md">rootfs guide</a>.</p>
+</section>
+
+<section id="packages" aria-labelledby="packages-title">
+  <h2 id="packages-title">Debian and Ubuntu package</h2>
+  <p class="lead">Build the packages from the clone, then install them:</p>
+<pre><code>sudo apt install build-essential debhelper pkg-config libavcodec-dev libavutil-dev libswscale-dev \
+     libegl-dev libffi-dev libgl-dev libsdl3-dev libsdl2-dev libwayland-dev libx11-dev
+make deb
+sudo apt install ../bifrost-emu_*.deb ../bifrost-emu-asgard_*.deb
+asgard-setup                  # once: about 1.5 GB of downloads
+bifrost-emu --setup-rootfs    # once, for Linux programs</code></pre>
+</section>
+
+<section id="bazzite" aria-labelledby="bazzite-title">
+  <h2 id="bazzite-title">Bazzite and other immutable Fedora</h2>
+  <p class="lead">Build and run inside a <a href="https://distrobox.it">Distrobox</a> container, since the emulator links the
+  container's libraries:</p>
+<pre><code>distrobox create --name bifrost --image registry.fedoraproject.org/fedora-toolbox:44
+distrobox enter bifrost
+make bootstrap</code></pre>
+</section>
+
+<section id="update" aria-labelledby="update-title">
+  <h2 id="update-title">Updating and removing</h2>
+  <p class="lead">After pulling new code, run the same <code>make bootstrap</code> again: only the files that changed are copied. The
+  <a href="$repo/blob/main/Docs/Android/ANDROID_APK.md">APK guide</a> covers updates, per-app settings and
+  <code>asgard</code> commands. If Bifrost is already installed elsewhere, such as <code>/usr/local</code>, bootstrap makes a
+  second copy that takes over when <code>~/.local/bin</code> comes first on your <code>PATH</code>.</p>
+  <p class="small">Full details, including building only the emulator and every option, are in the
+  <a href="$repo#quick-start">README quick start</a>. Something not working? See the
+  <a href="${url}games/">games list</a> for what has run, and open an <a href="$repo/issues">issue</a>.</p>
+</section>

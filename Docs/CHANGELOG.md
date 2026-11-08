@@ -23,6 +23,8 @@ there (guided provisioning, update/reinstall) remain in progress.
   pages, CoreMark tables, screenshots) keep that label.
 - Oddmar is recorded as playable (2026-11-08): the maintainer reports the first level plays very well with no stutter noticed,
   and a frame from their screen recording shows level gameplay. Later levels are not confirmed and stutter was not measured.
+- The project site has a sidebar and separate pages: Home, Install (one-command bootstrap, Debian/Ubuntu packages, Bazzite and
+  updating), Games and Screenshots, replacing the home page's install and screenshot sections (`Tools/Site`).
 
 ### Added (gamepads)
 

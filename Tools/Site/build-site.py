@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Build the project site (GitHub Pages: a home page and a games page) from files in the repository.
+"""Build the project site (GitHub Pages: home, install, games and screenshots pages) from files in the repository.
 
 The pages take the version from Include/Bifrost/Version.hpp and, from README.md, the "What
-runs" summary and table and the screenshots; the home page's plain-language copy is in home.html.
+runs" summary and table and the screenshots; the plain-language copy of each page is its own file here
+(home.html, install.html, games.html, screenshots.html) and layout.html holds the sidebar.
 Each table row's status is checked against Scripts/Android/compatibility.json, and the build fails
-rather than publish a page that disagrees with it. Writes index.html, games/index.html, sitemap.xml
+rather than publish a page that disagrees with it. Writes one index.html per page, sitemap.xml
 (submitted in Search Console: a project page's robots.txt is not read, only the domain root's) and
 the screenshots (WebP; needs Pillow) to the output directory (default build/site), with the icon and
 social preview from Assets/Branding and the Search Console verification files kept beside this
@@ -177,11 +178,15 @@ def main():
         "codeRepository": REPO, "license": "https://unlicense.org/", "isAccessibleForFree": True,
         "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
     }
+    pages = (("", "Home"), ("install/", "Install"), ("games/", "Games"), ("screenshots/", "Screenshots"))
+
     def render(name, title, path, description, structured, **values):
+        nav = "".join(f'<a href="{url}{target}"{" aria-current=\"page\"" if target == path else ""}>{label}</a>'
+                      for target, label in pages)
         main = string.Template(Path(__file__).with_name(name).read_text()).substitute(url=url, repo=REPO, **values)
         page = string.Template(Path(__file__).with_name("layout.html").read_text()).substitute(
             title=html.escape(title), description=html.escape(description), canonical=url + path, url=url, repo=REPO,
-            og_image=url + "social-preview.png", icon=icon, json_ld=json.dumps(structured, separators=(",", ":")).replace("</", "<\\/"),
+            og_image=url + "social-preview.png", icon=icon, nav=nav, json_ld=json.dumps(structured, separators=(",", ":")).replace("</", "<\\/"),
             version=html.escape(version), main=main)
         target = args.output / path / "index.html"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +194,20 @@ def main():
     names = "\n".join(f"    <li>{html.escape(name)}</li>" for name in playable)
     render("home.html", "bifrost-emu: run ARM64 Android games and apps on x86_64 Linux", "", DESCRIPTION, json_ld,
            version=html.escape(version), games=summary.group(1), playable=summary.group(3), summary=summary_html,
-           playable_names=names, shots=shots)
+           playable_names=names)
+    install_description = ("Install bifrost-emu, the ARM64 emulator for x86_64 Linux: one command builds it and sets up the "
+                           "Android runtime, with Debian, Ubuntu and Bazzite steps.")
+    render("install.html", "Install bifrost-emu: ARM64 Android and Linux apps on x86_64 Linux", "install/",
+           install_description,
+           {"@context": "https://schema.org", "@type": "WebPage", "name": "Install bifrost-emu",
+            "description": install_description, "url": url + "install/",
+            "isPartOf": {"@type": "WebSite", "name": "bifrost-emu", "alternateName": "Bifrost", "url": url}})
+    shots_description = "Screenshots of Android and Linux games running on bifrost-emu, captured from real sessions."
+    render("screenshots.html", "bifrost-emu screenshots: Android and Linux games", "screenshots/", shots_description,
+           {"@context": "https://schema.org", "@type": "CollectionPage", "name": "bifrost-emu screenshots",
+            "description": shots_description, "url": url + "screenshots/",
+            "isPartOf": {"@type": "WebSite", "name": "bifrost-emu", "alternateName": "Bifrost", "url": url}},
+           shots=shots)
     # As many playable names as fit the ~160 characters a search result shows.
     lead = (f"Which Android and Linux games run on bifrost-emu, the ARM64 emulator for x86_64 Linux: "
             f"{summary.group(3)} of {summary.group(1)} playable, including ")
@@ -213,7 +231,7 @@ def main():
     today = datetime.date.today().isoformat()
     (args.output / "sitemap.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-        + "".join(f"  <url><loc>{url}{path}</loc><lastmod>{today}</lastmod></url>\n" for path in ("", "games/"))
+        + "".join(f"  <url><loc>{url}{path}</loc><lastmod>{today}</lastmod></url>\n" for path, _ in pages)
         + "</urlset>\n")
     print(f"Wrote {args.output.relative_to(ROOT) if args.output.is_relative_to(ROOT) else args.output} for {url}")
 
