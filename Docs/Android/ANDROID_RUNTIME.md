@@ -2440,8 +2440,18 @@ Most games declare no `resizeableActivity`, which Android reads as resizable, so
 a new display size and some draw wrongly (stretched, cropped, black). The per-app `window_mode` setting (see
 [the settings table](ANDROID_APK.md)) chooses: `resizable`, the default, passes the window's shape on, and `keep` (host
 variable `BIFROST_ANDROID_WINDOW_MODE=keep`, passed to the guest by `android_managed.window_mode_environment`) makes the
-managed launcher take the `fixWindow` path above for any app, not only one that declares `resizeableActivity=false`. Not run
-against a real game here.
+managed launcher take the `fixWindow` path above for any app, not only one that declares `resizeableActivity=false`.
+
+Doki Doki Literature Club (Ren'Py 8.4.1) is the case for `keep`: after a host resize its images draw black while text still
+draws (traced 2026-11-08 with the thunk trace). Ren'Py's `GL2Draw.on_resize` does a full reset on Android and calls
+`TextureLoader.init()`, whose `quit()` deletes every GL texture; the guest's Python `Texture` objects keep the old names and
+are drawn with no storage, which any GL driver samples as black. Ren'Py re-uploads them only through `kill_textures()`, which it
+runs only when pygame_sdl2's `recreate_gl_context()` returns True, and that returns False while a context is current. SDL's
+Android layer (release-2.30.x `SDLSurface.surfaceChanged`, `onNativeSurfaceChanged`) leaves the EGL surface and context alone on a
+size-only change, which is what the runtime delivers, so the guest's own resize path produces this; no GL call is mistranslated
+(the render thread's textures are generated, deleted and bound consistently). Whether a real device with a resizable window
+behaves the same was not checked. With `window_mode=keep` Ren'Py never sees a resize and the images stay (user-confirmed
+2026-11-08).
 
 On a host resize the launcher recomputes the Configuration (`FrameworkDisplay`: `orientation` from the window's width and
 height, `screenWidthDp`, `screenHeightDp`, `smallestScreenWidthDp`), updates the resources, and hands every Activity to
