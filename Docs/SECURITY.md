@@ -30,6 +30,12 @@ sanitized environment. Do not pass through host devices, sockets, credentials,
 or directories that the guest does not need. Treat GPU and audio passthrough
 as additional trusted host interfaces.
 
+Texture data is guest-controlled input to host code. On a host without ASTC the Vulkan thunk decodes the guest's ASTC
+blocks and re-encodes them as BC7 in the emulator process (`Source/System/Graphics/TextureCodec`). The decoder is
+bounds-checked and was fuzzed with 200,000 random blocks under ASan and UBSan, and regions it cannot honour are dropped,
+but it has not had an independent security review. The scratch buffers and the cache of finished transcodes are bounded
+(32 MiB blocks, 256 MiB cache by default).
+
 ## Regression coverage
 
 `Tests/Unit/test_sandbox.c` validates selected BIFROST_ROOT path operations and

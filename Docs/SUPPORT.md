@@ -16,6 +16,7 @@ passing a focused test is not a claim of complete Linux ABI compatibility.
 | Dynamic libc | glibc and musl loader paths exercised by the provisioned full suite; glibc dynamic smoke tests run in PR CI | A guest rootfs must provide the matching AArch64 loader and libraries. Host x86_64 libraries are never guest code. |
 | JIT/interpreter | Focused guest regressions run in both modes; JIT differential runs use `make verify` | JIT verification has documented limits for calls, syscalls, and memory side effects. Keep output checks in guest tests. |
 | SDL/GL/Vulkan | Optional SDL2/GL host build; thunk tests run when the host display and driver are available | CI has no display: most GL and Vulkan tests run on SDL's offscreen driver and Mesa's software drivers, while the GLES/EGL, Wayland, Android surface and SDL Vulkan surface tests skip with exit 77. A skip is not evidence that a graphics path works, and software drivers say nothing about a real GPU. |
+| Vulkan texture formats | On a host with BC7 but no ASTC (an RX 7600 on RADV is the one checked), Android apps are told ASTC LDR works and the thunk keeps each ASTC image as BC7, transcoding the blocks on the CPU when the upload is submitted (all 14 2D footprints, UNORM and sRGB). Checked 2026-11-08 by a host test, a headless guest test through the thunk on that GPU, and the GPU's own BC7 decode of 2,232 encoded blocks (every mode used, all partitions), which matched an independent decoder exactly | Not compared with ARM's reference decoder (multi-partition and dual-plane blocks are checked only for self-consistency) or run on a host with native ASTC, where it should pass through unchanged. Reading back, copying or blitting an ASTC image, 3D and HDR ASTC, and the GL/GLES path are not covered. It costs CPU while textures stream in (60 to 70% of Zenless Zone Zero's CPU time in one story-scene profile before helper threads were given the lowest priority and finished transcodes were cached); `BIFROST_VK_NO_ASTC=1` turns it off. |
 | Host CPU features | The JIT needs SSE4.1 and FMA3 (AVX state included) and refuses to start without them; `--no-jit` runs on any x86-64 CPU. `test_host_cpu_models.sh` runs JIT fixtures on emulated Haswell and checks the refusal on older models; it has not been run since this minimum was set. Earlier history: On 2026-11-01 those models had no failure beyond `-cpu max` in the unit suite (QEMU 11.1; 192 pass, and 43 fail on every model because of qemu-user) | Emulated only: nothing ran on real old hardware. LZCNT without BMI1 (AMD K10, early Bulldozer) is not testable because QEMU 11.1 runs LZCNT as BSR there. AVX-512 hosts are not covered. A CPU without LAHF in 64-bit mode (the earliest x86-64 models) is unsupported. |
 
 ## Android scope and v2.0 plans
@@ -34,7 +35,10 @@ maintainer's report, with screenshots on their pages; The Battle Cats, Subway Su
 and Geometry Dash Lite on the report alone, with no capture. Zenless Zone Zero and
 Doki Doki Literature Club are playable on the maintainer's report (2026-11-06): the first with
 very low-resolution textures and heavy lag, the second with corrupted audio and graphics
-that break when the window is resized. Hungry Shark Evolution 14.5.0 and Hungry Shark World 8.2.6 have stable
+that break when the window is resized. On 2026-11-08 the maintainer played Zenless Zone Zero's story scenes with the
+ASTC-to-BC7 path (the overlay read 29 to 30 FPS at 3440x1384); the models are still very low resolution, which the
+maintainer says they always were, and a session ended on a guest null dereference once (not reproduced in the next
+7-minute session). Hungry Shark Evolution 14.5.0 and Hungry Shark World 8.2.6 have stable
 gameplay on the maintainer's report (2026-11-06), with no capture. YouTube shows its home screen. Firefox reaches its onboarding and
 browser screens, but pages do not load. Uptodown starts and runs a bounded session. Oddmar's first level plays very well on the maintainer's report
 (2026-11-08, no stutter noticed; a recording frame shows gameplay); later levels are not confirmed. Roblox, TrickCal
@@ -45,7 +49,9 @@ guarantees, and gameplay is confirmed only where the file says `playable`.
 Google account support is experimental. Play services come from microG, so behaviour that needs real Google services
 (device attestation, a Play Games profile, an adult-age check) is unavailable.
 Settings screens, host mDNS, HDR and arbitrary APK compatibility are not provided or
-claimed. The Android Vulkan HAL copies each presented frame (no zero-copy swapchain). An APK that ships only 32-bit
+claimed. The Android Vulkan HAL copies each presented frame through a host staging buffer (no zero-copy swapchain): a GPU
+read-back, a wait for the GPU and a CPU copy into the app's buffer on release, then another copy into the window; the
+upload on acquire is skipped after an image's first release (2026-11-08, not yet run in a game). An APK that ships only 32-bit
 libraries cannot start. See
 [runtime contracts](Android/ANDROID_RUNTIME.md), [APK tooling](Android/ANDROID_APK.md)
 and the [roadmap](roadmap.md) for open items and the known blockers by cause.

@@ -22,7 +22,7 @@ drawable size, not the smaller logical size the desktop reports. The original ga
 Experimental hardware fields show the full host CPU and current GL renderer names
 without CPU/GPU prefixes, emulator session RAM / total system RAM, and emulator
 resident VRAM / total dedicated GPU VRAM when available. Both memory fields use
-decimal MB (1,000,000 bytes), for example `RAM 400/33567 MB | ... | VRAM 300/8573 MB`.
+decimal MB (1,000,000 bytes), for example `RAM 400/33567 MB | ... | VRAM 300/8573 MB`; 6144 MB is therefore 5.7 GiB, not 6 GiB.
 The driver-reported device-local heap capacity can be smaller than the physical
 memory fitted to the card. System RAM comes from Linux MemTotal, so it may be lower
 than installed capacity.

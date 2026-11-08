@@ -71,7 +71,7 @@ that every feature has an automated test or a recorded capture.
 | [Umamusume: Pretty Derby](Docs/Apps/umamusume.md) | Android, Unity | Global 1.35.2: user-reported playable, title, home and Career story captured at 30 FPS, the game's own frame cap (2026-11-01). JP 2.32.0: blocked by the game's device integrity check when it connects. |
 | Subway Surfers 3.70.3 | Android, Unity/IL2CPP | User-reported playable, ads work (2026-10-29). |
 | Geometry Dash Lite 2.2.148 | Android, Cocos2d-x | User-reported playable (2026-10-29); ads only somewhat stable. |
-| Zenless Zone Zero 3.3.0 | Android, Unity/IL2CPP, Vulkan | User-confirmed gameplay in the city (2026-11-06), with very low-resolution textures and heavy lag (roughly 4 to 30 FPS on the overlay; the long loading screen is 0 to 2 FPS). Maximizing the window freezes its progress bar. |
+| Zenless Zone Zero 3.3.0 | Android, Unity/IL2CPP, Vulkan | User-confirmed gameplay in the city (2026-11-06) and story scenes (2026-11-08), with very low-resolution textures and heavy lag (roughly 4 to 30 FPS on the overlay on 2026-11-06, 29 to 30 FPS in story scenes on 2026-11-08; the long loading screen is 0 to 2 FPS). Its ASTC textures are converted to BC7 on the CPU, which costs CPU while they load. Maximizing the window freezes its progress bar. |
 | Doki Doki Literature Club 1.3.11.1 | Android, Ren'Py (SDL2, GLES) | User-confirmed play into the story (2026-11-06). The audio popped at every buffer boundary until the AAudio write path was fixed (user-confirmed clean 2026-11-08), and resizing the window blacks out images while text still draws (Ren'Py deletes its textures on an Android resize; the app opens with Window set to "Keep the app's shape", which avoids it, user-confirmed 2026-11-08). |
 | Hungry Shark Evolution 14.5.0, Hungry Shark World 8.2.6 | Android | User-reported stable gameplay (2026-11-06). Hungry Shark World's Play Games sign-in does not complete. |
 | YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
@@ -145,6 +145,10 @@ progress table and the known blockers; everything that changed is in the
 - **Android apps (beta.1):** a Vulkan device through a guest HAL over the host
   thunk, an app Keystore (PolyTrack saves) and real GPU fences for WebView; Zenless
   Zone Zero and Doki Doki Literature Club are recorded as playable.
+- **ASTC textures on GPUs without them (after the beta.1 label, in the tree):** a host with BC7 but no ASTC, such as AMD's
+  desktop drivers, is presented to Vulkan apps as having ASTC LDR; the thunk keeps those textures as BC7 and converts the blocks
+  on the CPU at upload (`BIFROST_VK_NO_ASTC=1` turns it off). Checked headless on an RX 7600 and by a GPU decode of every BC7
+  mode; not compared with ARM's decoder, and not yet measured in a game for memory or load time.
 - **Game windows (after the beta.1 label, in the tree):** a window the desktop minimises or hides pauses the app and resumes it
   when shown, F11 toggles fullscreen, the window's size is remembered per app, and an Activity that does not handle a resize
   is relaunched as Android does. Checked with fakes and fixtures, not yet on a real compositor or in a game.

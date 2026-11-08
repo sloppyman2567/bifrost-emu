@@ -19,7 +19,9 @@ playable, and fixes the CI-only test failures. It is the first beta label, not a
 there (guided provisioning, update/reinstall) remain in progress. Changes made after the 2026-11-03 label are listed below
 under their own headings: game-window visibility, fullscreen and a remembered size, Activity relaunch on a resize, setting up
 from the library, built-in per-app settings, 4 GiB packages, a realm idle timeout, the AAudio write fix, NEON `LD2` to `LD4` and
-`ST2` to `ST4` in the block, and the project site.
+`ST2` to `ST4` in the block, the project site, ASTC textures through BC7 on hosts without ASTC (with a lowest-priority,
+cached transcoder), a swapchain acquire that no longer re-uploads the frame, a faster `/proc/self/pagemap` and a crash line that
+names the library.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app

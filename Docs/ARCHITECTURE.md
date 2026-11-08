@@ -67,7 +67,10 @@ Large host adapters are divided by the APIs or protocols they implement:
   (`AndroidBufferImages.cpp`).
 - `Graphics/Thunks/DisplayThunk/`: lifecycle and registration in
   `DisplayThunk.cpp`, generic dispatch, proxy calls, Wayland forwarding,
-  Vulkan dispatch and Vulkan staging.
+  Vulkan dispatch and Vulkan staging, and `VulkanAstc.cpp` (ASTC images kept as BC7 on hosts
+  without ASTC; hooks chosen per symbol at registration).
+- `Graphics/TextureCodec/`: the ASTC LDR decoder, the BC7 encoder and the strip transcoder
+  with its cache (see its `AGENTS.md`); pure CPU code with no Vulkan or guest types.
 - `Graphics/Display/DisplayProxy/`: SDL window/handle ownership in
   `HostWindow.cpp`, X11 forwarding, Wayland object/lifecycle handling, Wayland
   marshalling and Wayland event listeners. These files implement one

@@ -65,7 +65,8 @@ otherwise.
   as a new orientation and size and an Activity that does not declare the change is relaunched; YouTube declares it and takes it
   in `onConfigurationChanged`, so the cause is untraced (the per-app Window setting's "Keep the app's shape" scales a game
   instead); no Settings screens, no host mDNS, no toast animations. The Android Vulkan HAL copies every
-  presented frame (no zero-copy swapchain).
+  presented frame through a staging buffer (no zero-copy swapchain; the upload on acquire is skipped after an image's first
+  release, 2026-11-08, not yet run in a game).
 - **Undiagnosed:** Firefox 159 reaches onboarding and a GeckoView surface but loads no pages; not re-tested since the
   November 1 Binder fix.
 
@@ -211,9 +212,21 @@ pointer-to-pointer parameters and a retry for mobile GLSL index conversions.
 
 Open:
 
-- A zero-copy Android Vulkan swapchain. The HAL's `VK_ANDROID_native_buffer` copies a full frame per present because
-  the software gralloc allocator is a sealed memfd the host driver cannot import as image memory; it needs a
-  dma-buf-backed allocation.
+- A zero-copy Android Vulkan swapchain. The HAL's `VK_ANDROID_native_buffer` reads a full frame back per present (a GPU copy,
+  a wait for the GPU and a CPU copy, then another copy into the window) because the software gralloc allocator is a sealed
+  memfd the host driver cannot import as image memory; it needs a dma-buf-backed allocation. Planned in two stages: dma-buf
+  gralloc buffers from the render node (removes the CPU copies; touches every Android app), then presenting them through
+  `zwp_linux_dmabuf_v1` with explicit sync and a fallback to the current path. Worth doing if a 60 FPS game cannot hold 60
+  with `present_ms` near 6; at 30 FPS the cost is about a sixth of the frame. The compositor and driver here (KWin, RADV)
+  offer what it needs; `/dev/udmabuf` is root-only on this machine, so it is not a basis.
+- ASTC through BC7 follow-ups: compare the decoder with ARM's reference (multi-partition and dual-plane blocks are checked
+  only for self-consistency); a cache of finished transcodes that survives a restart (the in-memory one does not) and a
+  faster encoder (the transcoder took 60 to 70% of Zenless Zone Zero's CPU samples in story scenes before the lowest-priority
+  helpers and the cache); measure memory, load time and the cache's hit rate in a game; the GL/GLES path; reading back,
+  copying and blitting ASTC images.
+- Zenless Zone Zero: very low-resolution models (always, before and after the ASTC path; likely a quality tier or render
+  scale chosen for an "unknown" device, unconfirmed: trace the 3D render-target size) and an unplaced guest null dereference
+  seen once on 2026-11-08.
 - `MediaPlayer` beyond FNAF Mobile Port (video to a Surface, streaming, seeking, long sessions); decoder validation beyond small
   fixtures (flush/reconfigure, B-frames, sustained playback).
 - Audio effects: `android.media.audiofx` loads and reports no effects; `Equalizer` and the like need DSP in front of the host's audio.

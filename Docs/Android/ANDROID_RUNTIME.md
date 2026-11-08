@@ -3556,15 +3556,29 @@ host-visible staging buffer and signals the loader's binary semaphore (and its
 fence) with the same queue submission; `vkQueueSignalReleaseImageANDROID`
 submits the reverse copy on the app's queue after the loader's wait
 semaphores, waits for it, writes the rows back into the gralloc mapping and
-returns `-1` because the copy is already complete. The bridge advertises the
+returns `-1` because the copy is already complete. After an image's first release
+the acquire upload is skipped (`host_current`, 2026-11-08): the host image already
+holds what the release wrote into the gralloc buffer and the compositor only reads
+it, so an empty submission signals the loader's semaphore and fence. This path runs
+only inside an Android app and was not run in a game when it was written. The bridge advertises the
 extension from `vkEnumerateDeviceExtensionProperties` and filters it (and any
 other host-unknown extension) out of `vkCreateDevice`.
 
 Copy-path limits: the gralloc format must byte-match the app's `VkFormat`
 (RGBA/RGBX/BGRA 8888, RGB 565, R8, RGBA FP16 are accepted), staging is CPU
-memory so acquire/release costs a full-frame copy, the image is left in
+memory so each release costs a full-frame GPU read-back, a wait for the GPU and a CPU
+copy (acquire costs one only before the image's first release), the image is left in
 `VK_IMAGE_LAYOUT_GENERAL`, and the copy assumes the app renders on the queue
 the loader passes to release (the bridge records the device's first queue
 family and replaces it with the caller's queue). A zero-copy path needs a
 dma-buf-backed gralloc allocation, which the software allocator does not
 provide.
+
+ASTC textures reach the host through the same thunk: a host GPU without ASTC but with BC7
+is offered to the app as having ASTC LDR, each ASTC image is kept as a BC7 image on the
+host and the app's blocks are transcoded on the CPU when the upload is submitted
+(`DisplayThunk/VulkanAstc.cpp`, codecs in `Source/System/Graphics/TextureCodec`; the
+contract is in the graphics `AGENTS.md`). Zenless Zone Zero's Unity logged "'ASTC_6x6' is
+not supported on this platform. Decompressing texture." until then and no longer does.
+`BIFROST_VK_NO_ASTC=1`, `BIFROST_ASTC_THREADS`, `BIFROST_ASTC_CACHE_MB` and
+`BIFROST_ASTC_STATS=1` control it (see [host integration](../HOST_INTEGRATION.md)).

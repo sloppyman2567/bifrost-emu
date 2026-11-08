@@ -56,6 +56,11 @@ fetched to exercise behavior beyond the synthetic tests:
 - **Voxelspace and libfixmath:** MIT notices are preserved in
   `Tests/Apps/voxelspace/LICENSE` and
   `Tests/Apps/voxelspace/libs/libfixmath/LICENSE`.
+- **BC7 tables and SPIR-V in the ASTC tests:** `Source/System/Graphics/TextureCodec/Bc7Tables.hpp` holds the partition
+  patterns and anchor indices of the BPTC format, extracted by script from the Khronos Data Format Specification's BPTC
+  chapter and cross-checked against that chapter's anchor tables (the ASTC decoder and BC7 encoder are original code,
+  written from the specification text). The specification's own license terms were not checked when it was used.
+  `Tests/Apps/test_vulkan_astc_spv.h` is a small compute shader compiled with glslc; its GLSL source is in the header.
 - **Vulkan headers:** upstream license information remains under
   `ThirdParty/VulkanHeaders/LICENSE.md` and `ThirdParty/VulkanHeaders/LICENSES/`.
 - **OpenGL registry:** `ThirdParty/GLRegistry/gl.xml` is Apache-2.0 (header in the
