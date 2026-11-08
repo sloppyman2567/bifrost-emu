@@ -18,9 +18,11 @@ public:
     enum class Kind { Mem, Pagemap };
     using Reader = std::function<bool(uint64_t addr, void* buf, size_t n)>;
     using Writer = std::function<bool(uint64_t addr, const void* buf, size_t n)>;
-    using Maps = std::function<std::vector<Yggdrasil::MapEntry>()>;
-    ProcMemoryNode(Kind kind, int flags, Reader read, Writer write, Maps maps)
-        : kind_(kind), flags_(flags), read_(std::move(read)), write_(std::move(write)), maps_(std::move(maps)) {}
+    // One byte per page from `first_page`: 0 unmapped, 1 anonymous, 2 file-backed.
+    using PageKinds = std::function<void(uint64_t first_page, size_t count, uint8_t* kinds)>;
+    ProcMemoryNode(Kind kind, int flags, Reader read, Writer write, PageKinds page_kinds)
+        : kind_(kind), flags_(flags), read_(std::move(read)), write_(std::move(write)),
+          page_kinds_(std::move(page_kinds)) {}
     ssize_t read(uint64_t off, void* buf, size_t n) override;
     ssize_t write(uint64_t off, const void* buf, size_t n) override;
     ssize_t lseek(int64_t off, int whence) override;
@@ -28,12 +30,11 @@ public:
     int flags() const override { return flags_; }
     void set_flags(int f) override { flags_ = f; }
 private:
-    uint64_t entry_for_page(const std::vector<Yggdrasil::MapEntry>& maps, uint64_t page) const;
     Kind kind_;
     int flags_;
     Reader read_;
     Writer write_;
-    Maps maps_;
+    PageKinds page_kinds_;
     uint64_t pos_ = 0;
 };
 

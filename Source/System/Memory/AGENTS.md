@@ -34,6 +34,8 @@ State shared between them goes in `MemoryInternal.hpp`.
   protection, file identity and offset discontinuities. Loader-copied ELF
   pages are named with `name_image`; `detach_file_locked` drops those names
   wherever storage is replaced or unmapped (mprotect keeps them).
+- `page_kinds` classifies a run of pages (unmapped, anonymous, file-backed or loader-named) under one lock for
+  `/proc/self/pagemap`; keep it in step with what `mappings_snapshot` calls file-backed, and never build a snapshot per entry.
 - `shared_futex_word` answers whether a 32-bit word lies in a writable MAP_SHARED
   file mapping and gives its host address; the futex syscall depends on it.
   Anonymous MAP_SHARED mappings are not covered.

@@ -820,6 +820,12 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   while an ART compaction has software checks on (2.5 to 4.3 ns per four accesses in a loop).
 - **Smaller encodings and less hot work.** No bare REX prefixes or zero displacements, no RAX save around the flag commit
   on conditional exits, and no stack store for each CSEL result. `jit_guard_stubs` is the new regression test.
+- **A `/proc/self/pagemap` scan rebuilt every mapping on each read.** `ProcMemoryNode` built the whole `/proc/self/maps` list
+  (a walk of the per-page file tree) for every `read()`, so a guest that reads pagemap one entry at a time spent a thread on it:
+  a live profile of Zenless Zone Zero showed 21 % of the process, one guest thread at 88 % CPU, in `Memory::mappings_snapshot()`.
+  The node now asks `Memory::page_kinds` (one lock, a walk of only the pages read, unmapped gaps skipped) through
+  `Yggdrasil::set_pagemap_provider`; a 20,000-read fixture went from 1,240 µs to 0.1 µs per read. `test_proc_mem_pagemap` also
+  checks a range read across a hole.
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 

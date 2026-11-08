@@ -220,6 +220,9 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         }
         return out;
     });
+    vfs_.set_pagemap_provider([this](uint64_t first_page, size_t count, uint8_t* kinds) {
+        mem_.page_kinds(first_page, count, kinds);
+    });
     // Wire up guest cwd tracking. The host cwd is meaningless because
     // BIFROST_ROOT sandboxing decouples guest paths from host paths.
     // The guest starts at "/" by default; chdir/fchdir update this.

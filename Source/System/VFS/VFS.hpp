@@ -266,6 +266,11 @@ public:
         memory_read_ = std::move(read);
         memory_write_ = std::move(write);
     }
+    // What each of `count` pages from page number `first_page` is, for /proc/self/pagemap: one byte
+    // per page, 0 unmapped, 1 anonymous, 2 file-backed.
+    void set_pagemap_provider(std::function<void(uint64_t, size_t, uint8_t*)> cb) {
+        pagemap_provider_ = std::move(cb);
+    }
     // ── Guest process name (comm) for /proc/self/comm ─────────────
     // The Emulator registers a callback that returns the current
     // guest_comm_ (set by prctl PR_SET_NAME, defaults to ELF basename).
@@ -328,6 +333,7 @@ private:
     std::function<std::vector<MapEntry>()> maps_provider_;
     std::function<bool(uint64_t, void*, size_t)> memory_read_;
     std::function<bool(uint64_t, const void*, size_t)> memory_write_;
+    std::function<void(uint64_t, size_t, uint8_t*)> pagemap_provider_;
     std::function<std::string()> comm_provider_;
     std::function<bool(int, std::string&)> task_comm_get_;
     std::function<bool(int, const std::string&)> task_comm_set_;

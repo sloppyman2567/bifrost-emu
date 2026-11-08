@@ -44,7 +44,8 @@
   Android's `MemoryInfo`, Unity and Chromium size themselves from them. Keep toybox's first eight field names in order.
 - `/proc/self/mem` and `/proc/self/pagemap` (also `/proc/<own pid>/…`) are served by `ProcMemoryNode` over the guest's
   address space, never the host's: mem reads and writes guest memory (EIO where unmapped); pagemap reports present, file-backed
-  and exclusive-anonymous flags from the guest mappings with the frame number 0. Other pids' `/proc/<pid>/mem` stay denied.
+  and exclusive-anonymous flags from the guest mappings with the frame number 0. Pagemap asks `Memory::page_kinds` for the
+  pages a read covers (`set_pagemap_provider`), never the maps list: scanners read one entry at a time. Other pids' `/proc/<pid>/mem` stay denied.
 - A task's `/proc/<pid>/status` is the complete status text with the debugger's name, state, ids, tracer and credentials filled
   in; `/proc/self/stat` takes state, times, nice, threads, start time and RSS from the host process and `vsize` from the
   guest mappings. An orphan (its starting parent died) sees parent 1.

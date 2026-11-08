@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <vector>
 
 namespace arm64emu::yggdrasil {
 
@@ -11,17 +12,6 @@ constexpr uint64_t PAGE = 4096;
 constexpr uint64_t ADDRESS_LIMIT = 1ull << 48;
 constexpr uint64_t PM_PRESENT = 1ull << 63, PM_FILE = 1ull << 61, PM_EXCLUSIVE = 1ull << 56;
 }  // namespace
-
-uint64_t ProcMemoryNode::entry_for_page(const std::vector<Yggdrasil::MapEntry>& maps, uint64_t page) const {
-    const uint64_t address = page * PAGE;
-    auto it = std::upper_bound(maps.begin(), maps.end(), address,
-                               [](uint64_t a, const Yggdrasil::MapEntry& m) { return a < m.start; });
-    if (it == maps.begin()) return 0;
-    --it;
-    if (address >= it->end) return 0;
-    const bool file_backed = it->inode != 0 || (!it->label.empty() && it->label[0] == '/');
-    return PM_PRESENT | (file_backed ? PM_FILE : PM_EXCLUSIVE);
-}
 
 ssize_t ProcMemoryNode::read(uint64_t off, void* buf, size_t n) {
     const bool sequential = off == static_cast<uint64_t>(-1);
@@ -38,11 +28,16 @@ ssize_t ProcMemoryNode::read(uint64_t off, void* buf, size_t n) {
         }
         if (done == 0 && n > 0) return -EIO;
     } else {
-        if (at >= (ADDRESS_LIMIT / PAGE) * 8) return 0;
-        const auto maps = maps_ ? maps_() : std::vector<Yggdrasil::MapEntry>{};
+        if (at >= (ADDRESS_LIMIT / PAGE) * 8 || n == 0) return 0;
+        // Classify the pages the read covers in one call: a scan reads one entry at a time.
+        const uint64_t limit = std::min<uint64_t>(at + n, (ADDRESS_LIMIT / PAGE) * 8);
+        const uint64_t first = at / 8, pages = (limit - 1) / 8 - first + 1;
+        std::vector<uint8_t> kinds(pages, 0);
+        if (page_kinds_) page_kinds_(first, pages, kinds.data());
         while (static_cast<size_t>(done) < n && at + done < (ADDRESS_LIMIT / PAGE) * 8) {
             const uint64_t byte = at + done;
-            const uint64_t entry = entry_for_page(maps, byte / 8);
+            const uint8_t kind = kinds[byte / 8 - first];
+            const uint64_t entry = kind == 0 ? 0 : PM_PRESENT | (kind == 2 ? PM_FILE : PM_EXCLUSIVE);
             const size_t skip = byte % 8, take = std::min<size_t>(8 - skip, n - done);
             std::memcpy(static_cast<uint8_t*>(buf) + done, reinterpret_cast<const uint8_t*>(&entry) + skip, take);
             done += static_cast<ssize_t>(take);

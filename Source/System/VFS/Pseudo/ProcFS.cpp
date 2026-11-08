@@ -295,7 +295,7 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
         if (!mem && (flags & O_ACCMODE) != O_RDONLY) { *err_out = -EACCES; return nullptr; }
         return std::make_unique<ProcMemoryNode>(
             mem ? ProcMemoryNode::Kind::Mem : ProcMemoryNode::Kind::Pagemap, flags, memory_read_, memory_write_,
-            maps_provider_);
+            pagemap_provider_);
     }
     // Directory listings.
     if (path == "/proc" || path == "/proc/") {

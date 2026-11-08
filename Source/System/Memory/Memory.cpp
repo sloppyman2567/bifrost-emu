@@ -15,6 +15,7 @@
 #include <cpuid.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <new>
 #include <shared_mutex>
@@ -691,6 +692,31 @@ std::vector<Memory::MappingView> Memory::mappings_snapshot() const {
         }
     }
     return out;
+}
+void Memory::page_kinds(uint64_t first_page, size_t count, uint8_t* kinds) const {
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    uint64_t addr = first_page * PAGE_SIZE;
+    auto vma = vmas_.upper_bound(addr);
+    if (vma != vmas_.begin() && std::prev(vma)->second.end > addr) --vma;
+    for (size_t i = 0; i < count; ++i, addr += PAGE_SIZE) {
+        while (vma != vmas_.end() && vma->second.end <= addr) ++vma;
+        if (vma == vmas_.end() || vma->first > addr) {
+            // Unmapped: the whole gap up to the next mapping is the same.
+            const uint64_t gap_end = vma == vmas_.end() ? UINT64_MAX : vma->first;
+            size_t run = 1;
+            while (i + run < count && addr + run * PAGE_SIZE < gap_end) ++run;
+            std::memset(kinds + i, 0, run);
+            i += run - 1;
+            addr += (run - 1) * PAGE_SIZE;
+            continue;
+        }
+        bool file = file_pages_.count(addr / PAGE_SIZE) != 0;
+        if (!file) {
+            auto image = image_runs_.upper_bound(addr);
+            file = image != image_runs_.begin() && std::prev(image)->second.end > addr;
+        }
+        kinds[i] = file ? 2 : 1;
+    }
 }
 int Memory::map_shared_file(uint64_t addr, uint64_t size, int fd,
                             uint64_t offset, uint8_t prot) {

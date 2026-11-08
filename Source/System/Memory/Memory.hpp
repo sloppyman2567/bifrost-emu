@@ -350,6 +350,10 @@ public:
     };
     // Every guest mapping in address order, PROT_NONE reservations included.
     std::vector<MappingView> mappings_snapshot() const;
+    // What `count` pages from page number `first_page` are, for /proc/self/pagemap: one byte each,
+    // 0 unmapped, 1 anonymous, 2 file-backed (mapped or loader-named). One lock, no allocation:
+    // a snapshot of every mapping per entry made a pagemap scan cost seconds of CPU.
+    void page_kinds(uint64_t first_page, size_t count, uint8_t* kinds) const;
     // The file a guest code address was mapped or loaded from, for the JIT's
     // persistent cache: a hash of the file's path and the address's offset in
     // it. False for anonymous memory and files without a stable path (memfd,

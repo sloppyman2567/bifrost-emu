@@ -72,6 +72,23 @@ int main(void) {
         CHECK((code & ((1ull << 55) - 1)) == 0 && (data & ((1ull << 55) - 1)) == 0, "the page frame number is hidden");
         munmap(anon, 4096);
         CHECK(pagemap_entry(fd, anon) == 0, "an unmapped page has an empty entry");
+        // One read over several pages (a hole in the middle) equals the entries read one by one, and an
+        // empty read returns nothing.
+        char *run = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECK(run != MAP_FAILED, "mmap run");
+        for (int page = 0; page < 4; page++) run[page * 4096] = 1;
+        munmap(run + 4096, 2 * 4096);
+        uint64_t together[4], apart[4];
+        off_t first = (off_t)((uintptr_t)run / 4096) * 8;
+        CHECK(pread(fd, together, sizeof together, first) == sizeof together, "read four entries at once");
+        for (int page = 0; page < 4; page++) apart[page] = pagemap_entry(fd, run + page * 4096);
+        CHECK(memcmp(together, apart, sizeof together) == 0, "a range read matches the single entries");
+        CHECK((together[0] >> 63) == 1 && together[1] == 0 && together[2] == 0 && (together[3] >> 63) == 1,
+              "the hole in the range is unmapped");
+        char none;
+        CHECK(pread(fd, &none, 0, first) == 0, "an empty read returns nothing");
+        munmap(run, 4096);
+        munmap(run + 3 * 4096, 4096);
         close(fd);
     }
     CHECK(open("/proc/self/pagemap", O_WRONLY) == -1 && (errno == EACCES || errno == EPERM || errno == EINVAL), "pagemap is read-only");
