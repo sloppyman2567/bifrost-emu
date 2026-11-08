@@ -461,6 +461,64 @@ void test_transcode_image() {
     CHECK(!transcode_astc_to_bc7(AstcRegion{dummy, 8, 4, 4, false, 4, 4}, Bc7Options{}, 1, out), "a row pitch shorter than the row is refused");
 }
 
+void test_transcode_cache() {
+    const int bw = 6, bh = 6, W = 30, H = 18;
+    const int nx = (W + bw - 1) / bw, ny = (H + bh - 1) / bh;
+    auto make = [&](int seed) {
+        std::vector<uint8_t> src(static_cast<size_t>(nx) * ny * 16);
+        for (int b = 0; b < nx * ny; b++) {
+            BlockBits bits;
+            bits.set(0, 9, 0x1FC); bits.set(10, 2, 3);
+            bits.set(12, 13, 0x1FFF); bits.set(25, 13, 0x1FFF); bits.set(38, 13, 0x1FFF); bits.set(51, 13, 0x1FFF);
+            for (int c = 0; c < 4; c++) bits.set(64 + 16 * c, 16, ((seed * 31 + b * 17 + c * 53) % 256) << 8);
+            std::memcpy(&src[static_cast<size_t>(b) * 16], bits.b, 16);
+        }
+        return src;
+    };
+    Bc7Options o;
+    Bc7Cache cache(1u << 20);
+    auto run = [&](const std::vector<uint8_t>& src, bool srgb, std::vector<uint8_t>& out) {
+        out.assign(bc7_image_bytes(W, H), 0xCD);
+        return transcode_astc_to_bc7_cached(AstcRegion{src.data(), static_cast<size_t>(nx) * 16, bw, bh, srgb, W, H}, o, 2, &cache, out.data());
+    };
+    std::vector<uint8_t> a = make(1), first, again, other;
+    CHECK(run(a, false, first), "a cached transcode runs");
+    CHECK(cache.stats().misses == 1 && cache.stats().hits == 0 && cache.stats().entries == 1, "the first transcode is a miss");
+    CHECK(run(a, false, again) && cache.stats().hits == 1, "the same blocks are a hit");
+    CHECK(first == again, "a hit returns the bytes the encoder produced");
+    std::vector<uint8_t> plain(bc7_image_bytes(W, H));
+    transcode_astc_to_bc7(AstcRegion{a.data(), static_cast<size_t>(nx) * 16, bw, bh, false, W, H}, o, 1, plain.data());
+    CHECK(plain == again, "and what the uncached transcoder produces");
+    std::vector<uint8_t> changed = a;
+    changed[37] ^= 0x10;
+    run(changed, false, other);
+    CHECK(cache.stats().misses == 2 && other != first, "one changed byte is a miss");
+    run(a, true, other);
+    CHECK(cache.stats().misses == 3, "the colour space is part of the key");
+    CHECK(transcode_astc_to_bc7_cached(AstcRegion{a.data(), static_cast<size_t>(nx) * 16, bw, bh, false, W, H}, o, 1, nullptr, plain.data()) && plain == first,
+          "without a cache it is the plain transcoder");
+
+    // A small cache gives up the least recently used entry and never holds more than its capacity.
+    const size_t one = bc7_image_bytes(W, H);
+    Bc7Cache small(one * 4 + 8);  // room for four, but one entry may use at most a quarter of it
+    auto put = [&](int seed) {
+        std::vector<uint8_t> src = make(seed), out(one);
+        transcode_astc_to_bc7_cached(AstcRegion{src.data(), static_cast<size_t>(nx) * 16, bw, bh, false, W, H}, o, 1, &small, out.data());
+    };
+    for (int seed = 10; seed < 18; seed++) put(seed);
+    CHECK(small.stats().bytes <= one * 4 + 8 && small.stats().entries == 4, "the cache stays within its capacity");
+    const uint64_t hits = small.stats().hits;
+    put(17);
+    CHECK(small.stats().hits == hits + 1, "the newest entry is still held");
+    put(10);
+    CHECK(small.stats().hits == hits + 1, "the oldest entry was evicted");
+    Bc7Cache tiny(64);
+    put(1);
+    std::vector<uint8_t> out(one);
+    transcode_astc_to_bc7_cached(AstcRegion{a.data(), static_cast<size_t>(nx) * 16, bw, bh, false, W, H}, o, 1, &tiny, out.data());
+    CHECK(tiny.stats().entries == 0, "an entry larger than a quarter of the capacity is not kept");
+}
+
 }  // namespace
 
 int main() {
@@ -472,6 +530,7 @@ int main() {
     test_bc7_exact_cases();
     test_bc7_quality();
     test_transcode_image();
+    test_transcode_cache();
     std::printf(g_fail ? "astc_bc7_transcode: FAILED (%d)\n" : "astc_bc7_transcode: ALL PASS\n", g_fail);
     return g_fail != 0;
 }

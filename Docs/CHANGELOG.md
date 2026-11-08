@@ -848,6 +848,12 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   emulator's own dynamic linker, and an Android app's libraries are mapped by Bionic's linker inside the guest, so a
   crash in `libil2cpp.so` or `libunity.so` showed bare addresses (an intermittent Zenless Zone Zero crash could not be
   placed). The line now names the file and offset of both `pc` and `x30` from the guest's own mappings.
+- **The ASTC transcoder took about 60% of Zenless Zone Zero's CPU during story scenes.** A passive profile of a play
+  session (cel-shaded scenes keep streaming character textures) put BC7 encoding and ASTC decoding at roughly 60 to 70%
+  of the game's samples. The transcoder's helper threads now run at nice 19 (they take only idle cycles; the calling
+  thread keeps its priority), and finished transcodes are cached under a hash of the ASTC blocks (`Bc7Cache`, 256 MiB,
+  `BIFROST_ASTC_CACHE_MB`), so a texture uploaded again is copied, not encoded. `BIFROST_ASTC_STATS=1` logs the
+  hit rate. Cache effect in a real session is not yet measured; the in-memory cache does not survive a restart.
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 

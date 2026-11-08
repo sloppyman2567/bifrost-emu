@@ -156,7 +156,8 @@
   4-texel alignment (or the mip edge) and are dropped with a once-only note otherwise. Not covered: reading back,
   copying or blitting an ASTC image, ASTC render targets, 3D/HDR ASTC, resubmitting an upload command buffer while the
   first submit still runs, and the GL/GLES path. `BIFROST_VK_NO_ASTC=1` turns it off, `BIFROST_ASTC_THREADS` sets the
-  transcoder's threads. The hand arm for `vkGetPhysicalDevice*Properties2/Features2` takes only the two-argument
+  transcoder's threads, `BIFROST_ASTC_CACHE_MB` sizes the cache of finished transcodes (re-uploads skip the encoder)
+  and `BIFROST_ASTC_STATS=1` logs volume and hits. The hand arm for `vkGetPhysicalDevice*Properties2/Features2` takes only the two-argument
   shapes. Covered by `vulkan_astc` (guest, through the thunk) and `test-astc-bc7-transcode` (host).
 - GL/GLES and Vulkan mapping APIs return guest bounces, never raw host mapping
   pointers. Preserve mapping lifetime, explicit flush/invalidate, pre-submit

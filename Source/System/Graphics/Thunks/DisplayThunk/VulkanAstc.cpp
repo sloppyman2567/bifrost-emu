@@ -5,6 +5,8 @@
 #include "System/Graphics/Thunks/DisplayThunk/DisplayThunkInternal.hpp"
 #include "System/Graphics/TextureCodec/AstcToBc7.hpp"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <thread>
 
@@ -277,6 +279,10 @@ struct VulkanAstc::State {
         return true;
     }
 
+    // Finished transcodes (BIFROST_ASTC_CACHE_MB, default 256), made on first use.
+    std::unique_ptr<texcodec::Bc7Cache> cache = dbg().astc_cache_mb ? std::make_unique<texcodec::Bc7Cache>(static_cast<size_t>(dbg().astc_cache_mb) << 20) : nullptr;
+    std::atomic<uint64_t> transcodes{0}, source_bytes{0}, output_bytes{0}, busy_us{0};
+
     unsigned threads() const {
         if (dbg().astc_threads) return dbg().astc_threads;
         return std::clamp(std::thread::hardware_concurrency() / 2, 1u, 8u);
@@ -290,7 +296,18 @@ struct VulkanAstc::State {
             for (uint32_t l = 0; l < p.layers; l++) {
                 const texcodec::AstcRegion region{src + l * p.src_layer_pitch, p.src_row_pitch, p.block_w, p.block_h, p.srgb,
                                                   static_cast<int>(p.width), static_cast<int>(p.height)};
-                texcodec::transcode_astc_to_bc7(region, options, threads(), p.scratch->base + p.dst_offset + l * p.dst_layer_bytes);
+                const auto t0 = std::chrono::steady_clock::now();
+                texcodec::transcode_astc_to_bc7_cached(region, options, threads(), cache.get(), p.scratch->base + p.dst_offset + l * p.dst_layer_bytes);
+                busy_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+                source_bytes += rows * p.src_row_pitch;
+                output_bytes += p.dst_layer_bytes;
+                if (dbg().astc_stats && transcodes++ % 64 == 63) {
+                    const texcodec::Bc7Cache::Stats st = cache ? cache->stats() : texcodec::Bc7Cache::Stats{};
+                    std::fprintf(stderr, "[vk-astc] %llu uploads, %.1f MiB ASTC -> %.1f MiB BC7 in %.1f s; cache %llu hits / %llu misses, %.0f MiB held\n",
+                                 static_cast<unsigned long long>(transcodes.load()), source_bytes.load() / 1048576.0,
+                                 output_bytes.load() / 1048576.0, busy_us.load() / 1e6, static_cast<unsigned long long>(st.hits),
+                                 static_cast<unsigned long long>(st.misses), st.bytes / 1048576.0);
+                }
             }
         });
         if (!ok) note_once("an ASTC upload's staging memory cannot be read on the host: the texture stays blank");

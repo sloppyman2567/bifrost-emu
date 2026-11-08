@@ -23,7 +23,10 @@ guest-memory types here; the Vulkan thunk calls these.
   by all channels of an endpoint. `Bc7Options::accept_error` trades speed for quality; the defaults were chosen from a
   sweep on game screenshots (about 4.5 to 5.5 Mpix/s per thread at 46 to 52 dB against the decoded source).
 - `transcode_astc_to_bc7` works in strips of lcm(4, block height) rows so temporary memory is a few hundred kilobytes
-  per thread; it repeats edge texels into partial BC7 blocks. All functions are reentrant (static tables only).
+  per thread, and its helper threads run at nice 19 so they only take idle cycles; it repeats edge texels into partial
+  BC7 blocks. `Bc7Cache` keeps finished transcodes under a 128-bit hash of the blocks and the shape (size, footprint,
+  colour space), least recently used out first, never holding an entry above a quarter of its capacity. All functions
+  are reentrant (static tables only).
 
 ## Work Guidance
 

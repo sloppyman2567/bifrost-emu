@@ -74,6 +74,8 @@ struct DebugFlags {
     bool vk_no_placed = false; // BIFROST_VK_NO_PLACED — keep vkMapMemory bounces (A/B control for placed maps)
     bool vk_no_astc = false;   // BIFROST_VK_NO_ASTC — do not offer ASTC to Vulkan guests (A/B control for the BC7 transcoder)
     unsigned astc_threads = 0; // BIFROST_ASTC_THREADS — transcoder threads per upload (1..64; 0 = half the host's cores, at most 8)
+    unsigned astc_cache_mb = 256; // BIFROST_ASTC_CACHE_MB — finished BC7 transcodes kept for re-uploads (0 = off, at most 4096)
+    bool astc_stats = false;   // BIFROST_ASTC_STATS — log transcoded and cached volume every 64 uploads
     // BIFROST_TEXT_SCRIPT — key and text events pushed into the Android window's SDL queue once
     // text input starts: "down:H,text:h;up:H;edit:ni;text:..." (steps by ';' 100 ms apart, items
     // in a step pushed together; down:/up: take an SDL scancode name). For input tests.
@@ -238,6 +240,12 @@ struct DebugFlags {
         }
         f.vk_no_placed = env("BIFROST_VK_NO_PLACED");
         f.vk_no_astc = env("BIFROST_VK_NO_ASTC");
+        f.astc_stats = env("BIFROST_ASTC_STATS");
+        if (const char* mb = std::getenv("BIFROST_ASTC_CACHE_MB")) {
+            char* end = nullptr;
+            unsigned long n = std::strtoul(mb, &end, 10);
+            if (end != mb && *end == '\0' && n <= 4096) f.astc_cache_mb = static_cast<unsigned>(n);
+        }
         if (const char* threads = std::getenv("BIFROST_ASTC_THREADS")) {
             char* end = nullptr;
             unsigned long n = std::strtoul(threads, &end, 10);

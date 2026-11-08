@@ -54,7 +54,9 @@ BIFROST_NO_THUNK_AUDIO=1         # Disable ALSA/PulseAudio thunking
 BIFROST_NO_THUNK_DISPLAY=1       # Disable Vulkan/Wayland thunking
 BIFROST_VK_NO_PLACED=1           # Keep vkMapMemory guest bounces instead of placed maps (A/B)
 BIFROST_VK_NO_ASTC=1             # Do not offer ASTC LDR textures to Vulkan guests on hosts without ASTC (A/B)
-BIFROST_ASTC_THREADS=4           # Threads transcoding one ASTC upload to BC7 (default: half the cores, at most 8)
+BIFROST_ASTC_THREADS=4           # Threads transcoding one ASTC upload to BC7 (default: half the cores, at most 8); helpers run at nice 19
+BIFROST_ASTC_CACHE_MB=256        # Finished BC7 transcodes kept for re-uploaded textures (0 = off, default 256)
+BIFROST_ASTC_STATS=1             # Log ASTC upload volume, time and cache hits every 64 uploads
 ```
 
 Graphical programs log their first successful frame presentation to stderr
