@@ -40,7 +40,8 @@ and how to install.
   `make verify` replays JIT blocks against the interpreter.
 - **Android apps without a phone** — *Asgard* runs real Bionic, ART and the
   Android 15 framework with a shared Binder broker, installs signed APK sets
-  (`bifrost-emu game.apk` installs and runs one) and plays a Unity/IL2CPP game.
+  (`bifrost-emu game.apk` installs and runs one) and runs games built with Unity/IL2CPP,
+  Cocos2d-x and Ren'Py (see [What runs](#what-runs)).
 - **Your real GPU, audio and input** — GL, EGL, GLES, Vulkan, SDL2/SDL3, ALSA
   and PulseAudio calls are forwarded to host libraries; Android windows render
   at the monitor's native pixel density.
@@ -108,8 +109,8 @@ Azur Lane shot from October 14 (2.0.0-alpha.1); the Linux games are from October
 
 ## Progress
 
-**2.0.0-beta.1** (2026-11-03) is the current pre-release. The goals for it and
-what follows are in the [roadmap](Docs/roadmap.md), which has a
+**2.0.0-beta.1** (2026-11-03) is the current pre-release, and the work after it is in the tree and listed below. The goals
+for it and what follows are in the [roadmap](Docs/roadmap.md), which has a
 progress table and the known blockers; everything that changed is in the
 [changelog](Docs/CHANGELOG.md). Since 2.0.0-alpha.2:
 
@@ -128,7 +129,15 @@ progress table and the known blockers; everything that changed is in the
 - **Android apps (beta.1):** a Vulkan device through a guest HAL over the host
   thunk, an app Keystore (PolyTrack saves) and real GPU fences for WebView; Zenless
   Zone Zero and Doki Doki Literature Club are recorded as playable.
-- **Open:** measured frame times, WebView interaction,
+- **Game windows (after the beta.1 label, in the tree):** a window the desktop minimises or hides pauses the app and resumes it
+  when shown, F11 toggles fullscreen, the window's size is remembered per app, and an Activity that does not handle a resize
+  is relaunched as Android does. Checked with fakes and fixtures, not yet on a real compositor or in a game.
+- **Library and install (in the tree):** the library offers **Set up…** for what a checkout still lacks, packages up to 4 GiB
+  install, a realm with no app ends after 10 minutes, built-in per-app settings let Doki Doki Literature Club open with its
+  window mode that avoids a resize corruption, and an AAudio write fix removed clicks in its music.
+- **JIT (in the tree):** native NEON `LD2` to `LD4` and `ST2` to `ST4`, FP compares kept in the host flags, and scalar FP
+  special cases moved out of the hot path.
+- **Open:** measured frame times, WebView interaction, window behaviour on real compositors,
   and sustained play. A passing build or a launch is not gameplay.
 
 Check an installed app's recorded status yourself with
@@ -305,6 +314,11 @@ Per-app settings (Back and Enter keys, Window, Controller, network, stats and mo
 [APK guide's table](Docs/Android/ANDROID_APK.md#per-app-settings). A gamepad drives the library and, with the Controller
 setting, a touch cursor for apps that only take touch.
 
+In a game window, **F11** toggles fullscreen and the size is remembered per app. A window the desktop minimises or hides stops the
+app until it is shown again (X11 reports minimising; on Wayland it depends on the compositor suspending the window). The library
+offers **Set up…** when a checkout lacks something, and a realm with no app ends after 10 minutes
+(`ASGARD_REALM_IDLE_SECONDS`, `0` keeps it). See [window visibility](Docs/Android/ANDROID_RUNTIME.md#window-visibility-2026-11-07).
+
 Native `NativeActivity` libraries can also run directly with
 `./bifrost-emu --android libgame.so`. Android support is experimental: Google
 Play services come from microG (sign-in works up to Google's own page; see the
@@ -478,7 +492,8 @@ adapter.
   only Ubuntu 24.04 is CI-built; see the [support matrix](Docs/SUPPORT.md).
 - **Android is experimental** — Google Play services and complete system_server
   remain absent. Small Codec2 decoding/Surface probes pass; full in-game video
-  and rewarded-ad playback are unverified.
+  and rewarded-ad playback are unverified. Window behaviour (minimise, fullscreen, remembered size) has been checked with fakes,
+  not on every compositor.
 - **Untrusted binaries** — read the [security model](Docs/SECURITY.md) first.
 
 ## Documentation

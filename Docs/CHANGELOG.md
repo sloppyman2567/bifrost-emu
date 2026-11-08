@@ -16,7 +16,10 @@ tighter exits and flags, native scalar and vector FP by element and LD1R, loop b
 accesses). It also gives Android apps a Vulkan device through a guest HAL over the host thunk, with placed memory maps and
 deep-marshalled Vulkan structs, gamepads for Android apps, records Zenless Zone Zero and Doki Doki Literature Club as
 playable, and fixes the CI-only test failures. It is the first beta label, not a completed beta scope: the [v2.0 goals](roadmap.md) and the beta.1 items still open
-there (guided provisioning, update/reinstall) remain in progress.
+there (guided provisioning, update/reinstall) remain in progress. Changes made after the 2026-11-03 label are listed below
+under their own headings: game-window visibility, fullscreen and a remembered size, Activity relaunch on a resize, setting up
+from the library, built-in per-app settings, 4 GiB packages, a realm idle timeout, the AAudio write fix, NEON `LD2` to `LD4` and
+`ST2` to `ST4` in the block, and the project site.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app

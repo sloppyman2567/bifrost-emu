@@ -45,7 +45,7 @@ Not the focus: games behind attestation or anti-cheat, and compatibility sweeps 
 **Since the beta.1 label (in the tree, not released):** the desktop library can be driven with a gamepad (a gamepad layout, menus,
 confirmations and the settings page drawn inside its window); per-app `window_mode` and `controller` settings, with a touch
 cursor driven by a pad; fixed-size apps can be tiled to a half or a corner; the Android setup's main downloads (the system image, microG, AAPT2, the Bionic runtime, the package tools, SDL3) resume
-when interrupted, and `make bootstrap` finds host tools and libraries without root, building SDL3 where the distribution has none. All of it was checked with fakes, on Qt's
+when interrupted, and `make bootstrap` finds host tools and libraries without root, building SDL3 where the distribution has none; a minimised or hidden game window pauses the app, F11 toggles fullscreen and the size is remembered, Activities are relaunched on a resize they do not handle, the library offers **Set up…**, packages up to 4 GiB install, a realm with no app ends after 10 minutes, and the JIT has native NEON structure loads and stores and cheaper FP compares. All of it was checked with fakes, on Qt's
 offscreen platform or in an Ubuntu 24.04 chroot, apart from what the maintainer saw on one KDE/Wayland desktop with a Steam
 Controller; none has run on a Steam Deck, in Game Mode, on a fresh Debian 13 or against a plain pad.
 
