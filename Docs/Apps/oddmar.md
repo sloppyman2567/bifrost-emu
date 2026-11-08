@@ -3,6 +3,7 @@
 Package: `com.mobge.Oddmar` (Unity 2018.4, IL2CPP).
 Status: **playable**, from the user's report on November 8, 2026, on Bifrost 2.0.0-beta.1: the first level plays very well and no
 stutter was noticed. A frame from the user's 4 minute screen recording at 3440x1440 shows level gameplay (below).
+The user also posted a video of it: [Oddmar on bifrost-emu (YouTube)](https://www.youtube.com/watch?v=5kNMdiAzoLA).
 
 ## Needs
 
