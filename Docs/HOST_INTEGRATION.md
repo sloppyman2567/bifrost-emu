@@ -135,7 +135,6 @@ The user-facing switches are listed above and in the [README](../README.md).
 | `BIFROST_GRAPHICS_VERBOSE / BIFROST_AUDIO_VERBOSE` | Print why SDL video or audio failed to start. |
 | `BIFROST_NO_DISPLAY_SUBST / BIFROST_NO_ELIDE / BIFROST_GUI_DBG / BIFROST_FB_DUMP` | Do not substitute the display in `eglGetDisplay`; do not elide redundant GL calls; log vertex-array pointer arguments; dump frames at `SDL_GL_SwapWindow`. |
 | `BIFROST_AUDIO_STATS / BIFROST_AUDIO_PUMP=0 / BIFROST_AUDIO_NO_CB / BIFROST_AUDIO_FAIL_OPEN` | A roughly 2-second audio heartbeat (callbacks and per-stream backlog); use the inline fallback instead of the audio pump; do not use the guest callback for SDL devices; make SDL audio open fail so the guest takes its own no-audio path. |
-| `BIFROST_ANDROID_THEME=light|dark` | Fix the system's night mode instead of following the desktop. |
 | `BIFROST_ANDROID_LEGACY_CB / BIFROST_ANDROID_TAP` | Use the legacy surface callbacks; inject synthetic taps so the input path is exercised without a person (tests). |
 | `BIFROST_ANDROID_NETWORK_INTERFACE` | The host interface the guest sees as its network; Asgard sets it (default `wlan0`). |
 
