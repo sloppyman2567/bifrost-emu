@@ -20,7 +20,7 @@ the emulator's memory, signal, syscall, loader and host-service implementations.
 | Guest filesystem and devices | `Source/System/VFS/`: `VFS.cpp`, `HostPaths.cpp`, `Nodes/`, `Pseudo/` |
 | Android runtime integration | `Source/System/Android/`: `Binder/`, `Media/` (realm codec services, Goldfish media transport, host decoders), `Properties/`, `Services/`, `Surface/`, `Window/` (SDL3 window backend, `WheelGestures`, `PadCursor`); guest-side code lives in `Guest/Android/` |
 | Guest-side code | `Guest/Android/` Bionic adapters, launchers and managed framework; `Guest/VDSO/` vDSO source |
-| Graphics and display | `Source/System/Graphics/`: `Display/`, `Input/`, `Thunks/` |
+| Graphics and display | `Source/System/Graphics/`: `Display/`, `Input/`, `Thunks/`, `TextureCodec/` (ASTC to BC7) |
 | Host audio and API forwarding | `Source/System/Audio/Audio.cpp`, `AudioThunk/` |
 | Embedding interfaces | `Include/Bifrost/` C++ API, `Source/System/API/` C API and native bridge |
 

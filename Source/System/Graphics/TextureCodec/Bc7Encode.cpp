@@ -1,0 +1,405 @@
+// Bc7Encode.cpp — see Bc7Encode.hpp. Bit layouts, partition tables and interpolation weights are from the Khronos
+// Data Format Specification's BPTC chapter.
+#include "System/Graphics/TextureCodec/Bc7Encode.hpp"
+#include "System/Graphics/TextureCodec/Bc7Tables.hpp"
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+namespace arm64emu::texcodec {
+namespace {
+
+using namespace bc7;
+
+// NS subsets, PB partition bits, CB colour bits, AB alpha bits, PK p-bit kind (0 none, 1 per endpoint, 2 one shared
+// by both endpoints of a subset), IB index bits. Modes 4 and 5 (separate alpha indices, rotation) are not produced.
+struct Mode { uint8_t ns, pb, cb, ab, pk, ib; };
+constexpr Mode kModes[8] = {
+    {3, 4, 4, 0, 1, 3}, {2, 6, 6, 0, 2, 3}, {3, 6, 5, 0, 0, 2}, {2, 6, 7, 0, 1, 2},
+    {0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0}, {1, 0, 7, 7, 1, 4}, {2, 6, 5, 5, 1, 2},
+};
+constexpr uint8_t kWeight2[4] = {0, 21, 43, 64};
+constexpr uint8_t kWeight3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
+constexpr uint8_t kWeight4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
+const uint8_t* weights(int ib) { return ib == 2 ? kWeight2 : ib == 3 ? kWeight3 : kWeight4; }
+constexpr int kUnusedPartition = 35;  // the specification's marks disagree with its anchor table here: never written
+
+// An n-bit endpoint value expanded to 8 bits by replicating its top bits.
+struct Dequant {
+    uint8_t v[9][256];
+    Dequant() {
+        std::memset(v, 0, sizeof(v));
+        for (int bits = 1; bits <= 8; bits++)
+            for (int x = 0; x < (1 << bits); x++) {
+                int r = 0;
+                for (int shift = 8 - bits;; shift -= bits) {
+                    r |= shift >= 0 ? x << shift : x >> -shift;
+                    if (shift <= 0) break;
+                }
+                v[bits][x] = static_cast<uint8_t>(r);
+            }
+    }
+};
+const Dequant kDq;
+
+struct Endpoints {
+    uint8_t q0[4] = {}, q1[4] = {};  // quantized to CB / AB bits
+    uint8_t p0 = 0, p1 = 0;          // p-bits (shared: both the same)
+    uint8_t e0[4] = {255, 255, 255, 255}, e1[4] = {255, 255, 255, 255};  // as decoded, 8 bits
+};
+
+struct Quant { uint8_t q[4]; uint8_t e[4]; };
+
+// Quantizes one endpoint with p-bit `p` (-1 when the mode has none). `channels` < 4 means alpha is the constant 255.
+Quant quantize_endpoint(const float* v, int channels, const Mode& m, int p) {
+    Quant out{};
+    for (int c = 0; c < 4; c++) {
+        const int nb = c < 3 ? m.cb : m.ab;
+        if (nb == 0) { out.q[c] = 0; out.e[c] = 255; continue; }
+        const int bits = nb + (p >= 0 ? 1 : 0), maxq = (1 << nb) - 1;
+        if (c >= channels) {  // opaque block in a mode with alpha: the largest value, with the p-bit set
+            out.q[c] = static_cast<uint8_t>(maxq);
+            out.e[c] = kDq.v[bits][p >= 0 ? (maxq << 1) | p : maxq];
+            continue;
+        }
+        const float scale = static_cast<float>((1 << bits) - 1) / 255.f;
+        int guess = static_cast<int>(std::lround((v[c] * scale - (p >= 0 ? p : 0)) / (p >= 0 ? 2.f : 1.f)));
+        guess = std::clamp(guess, 0, maxq);
+        int best_q = guess;
+        float best_d = 1e30f;
+        for (int q = std::max(guess - 1, 0); q <= std::min(guess + 1, maxq); q++) {
+            const float d = std::fabs(static_cast<float>(kDq.v[bits][p >= 0 ? (q << 1) | p : q]) - v[c]);
+            if (d < best_d) { best_d = d; best_q = q; }
+        }
+        out.q[c] = static_cast<uint8_t>(best_q);
+        out.e[c] = kDq.v[bits][p >= 0 ? (best_q << 1) | p : best_q];
+    }
+    return out;
+}
+
+float quant_error(const Quant& q, const float* v, int channels) {
+    float e = 0;
+    for (int c = 0; c < channels; c++) { const float d = q.e[c] - v[c]; e += d * d; }
+    return e;
+}
+
+Endpoints quantize_pair(const float* a, const float* b, int channels, const Mode& m) {
+    Endpoints ep;
+    Quant qa, qb;
+    int pa = 0, pb = 0;
+    if (m.pk == 0) {
+        qa = quantize_endpoint(a, channels, m, -1);
+        qb = quantize_endpoint(b, channels, m, -1);
+    } else if (m.pk == 1) {
+        // An opaque block in a mode with alpha needs the p-bit set to reach alpha 255.
+        const bool force = channels < 4 && m.ab > 0;
+        Quant ca[2] = {quantize_endpoint(a, channels, m, 0), quantize_endpoint(a, channels, m, 1)};
+        Quant cb[2] = {quantize_endpoint(b, channels, m, 0), quantize_endpoint(b, channels, m, 1)};
+        pa = force || quant_error(ca[1], a, channels) < quant_error(ca[0], a, channels);
+        pb = force || quant_error(cb[1], b, channels) < quant_error(cb[0], b, channels);
+        qa = ca[pa]; qb = cb[pb];
+    } else {
+        Quant ca[2] = {quantize_endpoint(a, channels, m, 0), quantize_endpoint(a, channels, m, 1)};
+        Quant cb[2] = {quantize_endpoint(b, channels, m, 0), quantize_endpoint(b, channels, m, 1)};
+        const float e0 = quant_error(ca[0], a, channels) + quant_error(cb[0], b, channels);
+        const float e1 = quant_error(ca[1], a, channels) + quant_error(cb[1], b, channels);
+        pa = pb = e1 < e0;
+        qa = ca[pa]; qb = cb[pb];
+    }
+    std::memcpy(ep.q0, qa.q, 4); std::memcpy(ep.q1, qb.q, 4);
+    std::memcpy(ep.e0, qa.e, 4); std::memcpy(ep.e1, qb.e, 4);
+    ep.p0 = static_cast<uint8_t>(pa); ep.p1 = static_cast<uint8_t>(pb);
+    return ep;
+}
+
+// Nearest palette entry for every pixel of a subset. Returns the squared error.
+int assign_indices(const int (*px)[4], const uint8_t* ids, int n, int channels, int ib, const uint8_t* e0,
+                   const uint8_t* e1, uint8_t* idx) {
+    const int count = 1 << ib;
+    const uint8_t* w = weights(ib);
+    int pal[16][4];
+    for (int k = 0; k < count; k++)
+        for (int c = 0; c < channels; c++) pal[k][c] = ((64 - w[k]) * e0[c] + w[k] * e1[c] + 32) >> 6;
+    int total = 0;
+    for (int i = 0; i < n; i++) {
+        const int* p = px[ids[i]];
+        int best = 1 << 30, best_k = 0;
+        for (int k = 0; k < count; k++) {
+            int d = 0;
+            for (int c = 0; c < channels; c++) { const int t = p[c] - pal[k][c]; d += t * t; }
+            if (d < best) { best = d; best_k = k; }
+        }
+        idx[i] = static_cast<uint8_t>(best_k);
+        total += best;
+    }
+    return total;
+}
+
+// Least-squares endpoints for fixed indices; false when the indices do not span a line.
+bool refit(const int (*px)[4], const uint8_t* ids, const uint8_t* idx, int n, int channels, int ib, float* a, float* b) {
+    const uint8_t* w = weights(ib);
+    double aa = 0, ab = 0, bb = 0, ax[4] = {}, bx[4] = {};
+    for (int i = 0; i < n; i++) {
+        const double wi = w[idx[i]] / 64.0, ia = 1.0 - wi;
+        aa += ia * ia; ab += ia * wi; bb += wi * wi;
+        for (int c = 0; c < channels; c++) { ax[c] += ia * px[ids[i]][c]; bx[c] += wi * px[ids[i]][c]; }
+    }
+    const double det = aa * bb - ab * ab;
+    if (det < 1e-6) return false;
+    for (int c = 0; c < channels; c++) {
+        a[c] = static_cast<float>(std::clamp((ax[c] * bb - bx[c] * ab) / det, 0.0, 255.0));
+        b[c] = static_cast<float>(std::clamp((bx[c] * aa - ax[c] * ab) / det, 0.0, 255.0));
+    }
+    return true;
+}
+
+// Principal axis of a subset's colours by power iteration. False for a single colour.
+bool principal_axis(const int (*px)[4], const uint8_t* ids, int n, int channels, float* mean, float* axis) {
+    double m[4] = {}, s[4][4] = {};
+    for (int i = 0; i < n; i++)
+        for (int c = 0; c < channels; c++) m[c] += px[ids[i]][c];
+    for (int c = 0; c < channels; c++) m[c] /= n;
+    for (int i = 0; i < n; i++)
+        for (int c = 0; c < channels; c++)
+            for (int d = c; d < channels; d++) s[c][d] += (px[ids[i]][c] - m[c]) * (px[ids[i]][d] - m[d]);
+    for (int c = 0; c < channels; c++)
+        for (int d = 0; d < c; d++) s[c][d] = s[d][c];
+    double v[4] = {};
+    int best = 0;
+    for (int c = 1; c < channels; c++) if (s[c][c] > s[best][best]) best = c;
+    if (s[best][best] < 1e-9) { for (int c = 0; c < channels; c++) mean[c] = static_cast<float>(m[c]); return false; }
+    for (int c = 0; c < channels; c++) v[c] = s[c][best];
+    for (int it = 0; it < 4; it++) {
+        double t[4] = {}, len = 0;
+        for (int c = 0; c < channels; c++) for (int d = 0; d < channels; d++) t[c] += s[c][d] * v[d];
+        for (int c = 0; c < channels; c++) len += t[c] * t[c];
+        len = std::sqrt(len);
+        if (len < 1e-12) break;
+        for (int c = 0; c < channels; c++) v[c] = t[c] / len;
+    }
+    for (int c = 0; c < channels; c++) { mean[c] = static_cast<float>(m[c]); axis[c] = static_cast<float>(v[c]); }
+    return true;
+}
+
+struct SubsetFit {
+    Endpoints ep;
+    int err = 1 << 30;
+};
+
+// Fits one subset: endpoints and indices (`idx`, one per pixel of `ids`).
+SubsetFit fit_subset(const int (*px)[4], const uint8_t* ids, int n, int channels, const Mode& m, int rounds, uint8_t* idx) {
+    SubsetFit best;
+    if (n <= 0) { best.err = 0; return best; }
+    float mean[4] = {}, axis[4] = {};
+    const bool spans = principal_axis(px, ids, n, channels, mean, axis);
+    float start[2][2][4];  // [which][endpoint][channel]
+    int starts = 1;
+    if (!spans) {
+        for (int e = 0; e < 2; e++) for (int c = 0; c < 4; c++) start[0][e][c] = mean[c];
+    } else {
+        float tmin = 1e30f, tmax = -1e30f;
+        int imin = 0, imax = 0;
+        for (int i = 0; i < n; i++) {
+            float t = 0;
+            for (int c = 0; c < channels; c++) t += (px[ids[i]][c] - mean[c]) * axis[c];
+            if (t < tmin) { tmin = t; imin = i; }
+            if (t > tmax) { tmax = t; imax = i; }
+        }
+        for (int c = 0; c < channels; c++) {
+            start[0][0][c] = std::clamp(mean[c] + axis[c] * tmin, 0.f, 255.f);
+            start[0][1][c] = std::clamp(mean[c] + axis[c] * tmax, 0.f, 255.f);
+            start[1][0][c] = static_cast<float>(px[ids[imin]][c]);
+            start[1][1][c] = static_cast<float>(px[ids[imax]][c]);
+        }
+        starts = 2;
+    }
+    uint8_t cur[16];
+    for (int s = 0; s < starts; s++) {
+        float a[4], b[4];
+        std::memcpy(a, start[s][0], sizeof(a)); std::memcpy(b, start[s][1], sizeof(b));
+        for (int r = 0; r < rounds; r++) {
+            const Endpoints ep = quantize_pair(a, b, channels, m);
+            const int err = assign_indices(px, ids, n, channels, m.ib, ep.e0, ep.e1, cur);
+            if (err < best.err) { best.err = err; best.ep = ep; std::memcpy(idx, cur, static_cast<size_t>(n)); }
+            if (err == 0 || r + 1 == rounds) break;
+            if (!refit(px, ids, cur, n, channels, m.ib, a, b)) break;
+        }
+        if (best.err == 0) break;
+    }
+    return best;
+}
+
+struct Candidate {
+    int err = 1 << 30;
+    int mode = -1, partition = 0;
+    Endpoints ep[3];
+    uint8_t idx[16];
+};
+
+void subset_ids(const Mode& m, int partition, uint8_t ids[3][16], int count[3]) {
+    count[0] = count[1] = count[2] = 0;
+    for (int i = 0; i < 16; i++) {
+        const int s = m.ns == 1 ? 0 : m.ns == 2 ? kPartition2[partition][i] : kPartition3[partition][i];
+        ids[s][count[s]++] = static_cast<uint8_t>(i);
+    }
+}
+
+int anchor_of(const Mode& m, int partition, int subset) {
+    if (subset == 0) return 0;
+    if (m.ns == 2) return kAnchor2[partition];
+    return subset == 1 ? kAnchor3A[partition] : kAnchor3B[partition];
+}
+
+void try_mode(int mode, int partition, const int (*px)[4], int channels, int rounds, Candidate& best) {
+    const Mode& m = kModes[mode];
+    uint8_t ids[3][16];
+    int count[3];
+    subset_ids(m, partition, ids, count);
+    Candidate c;
+    c.mode = mode;
+    c.partition = partition;
+    c.err = 0;
+    for (int s = 0; s < m.ns && c.err < best.err; s++) {
+        uint8_t idx[16];
+        SubsetFit f = fit_subset(px, ids[s], count[s], channels, m, rounds, idx);
+        // The anchor index stores one bit less: its top bit must be zero, so swap the endpoints if it is not.
+        const int anchor = anchor_of(m, partition, s);
+        for (int i = 0; i < count[s]; i++) {
+            if (ids[s][i] != anchor) continue;
+            if (idx[i] >= (1 << (m.ib - 1))) {
+                for (int ch = 0; ch < 4; ch++) { std::swap(f.ep.q0[ch], f.ep.q1[ch]); std::swap(f.ep.e0[ch], f.ep.e1[ch]); }
+                std::swap(f.ep.p0, f.ep.p1);
+                for (int j = 0; j < count[s]; j++) idx[j] = static_cast<uint8_t>((1 << m.ib) - 1 - idx[j]);
+            }
+            break;
+        }
+        for (int i = 0; i < count[s]; i++) c.idx[ids[s][i]] = idx[i];
+        c.ep[s] = f.ep;
+        c.err += f.err;
+    }
+    if (c.err < best.err) best = c;
+}
+
+// How well each subset of a partition fits one line, summed: the part of the colour variance off the principal axis.
+double partition_estimate(const int (*px)[4], int channels, const uint8_t* subset_of, int ns) {
+    double total = 0;
+    for (int s = 0; s < ns; s++) {
+        double sum[4] = {}, sq[4][4] = {};
+        int n = 0;
+        for (int i = 0; i < 16; i++) {
+            if (subset_of[i] != s) continue;
+            n++;
+            for (int c = 0; c < channels; c++) {
+                sum[c] += px[i][c];
+                for (int d = c; d < channels; d++) sq[c][d] += static_cast<double>(px[i][c]) * px[i][d];
+            }
+        }
+        if (n < 2) continue;
+        double cov[4][4], trace = 0;
+        for (int c = 0; c < channels; c++)
+            for (int d = c; d < channels; d++) { cov[c][d] = cov[d][c] = sq[c][d] - sum[c] * sum[d] / n; }
+        for (int c = 0; c < channels; c++) trace += cov[c][c];
+        int best = 0;
+        for (int c = 1; c < channels; c++) if (cov[c][c] > cov[best][best]) best = c;
+        double v[4] = {};
+        for (int c = 0; c < channels; c++) v[c] = cov[c][best];
+        double lambda = 0;
+        for (int it = 0; it < 3; it++) {
+            double t[4] = {}, len = 0;
+            for (int c = 0; c < channels; c++) for (int d = 0; d < channels; d++) t[c] += cov[c][d] * v[d];
+            for (int c = 0; c < channels; c++) len += t[c] * t[c];
+            len = std::sqrt(len);
+            if (len < 1e-9) break;
+            for (int c = 0; c < channels; c++) v[c] = t[c] / len;
+            lambda = len;
+        }
+        total += std::max(trace - lambda, 0.0);
+    }
+    return total;
+}
+
+// The `keep` best partitions of `ns` subsets, best first.
+int rank_partitions(const int (*px)[4], int channels, int ns, int keep, int* out) {
+    struct Scored { double score; int partition; };
+    Scored top[8];
+    int have = 0;
+    keep = std::min(keep, 8);
+    const int partitions = 1 << kModes[ns == 2 ? 1 : 2].pb;
+    for (int p = 0; p < partitions; p++) {
+        if (ns == 2 && p == kUnusedPartition) continue;
+        const double score = partition_estimate(px, channels, ns == 2 ? kPartition2[p] : kPartition3[p], ns);
+        if (have < keep || score < top[have - 1].score) {
+            int at = have < keep ? have++ : have - 1;
+            top[at] = {score, p};
+            while (at > 0 && top[at].score < top[at - 1].score) { std::swap(top[at], top[at - 1]); at--; }
+        }
+    }
+    for (int i = 0; i < have; i++) out[i] = top[i].partition;
+    return have;
+}
+
+struct BitWriter {
+    uint8_t b[16] = {};
+    int pos = 0;
+    void put(uint32_t v, int n) {
+        for (int i = 0; i < n; i++, pos++)
+            if ((v >> i) & 1) b[pos >> 3] |= static_cast<uint8_t>(1u << (pos & 7));
+    }
+};
+
+void pack(const Candidate& c, uint8_t* out) {
+    const Mode& m = kModes[c.mode];
+    BitWriter w;
+    w.put(1u << c.mode, c.mode + 1);
+    w.put(static_cast<uint32_t>(c.partition), m.pb);
+    for (int ch = 0; ch < 3; ch++)
+        for (int s = 0; s < m.ns; s++) { w.put(c.ep[s].q0[ch], m.cb); w.put(c.ep[s].q1[ch], m.cb); }
+    if (m.ab)
+        for (int s = 0; s < m.ns; s++) { w.put(c.ep[s].q0[3], m.ab); w.put(c.ep[s].q1[3], m.ab); }
+    if (m.pk == 1)
+        for (int s = 0; s < m.ns; s++) { w.put(c.ep[s].p0, 1); w.put(c.ep[s].p1, 1); }
+    else if (m.pk == 2)
+        for (int s = 0; s < m.ns; s++) w.put(c.ep[s].p0, 1);
+    for (int i = 0; i < 16; i++) {
+        bool anchor = i == 0;
+        for (int s = 1; s < m.ns; s++) anchor |= i == anchor_of(m, c.partition, s);
+        w.put(c.idx[i], m.ib - (anchor ? 1 : 0));
+    }
+    std::memcpy(out, w.b, 16);
+}
+
+}  // namespace
+
+void bc7_encode_block(const uint8_t* rgba, const Bc7Options& o, uint8_t* block) {
+    int px[16][4];
+    bool opaque = true;
+    for (int i = 0; i < 16; i++) {
+        for (int c = 0; c < 4; c++) px[i][c] = rgba[i * 4 + c];
+        opaque &= px[i][3] == 255;
+    }
+    const int channels = opaque ? 3 : 4;
+    Candidate best;
+    try_mode(6, 0, px, channels, o.refine_rounds, best);
+    if (best.err > o.accept_error * 16 * channels) {
+        int ranked[8];
+        const int n2 = o.partitions2 > 0 ? rank_partitions(px, channels, 2, o.partitions2, ranked) : 0;
+        for (int i = 0; i < n2; i++) {
+            if (opaque) {
+                try_mode(1, ranked[i], px, 3, o.refine_rounds, best);
+                try_mode(3, ranked[i], px, 3, o.refine_rounds, best);
+            } else {
+                try_mode(7, ranked[i], px, 4, o.refine_rounds, best);
+            }
+        }
+        if (opaque && o.partitions3 > 0) {
+            const int n3 = rank_partitions(px, 3, 3, o.partitions3, ranked);
+            for (int i = 0; i < n3; i++) {
+                try_mode(0, ranked[i] & 15, px, 3, o.refine_rounds, best);  // mode 0 has 16 partitions
+                try_mode(2, ranked[i], px, 3, o.refine_rounds, best);
+            }
+        }
+    }
+    pack(best, block);
+}
+
+}  // namespace arm64emu::texcodec

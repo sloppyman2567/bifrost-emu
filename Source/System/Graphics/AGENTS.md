@@ -168,3 +168,7 @@
   statistics through guest GL or Vulkan state. Mode/title/overlay defaults live in `DebugFlags.hpp`.
 - Run affected real-GPU GL/EGL/SDL/Vulkan/XWayland probes and the headless header
   check. Rendered smoke frames alone do not validate sustained gameplay.
+
+## Child DOX Index
+
+- [TextureCodec](TextureCodec/AGENTS.md): ASTC LDR decoder, BC7 encoder and the ASTC-to-BC7 strip transcoder.

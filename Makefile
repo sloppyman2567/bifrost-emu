@@ -728,6 +728,12 @@ test-audio-declick:
 	$(CXX) $(CXXFLAGS) Tests/Host/audio_declick.cpp -o $(OBJDIR)/audio_declick $(LDFLAGS)
 	./$(OBJDIR)/audio_declick
 
+.PHONY: test-astc-bc7-transcode
+test-astc-bc7-transcode:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Host/astc_bc7_transcode.cpp -o $(OBJDIR)/astc_bc7_transcode -pthread $(LDFLAGS)
+	./$(OBJDIR)/astc_bc7_transcode
+
 .PHONY: test-audio-frame-counters
 test-audio-frame-counters:
 	@mkdir -p $(OBJDIR)
