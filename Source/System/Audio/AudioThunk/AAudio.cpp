@@ -562,12 +562,16 @@ std::optional<int64_t> AudioDispatch::aaudio() {
             if (it == I.aa_streams_.end() || !I.engine) { tr(rc); return rc; }
             if (frames < 0) { rc = -898; tr(rc); return rc; }  // AAUDIO_ERROR_ILLEGAL_ARGUMENT
         }
-        // AOSP AudioStreamInternal::write blocks until every frame is accepted or the
-        // timeout passes, and returns the frames written. A full ring is therefore a wait,
-        // not an immediate 0: a caller that retries a 1 ms write would spin otherwise.
-        // The pump lock is dropped while waiting, so callbacks and other streams run.
+        // AOSP's legacy path (AudioStreamTrack::write, android-15.0.0_r1) turns any positive
+        // timeout into a fully blocking AudioTrack write and a zero timeout into a
+        // non-blocking one. SDL's AAudio backend relies on that: it writes each mix buffer
+        // with a 1 ms timeout, ignores the count returned and has no other pacing, so a short
+        // write silently drops the rest of the buffer (a click at every buffer boundary).
+        // A positive timeout therefore waits for ring space until everything is written, with a
+        // 2 s budget like the other blocking writers (a stalled host device, or a group exit,
+        // cannot hang the guest). The pump lock is dropped while waiting.
         const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::nanoseconds(std::max<int64_t>(timeout_ns, 0));
+            (timeout_ns > 0 ? std::chrono::seconds(2) : std::chrono::seconds(0));
         std::vector<uint8_t> tmp;
         int32_t done = 0;
         for (;;) {

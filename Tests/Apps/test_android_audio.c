@@ -134,23 +134,21 @@ int main(void) {
             if (stream) {
                 CHECK(st(stream) == 0, "start blocking stream");
                 CHECK(wr(stream, pcm, 4800, 0) == 4800, "blocking write");
-                /* A full ring is a wait, not an immediate zero: fill it with
-                 * zero-timeout writes, then a write with a timeout holds for
-                 * ring space and returns the short count at the deadline. */
+                /* AOSP's legacy path (AudioStreamTrack::write): a zero timeout never
+                 * waits, a positive one blocks until every frame is written. SDL
+                 * writes with a 1 ms timeout and drops whatever is not accepted. */
                 int filled = 0;
                 for (int i = 0; i < 40 && !filled; i++)
                     filled = wr(stream, pcm, 4800, 0) < 4800;
                 CHECK(filled, "zero-timeout write to a full ring is short");
                 struct timespec t0, t1;
                 clock_gettime(CLOCK_MONOTONIC, &t0);
-                int part = wr(stream, pcm, 4800, 30000000);
+                int all = wr(stream, pcm, 4800, 1000000);
                 clock_gettime(CLOCK_MONOTONIC, &t1);
                 long ms = (t1.tv_sec - t0.tv_sec) * 1000 +
                           (t1.tv_nsec - t0.tv_nsec) / 1000000;
-                CHECK(part >= 0 && part < 4800 && ms >= 25 && ms < 500,
-                      "timed write to a full ring waits for its timeout");
-                CHECK(wr(stream, pcm, 4800, 3000000000LL) == 4800,
-                      "write waits for ring space to finish");
+                CHECK(all == 4800 && ms >= 20 && ms < 1500,
+                      "1 ms-timeout write to a full ring blocks until all frames are written");
                 CHECK(cls(stream) == 0, "close blocking stream");
             }
         }

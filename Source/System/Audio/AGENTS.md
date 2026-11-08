@@ -10,8 +10,9 @@
 - With no host device (SDL could not open one, or a headless build) `Audio` drains unpaused streams at the device rate, like
   a silent device (`drain_without_device_locked_`), so writers neither hang nor run unpaced. A device takes over
   through the mixer; both credit frames with `consume_frames_locked_`. `audio_test` covers it on a host without sound.
-- `AAudioStream_write` honours its timeout like AOSP: it waits for ring space with `pump_mu` released and returns the frames
-  written; a stopped or paused stream returns what fit, because nothing drains it.
+- `AAudioStream_write` follows AOSP's legacy `AudioStreamTrack::write`: a positive timeout blocks until every frame is written
+  (2 s budget, `pump_mu` released while waiting), zero never waits, and a stopped or paused stream returns what fit. SDL's AAudio
+  backend writes with a 1 ms timeout and discards a short count, so a bounded wait would drop audio.
 - A stream joining or leaving the mix fades over 3 ms (`StreamDeclick.hpp`, `make test-audio-declick`), and a data-callback
   AAudio stream restarted after a stop drops its old queued audio. Pause keeps it, and write-mode streams may prefill while stopped.
 - `AudioThunk/AudioThunk.cpp` owns export registration; the Android adapter builder

@@ -183,12 +183,15 @@ there (guided provisioning, update/reinstall) remain in progress.
   the real launcher offscreen with a slow poll in flight and interrupts it (it fails on the old code with SIGABRT).
   An installed Asgard (`/usr/local/share/bifrost/asgard`) keeps the crash until it is reinstalled.
 
-### Fixed (AAudio write ignored its timeout)
+### Fixed (AAudio write dropped audio)
 
-- `AAudioStream_write` returned 0 at once when the host ring was full, whatever `timeoutNanoseconds` said. Android blocks
-  until every frame is accepted or the timeout passes (AOSP `AudioStreamInternal::write`), so an app that retries a 1 ms write
-  (Doki Doki Literature Club) spun on emulated CPU. The write now waits for ring space with the pump lock released, returns
-  the frames written, and returns early on a stopped or paused stream. `test_android_audio` covers a full ring.
+- `AAudioStream_write` returned a short count, or 0, as soon as the host ring was full, whatever `timeoutNanoseconds` said.
+  AOSP's legacy path (`AudioStreamTrack::write`, android-15.0.0_r1) makes any positive timeout a fully blocking write and a
+  zero timeout a non-blocking one. SDL's AAudio backend writes each mix buffer with a 1 ms timeout, ignores the count it gets
+  back and has no other pacing, so every short write threw away the rest of the buffer: Doki Doki Literature Club's music had
+  a click at each 1024-frame boundary and burned emulated CPU retrying. A positive timeout now waits for ring space until
+  everything is written (2 s budget, pump lock released); a stopped or paused stream returns what fit. `test_android_audio`
+  covers a full ring.
 
 ### Added (setting up from the library)
 
