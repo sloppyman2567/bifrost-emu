@@ -74,7 +74,7 @@ that every feature has an automated test or a recorded capture.
 | Doki Doki Literature Club 1.3.11.1 | Android, Ren'Py (SDL2, GLES) | User-confirmed play into the story (2026-11-06). The audio popped at every buffer boundary until the AAudio write path was fixed (user-confirmed clean 2026-11-08), and resizing the window blacks out images while text still draws (Ren'Py deletes its textures on an Android resize; the app opens with Window set to "Keep the app's shape", which avoids it, user-confirmed 2026-11-08). |
 | Hungry Shark Evolution 14.5.0, Hungry Shark World 8.2.6 | Android | User-reported stable gameplay (2026-11-06). Hungry Shark World's Play Games sign-in does not complete. |
 | YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
-| Oddmar | Android, Unity/IL2CPP | User-confirmed gameplay in the first level on 2.0.0-beta.1 (2026-11-08), with no stutter noticed; later levels are not confirmed. |
+| [Oddmar](Docs/Apps/oddmar.md) | Android, Unity/IL2CPP | User-confirmed gameplay in the first level on 2.0.0-beta.1 (2026-11-08), with no stutter noticed; later levels are not confirmed. |
 | Uptodown | Android | Draws its home list, then asks for all-files access, which Bifrost cannot grant. |
 | Roblox, TrickCal | Android | Blocked: Roblox is disconnected after joining (needs real Google attestation); TrickCal's anti-cheat ends it. |
 | [Neverball 1.6.0](Docs/Apps/neverball.md) | Linux, SDL2/GL | User-confirmed stable gameplay, replays, menus and fonts. |
@@ -488,7 +488,7 @@ The current version is **2.0.0-beta.1**, the first beta pre-release toward the
 
 | Topic | Document |
 |---|---|
-| App status | [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Arknights](Docs/Apps/arknights.md), [Umamusume](Docs/Apps/umamusume.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
+| App status | [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Arknights](Docs/Apps/arknights.md), [Oddmar](Docs/Apps/oddmar.md), [Umamusume](Docs/Apps/umamusume.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
 | JIT internals | [JIT guide](Docs/JIT.md) |
 | Source layout | [Architecture](Docs/ARCHITECTURE.md) |
 | Android | [Runtime](Docs/Android/ANDROID_RUNTIME.md), [APKs](Docs/Android/ANDROID_APK.md), [Binder](Docs/Android/ANDROID_BINDER.md), [window plugins](Docs/Android/ANDROID_WINDOW_PLUGINS.md) |
