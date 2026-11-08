@@ -844,6 +844,10 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
 - **`vkGetPhysicalDeviceImageFormatProperties2` took the `Properties2` shortcut.** The hand arm for the
   `vkGetPhysicalDevice*Properties2` and `*Features2` queries matched by name and passed two arguments to the host, but
   this command takes three. It now takes only the two-argument commands; the rest go through their own plans.
+- **The crash line named no library for an Android app.** `[crash] ... pc=0x7153f5c0` found its module only through the
+  emulator's own dynamic linker, and an Android app's libraries are mapped by Bionic's linker inside the guest, so a
+  crash in `libil2cpp.so` or `libunity.so` showed bare addresses (an intermittent Zenless Zone Zero crash could not be
+  placed). The line now names the file and offset of both `pc` and `x30` from the guest's own mappings.
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 
