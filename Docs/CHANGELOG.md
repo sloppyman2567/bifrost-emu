@@ -44,6 +44,14 @@ names the library.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (what the other threads do during a long stall)
+
+- A main-thread stall that lasts 4 s now also prints, once, an `APP_STALL_THREAD <name> <state> at <top 10 frames>` line for
+  each other thread that is doing something (idle Loopers and pool threads are left out) and `APP_STALL_THREADS <count>`, at
+  most 40 threads and 3 times per session. A main thread waiting for a game's render thread, such as a minimised Unity game's
+  `onPause`, is only explained by what that thread does. Not run against a real stall; the Java builds with the managed
+  launcher.
+
 ### Fixed (a video's first codec on a view failed)
 
 - A SurfaceView's queue was an RGBA `ImageReader`, rebuilt when a producer turned out to write something else. A video app's

@@ -3153,7 +3153,10 @@ UI loop has beaten in the last 250 ms steps; after 1.5 s of silence it prints
 `APP_MAIN_STALL_END`, at most 60 reports per session. Reading one thread's stack
 does not suspend the others, so it can stay on. Read a stall after the fact with
 `grep APP_MAIN_STALL` in the session log. It shows Java frames only: a stall in
-native code ends in the JNI method that called it.
+native code ends in the JNI method that called it. A stall that lasts 4 s also prints, once, an
+`APP_STALL_THREAD <name> <state> at <top 10 frames>` line for each other thread that is doing something (idle Loopers and
+pool threads are left out, at most 40 threads, 3 times per session) and `APP_STALL_THREADS <count>`: a main thread
+waiting for a game's render thread (a minimised Unity game's `onPause`) is only explained by what that thread does.
 
 First real session (Hungry Shark World, 358 s, with ads and links): 12 reports,
 each 1.5 to 3.7 s. By cause:
