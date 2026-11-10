@@ -112,7 +112,11 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         memory_fault_stub_ = 1;
         guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
         if (load) {
-            emit_load_mem(page, effective, 0, mp.width, false, true);
+            // LDRSB/LDRSH/LDRSW: one sign-extending load (see sext_load_).
+            const bool sext = inst.op == IROp::LOAD_MEM && cur_op_index_ < sext_load_.size() &&
+                              sext_load_[cur_op_index_];
+            emit_load_mem(page, effective, 0, mp.width, sext, true);
+            if (sext) sext_load_done_ = cur_op_index_;
             set_vreg_reg(inst.dest, page);
         } else {
             emit_store_mem(effective, 0, value, mp.width, true);
@@ -426,6 +430,16 @@ void FrostJIT::flush_deferred_guards() {
 // IR ops that touch cpu.regs[]/cpu.v_lo[]/memory directly via the
 // regalloc-aware helpers (load_vreg_to_reg, store_reg_to_vreg,
 // emit_load_mem, emit_store_mem, emit_load_arm, emit_store_arm).
+// A lazy LOAD_REG whose consumer did not fold it: load it now. Nothing ran
+// since the LOAD_REG, so cpu.regs[] still holds the value it would have read.
+void FrostJIT::materialize_lazy_load() {
+    if (lazy_load_vreg_ < 0) return;
+    const int v = lazy_load_vreg_;
+    lazy_load_vreg_ = -1;
+    const int d = alloc_reg();
+    emit_load_arm(d, lazy_load_arch_);
+    set_vreg_reg(v, d);
+}
 int FrostJIT::compile_ir_mem(const IRInst& inst) {
     switch (inst.op) {
         case IROp::LOAD_REG:
@@ -444,6 +458,14 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             // instead of cpu.regs[]. This is used for FP LDR/STR.
             {
                 kill_vreg(inst.dest);
+                // Read only by the CMP that follows, and the register's value
+                // is in cpu.regs[] (not cached): the compare reads it there.
+                if (cur_op_index_ < lazy_load_.size() && lazy_load_[cur_op_index_] &&
+                    vreg_home_[inst.src1] < 0) {
+                    lazy_load_vreg_ = inst.dest;
+                    lazy_load_arch_ = inst.src1;
+                    return 0;
+                }
                 int d;
                 if (inst.src1 <= 31 && vreg_home_[inst.src1] >= 0) {
                     int s = vreg_home_[inst.src1];

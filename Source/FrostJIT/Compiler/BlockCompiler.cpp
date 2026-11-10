@@ -137,6 +137,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     flag_deps_scratch_.clear();
     flag_store_skipped_ = false;
     chain_entry_off_ = 0;
+    chain_entry_pc_off_ = 0;
+    block_calls_out_ = false;
+    late_fall_pc_ = 0;
     frame_return_off_ = SIZE_MAX;
     num_stack_slots_ = 0;
     vec_cache_reset();
@@ -643,6 +646,45 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // a register: the predecessor's epilogue set RSI=emu from CPU::jit_emu,
     // and a successor that skips its own prologue still reads it. Disabled mode leaves
     // chain_entry_off_ unused (chain slots patch to fn instead).
+    //
+    // A predecessor's patched slot skips its PC store (defer_pc_store), so
+    // the entry published for a block that calls out of generated code sets
+    // cpu.pc itself; RAX is free here on every entry. The dispatcher's entry
+    // falls through it with the same value.
+    // Only blocks expected to call out get it inline: these ops' emitters
+    // stay inside generated code (guarded accesses reach helpers only through
+    // exits that set cpu.pc themselves). The list is a size prediction, not
+    // the contract: a block that calls out without the inline store gets the
+    // same store in a stub after its code (see block_calls_out_ below).
+    chain_entry_pc_off_ = SIZE_MAX;
+    if (defer_pc_store()) {
+        bool may_call_out = false;
+        for (const IRInst& inst : ir_block.insts) {
+            switch (inst.op) {
+                case IROp::NOP: case IROp::IMM: case IROp::MOV:
+                case IROp::LOAD_REG: case IROp::STORE_REG:
+                case IROp::LOAD_MEM: case IROp::STORE_MEM:
+                case IROp::ADD: case IROp::SUB: case IROp::MUL:
+                case IROp::AND: case IROp::OR: case IROp::XOR:
+                case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
+                case IROp::NOT: case IROp::NEG: case IROp::SEXT: case IROp::ZEXT:
+                case IROp::ADDS: case IROp::SUBS: case IROp::TST:
+                case IROp::CSEL: case IROp::UBFM: case IROp::SBFM:
+                case IROp::BRCOND_ZERO: case IROp::BRCOND_BIT:
+                case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
+                    break;
+                default:
+                    may_call_out = true;
+                    break;
+            }
+            if (may_call_out) break;
+        }
+        if (may_call_out) {
+            chain_entry_pc_off_ = code_buf_used_;
+            emit_mov_imm_to_rax(start_pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
+        }
+    }
     chain_entry_off_ = code_buf_used_;
     // BIFROST_BLOCK_TRACE: log every cold and chained entry. Like the Tier-2
     // counter below, it runs before anything is cached, so the caller-saved
@@ -900,6 +942,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         size_t n = ir_block.insts.size();
         vreg_last_use_op_.assign(4096, -1);
         reset_vreg_uses();
+        int highest_used = 31;  // highest vreg the scan below recorded
         for (size_t i = 0; i < n; i++) {
             const IRInst& inst = ir_block.insts[i];
             if (inst.op != IROp::LOAD_REG) {
@@ -909,10 +952,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 if (inst.src1 > 31 && inst.src1 < 4096) {
                     vreg_last_use_op_[inst.src1] = static_cast<int>(i);
                     note_vreg_use(inst.src1, static_cast<uint16_t>(i));
+                    if (inst.src1 > highest_used) highest_used = inst.src1;
                 }
                 if (inst.src2 > 31 && inst.src2 < 4096) {
                     vreg_last_use_op_[inst.src2] = static_cast<int>(i);
                     note_vreg_use(inst.src2, static_cast<uint16_t>(i));
+                    if (inst.src2 > highest_used) highest_used = inst.src2;
                 }
             }
             // aux is a vreg for SMADDL/UMADDL/SMSUBL/UMSUBL (accumulator);
@@ -920,12 +965,15 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             if (inst.aux > 31 && inst.aux < 4096) {
                 vreg_last_use_op_[inst.aux] = static_cast<int>(i);
                 note_vreg_use(inst.aux, static_cast<uint16_t>(i));
+                if (inst.aux > highest_used) highest_used = inst.aux;
             }
         }
         // Build kills_per_op_: for each op i, the list of scratch vregs
         // whose last use is i (dest is excluded at kill time in the loop).
+        // Only slots up to highest_used were written: scanning all 4096 per
+        // block was about half of this function's own time.
         kills_per_op_.assign(n, {});
-        for (int v = 32; v < 4096; v++) {
+        for (int v = 32; v <= highest_used; v++) {
             if (vreg_last_use_op_[v] >= 0) {
                 kills_per_op_[vreg_last_use_op_[v]].push_back(static_cast<uint16_t>(v));
             }
@@ -1027,6 +1075,50 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 zext32_fused_[i] = 1;
         }
     }
+    // Sign-extending loads and compares against a register's memory home
+    // (see sext_load_ and lazy_load_). Both read zext32_fused_ and the
+    // last-use table as they stand, and change neither.
+    {
+        const size_t n = ir_block.insts.size();
+        sext_load_.assign(n, 0);
+        lazy_load_.assign(n, 0);
+        scaled_add_.assign(n, 0);
+        sext_load_done_ = SIZE_MAX;
+        lazy_load_vreg_ = -1;
+        scaled_vreg_ = -1;
+        for (size_t i = 0; i + 1 < n; i++) {
+            const IRInst& op = ir_block.insts[i];
+            const IRInst& nx = ir_block.insts[i + 1];
+            if (!(op.dest > 32 && op.dest < 4096)) continue;
+            if (op.op == IROp::SHL && op.dest != op.src1) {
+                // The translator loads the base register between the shift
+                // and the add of `[xN, xM, lsl #s]`: one LOAD_REG may sit there.
+                size_t j = i + 1;
+                if (ir_block.insts[j].op == IROp::LOAD_REG && ir_block.insts[j].dest != op.dest &&
+                    j + 1 < n) ++j;
+                const IRInst& add = ir_block.insts[j];
+                if (add.op == IROp::ADD && add.src2 == op.dest && add.src1 != op.dest &&
+                    vreg_last_use_op_[op.dest] == static_cast<int>(j))
+                    scaled_add_[i] = 1;  // the emitter checks the count and width
+                continue;
+            }
+            if (vreg_last_use_op_[op.dest] != static_cast<int>(i + 1)) continue;
+            if (op.op == IROp::LOAD_MEM && nx.op == IROp::SEXT && nx.src1 == op.dest) {
+                // emit_load_mem's sign-extending forms: MOVSXD for 4 bytes
+                // (to 64 bits), MOVSX r32 for 1 and 2, which is the value
+                // only when the SEXT itself is the 32-bit fused form.
+                const int width = op.load_mem_params().width;
+                if (nx.sext_bits() != width * 8) continue;
+                if (width == 4 || ((width == 1 || width == 2) && zext32_fused_[i + 1]))
+                    sext_load_[i] = 1;
+            } else if (op.op == IROp::LOAD_REG && !op.is_fp_load() && op.src1 <= 30 &&
+                       nx.op == IROp::SUBS && nx.src2 == op.dest && nx.src1 != op.dest &&
+                       (nx.dest == 0 || (nx.dest > 32 && nx.dest < 4096 && nx.dest != op.dest &&
+                                         vreg_last_use_op_[nx.dest] <= static_cast<int>(i + 1)))) {
+                lazy_load_[i] = 1;
+            }
+        }
+    }
     // ── Flag-loop-carry pre-scan ────────────────────────────────────
     // Decides whether a self-loop back-edge may skip the taken-path
     // pstate materialization (Branch.cpp BRCOND case). A
@@ -1094,6 +1186,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 patch_jcc_rel32(f.jcc_offset, rel);
             }
         }
+        if (lazy_load_vreg_ >= 0 && inst.op != IROp::SUBS) materialize_lazy_load();
+        if (scaled_vreg_ >= 0 && inst.op != IROp::ADD && inst.op != IROp::LOAD_REG) materialize_scaled();
         if (compile_ir_inst(inst)) break;
         // A non-IMM op defining a vreg invalidates any const entry for it
         // (defensive; the monotonic allocator makes collisions impossible).
@@ -1125,6 +1219,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     kills_per_op_.clear();
     fold_ahead_kind_.clear();
     zext32_fused_.clear();
+    sext_load_.clear();
+    lazy_load_.clear();
+    scaled_add_.clear();
+    sext_load_done_ = SIZE_MAX;
+    lazy_load_vreg_ = -1;
+    scaled_vreg_ = -1;
     vreg_last_use_op_.clear();
     reset_vreg_uses();
     // ── Epilogue ─────────────────────────────────────────────────
@@ -1160,7 +1260,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // cur_pc — the first untranslated instruction (BL+4 or the cap
         // point). Blocks without inlined leaves keep the cheap formula.
         uint64_t next_pc = has_inlined_leaf ? cur_pc : start_pc + ir_block.count * 4;
-        emit_mov_imm_to_rax(next_pc);
+        late_fall_pc_ = next_pc;  // loaded below, on the right side of the slot
         // Fall-through (MAX_BLOCK hit before any block-ender): the next
         // PC is statically known, so this block is chainable to it.
         if (!unchainable_end_ && chain_target_pc_ == 0) {
@@ -1171,7 +1271,19 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // At this point, flags are materialized and vregs are flushed.
     // RAX holds the next PC (either from rax_holds_next_pc_ or the
     // static fall-through).
-    emit_store(CPU_REG, PC_OFF, RAX);
+    // A static chain-skip exit stores it after the slot instead: a patched
+    // slot jumps past the store, and every other way out of the slot (still
+    // unpatched, an empty or revoked MT cell, the backward-edge checks) falls
+    // into it. Indirect and unchainable exits keep the store here.
+    const bool pc_after_slot = defer_pc_store() && !unchainable_end_ && !indirect_exit_;
+    // A next pc not yet in RAX (late_fall_pc_) follows the slot with the store,
+    // unless the slot reads RAX: an MT backward edge compares it with the stop
+    // sentinel. mt_active() is read once; it can change during this compile.
+    const bool mt = mt_active();
+    const bool imm_after_slot = late_fall_pc_ && pc_after_slot &&
+                                !(mt && chain_target_pc_ <= current_start_pc_);
+    if (late_fall_pc_ && !imm_after_slot) emit_mov_imm_to_rax(late_fall_pc_);
+    if (!pc_after_slot) emit_store(CPU_REG, PC_OFF, RAX);
     emit_tier2_edge_profile(false);
     // ── Chain-capable epilogue ────────────────────────────────────
     // For block chaining we jump directly from one block's epilogue to
@@ -1201,12 +1313,14 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // for the successor's prologue-agnostic body (it reads cpu/emu
         // from RDI/RSI at chain_entry just like fn does).
         chain_patch_off = code_buf_used_;
-        if (mt_active()) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
+        if (mt) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
         else emit_slot_nop5();
         // A register branch's slot is never patched (dynamic target); try
         // the indirect-branch table instead of returning to the dispatcher.
         if (indirect_exit_ && !dbg().no_chain) emit_indirect_branch_probe();
         // Cold exit (only reached when the slot above is unpatched).
+        if (imm_after_slot) emit_mov_imm_to_rax(late_fall_pc_);
+        if (pc_after_slot) emit_store(CPU_REG, PC_OFF, RAX);
         emit_frame_return(false);
     } else {
         // ── Chain-capable epilogue (original layout) ────────────────
@@ -1222,7 +1336,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // all 5 bytes with `jmp rel32` → target block's entry, skipping the
         // dispatcher entirely for straight-line / unconditional-branch code.
         chain_patch_off = code_buf_used_;
-        if (mt_active()) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_, false, RDI);
+        if (mt) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_, false, RDI);
         emit_ret();                                  // 0xC3
         emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
     }
@@ -1255,6 +1369,21 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     const size_t recovery_start = code_buf_used_;
     flush_deferred_guards();
     flush_deferred_fp_steps();
+    // The chain entry to publish (see chain_entry_pc_off_). A block that
+    // called out without the inline PC store gets it here, ahead of a jump
+    // to the plain entry.
+    size_t chain_entry_publish = chain_entry_off_;
+    if (defer_pc_store() && block_calls_out_) {
+        if (chain_entry_pc_off_ == SIZE_MAX) {
+            chain_entry_pc_off_ = code_buf_used_;
+            emit_mov_imm_to_rax(start_pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
+            const size_t jump = emit_jmp_rel32_placeholder();
+            patch_jmp_rel32(jump, static_cast<int32_t>(static_cast<int64_t>(chain_entry_off_) -
+                                                       static_cast<int64_t>(jump + 5)));
+        }
+        chain_entry_publish = chain_entry_pc_off_;
+    }
     // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
     // Counts the spill/reload instruction density of THIS block. A high
     // reload:spill ratio for the same vreg within a block is the bloat
@@ -1318,7 +1447,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Only set when the gate is on; otherwise chain slots target fn and
     // try_chain_block ignores this field.
     if (chain_skip_enabled())
-        entry.chain_entry = (uint64_t(*)(CPU*, Emulator*))(code_buf_ + chain_entry_off_);
+        entry.chain_entry = (uint64_t(*)(CPU*, Emulator*))(code_buf_ + chain_entry_publish);
     entry.ends_with_branch = ir_block.ends_with_branch;
     entry.chain_patch_off = chain_patch_off;
     entry.chain_target_pc = chain_target_pc_;

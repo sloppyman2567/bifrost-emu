@@ -55,6 +55,17 @@ uint64_t crc32_software(uint64_t seed, uint64_t data, uint64_t bytes, uint64_t c
 }
 }
 // ── FrostJIT::compile_ir_alu ───────────────────────────────────────────
+// The shift a SHL left for an ADD that did not take it as an index scale.
+void FrostJIT::materialize_scaled() {
+    if (scaled_vreg_ < 0) return;
+    const int v = scaled_vreg_;
+    scaled_vreg_ = -1;
+    clobber_flags();  // may spill v; the shift below overwrites host flags
+    const int r = ensure_vreg(v);
+    emit_shift_imm8(r, 4, static_cast<uint8_t>(scaled_shift_));
+    vreg_dirty_[v] = true;
+    dirty_host_regs_ |= (1u << r);
+}
 int FrostJIT::compile_ir_alu(const IRInst& inst) {
     // Reuse a consumed scratch value instead of allocating, spilling and
     // copying it. Architectural values and pinned loop state stay live.
@@ -161,6 +172,11 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // W-form fusion (zext32_fused_): 32-bit encodings; the next ZEXT
             // 32 then needs no instruction.
             const bool w32 = cur_op_index_ < zext32_fused_.size() && zext32_fused_[cur_op_index_];
+            // A shift left for this op to scale (scaled_add_): any other
+            // consumer gets the shifted value first.
+            const bool scaled = scaled_vreg_ >= 0 && inst.op == IROp::ADD &&
+                                inst.src2 == scaled_vreg_ && inst.src1 != inst.src2;
+            if (scaled_vreg_ >= 0 && !scaled) materialize_scaled();
             bool lea_sub = false;
             if (inst.op == IROp::SUB && inst.dest != inst.src2 &&
                 inst.src1 != inst.src2 && vreg_last_use_this_op(inst.src2)) {
@@ -246,7 +262,16 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     !(pinned_host_regs_ & (1u << s2)))) d = s2;
                 else d = result_reg(inst.src1, s1, s2 == s1 ? -1 : s2);
                 alu_w32_ = w32;
-                if (flags_in_host_ || d != s1) {
+                if (scaled) {
+                    // lea d, [s1 + s2*2^n]: s2 holds the unshifted operand.
+                    scaled_vreg_ = -1;
+                    const bool disp = (s1 & 7) == 5;
+                    emit_alu_rex(d >= 8, s2 >= 8, s1 >= 8);
+                    emit_byte(0x8D);
+                    emit_byte(modrm(disp ? 1 : 0, d & 7, 4));
+                    emit_byte(sib(static_cast<uint8_t>(scaled_shift_), s2 & 7, s1 & 7));
+                    if (disp) emit_byte(0);
+                } else if (flags_in_host_ || d != s1) {
                     // Allocatable registers exclude RSP. R12 is a valid
                     // SIB index with REX.X; R13 as base needs disp8=0.
                     const bool disp = (s1 & 7) == 5;
@@ -308,6 +333,27 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         }
         case IROp::SHL: case IROp::SHR:
         case IROp::SAR: case IROp::ROR: {
+            // A 64-bit `lsl #1..3` read only by the next ADD becomes that
+            // ADD's index scale (scaled_add_): the result vreg takes the
+            // register the shift would have worked in, without the shift,
+            // and host flags stay as they are.
+            if (inst.op == IROp::SHL && cur_op_index_ < scaled_add_.size() &&
+                scaled_add_[cur_op_index_] && inst.dest != inst.src2 && inst.src1 != inst.src2 &&
+                inst.gpr_shift_params().width != 32) {
+                auto cit = jit_consts_.find(inst.src2);
+                if (cit != jit_consts_.end() && vreg_last_use_this_op(inst.src2) &&
+                    cit->second >= 1 && cit->second <= 3) {
+                    const int count = static_cast<int>(cit->second);
+                    kill_vreg(inst.src2);
+                    const int s1 = ensure_vreg(inst.src1);
+                    const int d = result_reg(inst.src1, s1);
+                    if (d != s1) emit_mov_reg(d, s1);
+                    set_vreg_reg(inst.dest, d);
+                    scaled_vreg_ = inst.dest;
+                    scaled_shift_ = count;
+                    return 0;
+                }
+            }
             clobber_flags();
             // ── Constant-count immediate shift ──
             // If src2 is a block-local IMM constant (dead after this op and
@@ -440,7 +486,10 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             if (!movsx) clobber_flags();  // shifts clobber RFLAGS
             int s = ensure_vreg(inst.src1);
             int d = result_reg(inst.src1, s);
-            if (movsx) {
+            if (cur_op_index_ > 0 && sext_load_done_ == cur_op_index_ - 1) {
+                // The load before this op already extended (sext_load_).
+                if (d != s) emit_mov_reg(d, s);
+            } else if (movsx) {
                 // A REX prefix is always present, so byte sources 4-7 are
                 // SPL..DIL. Fused with a following ZEXT 32 (8/16-bit only),
                 // MOVSX r32 extends into bits 31:0 and clears bits 63:32.
@@ -804,10 +853,22 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     if (immr == 0) { if (width == 32) keep_low(32); }  // a move
                     else sar_imm(immr);                              // asr
                 } else {
-                    // Put the field's top bit in the sign position, then shift
-                    // it back down with sign fill (sxtb/sxth/sxtw/sbfx).
-                    shl_imm(top - imms);
-                    sar_imm(top - imms + immr);
+                    const int flen = imms + 1;
+                    if (immr == 0 && (flen == 8 || flen == 16 || (flen == 32 && width == 64))) {
+                        // sxtb/sxth/sxtw: one MOVSX/MOVSXD instead of the
+                        // shift pair. The REX prefix is always present, so a
+                        // byte source 4-7 is SPL..DIL; the r32 form clears
+                        // bits 63:32 as every 32-bit result here must.
+                        emit_byte(rex(width == 64, d >= 8, false, d >= 8));
+                        if (flen == 32) emit_byte(0x63);
+                        else { emit_byte(0x0F); emit_byte(flen == 8 ? 0xBE : 0xBF); }
+                        emit_byte(modrm(3, d & 7, d & 7));
+                    } else {
+                        // Put the field's top bit in the sign position, then shift
+                        // it back down with sign fill (sbfx).
+                        shl_imm(top - imms);
+                        sar_imm(top - imms + immr);
+                    }
                 }
             } else {
                 // Insert: the low imms+1 bits move up to bit (width - immr)

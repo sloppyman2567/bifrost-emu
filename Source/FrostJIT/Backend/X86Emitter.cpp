@@ -324,6 +324,7 @@ void FrostJIT::emit_bswap_reg(int dst) {
     emit_byte(rex(true,false,false,dst>=8)); emit_byte(0x0F); emit_byte(0xC8 + (dst&7));
 }
 void FrostJIT::emit_call_abs(void* target) {
+    block_calls_out_ = true;  // see chain_entry_pc_off_
     emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(target));
     note_host_reloc(HostReloc::Image);
     emit_byte(0xFF); emit_byte(0xD0);
@@ -381,6 +382,7 @@ void FrostJIT::patch_jmp_rel32(size_t off, int32_t rel) {
     memcpy(code_buf_+off+1, &rel, 4);
 }
 size_t FrostJIT::emit_call_rel32_placeholder() {
+    block_calls_out_ = true;  // a native callee: see chain_entry_pc_off_
     size_t off = code_buf_used_; emit_byte(0xE8); emit_u32(0); return off;
 }
 void FrostJIT::patch_call_rel32(size_t off, const uint8_t* target) {

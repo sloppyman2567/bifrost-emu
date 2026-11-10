@@ -206,6 +206,24 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   (the proof compile shifts PCs). Undeclared host addresses make blocks unrecordable (they are caught,
   not reused), so a missing declaration shows as `host-address` in `[JIT] disk cache unrecordable:`.
   A new per-block side table needs the install path to fill it too (`install_cached`).
+- `cpu.pc` is not maintained across a patched chain edge (`defer_pc_store`: chain-skip without Tier-2). A static exit
+  stores it after its slot, so only the paths that leave generated code write it, and inside a chained block it holds an
+  older block's PC. Code that needs it current must not assume the block start: an exit or helper call site sets it
+  itself, and a block that calls out of generated code publishes a chain entry that stores its start PC first
+  (`chain_entry_pc_off_`). `emit_call_abs` and `emit_call_rel32_placeholder` set `block_calls_out_`; a new way of
+  calling out (a raw `call`, a tail jump to C++) must set it too. The op list at the chain entry only chooses between the
+  inline store and the stub after the block. Anything emitted between an exit's `mov eax, pc` and its frame return must
+  keep RAX: it is the block function's return value. A new chain target that reads `cpu.pc` (as the Tier-2 trial wrapper
+  does) needs its own store or must switch `defer_pc_store` off, as Tier-2 does.
+- `BRCOND` spills with `flush_all_vregs_but_pins` before its `jcc`: both paths are emitted one after the other and each
+  commits flags through RAX/RCX/RDX, so nothing but the loop pins (R12-R15) may stay cached across the branch. Every exit
+  of a pinned block must still write dirty pins (`flush_all_vregs_exit`, `flush_all_vregs_keep`, `flush_arch_vregs_keep`).
+- `sext_load_`, `lazy_load_` and `scaled_add_` are Tier-1 pre-scan requests, cleared for Tier-2. The guarded load reports
+  what it emitted in `sext_load_done_` (other load paths zero-extend, so the `SEXT` must not trust the request). A lazy
+  `LOAD_REG` and an unshifted `SHL` result exist for one op only: `ensure_vreg` and the compile loop materialize a lazy
+  load for any reader but the `SUBS` it was left for, and the loop and the ALU emitter materialize the shift for anything
+  but the `ADD` that scales it. A new emitter for `ADD` or `SUBS`, or one that reads a source through `vreg_home_`
+  directly, must call `materialize_scaled()` / `materialize_lazy_load()` first.
 - A non-thunk SVC leaves its block with `cpu.jit_svc_pc` set and C++ runs it (`run_pending_svc`, which
   clears the field first because `clone` copies the CPU). Anything else that calls a block's `fn` directly
   and then reads `cpu.pc` must run a pending SVC before executing at that pc. Thunk SVCs (`x8 == 0x1000`)

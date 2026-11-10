@@ -187,6 +187,12 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         // the vreg mapped). The shift kind-2 fold has no extra guards.
         fold_ahead_kind_.assign(n, 0);
         zext32_fused_.clear();  // Tier-1 only (BlockCompiler pre-scan)
+        sext_load_.clear();     // likewise, with their per-compile state: an
+        lazy_load_.clear();     // abandoned Tier-1 compile may have left it set
+        scaled_add_.clear();
+        sext_load_done_ = SIZE_MAX;
+        lazy_load_vreg_ = -1;
+        scaled_vreg_ = -1;
         for (size_t i = 0; i < n; i++) {
             const IRInst& im = region_ir[i];
             if (im.op != IROp::IMM) continue;

@@ -16,6 +16,63 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## PC stores behind the chain slot, loop pins and four peepholes (2026-11-10)
+
+A sample of the operations executed inside translated blocks (AMD IBS, `perf record -e ibs_op/cnt_ctl=1,swfilt=1/u` with
+`BIFROST_JIT_DUMP=1`, sample addresses mapped onto the dumped blocks and each instruction classified) on CoreMark, `bench_fib`,
+`bench_dispatch` and busybox `gzip` and `sort` showed that most of them are bookkeeping, not guest work: guest register loads
+and stores 18-24%, bounds guards 11-17%, flag packing at exits 4-17%, the PC store before each chain slot 5-8%, chain jumps
+4.5-8.6%. The plain `instructions:u` event skids too far to attribute single instructions; IBS does not. This change takes the
+cheap part of that list.
+
+- **The PC store follows the chain slot.** A static chain-skip exit was `mov eax, pc; mov [cpu.pc], rax; slot; frame return`,
+  so a patched edge stored a PC nothing read. It is now `slot; mov eax, pc; mov [cpu.pc], rax; frame return`
+  (`defer_pc_store`): a patched slot jumps past both instructions, and every other way out of the slot (still unpatched, an
+  empty or revoked MT cell, the backward-edge checks) falls into them. An MT backward edge keeps the `mov eax, pc` before its
+  slot, which compares RAX with the stop sentinel. Indirect (`ret`/`br`/`blr`) and unchainable exits, the ordinary layout
+  (`BIFROST_NO_CHAIN_SKIP=1`) and `BIFROST_TIER2=1` keep the old order: a Tier-2 trial wrapper is a chain target that reads
+  `cpu.pc`.
+- **`cpu.pc` is stale inside a chained block, except where a helper may read it.** C++ helpers called from generated code can
+  read `cpu.pc` (the slow memory paths raise a guest signal with it), and until now it held the block's start. A block that
+  calls out of generated code therefore publishes a chain entry that stores its own start PC first. Every call emitter sets
+  `block_calls_out_`, so this follows what was emitted, not a list. A list of ops whose emitters stay inside generated code only
+  decides where the store goes: inline before the plain entry when a call is expected, in a stub after the block (store, then
+  a jump to the plain entry) when a call was emitted without being expected. Guarded accesses reach helpers only through exits
+  that set the PC themselves, so integer blocks carry no entry store.
+- **Loop pins are not stored on every iteration.** `BRCOND` flushed every cached register before its `jcc`, including the
+  loop-carried pins of a self-loop, so a `cmp; b.cond` loop stored up to four registers per iteration while a `cbz` loop stored
+  none. `flush_all_vregs_but_pins` leaves the pins mapped and dirty in R12-R15, which neither path's flag commit touches; the
+  fall-through epilogue and the exit after the self-loop slot write them back.
+- **Four peepholes** (Tier-1; each is decided by a pre-scan and re-checked by the emitter):
+  `LDRSB`/`LDRSH`/`LDRSW` are one sign-extending load instead of `movzx` + `movsx` (`sext_load_`); `sxtb`/`sxth`/`sxtw` through
+  `SBFM` are one `movsx`/`movsxd` instead of a shift pair; a 64-bit `lsl #1..3` read only by the next `ADD` becomes that
+  `lea`'s index scale (`scaled_add_`, one `LOAD_REG` may sit between them, as the translator emits for `[xN, xM, lsl #s]`); and
+  a register read only as the second operand of the following `CMP` is `cmp r, [cpu.regs]` (`lazy_load_`). The last two leave
+  a value unmaterialized for one op; `materialize_scaled` and `materialize_lazy_load` emit the original instruction for any
+  consumer that does not fold it, and the Tier-1 loop calls them before every other op.
+- **Compile time.** The kill-list scan walked all 4,096 vreg slots for every block; it stops at the highest vreg the block
+  uses. That loop was about half of `translate_block`'s own time in a busybox shell run (17 microseconds per block).
+
+Host instructions executed (`perf stat -e instructions:u`, one run each, same machine and session, the build before this
+change against the build with it):
+
+| Program | Before | After | Change |
+|---|---|---|---|
+| CoreMark, 20,000 iterations | 24.60 G | 21.66 G | -11.9% |
+| `bench_mips` | 2.519 G | 2.211 G | -12.2% |
+| `bench_sort` | 1.521 G | 1.433 G | -5.8% |
+| `bench_fib` | 1.589 G | 1.506 G | -5.2% |
+| `bench_dispatch` | 34.86 G | 33.66 G | -3.5% |
+
+These are instruction counts, which repeat to four digits; run times were not compared (single-run cycle counts moved by less
+than their noise except CoreMark, about -4%). Emitted code is 43.8 bytes per guest instruction on CoreMark against 43.6. No
+game, multithreaded workload or FP kernel was measured.
+
+Still open from the same sample, largest first: flag packing at exits (the dead-flag scan stops at the first load, so a loop
+whose blocks each start with a load packs seven instructions on every edge), one bounds check per access even for runs of
+same-base stack accesses, guest-state stores overwritten later in the block, the 17-instruction indirect-branch probe, copies to
+and from pinned registers, and the `movabs` of the window base on every chain entry.
+
 ## FP compares in the host flags, and where last-level misses come from (2026-11-07)
 
 `fcmp` built NZCV with `pushfq`, a chain of up to three data-dependent branches and a read-modify-write of pstate: about 22 host

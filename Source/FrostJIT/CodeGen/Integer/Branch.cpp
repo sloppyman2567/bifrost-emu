@@ -193,6 +193,14 @@ void FrostJIT::emit_taken_path_epilogue() {
     // silently drop the writeback from the fall-through epilogue (the vec
     // cache's dirty state is a codegen-time concept, not a runtime one).
     vec_cache_writeback_all(false);
+    // The taken target is static. Under defer_pc_store its PC store follows
+    // the slot, and so does the load of RAX unless the slot reads RAX (an MT
+    // backward edge compares it with the stop sentinel). mt_active() is read
+    // once: it can change while this block compiles.
+    const bool mt = mt_active();
+    const bool pc_after_slot = defer_pc_store();
+    const bool imm_after_slot = pc_after_slot && !(mt && taken_chain_target_pc_ <= current_start_pc_);
+    if (!imm_after_slot) emit_mov_imm_to_rax(taken_chain_target_pc_);
     // Flush dirty GPR vregs: the taken exit returns to the dispatcher
     // (or a chained successor that reloads from home slots), so every
     // value computed before the branch must be written home. Without
@@ -206,7 +214,7 @@ void FrostJIT::emit_taken_path_epilogue() {
     // Only architectural registers: nothing after this exit reads a scratch
     // stack slot.
     flush_arch_vregs_keep();
-    emit_store(CPU_REG, PC_OFF, RAX);
+    if (!pc_after_slot) emit_store(CPU_REG, PC_OFF, RAX);
     emit_tier2_edge_profile(true);
     // RDI/RSI only for the ordinary layout's fn targets (see the block epilogue).
     if (!chain_skip_enabled()) {
@@ -236,9 +244,11 @@ void FrostJIT::emit_taken_path_epilogue() {
     if (chain_skip_enabled()) {
         taken_chain_patch_off_ = code_buf_used_;
         has_taken_chain_slot_ = true;
-        if (mt_active()) emit_mt_chain_slot(taken_chain_target_pc_);
+        if (mt) emit_mt_chain_slot(taken_chain_target_pc_);
         else emit_slot_nop5();
         // Cold exit (only reached when the slot above is unpatched).
+        if (imm_after_slot) emit_mov_imm_to_rax(taken_chain_target_pc_);
+        if (pc_after_slot) emit_store(CPU_REG, PC_OFF, RAX);
         emit_frame_return(false);
     } else {
         // Default layout (original): restore the callee-saved regs FIRST,
@@ -253,7 +263,7 @@ void FrostJIT::emit_taken_path_epilogue() {
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
         taken_chain_patch_off_ = code_buf_used_;
         has_taken_chain_slot_ = true;
-        if (mt_active()) emit_mt_chain_slot(taken_chain_target_pc_, false, RDI);
+        if (mt) emit_mt_chain_slot(taken_chain_target_pc_, false, RDI);
         emit_ret();                                  // 0xC3
         emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
     }
@@ -284,7 +294,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
-            emit_mov_imm_to_rax(fall);
+            if (defer_pc_store()) late_fall_pc_ = fall;
+            else emit_mov_imm_to_rax(fall);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
@@ -300,7 +311,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // re-runs the prologue, whose preloads read STALE cpu.regs[]
             // for the deferred pins (infinite loop).
             emit_selfloop_backedge(bp.target);
-            emit_mov_imm_to_rax(bp.target);
+            if (has_selfloop_slot_) emit_mov_imm_to_rax(bp.target);  // else emit_taken_path_epilogue
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             if (!has_selfloop_slot_) {
@@ -344,7 +355,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
-            emit_mov_imm_to_rax(fall);
+            if (defer_pc_store()) late_fall_pc_ = fall;
+            else emit_mov_imm_to_rax(fall);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
@@ -356,7 +368,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // deferred pins only persist across a back-edge that jumps to the
             // body, not one that re-enters the prologue (stale preloads).
             emit_selfloop_backedge(bp.target);
-            emit_mov_imm_to_rax(bp.target);
+            if (has_selfloop_slot_) emit_mov_imm_to_rax(bp.target);  // else emit_taken_path_epilogue
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             if (!has_selfloop_slot_) {
@@ -454,9 +466,11 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // Emit the JCC first — it consumes host RFLAGS directly, so no
             // flag materialization is needed before it. Flags are materialized
             // to pstate on each path separately (the next block may read pstate).
-            // Stores don't clobber RFLAGS, so flush_all_vregs needs no
-            // pushfq/popfq wrapper here.
-            flush_all_vregs();
+            // Stores don't clobber RFLAGS, so the flush needs no
+            // pushfq/popfq wrapper here. Loop-carried pins are left to the
+            // exits: flushing them here stored every pin on every iteration
+            // of a `cmp; b.cond` loop.
+            flush_all_vregs_but_pins();
             if (direct_mask) {
                 emit_byte(0xF7); emit_modrm_disp(0, CPU_REG, PSTATE_OFF);  // test dword [pstate], mask
                 emit_u32(direct_mask);
@@ -495,7 +509,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // JCC has consumed the host flags. Only architectural NZCV must
             // survive the exit; restoring RFLAGS here is dead work.
             materialize_flags_to_pstate(false, fall_dead);
-            emit_mov_imm_to_rax(inst.arm_pc + 4);
+            if (defer_pc_store()) late_fall_pc_ = inst.arm_pc + 4;
+            else emit_mov_imm_to_rax(inst.arm_pc + 4);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // ── Taken path ──
@@ -541,7 +556,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             //
             // Disable with BIFROST_NO_SELFLOOP=1 for debugging.
             emit_selfloop_backedge(bp.target);
-            emit_mov_imm_to_rax(bp.target);
+            if (has_selfloop_slot_) emit_mov_imm_to_rax(bp.target);  // else emit_taken_path_epilogue
             rax_holds_next_pc_ = true;
             flags_in_host_ = false;
             //

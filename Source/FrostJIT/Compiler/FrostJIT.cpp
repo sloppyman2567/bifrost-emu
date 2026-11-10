@@ -694,10 +694,32 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                     }
                 }
             }
-            int s1, s2;
-            ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             const bool is_sub = inst.op == IROp::SUBS;
             const bool is_32bit = inst.addsub_params().bits == 32;
+            if (lazy_load_vreg_ >= 0) {
+                // The second operand is a register nothing else reads
+                // (lazy_load_): CMP r, [cpu.regs]. The 32-bit form reads the
+                // low half of the little-endian home.
+                const bool discard = inst.dest == 0 ||
+                    (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
+                     cur_op_index_ < kills_per_op_.size() &&
+                     vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
+                if (is_sub && discard && inst.src2 == lazy_load_vreg_ && inst.src1 != inst.src2) {
+                    const int arch = lazy_load_arch_;
+                    lazy_load_vreg_ = -1;
+                    const int a = ensure_vreg(inst.src1);
+                    if (const uint8_t prefix = rex(!is_32bit, a >= 8, false, false); prefix != 0x40) emit_byte(prefix);
+                    emit_byte(0x3B);  // cmp r, r/m
+                    emit_modrm_disp(a, CPU_REG, REGS_OFF + 8 * arch);
+                    flags_in_host_ = true;
+                    flags_match_pstate_ = false;
+                    flags_from_sub_ = true;
+                    return false;
+                }
+                materialize_lazy_load();
+            }
+            int s1, s2;
+            ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             // CMP normally has an unused temporary destination in the IR.
             // Restrict this test to body liveness: Tier-2 preheader indices
             // sit after the body in the allocator's synthetic use ordering.
@@ -1185,6 +1207,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(jit_call_helper));
                 note_host_reloc(HostReloc::Image);
                 emit_byte(0xFF); emit_byte(0xD0);  // call rax
+                block_calls_out_ = true;
                 emit_add_rsp_imm8(8);
                 emit_ret();
                 patch_jmp_rel32(jmp_past,

@@ -1779,6 +1779,7 @@ private:
     void flush_all_vregs_exit();
     void flush_arch_vregs_keep();
     void store_dirty_unpinned_arch_regs();  // self-loop back-edge writeback
+    void flush_all_vregs_but_pins();        // before a two-path conditional branch
     void invalidate_all_vregs();
     // ── Targeted flush/invalidate ───────────────────
     // Walk only the host regs whose bits are set in `mask`, spilling any
@@ -2070,6 +2071,31 @@ private:
     // its 32-bit x86 form (bits 63:32 cleared) and the ZEXT emits nothing
     // when it keeps the same host register. Tier-1 only; empty elsewhere.
     std::vector<uint8_t> zext32_fused_;
+    // sext_load_[i] = 1: op i is a LOAD_MEM whose only reader is the SEXT of
+    // its own width at i + 1 (LDRSB/LDRSH/LDRSW), so the guarded load may
+    // sign-extend itself. A request only: the SEXT skips its own extension
+    // when sext_load_done_ names the op before it, which the load sets after
+    // emitting that form (the other load paths zero-extend). Tier-1 only.
+    std::vector<uint8_t> sext_load_;
+    size_t sext_load_done_ = SIZE_MAX;
+    // lazy_load_[i] = 1: op i is a LOAD_REG read only by the discarded SUBS
+    // (a CMP) at i + 1, as its second operand. The load then emits nothing
+    // and the compare reads cpu.regs[] as a memory operand. lazy_load_vreg_
+    // is the pending vreg (-1: none); materialize_lazy_load() emits the load
+    // after all for a consumer that does not fold it. Tier-1 only.
+    std::vector<uint8_t> lazy_load_;
+    int lazy_load_vreg_ = -1;
+    int lazy_load_arch_ = -1;
+    void materialize_lazy_load();
+    // scaled_add_[i] = 1: op i is a SHL read only by the next ADD (at i + 1,
+    // or i + 2 past one LOAD_REG), as its second operand. For a 64-bit shift by a constant 1-3 the SHL then emits
+    // no shift (its result vreg holds the unshifted value, scaled_vreg_ and
+    // scaled_shift_ say so) and the ADD is `lea d, [a + b*2^n]`.
+    // materialize_scaled() emits the shift after all. Tier-1 only.
+    std::vector<uint8_t> scaled_add_;
+    int scaled_vreg_ = -1;
+    int scaled_shift_ = 0;
+    void materialize_scaled();
     // ── Block-local constant tracking ────────────────────────────────
     // jit_consts_[v] = constant value of scratch vreg `v`, populated when
     // the IMM op that defines it is compiled. Used to fold a constant src2
@@ -2156,6 +2182,21 @@ private:
     // reuses the chain root's unified 32 KB frame. For blocks with no vec
     // cache this equals block_body_start_off_.
     size_t  chain_entry_off_ = 0;        // offset of chain-skip entry point
+    // Deferred PC store (defer_pc_store): a static chain-skip exit stores
+    // cpu.pc after its slot, so a patched edge skips it and cpu.pc is stale
+    // inside the successor. A block that calls out of generated code (a C++
+    // helper may read cpu.pc: slow memory paths raise guest signals with it)
+    // publishes chain_entry_pc_off_ instead, which stores its own start pc
+    // first; the others publish chain_entry_off_. The store is inline before
+    // chain_entry_off_ when the block's ops predict a call, else in a stub
+    // after the block that jumps to chain_entry_off_ (SIZE_MAX: not emitted).
+    size_t  chain_entry_pc_off_ = 0;
+    bool    block_calls_out_ = false;    // set by every call emitter
+    bool    defer_pc_store() const { return chain_skip_enabled() && !tier2_enabled(); }
+    // Fall-through pc a conditional branch left for the shared epilogue to
+    // load (0: RAX already holds the next pc). The epilogue loads it after its
+    // slot too, unless the slot reads RAX (an MT backward edge).
+    uint64_t late_fall_pc_ = 0;
     // Taken-path chain state (reset at translate_block start).
     // Conditional branches (BRCOND/CBZ/CBNZ/TBZ/TBNZ) emit a SECOND 5-byte
     // chain slot at the end of their taken-path epilogue (ret + 4 NOPs).

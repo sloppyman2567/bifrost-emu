@@ -44,6 +44,18 @@ names the library.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (fewer host instructions per block in the JIT)
+
+- A chained block edge no longer stores the guest PC: the store and its constant follow the chain slot, so only an exit
+  that returns to the dispatcher runs them. Blocks that call a C++ helper set the PC at their chain entry instead.
+- A `cmp; b.cond` loop no longer stores its pinned registers on every iteration.
+- Sign-extending loads, `sxtb`/`sxth`/`sxtw`, a shifted index added to a base, and a compare against a register that is
+  only in memory each take one host instruction fewer.
+- Block translation no longer scans 4,096 register slots per block.
+- Host instructions executed fall by 11.9% on CoreMark, 12.2% on `bench_mips`, 5.8% on `bench_sort`, 5.2% on `bench_fib`
+  and 3.5% on `bench_dispatch` (instruction counts, not run time; no game was measured). Details and what the sample
+  still shows as waste are in [the JIT guide](JIT.md#pc-stores-behind-the-chain-slot-loop-pins-and-four-peepholes-2026-11-10).
+
 ### Added (Android apps follow the desktop's colour scheme)
 
 - The system's night mode now follows the desktop's light or dark scheme, so YouTube and other apps that read
