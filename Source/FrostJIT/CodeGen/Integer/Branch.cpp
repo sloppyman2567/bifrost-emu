@@ -466,11 +466,12 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // Emit the JCC first — it consumes host RFLAGS directly, so no
             // flag materialization is needed before it. Flags are materialized
             // to pstate on each path separately (the next block may read pstate).
-            // Stores don't clobber RFLAGS, so the flush needs no
-            // pushfq/popfq wrapper here. Loop-carried pins are left to the
-            // exits: flushing them here stored every pin on every iteration
-            // of a `cmp; b.cond` loop.
-            flush_all_vregs_but_pins();
+            // Stores don't clobber RFLAGS, so flush_all_vregs needs no
+            // pushfq/popfq wrapper here. This stores a self-loop's pins on
+            // every iteration, and it has to: the body start treats each pin
+            // as clean (equal to cpu.regs[]), so leaving them dirty across
+            // the back-edge miscompiled jit_fp_ldst_cache (2026-11-10).
+            flush_all_vregs();
             if (direct_mask) {
                 emit_byte(0xF7); emit_modrm_disp(0, CPU_REG, PSTATE_OFF);  // test dword [pstate], mask
                 emit_u32(direct_mask);

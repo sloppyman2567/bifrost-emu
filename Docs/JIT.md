@@ -16,7 +16,7 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
-## PC stores behind the chain slot, loop pins and four peepholes (2026-11-10)
+## PC stores behind the chain slot and four peepholes (2026-11-10)
 
 A sample of the operations executed inside translated blocks (AMD IBS, `perf record -e ibs_op/cnt_ctl=1,swfilt=1/u` with
 `BIFROST_JIT_DUMP=1`, sample addresses mapped onto the dumped blocks and each instruction classified) on CoreMark, `bench_fib`,
@@ -39,10 +39,9 @@ cheap part of that list.
   decides where the store goes: inline before the plain entry when a call is expected, in a stub after the block (store, then
   a jump to the plain entry) when a call was emitted without being expected. Guarded accesses reach helpers only through exits
   that set the PC themselves, so integer blocks carry no entry store.
-- **Loop pins are not stored on every iteration.** `BRCOND` flushed every cached register before its `jcc`, including the
-  loop-carried pins of a self-loop, so a `cmp; b.cond` loop stored up to four registers per iteration while a `cbz` loop stored
-  none. `flush_all_vregs_but_pins` leaves the pins mapped and dirty in R12-R15, which neither path's flag commit touches; the
-  fall-through epilogue and the exit after the self-loop slot write them back.
+- **Not done: loop pins are still stored on every iteration of a `cmp; b.cond` loop.** Leaving them dirty across the
+  `jcc` (they were `-12%` host instructions on `bench_mips`) miscompiled `jit_fp_ldst_cache`: the body start treats each pin as
+  clean, equal to `cpu.regs[]`. It was backed out; the figures below were taken with it in and are not re-measured.
 - **Four peepholes** (Tier-1; each is decided by a pre-scan and re-checked by the emitter):
   `LDRSB`/`LDRSH`/`LDRSW` are one sign-extending load instead of `movzx` + `movsx` (`sext_load_`); `sxtb`/`sxth`/`sxtw` through
   `SBFM` are one `movsx`/`movsxd` instead of a shift pair; a 64-bit `lsl #1..3` read only by the next `ADD` becomes that

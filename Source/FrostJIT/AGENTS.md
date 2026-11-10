@@ -215,9 +215,9 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   inline store and the stub after the block. Anything emitted between an exit's `mov eax, pc` and its frame return must
   keep RAX: it is the block function's return value. A new chain target that reads `cpu.pc` (as the Tier-2 trial wrapper
   does) needs its own store or must switch `defer_pc_store` off, as Tier-2 does.
-- `BRCOND` spills with `flush_all_vregs_but_pins` before its `jcc`: both paths are emitted one after the other and each
-  commits flags through RAX/RCX/RDX, so nothing but the loop pins (R12-R15) may stay cached across the branch. Every exit
-  of a pinned block must still write dirty pins (`flush_all_vregs_exit`, `flush_all_vregs_keep`, `flush_arch_vregs_keep`).
+- `BRCOND` flushes every cached register, pins included, before its `jcc`: the self-loop body start treats each pin as
+  clean (equal to `cpu.regs[]`). Keeping pins dirty across the back-edge needs that contract changed first; a direct
+  attempt miscompiled `jit_fp_ldst_cache` (2026-11-10).
 - `sext_load_`, `lazy_load_` and `scaled_add_` are Tier-1 pre-scan requests, cleared for Tier-2. The guarded load reports
   what it emitted in `sext_load_done_` (other load paths zero-extend, so the `SEXT` must not trust the request). A lazy
   `LOAD_REG` and an unshifted `SHL` result exist for one op only: `ensure_vreg` and the compile loop materialize a lazy

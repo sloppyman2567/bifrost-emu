@@ -603,21 +603,6 @@ void FrostJIT::flush_all_vregs() {
         }
     }
 }
-// Before a conditional branch whose two paths are emitted one after the
-// other: everything is spilled except the loop-carried pins. Those stay
-// mapped and dirty in R12-R15, which neither path's flag commit touches, so
-// a self-loop iteration stores none of them and each exit writes them back.
-void FrostJIT::flush_all_vregs_but_pins() {
-    uint16_t m = dirty_host_regs_;
-    while (m) {
-        int r = __builtin_ctz(m);
-        m &= m - 1;
-        int v = reg_vreg_[r];
-        if (v < 0 || !vreg_dirty_[v]) continue;
-        if (v <= 30 && arch_pin_[v] == r) continue;
-        evict_vreg(v);
-    }
-}
 // Block-exit forms: the code after an exit never reads a scratch vreg's
 // stack slot, so only architectural registers are written back. The final
 // epilogue unmaps dirty scratch vregs without storing them; the taken-path
