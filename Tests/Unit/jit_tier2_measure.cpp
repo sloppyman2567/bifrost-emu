@@ -244,7 +244,7 @@ static bool linear_scenario(bool mt,bool keep,bool collisions=false) {
     // minimum), so the visit budget alone ends the trial: burn little.
     struct BurnScope { unsigned saved=base_burn; ~BurnScope() { base_burn=saved; } } burn_scope;
     if(collisions) base_burn=1000;
-    for(;visits<65536 && !Tier2TestAccess::decision(trial);++visits) {
+    for(;visits<262144 && !Tier2TestAccess::decision(trial);++visits) {
         c.pc=HEAD; c.regs[1]=0; c.regs[30]=STOP; c.jit_stop_pc=STOP;
         // A colliding owner between every visit prevents a pair from
         // forming; the global attempt budget must still terminate.

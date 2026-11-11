@@ -46,6 +46,15 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (Tier-2 through calls and returns)
+
+- Tier-2 regions can end in a `ret`, leaving through the indirect-branch table, and can follow a `bl` into its callee and
+  back: the matching `ret` becomes a guard on the link register, and a mismatch leaves through it (2026-11-11). Trace blocks
+  end where Tier-1's blocks do, so their trials compare like with like.
+- CoreMark keeps its two CRC regions (14% and 7% less time than Tier-1 in their trials) and runs 1.2% fewer host
+  instructions than Tier-1; three alternating runs were 0.7-2.9% faster, inside run-to-run placement noise.
+- `BIFROST_NO_CALLREGION=1` turns this reach off. New fixture: `jit_tier2_calls` (suite entry `tier2_calls`).
+
 ### Changed (Tier-2 no longer slows Tier-1 code)
 
 - With `BIFROST_TIER2=1` every chained block edge stored the guest PC again, because the trial wrapper read it; CoreMark ran

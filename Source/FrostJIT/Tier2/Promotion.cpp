@@ -124,6 +124,9 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             if (counter != hot_counter_sites_.end())
                 counter->second->hits.store(0, std::memory_order_relaxed);
             tier2_profile_retries.fetch_add(1, std::memory_order_relaxed);
+            if (dbg().tier2_trace_verbose)
+                std::fprintf(stderr, "[tier2] retry pc=0x%llx: a branch on the path has too few samples\n",
+                    (unsigned long long)pc);
             return;
         }
         it->second.tier2_hot_logged = true;
@@ -174,6 +177,9 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                 baseline->second.has_call || baseline->second.has_svc || baseline->second.has_selfloop_slot ||
                 baseline->second.instr_count != b.ir.count) {
                 tier2_profit_rejections.fetch_add(1, std::memory_order_relaxed);
+                if (dbg().tier2_trace_verbose)
+                    std::fprintf(stderr, "[tier2] decline pc=0x%llx: block 0x%llx has no matching Tier-1 baseline\n",
+                        (unsigned long long)pc, (unsigned long long)b.pc);
                 return;
             }
             baseline_graph.push_back({b.pc, baseline->second.fn});
@@ -192,6 +198,9 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             std::chrono::steady_clock::now() - compile_start).count(), std::memory_order_relaxed);
         tier2_code_bytes.fetch_add(code_buf_used_ - region_start, std::memory_order_relaxed);
         const size_t region_bytes = code_buf_used_ - region_start;
+        if (!rfn && dbg().tier2_trace_verbose)
+            std::fprintf(stderr, "[tier2] decline pc=0x%llx: %s\n", (unsigned long long)pc,
+                trace.ok ? "the region compiler refused the trace" : "the trace is unusable");
         if (!rfn || !ensure_code_space(256)) {
             if (tier2_current_monitor_)
                 tier2_current_monitor_->enabled.store(0, std::memory_order_release);

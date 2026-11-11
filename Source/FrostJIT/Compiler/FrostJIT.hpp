@@ -74,7 +74,11 @@ struct Tier2Trace {
         // direct jump or synthetic cap continuation. The compiler identifies
         // inline direct edges and the final back-edge to head_pc.
         std::vector<std::pair<uint64_t, int>> side_exits;
+        // kDynamicExit side exit: leave to the address in this guest register (a RET).
+        int dynamic_exit_reg = -1;
     };
+    // Side-exit target of a RET: a final BR, or the guard a matched RET becomes.
+    static constexpr uint64_t kDynamicExit = ~0ull;
     std::vector<Block> blocks;
     uint64_t head_pc = 0;
     uint64_t total_insts = 0;   // sum of block instruction counts
@@ -92,6 +96,7 @@ struct Tier2RegionPlan {
         uint64_t side_pc;    // taken (side-exit / back-edge) target
         uint64_t pc;         // block start PC (for exit_pc)
         size_t   inst_count; // ARM instructions in this block
+        int dynamic_exit_reg = -1;  // side_pc == Tier2Trace::kDynamicExit: target register
     };
     std::vector<Block> blocks;
     std::vector<IRInst> region_ir;  // loop body

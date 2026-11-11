@@ -368,6 +368,7 @@ UNIT_TESTS=(
     "test_malloc|Tests/Unit/test_malloc.elf||5|malloc test done"
     "test_simd_arith|Tests/Unit/test_simd_arith.elf||10|ALL PASS"
     "tier2_smov|Tests/Unit/jit_tier2_smov.elf||10|ALL PASS|JIT"
+    "tier2_calls|Tests/Unit/jit_tier2_calls.elf||60|jit_tier2_calls: ALL PASS|JIT"
     "memory_guard_address|Tests/Unit/jit_memory_guard_address.elf||15|ALL PASS"
     "guard_stubs|Tests/Unit/jit_guard_stubs.elf||20|ALL PASS"
     "bitfield_regalloc|Tests/Unit/jit_bitfield_regalloc.elf||10|ALL PASS"
@@ -1154,8 +1155,8 @@ run_test() {
     local tmpout tmpin=""
     local -a test_runner=("$EMU" "${EMU_FLAGS[@]}" "${test_command[@]}")
     local -a test_env=("${RUN_ENV[@]}")
-    # This fixture specifically checks region codegen, which is opt-in.
-    [[ "$name" == tier2_smov ]] && test_env+=(BIFROST_TIER2=1)
+    # These fixtures specifically check region codegen, which is opt-in.
+    [[ "$name" == tier2_smov || "$name" == tier2_calls ]] && test_env+=(BIFROST_TIER2=1)
     [[ "$name" == android_service_manager ]] && test_runner=("$EMU" "${EMU_FLAGS[@]}" --android-services "${test_command[@]}")
     # INTERP rows check interpreter semantics the JIT does not have yet
     # (see the row comment); they run under --no-jit in every mode.

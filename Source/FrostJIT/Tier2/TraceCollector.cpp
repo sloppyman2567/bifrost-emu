@@ -29,6 +29,9 @@
 #include <vector>
 #include "FrostJIT/Tier2/Tier2Internal.hpp"
 namespace arm64emu {
+// Set by each Tier-1 compile on this thread; translate_to_ir lowers BL to a
+// jump that sets X30 while it is true (chain-skip), and the walker follows it.
+extern thread_local bool bl_call_disabled_;
 
 // Walks guest code from a hot head along every edge the branch profiles have
 // seen, then keeps the blocks that can get back to the head: the natural loop.
@@ -131,6 +134,11 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
     // Follow fall-through and direct-jump edges. Only a return to the head
     // closes a region loop; other cycles are bounded by the visited set.
     std::vector<uint64_t> visited;
+    // Return addresses of BLs followed into their callee (chain-skip lowers BL
+    // to a jump that sets X30). A RET matching the top continues the trace at
+    // the return address behind a guard; deeper nesting ends the trace.
+    std::vector<uint64_t> returns;
+    constexpr size_t MAX_CALL_DEPTH = 4;
 
     uint64_t cur_pc = head_pc;
     bool trace_ended = false;  // normal termination (RET / B / caps / cold-entry)
@@ -176,11 +184,17 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
 
         uint64_t ip = cur_pc;
         int instr_count = 0;
+        // Trials compare exact Tier-1 blocks, and Tier-1 also ends a block
+        // where another one starts (a RET to a second address creates one):
+        // end this block where the published translation at its start ends.
+        int block_insts = max_block_insts;
+        if (cached != blocks_.end() && !cached->second.is_region && cached->second.instr_count > 0)
+            block_insts = std::min(block_insts, cached->second.instr_count);
         bool block_ended = false;
         bool trace_ends_after_block = false;
         uint64_t next_pc = cur_pc;
 
-        while (!block_ended && instr_count < max_block_insts &&
+        while (!block_ended && instr_count < block_insts &&
                !block_translation_budget_reached(tb.ir, instr_count, g_alloc.next)) {
             if (trace.total_insts + static_cast<uint64_t>(instr_count) >= MAX_TRACE_INSTS) {
                 // Mid-block instruction cap — a normal (bounded) end.
@@ -225,7 +239,7 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
                 aborted = true;
                 break;
             }
-            if (d.cls == InstClass::BL) {
+            if (d.cls == InstClass::BL && !bl_call_disabled_) {
                 if (!no_callregion_ &&
                     lookup_only_locked(ip + static_cast<uint64_t>(d.imm)) != nullptr) {
                     // Call-aware region: a BL is a direct CALL. The callee is
@@ -257,14 +271,61 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
                 break;
             }
 
-            // RET: translate it (it ends the block), then end the trace.
+            // RET: a dynamic exit through its register. One that returns from
+            // a BL followed in this trace instead guards the register against
+            // that return address (flag-neutral: XOR, then a zero test) and
+            // continues there; a mismatch leaves through the register.
             if (d.cls == InstClass::RET) {
+                if (no_callregion_) {  // M1: a RET ends the trace with no exit edge
+                    translate_to_ir(tb.ir, d, ip);
+                    instr_count++;
+                    tb.ir.count = instr_count;
+                    trace.stop_reason = "ret";
+                    trace_ends_after_block = true;
+                    block_ended = true;
+                    break;
+                }
+                if (d.rn == 31) {
+                    trace.stop_reason = "ret_xzr";
+                    aborted = true;
+                    break;
+                }
                 translate_to_ir(tb.ir, d, ip);
                 instr_count++;
                 tb.ir.count = instr_count;
-                trace.stop_reason = "ret";
-                trace_ends_after_block = true;
+                const uint16_t target = tb.ir.insts.back().src1;  // BR target vreg
+                tb.dynamic_exit_reg = d.rn;
                 block_ended = true;
+                if (returns.empty()) {
+                    tb.side_exits.push_back(
+                        {Tier2Trace::kDynamicExit, static_cast<int>(tb.ir.insts.size() - 1)});
+                    trace.stop_reason = "ret";
+                    trace_ends_after_block = true;
+                    break;
+                }
+                const uint64_t expected = returns.back();
+                returns.pop_back();
+                tb.ir.insts.pop_back();
+                const uint16_t constant = load_imm(tb.ir, expected);
+                const uint16_t difference = g_alloc.alloc();
+                tb.ir.insts.push_back(IRInst::make(IROp::XOR, difference, target, constant));
+                BrCondZeroParams guard;
+                guard.cond = 1;  // taken when the register is not the return address
+                guard.target = expected;
+                guard.sf = true;
+                tb.ir.insts.push_back(IRInst::make_brcond_zero(difference, guard, ip));
+                tb.side_exits.push_back(
+                    {Tier2Trace::kDynamicExit, static_cast<int>(tb.ir.insts.size() - 1)});
+                tb.follows_taken = true;  // continuation is hot_successor, not ip + 4
+                tb.hot_successor = expected;
+                next_pc = expected;
+                // A return onto the head or an earlier block cannot continue the
+                // linear path: exit there through the fall-through.
+                if (expected == head_pc ||
+                    std::find(visited.begin(), visited.end(), expected) != visited.end()) {
+                    trace.stop_reason = "ret_join";
+                    trace_ends_after_block = true;
+                }
                 break;
             }
 
@@ -370,6 +431,24 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
                     trace_ends_after_block = true;
                 }
                 block_ended = true;
+                break;
+            }
+            // A BL lowered to a jump (chain-skip): follow it into the callee
+            // like B, remembering where its RET returns.
+            if (d.cls == InstClass::BL && ends && !no_callregion_ &&
+                tb.ir.insts.back().op == IROp::BRCOND_FALLTHRU) {
+                uint64_t target = ip + static_cast<uint64_t>(d.imm);
+                tb.side_exits.push_back(
+                    {target, static_cast<int>(tb.ir.insts.size() - 1)});
+                next_pc = target;
+                block_ended = true;
+                if (target == head_pc || returns.size() >= MAX_CALL_DEPTH ||
+                    std::find(visited.begin(), visited.end(), target) != visited.end()) {
+                    trace.stop_reason = "call_exit";  // a static exit into the callee
+                    trace_ends_after_block = true;
+                } else {
+                    returns.push_back(ip + 4);
+                }
                 break;
             }
             // A disabled in-block call can lower to a block-ending jump.

@@ -68,7 +68,14 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
         const int term_idx = static_cast<int>(b.ir.insts.size()) - 1;
         if (b.side_exits[0].second != term_idx) return false;
         const IRInst& term = b.ir.insts[term_idx];
-        if (term.op == IROp::BRCOND_FALLTHRU) {
+        const bool dynamic = b.side_exits[0].first == Tier2Trace::kDynamicExit;
+        if (dynamic && (b.dynamic_exit_reg < 0 || b.dynamic_exit_reg > 30)) return false;
+        if (term.op == IROp::BR) {
+            // A RET ending the path: the region leaves through its register.
+            if (!dynamic || i + 1 != nblk) return false;
+        } else if (dynamic && term.op != IROp::BRCOND_ZERO) {
+            return false;  // a matched RET's guard is the only other dynamic exit
+        } else if (term.op == IROp::BRCOND_FALLTHRU) {
             if (term.fallthru_params().target != b.side_exits[0].first) return false;
             if (i + 1 < nblk && b.side_exits[0].first != blocks[i + 1].pc)
                 return false;
@@ -141,7 +148,8 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
             region_ir.push_back(c);
         }
         rblocks[i] = {start, region_ir.size() - 1, blocks[i].side_exits[0].first,
-                      blocks[i].pc, static_cast<size_t>(blocks[i].ir.count)};
+                      blocks[i].pc, static_cast<size_t>(blocks[i].ir.count),
+                      blocks[i].dynamic_exit_reg};
     }
 
     // Scalar SSA spans the entire path, including a backedge when retained
@@ -153,8 +161,13 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     bool ssa_region = false;
     if (!dbg().no_ssa && !getenv("BIFROST_NO_OPT")) {
         size_t conditional = 0;
+        // A final BR (RET) is the path's exit, not a conditional side exit.
+        auto conditional_term = [&](const RBlock& b) {
+            const IROp op = region_ir[b.term].op;
+            return op != IROp::BRCOND_FALLTHRU && op != IROp::BR;
+        };
         for (const auto& b : rblocks)
-            conditional += region_ir[b.term].op != IROp::BRCOND_FALLTHRU;
+            conditional += conditional_term(b);
         const size_t exit = nblk + 1;
         size_t side_exit = exit + (last_is_backedge ? 0 : 1);
         std::vector<SSASourceBlock> source(side_exit + conditional);
@@ -164,7 +177,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
             input.ir.insts.assign(region_ir.begin() + rblocks[b].start,
                                   region_ir.begin() + rblocks[b].term + 1);
             input.successors = {b + 1 == nblk ? (last_is_backedge ? 1 : exit) : b + 2};
-            if (region_ir[rblocks[b].term].op != IROp::BRCOND_FALLTHRU)
+            if (conditional_term(rblocks[b]))
                 input.successors.push_back(side_exit++);
         }
         SSAFunction function;
@@ -211,8 +224,12 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     //     the pre-call value). Pure scratch IMM/ALU chains stay hoistable —
     //     they live in the region's own frame slots, which the callee (its own
     //     frame) never touches.
+    // A BR terminating the last block is the region's dynamic exit (a RET):
+    // nothing runs after it, so it is not a call.
     const bool has_call = [&]() {
-        for (const IRInst& inst : region_ir) {
+        for (size_t k = 0; k < region_ir.size(); ++k) {
+            const IRInst& inst = region_ir[k];
+            if (inst.op == IROp::BR && k == rblocks.back().term) continue;
             if (inst.op == IROp::SVC || inst.op == IROp::BR ||
                 inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
                 inst.op == IROp::CALL_INTERP)

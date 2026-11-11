@@ -97,7 +97,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         // so a window ends wherever the workload does and counts towards its
         // arm's pool. Bound total timer calls even when CPU-local slots
         // collide or pools never fill: unproven code stays in Tier-1.
-        const bool exhausted = ++trial.entries >= 32768;
+        const bool exhausted = ++trial.entries >= 131072;
         if (ns && work && cpu.running && monitor->enabled.load(std::memory_order_acquire)) {
             slot.window_ns += ns;
             slot.window_work += work;

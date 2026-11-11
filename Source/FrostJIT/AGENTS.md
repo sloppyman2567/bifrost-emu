@@ -160,6 +160,12 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   (`tier2_settle_locked`), not only the head, or they keep their profiles and PC-storing chain entries. A constituent
   that now translates to another length (Tier-1 splits at block starts compiled since) is instead refreshed with the
   head (`tier2_refresh_queue_`, unsettled, bounded by `tier2_retrains_`).
+- Under chain-skip the trace walker follows a BL into its callee and a matching RET becomes a flag-neutral guard
+  (`XOR` with the return address, `BRCOND_ZERO`) whose taken edge is a dynamic exit; a RET ending the path keeps its `BR`.
+  Both are `Tier2Trace::kDynamicExit` side exits with `dynamic_exit_reg`: the exit commits all state, then reads the
+  register from `cpu.regs[]` and tries the indirect-branch probe. Only a final `BR` is exempt from the planner's call
+  check. Trace blocks end where the published Tier-1 block at their start ends (exact trial baselines).
+  `BIFROST_NO_CALLREGION=1` turns this reach off; single-head policy tests set it.
 - Trial policy constants are `kTier2TrialWindowNs` and `kTier2TrialPairs` (FrostJIT.hpp); `jit_tier2_measure` reads
   them and calibrates its burn loops to one closed window per visit, so change them there, not in the test.
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation

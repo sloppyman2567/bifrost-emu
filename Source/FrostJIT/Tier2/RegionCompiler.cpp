@@ -519,12 +519,14 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         size_t jcc_patch;
         bool   need_cmc;
         uint64_t side_pc;
+        int dynamic_exit_reg;  // side_pc == Tier2Trace::kDynamicExit
     };
     std::vector<Snapshot> cold;  // per non-last block, in order
     RegionSnapshot back_snap;
     bool has_back_snap = false;
     size_t last_jcc = 0;         // last block's taken JCC (patched → Lback)
     bool last_term_uncond = false;  // last block ends in an unconditional `b`
+    bool last_term_dynamic = false; // last block ends in a RET: leave through its register
     bool skip_exit_sections = false;  // uncond back-edge: L_exit/Lback dead
     size_t blk = 0;
     for (size_t i = 0; i < region_ir.size(); i++) {
@@ -589,6 +591,13 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     jcc = emit_jcc_rel32_placeholder(cc);
                     break;
                 }
+                case IROp::BR: {
+                    // A RET ending the path (the planner admits it only there):
+                    // the fall-through exit below leaves through its register.
+                    last_term_dynamic = true;
+                    blk++;
+                    continue;
+                }
                 case IROp::BRCOND_FALLTHRU: {
                     // An internal direct edge is already laid out inline.
                     // Keep register/flag state live across this boundary.
@@ -643,7 +652,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             }
             if (blk + 1 < nblk) {
                 // Non-last block: the taken edge is an ordinary cold exit.
-                cold.push_back({std::move(snap), jcc, need_cmc, rblocks[blk].side_pc});
+                cold.push_back({std::move(snap), jcc, need_cmc, rblocks[blk].side_pc,
+                                rblocks[blk].dynamic_exit_reg});
             } else if (last_is_backedge) {
                 // Last block, back-edge: the taken edge loops to the head.
                 last_jcc = jcc;
@@ -651,7 +661,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                 has_back_snap = true;
             } else {
                 // Last block, no back-edge: its taken edge is a cold exit too.
-                cold.push_back({std::move(snap), jcc, need_cmc, rblocks[blk].side_pc});
+                cold.push_back({std::move(snap), jcc, need_cmc, rblocks[blk].side_pc,
+                                rblocks[blk].dynamic_exit_reg});
             }
             // Fall-through: restore CF so the next inline block body reads the
             // original carry (the branch's cmc was only for its own JCC).
@@ -730,6 +741,15 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         size_t p = emit_jmp_rel32_placeholder();
         shared_exit_patch_offs.push_back(p);
     };
+    // A RET's exit, after every vreg, pin and flag is committed: the target is
+    // the guest register's committed value. As Tier-1's register-branch exit,
+    // try the indirect-branch table first; its misses fall into the shared tail.
+    auto emit_dynamic_exit = [&](int reg) {
+        emit_load_arm(RAX, reg);
+        emit_store(CPU_REG, PC_OFF, RAX);
+        if (chain_skip_enabled() && !dbg().no_chain) emit_indirect_branch_probe();
+        emit_shared_exit_jmp();
+    };
     // Region exits use revocable data cells in both modes. Untracked target
     // constants can execute stale guest instructions after invalidation.
     static const bool no_exitchain_ = (getenv("BIFROST_NO_EXITCHAIN") != nullptr);
@@ -765,7 +785,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         flush_all_vregs();
         emit_flush_all_pins();
         if (exit_pc != trace.head_pc) emit_completion_credit();
-        if (!emit_chainout_exit(exit_pc)) {
+        if (last_term_dynamic) {
+            emit_dynamic_exit(rblocks[nblk - 1].dynamic_exit_reg);
+        } else if (!emit_chainout_exit(exit_pc)) {
             emit_mov_imm_to_rax(exit_pc);
             emit_shared_exit_jmp();
         }
@@ -833,6 +855,11 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         materialize_flags_to_pstate();
         flush_all_vregs();
         emit_flush_all_pins();
+        if (c.side_pc == Tier2Trace::kDynamicExit) {
+            // A matched RET's guard failed: the register holds another address.
+            emit_dynamic_exit(c.dynamic_exit_reg);
+            continue;
+        }
         const bool feedback = native_feedback && c.side_pc != trace.head_pc;
         size_t needs_cpp = 0;
         if (feedback) {

@@ -16,6 +16,40 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Tier-2 through calls and returns (2026-11-11)
+
+Under chain-skip a guest `BL` is a jump that sets X30 and `RET` an indirect exit, and Tier-2 stopped at both: a BL ended the
+trace as an unsupported terminator, and a trace ending in RET was refused (its `BR` counted as a call). CoreMark's `crcu32`
+(GCC inlined `crc16` and `crcu8` into it: 201 instructions in seven blocks) and `core_bench_state`'s caller loops stopped there.
+
+- **A RET can end a region.** Its block keeps the `BR`; the side exit is `Tier2Trace::kDynamicExit` with the register in
+  `dynamic_exit_reg`. The fall-through exit commits every vreg, pin and flag, loads the register's committed value into RAX,
+  stores `cpu.pc` and tries Tier-1's indirect-branch probe (`emit_indirect_branch_probe`) before the shared exit tail. The
+  planner no longer counts that final `BR` as a call, so such a region keeps pins and chain-skip.
+- **The walker follows a BL into its callee** like a direct jump, pushing the return address (at most four deep). A RET that
+  matches the top becomes `IMM ret; XOR t = xN ^ ret; BRCOND_ZERO t != 0`: a flag-neutral guard whose taken edge is a dynamic
+  exit through xN, while the trace continues at the return address (`follows_taken`, `hot_successor`). A callee already in the
+  trace, or deeper nesting, ends the trace with a static exit into it.
+- **Trace blocks end where the published Tier-1 block does.** Tier-1 splits a block at every block start compiled since; a
+  RET that sometimes returns past its call site creates one, and a trace block spanning it had no matching baseline, so the
+  trial was declined.
+- `BIFROST_NO_CALLREGION=1` turns all of this off, as it already did native call regions. `test_jit_tier2_measure.sh` and
+  `test_jit_tier2_feedback.sh` set it: their single-head scenarios end in RET, which now forms its own neighbouring region.
+- `BIFROST_TIER2_TRACE_VERBOSE` also names the previously silent outcomes: an unprofiled retry, a baseline mismatch, an
+  unusable trace and a compiler refusal.
+
+`Tests/Unit/jit_tier2_calls.c` (suite entry `tier2_calls`, run with `BIFROST_TIER2=1`) checks a loop whose callee moves its
+return address every 1024th call (the guard must leave through X30), nested calls, the same callee twice per iteration and a
+branchy leaf; it passes under QEMU, on Tier-1 and with Tier-2, where the guard loop's region is kept at 0.69 of Tier-1's time.
+
+CoreMark, one pinned core, 200,000 iterations, Tier-2 against Tier-1 on the same build: the two CRC regions ending in RET are
+kept (`crcu32` 0.86, `0x403404` 0.93, twelve wins each) with the list region and `0x401d70`; 197.51 G host instructions against
+199.83 G (-1.2%); three alternating pairs ran 0.7%, 1.4% and 2.9% more iterations per second (cycles -0.8 to -2.3%), each
+inside the placement range, so a small gain rather than a measured one. `core_state_transition` still gains nothing: it loops
+over each token's characters, so a trace through the call meets a back-edge that is not the head. All CRCs match Tier-1.
+Checked: the five `test_jit_tier2_*` scripts, the 47 `jit_`/`tier2` unit tests in both modes (`jit_disk_cache` fails under
+Tier-2 by design) and `make verify` (106 differential fixtures). No game was run with Tier-2.
+
 ## Tier-2 without a Tier-1 tax, and leaner region code (2026-11-11)
 
 `BIFROST_TIER2=1` made CoreMark slower although it kept no region: 219.37 G host instructions against 199.83 G (+9.8%),
@@ -47,8 +81,7 @@ list-search region (`0x400f58`, two blocks, about 18 host operations per iterati
 (medians 0.89 to 0.95, 11 or 12 of 12 wins) and rejects `0x401010` (1.05 to 1.06, no wins), where the old rule flipped
 between runs. Tier-2 then executes 197.70 G (-1.1% against Tier-1); its cycles were +2.9% and -0.8% in two runs, inside the
 placement range measured below, so no speedup is claimed. The loop chases a linked list, so it runs close to load latency and
-fewer operations buy little; that is an inference from the ratios, not a measured latency. CoreMark's other hot loops are outside Tier-2's reach: the matrix
-inner loop is a single block (trials need two), and `core_state_transition` ends in `ret`.
+fewer operations buy little; that is an inference from the ratios, not a measured latency. The matrix inner loop stays outside Tier-2's reach: it is a single block (trials need two).
 
 Checked: the five `test_jit_tier2_*` scripts, the 45 `jit_` unit tests with and without `BIFROST_TIER2=1` (`jit_disk_cache`
 fails under Tier-2 by design: the persistent cache is off then), `make verify` (105 differential fixtures, 11 threaded
@@ -1959,7 +1992,8 @@ the MT transition revoke them. Code and cells remain allocated for in-flight
 CPUs. Empty cells return to dispatch until a replacement target is compiled.
 
 Admission requires at least two cached native Tier-1 blocks with exactly the
-trace's block boundaries, without calls or retained self-loop frames. Branch
+trace's block boundaries, without calls or retained self-loop frames; the walker
+ends each trace block where the published Tier-1 block at its start ends. Branch
 profiles choose candidate paths; code size no longer predicts execution payoff.
 A head that reaches its entry count is timed over a second window, and goes on
 only if it runs at least 10 million guest instructions per second through its
@@ -2016,7 +2050,7 @@ leave out what happens after an exit, so a candidate that leaves badly can pass
 here and still lose over the whole program. Slower or noisy
 candidates restore Tier-1; a measured loss can schedule a smaller prefix after
 fresh profiling, following the bounded size search described above. A trial
-with insufficient evidence after 128 pools or 32768 visits also restores Tier-1. Version
+with insufficient evidence after 128 pools or 131072 visits also restores Tier-1. Version
 checks and normal revocation protect
 in-flight references across mapping changes and ST-to-MT transition.
 
