@@ -47,6 +47,16 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     // a fault on either half restarts the whole instruction from unchanged state.
     DecodedInst decoded;
     if (!decode(decoded, guest_memory_->fetch_inst(fetch_address(inst.arm_pc)))) return false;
+    // LDR S/D whose FP register is cached: the load writes its XMM directly
+    // (fp_load_). The slot is claimed here, before the guard captures the
+    // layout, exactly as the FMOV_G2F's own preparation would.
+    int fp_reg = -1, fp_xmm = -1;
+    if (load && defer_guards_ && vec_cache_active_ && cur_insts_ && cur_op_index_ < fp_load_.size() &&
+        fp_load_[cur_op_index_] && cur_op_index_ + 1 < cur_insts_->size()) {
+        fp_reg = (*cur_insts_)[cur_op_index_ + 1].dest & 31;
+        if (vec_allocator_active_) vec_prepare_operands(0, uint32_t(1) << fp_reg);
+        fp_xmm = vec_xmm(fp_reg);
+    }
 
     memory_fault_stub_ = 0;
     clobber_flags(false, /*rdx_only=*/true);
@@ -111,7 +121,16 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         // registered site with the real stub offset before publication.
         memory_fault_stub_ = 1;
         guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
-        if (load) {
+        if (load && fp_xmm >= 0) {
+            // movss/movsd xmm, [WIN_REG + effective]: zeroes the bits above, as
+            // the MOVQ of the FMOV_G2F did. A fault leaves the XMM untouched.
+            register_memory_fault_site();
+            emit_byte(mp.width == 8 ? 0xF2 : 0xF3);
+            emit_byte(rex(false, fp_xmm >= 8, effective >= 8, true));
+            emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_sib_win(fp_xmm, effective, 0);
+            fp_load_done_ = cur_op_index_;
+        } else if (load) {
             // LDRSB/LDRSH/LDRSW: one sign-extending load (see sext_load_).
             const bool sext = inst.op == IROp::LOAD_MEM && cur_op_index_ < sext_load_.size() &&
                               sext_load_[cur_op_index_];
@@ -125,6 +144,11 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         memory_fault_stub_ = 0;
         deferred_guards_.push_back(std::move(guard));
         pinned_host_regs_ = saved_pins;
+        if (fp_load_done_ == cur_op_index_) {
+            // After the capture: the fault exit sees the layout before the load.
+            vec_cache_mark_dirty(fp_reg);
+            if (fp_cache_active_) fp_zero_hi(fp_reg);  // the lo-only cache keeps v_hi in memory
+        }
         return true;
     }
     // Inline (Tier-2): the open gate or a clear flag jumps over the checks.

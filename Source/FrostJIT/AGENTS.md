@@ -95,6 +95,11 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
 - A scalar FP load or store is `LOAD_MEM` + `FMOV_G2F` or `FMOV_F2G` + `STORE_MEM`,
   never `SIMD_LDST`: that op is not cache-compatible and would veto the XMM cache
   for the whole block. Vd is written only after the load, so a fault leaves it intact.
+  In Tier-1 a 4- or 8-byte `LOAD_MEM` read only by the next `FMOV_G2F` (`fp_load_`) loads straight into the
+  register's cached XMM with `movss`/`movsd` (a registered fault site, slot claimed before the guard captures
+  the layout) and the `FMOV_G2F` emits nothing. A scalar result written to a cached XMM leaves every bit above it
+  zero (`xorps; movss` or `movq`), so the vector cache's `fp_zero_hi` is free that op (`fp_hi_zeroed_vreg_`, reset
+  per op). Keep `v_hi` zero stores as `pxor; movsd`: an immediate `mov qword` made scalar loops ~30% slower.
 - Native saturating integer SIMD must set FPSR.QC like the interpreter
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.
@@ -227,7 +232,7 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   `vreg_home_[v]` only for `v <= max_vreg_`. Exits taken before a pin's rewrite store every mapped architectural
   register, not only dirty ones (`emit_memory_fault_exit`, `emit_fp_interp_step`); keep that for any new mid-block exit.
   `jit_selfloop_pins` and `jit_fp_ldst_cache` cover both.
-- `sext_load_`, `lazy_load_` and `scaled_add_` are Tier-1 pre-scan requests, cleared for Tier-2. The guarded load reports
+- `sext_load_`, `fp_load_`, `lazy_load_` and `scaled_add_` are Tier-1 pre-scan requests, cleared for Tier-2. The guarded load reports
   what it emitted in `sext_load_done_` (other load paths zero-extend, so the `SEXT` must not trust the request). A lazy
   `LOAD_REG` and an unshifted `SHL` result exist for one op only: `ensure_vreg` and the compile loop materialize a lazy
   load for any reader but the `SUBS` it was left for, and the loop and the ALU emitter materialize the shift for anything

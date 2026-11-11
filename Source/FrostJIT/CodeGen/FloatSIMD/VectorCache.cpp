@@ -886,32 +886,26 @@ void FrostJIT::fp_store_operand(int xmm, int vreg, bool is_double) {
     uint8_t prefix = is_double ? 0xF2 : 0xF3;
     int xd = vec_xmm(vreg);
     if (xd >= 0) {
+        // The pinned XMM gets the result with every bit above it zero, as an
+        // ARM scalar write leaves the register (interp write_fp_s/write_fp_d):
+        // single `xorps xd,xd; movss xd,xmm`, double `movq xd,xmm`. The vector
+        // cache keeps v_hi in the XMM, so fp_zero_hi then has nothing to do.
+        // Callers pass scratch XMM0-2 and pins are XMM3-15, so xmm != xd.
         if (!is_double) {
-            // Single: canonicalize xd[63:32] = 0 (interp write_fp_s zeroes
-            // v_lo high). A bare movss MERGES and leaves stale high bits,
-            // which writeback stores to memory (verify v_lo mismatch).
-            // Scratch t in XMM0-2 minus the src — pins live in XMM3-15 and
-            // scalar scratch is XMM0-2, so t never collides with xd.
-            int t = (xmm == 0) ? 1 : 0;  // t < 8 always; t != xmm always
-            emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
-            emit_byte(modrm(3, t & 7, t & 7));                       // pxor t,t
+            emit_rex_if_needed(xd >= 8, false, xd >= 8);
+            emit_byte(0x0F); emit_byte(0x57);
+            emit_byte(modrm(3, xd & 7, xd & 7));                     // xorps xd,xd
             emit_byte(0xF3);
-            emit_rex_if_needed(false, false, xmm >= 8);
+            emit_rex_if_needed(xd >= 8, false, xmm >= 8);
             emit_byte(0x0F); emit_byte(0x10);
-            emit_byte(modrm(3, t & 7, xmm & 7));                     // movss t,xmm
-            emit_rex_if_needed(xd >= 8, false, false);
-            emit_byte(0x0F); emit_byte(0x28);
-            emit_byte(modrm(3, xd & 7, t & 7));                      // movaps xd,t
+            emit_byte(modrm(3, xd & 7, xmm & 7));                    // movss xd,xmm
         } else {
-            // movsd/movss xmm_d, xmm  (reg-reg; REX for XMM8-15).
-            // 0F 11 is the STORE form: ModRM.reg = SOURCE, ModRM.rm = DEST,
-            // so the REX.R/REX.B extension bits follow the source (xmm) /
-            // dest (xd) respectively — NOT xd/xmm.
-            emit_byte(prefix);
-            emit_rex_if_needed(xmm >= 8, false, xd >= 8);
-            emit_byte(0x0F); emit_byte(0x11);
-            emit_byte(modrm(3, xmm & 7, xd & 7));
+            emit_byte(0xF3);
+            emit_rex_if_needed(xd >= 8, false, xmm >= 8);
+            emit_byte(0x0F); emit_byte(0x7E);
+            emit_byte(modrm(3, xd & 7, xmm & 7));                    // movq xd,xmm
         }
+        if (!fp_cache_active_) fp_hi_zeroed_vreg_ = vreg;
         vec_cache_mark_dirty(vreg);
     } else {
         emit_byte(prefix);
@@ -927,13 +921,17 @@ void FrostJIT::fp_store_operand(int xmm, int vreg, bool is_double) {
     }
 }
 
-// Zero v_hi[vreg] via pxor xmm0,xmm0 + movsd [hi],xmm0 — no GPR touched.
-// v_hi is never cached in fp-cache blocks, so this is always a memory
-// store. MUST run after the lo result is stored.
+// Zero v_hi[vreg]. A vector-cache XMM holds v_hi in bits 127:64, already
+// zero when this op's fp_store_operand wrote it; otherwise (the lo-only
+// fp cache, or an unpinned register) it is `pxor xmm0, xmm0; movsd [hi],
+// xmm0`. Keep that pair: `mov qword [hi], 0` is one instruction fewer but
+// made two scalar-FP kernels (cull, collide) about 30% slower in cycles
+// (2026-11-10, cause not established). MUST run after the lo result is stored.
 void FrostJIT::fp_zero_hi(int vreg) {
     const int pinned = vec_xmm(vreg);
     if (pinned >= 0 && !fp_cache_active_) {
-        emit_vec_zero_upper(pinned);
+        if (fp_hi_zeroed_vreg_ != vreg) emit_vec_zero_upper(pinned);
+        fp_hi_zeroed_vreg_ = -1;
         vec_cache_mark_dirty(vreg);
         return;
     }

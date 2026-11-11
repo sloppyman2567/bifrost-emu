@@ -1085,6 +1085,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     {
         const size_t n = ir_block.insts.size();
         sext_load_.assign(n, 0);
+        fp_load_.assign(n, 0);
+        fp_load_done_ = SIZE_MAX;
         lazy_load_.assign(n, 0);
         scaled_add_.assign(n, 0);
         sext_load_done_ = SIZE_MAX;
@@ -1115,6 +1117,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 if (nx.sext_bits() != width * 8) continue;
                 if (width == 4 || ((width == 1 || width == 2) && zext32_fused_[i + 1]))
                     sext_load_[i] = 1;
+            } else if (op.op == IROp::LOAD_MEM && nx.op == IROp::FMOV_G2F && nx.src1 == op.dest &&
+                       (op.load_mem_params().width == 4 || op.load_mem_params().width == 8)) {
+                fp_load_[i] = 1;  // the emitter checks the cache
             } else if (op.op == IROp::LOAD_REG && !op.is_fp_load() && op.src1 <= 30 &&
                        nx.op == IROp::SUBS && nx.src2 == op.dest && nx.src1 != op.dest &&
                        (nx.dest == 0 || (nx.dest > 32 && nx.dest < 4096 && nx.dest != op.dest &&
@@ -1224,6 +1229,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     fold_ahead_kind_.clear();
     zext32_fused_.clear();
     sext_load_.clear();
+    fp_load_.clear();
+    fp_load_done_ = SIZE_MAX;
     lazy_load_.clear();
     scaled_add_.clear();
     sext_load_done_ = SIZE_MAX;

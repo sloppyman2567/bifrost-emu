@@ -16,6 +16,29 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Scalar FP loads into cached XMMs and cheaper scalar results (2026-11-10)
+
+An IBS sample of the engine-shaped kernels (ops inside translated code, each classified by operand pattern) found real
+FP arithmetic at only 2-6% of executed ops in the FP kernels; XMM copies were 14-21%, `v_lo`/`v_hi` traffic 5-24%,
+`pxor` zeroing 3-13% and NaN checks 4-10%. Two changes take the cheap part:
+
+- **`LDR S/D` loads into the XMM.** It was a guarded GPR load, `movq xmm, gpr` and a `v_hi` zero store. A 4- or 8-byte
+  `LOAD_MEM` read only by the next `FMOV_G2F` (`fp_load_`) is now `movss`/`movsd xmm, [mem]` into the register's cached
+  XMM; the `FMOV_G2F` emits nothing. The access is a registered fault site and the slot is claimed before the guard
+  captures its layout, so a fault leaves the XMM untouched and the exit sees the state before the load.
+- **Scalar results.** A single result reached its cached XMM as `pxor t; movss t, x; movaps xd, t`; it is now
+  `xorps xd, xd; movss xd, x`, and a double result `movq xd, x` instead of a merging `movsd`, so in the vector cache
+  (where the XMM holds `v_hi`) the following zero of bits 127:64 is dropped.
+
+Not changed, measured: storing the `v_hi` zero as `mov qword [hi], 0` instead of `pxor; movsd` is one instruction fewer
+but made cull and collide about 30% slower in cycles (cause not established). NaN checks were left alone: dropping one
+exactly needs a result that cannot be NaN or whose payload nothing can observe, and in the five FP kernels 3 of 277 checked
+ops qualify (results that are only compared still meet a load, which can fault, before they are overwritten).
+
+Against the previous commit (best of two runs, 350 minus 50 frames, pinned): host instructions -5.4% skinning, -5.9%
+particles and audiomix, -7.3% cull, -5.8% collide; cycles -6.3% audiomix, -2.4% cull, -2.3% collide, -1.1% skinning,
+particles unchanged. No game was measured.
+
 ## NZCV stored as the `lahf` image (2026-11-10)
 
 `cpu.pstate` held NZCV in the architectural layout (N=31, Z=30, C=29, V=28) plus a JIT carry-convention bit 27. Every exit

@@ -50,7 +50,14 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         // These ops move data between cpu.regs[] and cpu.v_lo[]/v_hi[]
         // using direct memory access through CPU_REG (RBX).
         // No CALL_INTERP needed — pure memory moves through RAX.
-        case IROp::FMOV_G2F:    emit_fmov_helper(/*dir=*/0, /*field=*/0, inst.dest, inst.src1, inst.dest); return true;
+        case IROp::FMOV_G2F:
+            // The guarded load before it already loaded the XMM (fp_load_).
+            if (fp_load_done_ != SIZE_MAX && fp_load_done_ + 1 == cur_op_index_) {
+                fp_load_done_ = SIZE_MAX;
+                return true;
+            }
+            emit_fmov_helper(/*dir=*/0, /*field=*/0, inst.dest, inst.src1, inst.dest);
+            return true;
         case IROp::FMOV_F2G:    emit_fmov_helper(/*dir=*/1, /*field=*/0, inst.src1, inst.src1, inst.dest); return true;
         case IROp::FMOV_G2FHI:  emit_fmov_helper(/*dir=*/0, /*field=*/1, inst.dest, inst.src1, inst.dest); return true;
         case IROp::FMOV_FHI2G:  emit_fmov_helper(/*dir=*/1, /*field=*/1, inst.src1, inst.src1, inst.dest); return true;

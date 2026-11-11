@@ -209,6 +209,7 @@ thread_local FrostJIT::DispatchStats FrostJIT::tls_dispatch_stats_;
 // emit_load_mem / emit_store_mem live in X86Emitter.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
+    fp_hi_zeroed_vreg_ = -1;
     auto compile = [&]() {
         if (!vec_allocator_active_) return compile_ir_inst_body(inst);
         VectorEffects effects;

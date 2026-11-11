@@ -188,6 +188,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         fold_ahead_kind_.assign(n, 0);
         zext32_fused_.clear();  // Tier-1 only (BlockCompiler pre-scan)
         sext_load_.clear();     // likewise, with their per-compile state: an
+        fp_load_.clear();
+        fp_load_done_ = SIZE_MAX;
         lazy_load_.clear();     // abandoned Tier-1 compile may have left it set
         scaled_add_.clear();
         sext_load_done_ = SIZE_MAX;

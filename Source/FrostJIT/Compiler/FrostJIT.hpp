@@ -2078,6 +2078,12 @@ private:
     // emitting that form (the other load paths zero-extend). Tier-1 only.
     std::vector<uint8_t> sext_load_;
     size_t sext_load_done_ = SIZE_MAX;
+    // fp_load_[i] = 1: op i is a 4- or 8-byte LOAD_MEM whose only reader is the
+    // FMOV_G2F at i + 1 (LDR S/D). When the destination is in the vector cache
+    // the guarded load is `movss/movsd xmm, [mem]` straight into its XMM and
+    // sets fp_load_done_ = i; the FMOV_G2F then emits nothing. Tier-1 only.
+    std::vector<uint8_t> fp_load_;
+    size_t fp_load_done_ = SIZE_MAX;
     // lazy_load_[i] = 1: op i is a LOAD_REG read only by the discarded SUBS
     // (a CMP) at i + 1, as its second operand. The load then emits nothing
     // and the compare reads cpu.regs[] as a memory operand. lazy_load_vreg_
@@ -2252,6 +2258,9 @@ private:
     // vregs 0-31 are guest GPRs, so the FP operands use the raw ARM reg
     // indices (0-31) directly, never allocator vregs.
     bool fp_cache_active_ = false;
+    // fp_store_operand zeroed this pinned register's bits 127:64 in the current op (vector
+    // cache only), so the op's fp_zero_hi emits nothing. Reset at every op.
+    int fp_hi_zeroed_vreg_ = -1;
     // Returns the host XMM reg pinning guest vector `vreg`, or -1.
     int  vec_xmm(int vreg) const {
         return (vec_cache_active_ && vreg >= 0 && vreg < 32)
