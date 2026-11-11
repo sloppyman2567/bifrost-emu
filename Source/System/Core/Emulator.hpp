@@ -291,6 +291,8 @@ public:
     // False when `tid` is not a task of this process.
     bool set_task_comm(int tid, const std::string& name);
     void inherit_task_comm(int parent_tid, int child_tid);
+    // The leader and every guest thread that has not finished (/proc/self/task).
+    std::vector<int> task_ids();
     // Guest umask (tracked separately from host for sandbox isolation
     // and JIT verify-mode correctness).
     // Linux do_group_exit: exit_group or a fatal default signal on ANY

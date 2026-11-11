@@ -52,6 +52,13 @@ names the library, and ASTC transcoding about four times faster in a real game.
   (2026-11-11): the first step towards an Android Zygote, whose children never exec. A child ran a warmed loop at the
   parent's speed (0.0051 s against 0.0050 s) where it used to take 0.57 s.
 
+### Fixed (/proc/self/task lists the guest's threads)
+
+- `/proc/self/task` was the host's directory, so a guest saw the emulator's own thread ids (including the JIT's
+  preemption ticker, which stays after the guest's threads end) instead of its guest thread ids (2026-11-11). It now lists
+  the leader and the guest threads that are still running, as Linux does; an exited thread leaves at once. ART's
+  `ZygoteHooks.preFork` waits for a single task there, so a Zygote under the JIT would have waited forever.
+
 ### Fixed (the library card after an update)
 
 - Installing a new version over an installed app left its library card on the old version and install date (Battle Cats

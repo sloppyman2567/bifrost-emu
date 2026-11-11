@@ -38,7 +38,9 @@
 - Task names belong to the Emulator: `/proc/self/comm` is the leader's,
   `/proc/self/task/<tid>/comm` (and `/proc/thread-self/comm`, rewritten in
   `open_guest_at`) reads and renames one guest TID with `comm_write`
-  semantics. Guest TIDs are not host TIDs; never pass those through.
+  semantics. `/proc/self/task` lists the leader and the unfinished guest threads (`Emulator::task_ids`), each a
+  directory holding `comm`; ART's `ZygoteHooks.preFork` waits on that count. Guest TIDs are not host TIDs; never pass
+  those through.
 - `/proc/meminfo` and the `sysinfo` syscall come from one view, `Core/GuestMemoryView` (the host's real free and
   available memory under a total capped at 8 GiB, `BIFROST_GUEST_MEMORY_MB`): never hard-code figures, because
   Android's `MemoryInfo`, Unity and Chromium size themselves from them. Keep toybox's first eight field names in order.

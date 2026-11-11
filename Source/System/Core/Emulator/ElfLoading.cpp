@@ -266,6 +266,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     vfs_.set_task_comm_hooks(
         [this](int tid, std::string& name) { return find_task_comm(tid, name); },
         [this](int tid, const std::string& name) { return set_task_comm(tid, name); });
+    vfs_.set_task_list_provider([this] { return task_ids(); });
     // Open the ELF through the BIFROST_ROOT sandbox: `path` is the guest
     // path (what /proc/self/exe reports), so the host file is the remapped
     // "$BIFROST_ROOT/<path>". Relative paths pass through unchanged, so

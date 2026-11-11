@@ -143,6 +143,7 @@ static std::vector<DirNode::Entry> proc_self_entries() {
         {"limits",  0x1 /*DT_REG*/},
         {"mounts",  0x1 /*DT_REG*/},
         {"fd",      0x4 /*DT_DIR*/},
+        {"task",    0x4 /*DT_DIR*/},
     };
 }
 // ── Yggdrasil::open_procfs ────────────────────────────────────────────
@@ -359,6 +360,24 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
             comm.push_back('\n');
             return comm;
         }, flags);
+    }
+    // ── /proc/self/task → this process's guest threads ──────────────
+    // Guest TIDs, never the host's: a host listing names the emulator's own threads (JIT ticker, helpers), and ART's
+    // ZygoteHooks.preFork waits until only one task is left. An exited thread leaves the listing at once.
+    if (path == "/proc/self/task" && task_list_provider_) {
+        std::vector<DirNode::Entry> entries;
+        for (int tid : task_list_provider_()) entries.push_back({std::to_string(tid), 0x4 /*DT_DIR*/});
+        return serve_dir("/proc/self/task", std::move(entries), flags);
+    }
+    if (path.compare(0, 16, "/proc/self/task/") == 0 && path.find('/', 16) == std::string::npos && task_list_provider_) {
+        const std::string digits = path.substr(16);
+        const auto tids = task_list_provider_();
+        if (digits.empty() || digits.size() > 9 || digits.find_first_not_of("0123456789") != std::string::npos ||
+                std::find(tids.begin(), tids.end(), std::stoi(digits)) == tids.end()) {
+            *err_out = -ENOENT;
+            return nullptr;
+        }
+        return serve_dir(path, {{"comm", 0x1 /*DT_REG*/}}, flags);
     }
     // ── /proc/self/task/<tid>/comm → one thread's name ──────────────
     // Bionic pthread_setname_np/getname_np use it for other threads.

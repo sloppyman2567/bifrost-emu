@@ -284,6 +284,8 @@ public:
         task_comm_get_ = std::move(get);
         task_comm_set_ = std::move(set);
     }
+    // Live guest TIDs of this process (leader first) for the /proc/self/task listing.
+    void set_task_list_provider(std::function<std::vector<int>()> cb) { task_list_provider_ = std::move(cb); }
     // ── Guest cwd tracking (chdir/getcwd) ──────────────────────────
     // The Emulator registers the guest's current working directory
     // here so the getcwd syscall can return the real path (the host
@@ -337,6 +339,7 @@ private:
     std::function<std::string()> comm_provider_;
     std::function<bool(int, std::string&)> task_comm_get_;
     std::function<bool(int, const std::string&)> task_comm_set_;
+    std::function<std::vector<int>()> task_list_provider_;
     std::function<std::string()> cwd_getter_;
     std::function<bool(const std::string&)> cwd_setter_;
     std::string guest_cwd_ = "/";

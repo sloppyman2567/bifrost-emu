@@ -776,6 +776,20 @@ bool Emulator::find_task_comm(int tid, std::string& name) const {
     name = guest_comm_;
     return true;
 }
+std::vector<int> Emulator::task_ids() {
+    std::vector<int> tids{vfs_.self_pid()};
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        for (const auto& gt : threads_)
+            if (!gt->finished.load(std::memory_order_acquire)) tids.push_back(gt->tid);
+    }
+    std::lock_guard<std::mutex> g(sdl_threads_mu_);
+    for (const auto& entry : sdl_threads_)
+        if (!entry.second->finished.load(std::memory_order_acquire)) tids.push_back(static_cast<int>(entry.second->tid));
+    for (const auto& st : retired_sdl_threads_)
+        if (!st->finished.load(std::memory_order_acquire)) tids.push_back(static_cast<int>(st->tid));
+    return tids;
+}
 void Emulator::inherit_task_comm(int parent_tid, int child_tid) {
     std::string name = task_comm(parent_tid);
     std::lock_guard<std::mutex> g(comm_mu_);

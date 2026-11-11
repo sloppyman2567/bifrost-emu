@@ -13,7 +13,9 @@
 //   8. PR_GET_TID_ADDRESS works
 //   9. Task names are per thread: PR_SET_NAME names the caller, threads
 //      inherit their creator's name, /proc/self/comm is the leader's and
-//      /proc/self/task/<tid>/comm reads and renames one thread
+//      /proc/self/task/<tid>/comm reads and renames one thread; /proc/self/task
+//      lists the guest's own threads (not the emulator's host threads) and drops
+//      a thread once it has exited
 //
 // Build: make cross SRC=Tests/Apps/test_prctl.c OUT=Tests/Apps/test_prctl.elf
 // Run:   ./bifrost-emu Tests/Apps/test_prctl.elf
@@ -25,6 +27,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <dirent.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 
@@ -59,6 +62,23 @@ static void* name_worker(void* arg) {
     pthread_barrier_wait(&names_barrier);
     prctl(PR_GET_NAME, worker_renamed, 0, 0, 0);
     return NULL;
+}
+
+// Tasks listed by /proc/self/task, or -1; *found_a / *found_b report the two TIDs.
+static int list_tasks(long a, long b, int *found_a, int *found_b) {
+    DIR *dir = opendir("/proc/self/task");
+    if (!dir) return -1;
+    int count = 0;
+    *found_a = *found_b = 0;
+    for (struct dirent *entry; (entry = readdir(dir));) {
+        if (entry->d_name[0] == '.') continue;
+        long tid = strtol(entry->d_name, NULL, 10);
+        *found_a |= tid == a;
+        *found_b |= tid == b;
+        count++;
+    }
+    closedir(dir);
+    return count;
 }
 
 int main(void) {
@@ -136,6 +156,10 @@ int main(void) {
         pthread_create(&thread, NULL, name_worker, NULL);
         pthread_barrier_wait(&names_barrier);
         CHECK(strcmp(worker_inherited, "leader") == 0, "new thread inherits its creator's name");
+        long leader_tid = syscall(SYS_gettid);
+        int has_leader, has_worker;
+        CHECK(list_tasks(leader_tid, worker_tid, &has_leader, &has_worker) == 2 && has_leader && has_worker,
+              "/proc/self/task lists exactly the leader and the worker");
         CHECK(strcmp(worker_self_comm, "worker\n") == 0, "/proc/thread-self/comm shows the caller");
         memset(name, 0, sizeof(name));
         prctl(PR_GET_NAME, name, 0, 0, 0);
@@ -151,6 +175,8 @@ int main(void) {
         pthread_barrier_wait(&names_barrier);
         pthread_join(thread, NULL);
         CHECK(strcmp(worker_renamed, "renamed") == 0, "a task comm write renames that thread");
+        CHECK(list_tasks(leader_tid, worker_tid, &has_leader, &has_worker) == 1 && has_leader && !has_worker,
+              "/proc/self/task drops a joined thread");
         errno = 0;
         CHECK(open("/proc/self/task/999999/comm", O_RDONLY) < 0 && errno == ENOENT,
               "an unknown task has no comm");
