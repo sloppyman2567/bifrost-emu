@@ -100,6 +100,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Android/test_android_provisioning.py  # asgard setup: the steps a tree lacks and running them (fake commands), tied to the Makefile and the installer
 ./Scripts/Android/test_android_gamepad.py     # the library's gamepad control: pad states to actions, repeat, stick, keys per widget (offline)
 ./Scripts/Android/test_download_progress.py    # asgard-setup's download progress lines (terminal and piped), and resumable fetch against a local HTTP server
+./Scripts/Android/test_file_digests.py         # launch-time file hashes are reused only while size, mtime, ctime and inode are unchanged (same-size edit with mtime restored, replacement, recent file, unusable cache)
 ./Scripts/Android/test_asgard_stale_broker.py  # a broker an upgrade left running: restarted when idle, refused when busy; realm stop --force; the realm idle timeout (an idle realm ends, an attached app keeps it, a control request restarts the clock, 0 and a bad value, an emulator without the option); a broker that cannot start reports its exit and output (both start paths)
 ./Scripts/Android/test_asgard_process_host.py   # service children carry --asgard-service-parent and die with a killed supervisor (real emulator, plus a control)
 make test-shader-index-conversion               # the int() rewrite glCompileShader retries a rejected ES 3.x source with; gles_uint_index (run_tests.sh) checks it through the thunk on the host driver

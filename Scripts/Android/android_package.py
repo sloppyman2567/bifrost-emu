@@ -27,6 +27,7 @@ import android_settings
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
 import android_media as media
+import file_digests
 API = 35
 PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+")
 RESERVED = {
@@ -49,11 +50,7 @@ MAX_EXPANDED_TOTAL = 2 * MAX_TOTAL
 
 
 def digest(path):
-    value = hashlib.sha256()
-    with path.open("rb") as stream:
-        for data in iter(lambda: stream.read(1024 * 1024), b""):
-            value.update(data)
-    return value.hexdigest()
+    return file_digests.digest(path)
 
 
 def snapshot_input(source, destination):
@@ -150,13 +147,25 @@ def manifest_contract(path, aapt2):
 
 
 @contextmanager
-def app_lock(directory, blocking=True):
+def app_lock(directory, blocking=True, on_busy=None):
+    """on_busy: called when a non-blocking lock is taken; if it returns True (it asked the holder to finish), the
+    lock is waited for, up to 30 s."""
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".install.lock").open("a+b") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         except BlockingIOError:
-            raise ValueError("App is busy: " + directory.name) from None
+            if on_busy is None or not on_busy():
+                raise ValueError("App is busy: " + directory.name) from None
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise ValueError("App is busy: " + directory.name) from None
+                    time.sleep(0.05)
         yield
 
 
@@ -624,7 +633,9 @@ def launch(package, state, emu, no_jit=False, window_plugin=None, frames=0,
         raise ValueError("Invalid package name")
     app = state / package
     from android_sessions import Session, app_id
-    with app_lock(app, blocking=False):
+    from android_managed import cancel_optimizer
+    # A finished session may still be compiling the app for this launch's benefit: stop it rather than refuse.
+    with app_lock(app, blocking=False, on_busy=lambda: cancel_optimizer(app / "managed")):
         metadata = json.loads((app / "package.json").read_text())
         # Installed before installs were refused for this.
         preflight.require_arm64(abi for report in metadata.get("packages", []) for abi in report.get("abis", []))

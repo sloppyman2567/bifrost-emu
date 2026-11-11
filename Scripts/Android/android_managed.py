@@ -23,6 +23,7 @@ import threading
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
+import file_digests
 import android_framework
 import android_google
 import android_microg
@@ -629,8 +630,7 @@ class DnsProxy:
 
 
 def file_hash(path):
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+    return file_digests.digest(path)
 
 
 def build_launcher(output=ROOT / "build/android-managed-launcher", extra_sources=()):
@@ -804,51 +804,21 @@ def retain_dexopt(managed, old, fresh, identity, metadata, code, guest_env):
     return key, bool(saved.get("failed"))
 
 
-def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
-    """ART Service's install/background dexopt of the base APK (artd/artd.cc).
+class OptimizationCancelled(Exception):
+    """A launch asked the after-session optimizer to stop (SIGUSR1)."""
 
-    profman merges the current profile into the reference profile; dex2oat then
-    writes <code>/oat/arm64/base.{odex,vdex,art}. Without a reference profile the
-    image's speed-profile install filter degrades to verify, as on a device.
-    Split APK code stays with ART's JIT. Caller holds the package lock.
-    """
-    package = metadata["package"]
-    apk = code + "/base.apk"
-    current = f"/data/misc/profiles/cur/0/{package}/primary.prof"
-    reference = f"/data/misc/profiles/ref/{package}/primary.prof"
-    oat = code + "/oat/arm64"
 
-    def run(binary, *args, timeout):
-        return run_guest_tool(root, emu, guest_env, no_jit, binary, *args, timeout=timeout)
+DEXOPT_OUTPUTS = ("base.odex", "base.vdex", "base.art")
 
-    profile = root / reference.lstrip("/")
-    if (root / current.lstrip("/")).is_file() and (root / current.lstrip("/")).stat().st_size:
-        # profman locks an existing reference by path; artd creates it first.
-        profile.touch(exist_ok=True)
-        merge = run("/apex/com.android.art/bin/profman", "--profile-file=" + current,
-                    "--reference-profile-file=" + reference, "--apk=" + apk, "--dex-location=" + apk,
-                    timeout=300)
-        # 0 success, 1 merged, 2 small delta, 7 empty/outdated (profman_result.h).
-        if merge.returncode not in (0, 1, 2, 7):
-            print(f"profman failed ({merge.returncode}); keeping the previous reference profile",
-                  file=sys.stderr)
-    profiled = profile.is_file() and profile.stat().st_size > 0
-    compiler_filter = "speed-profile" if profiled else "verify"
-    runtime = managed / "runtime.json"
-    stamp = dexopt_key(json.loads(runtime.read_text())["identity"], root, metadata, code, guest_env)
-    outputs = [root / oat.lstrip("/") / name for name in ("base.odex", "base.vdex", "base.art")]
-    saved = read_dexopt_stamp(managed)
-    # A failure is not retried until an input changes.
-    if valid_dexopt(saved, stamp, root, code, file_hash(runtime)):
-        if saved.get("schema") != 2:
-            save_dexopt_stamp(managed, stamp, root, code, bool(saved.get("failed")))
-        return
+
+def dex2oat_arguments(stamp, apk, oat, reference, profiled):
     properties = stamp["properties"]
     arguments = ["--dex-file=" + apk, "--dex-location=" + apk, "--oat-file=" + oat + "/base.odex",
                  "--instruction-set=arm64",
                  "--instruction-set-variant=" + properties.get("dalvik.vm.isa.arm64.variant", "generic"),
                  "--instruction-set-features=" + properties.get("dalvik.vm.isa.arm64.features", "default"),
-                 "--compiler-filter=" + compiler_filter, "--class-loader-context=" + stamp["context"],
+                 "--compiler-filter=" + ("speed-profile" if profiled else "verify"),
+                 "--class-loader-context=" + stamp["context"],
                  "--compilation-reason=" + ("bg-dexopt" if profiled else "install")]
     for option in ("Xms", "Xmx"):
         if properties.get("dalvik.vm.dex2oat-" + option):
@@ -862,15 +832,43 @@ def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
         if properties.get("dalvik.vm.dex2oat-resolve-startup-strings"):
             arguments.append("--resolve-startup-const-strings=" +
                              properties["dalvik.vm.dex2oat-resolve-startup-strings"])
+    return arguments
+
+
+def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
+    """ART Service's install dexopt of the base APK (artd/artd.cc), on the launch path.
+
+    It compiles only when no valid artifacts exist for the committed reference profile (first launch, a new
+    framework, APK or property set): profile merges and the recompiles they call for run after the session
+    (optimize_after_session), as ART Service's background dexopt does on a device, so a launch never waits for
+    them. Without a reference profile the image's speed-profile install filter degrades to verify. Split APK
+    code stays with ART's JIT. Caller holds the package lock.
+    """
+    package = metadata["package"]
+    apk = code + "/base.apk"
+    reference = f"/data/misc/profiles/ref/{package}/primary.prof"
+    oat = code + "/oat/arm64"
+    profile = root / reference.lstrip("/")
+    profiled = profile.is_file() and profile.stat().st_size > 0
+    runtime = managed / "runtime.json"
+    stamp = dexopt_key(json.loads(runtime.read_text())["identity"], root, metadata, code, guest_env)
+    outputs = [root / oat.lstrip("/") / name for name in DEXOPT_OUTPUTS]
+    saved = read_dexopt_stamp(managed)
+    # A failure is not retried until an input changes.
+    if valid_dexopt(saved, stamp, root, code, file_hash(runtime)):
+        if saved.get("schema") != 2:
+            save_dexopt_stamp(managed, stamp, root, code, bool(saved.get("failed")))
+        return
     directory = root / code.lstrip("/")
     mode = directory.stat().st_mode
-    print(f"Compiling {package} ({compiler_filter})", flush=True)
+    print(f"Compiling {package} ({'speed-profile' if profiled else 'verify'})", flush=True)
     try:
         directory.chmod(mode | stat.S_IWUSR)
         (directory / "oat/arm64").mkdir(parents=True, exist_ok=True)
         for path in outputs: path.unlink(missing_ok=True)
         try:
-            result = run("/apex/com.android.art/bin/dex2oat64", *arguments, timeout=3600)
+            result = run_guest_tool(root, emu, guest_env, no_jit, "/apex/com.android.art/bin/dex2oat64",
+                                    *dex2oat_arguments(stamp, apk, oat, reference, profiled), timeout=3600)
             failed = result.returncode != 0
         except subprocess.TimeoutExpired:
             result, failed = None, True
@@ -883,6 +881,102 @@ def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
     finally:
         directory.chmod(mode)
     save_dexopt_stamp(managed, stamp, root, code, failed)
+
+
+def optimizer_pid_file(managed):
+    return managed / "optimizing.pid"
+
+
+def cancel_optimizer(managed):
+    """Ask a finished session's optimizer to stop, so a new launch can take the package lock. True if one runs."""
+    try:
+        pid = int(optimizer_pid_file(managed).read_text().strip())
+        os.kill(pid, signal.SIGUSR1)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def optimize_after_session(managed, root, metadata, code, emu, guest_env, no_jit=False):
+    """ART Service's background dexopt (artd MergeProfiles + Dexopt), run once the app has exited.
+
+    profman merges the session's current profile into a staged copy of the reference profile; only when it asks
+    for a compile (kCompile) is the app recompiled, with the previous artifacts set aside. The staged profile and
+    the new record are committed together after a successful compile, so a failure or a cancellation (a launch
+    sends SIGUSR1) leaves the previous profile, artifacts and record exactly as the next launch expects them.
+    Caller holds the package lock.
+    """
+    package = metadata["package"]
+    if metadata.get("system") or "base.apk" not in metadata["files"]: return
+    apk = code + "/base.apk"
+    current = f"/data/misc/profiles/cur/0/{package}/primary.prof"
+    reference = f"/data/misc/profiles/ref/{package}/primary.prof"
+    staged = reference + ".next"
+    oat = code + "/oat/arm64"
+    current_path, reference_path, staged_path = (root / name.lstrip("/") for name in (current, reference, staged))
+    if not current_path.is_file() or not current_path.stat().st_size: return
+    pid_file = optimizer_pid_file(managed)
+    directory = root / code.lstrip("/")
+    output_dir = root / oat.lstrip("/")
+    aside = output_dir / ".previous"
+    mode = directory.stat().st_mode
+
+    def cancelled(signum, frame): raise OptimizationCancelled()
+    previous_handler = signal.signal(signal.SIGUSR1, cancelled)
+    pending = pid_file.with_name("." + pid_file.name)
+    pending.write_text(f"{os.getpid()}\n")
+    pending.replace(pid_file)
+    moved = False
+    try:
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        if reference_path.is_file(): shutil.copy2(reference_path, staged_path)
+        else: staged_path.touch()  # profman locks an existing reference by path; artd creates it first
+        merge = run_guest_tool(root, emu, guest_env, no_jit, "/apex/com.android.art/bin/profman",
+                               "--profile-file=" + current, "--reference-profile-file=" + staged,
+                               "--apk=" + apk, "--dex-location=" + apk, timeout=300)
+        # profman_result.h: 1 kCompile; 0, 2 (small delta) and 7 (empty) leave the compiled code as it is.
+        if merge.returncode != 1:
+            if merge.returncode not in (0, 2, 7):
+                print(f"profman failed ({merge.returncode}); keeping the previous reference profile", file=sys.stderr)
+            return
+        runtime = managed / "runtime.json"
+        stamp = dexopt_key(json.loads(runtime.read_text())["identity"], root, metadata, code, guest_env)
+        print(f"Compiling {package} (speed-profile) for its next launch", flush=True)
+        directory.chmod(mode | stat.S_IWUSR)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(aside, ignore_errors=True)
+        aside.mkdir()
+        for name in DEXOPT_OUTPUTS:
+            if (output_dir / name).exists(): (output_dir / name).rename(aside / name)
+        moved = True
+        result = run_guest_tool(root, emu, guest_env, no_jit, "/apex/com.android.art/bin/dex2oat64",
+                                *dex2oat_arguments(stamp, apk, oat, staged, True), timeout=3600)
+        if result.returncode != 0:
+            print(f"dex2oat failed; {package} keeps its previous code:\n"
+                  f"{result.stderr.decode(errors='replace')[-2000:]}", file=sys.stderr)
+            return
+        for name in DEXOPT_OUTPUTS:
+            if (output_dir / name).exists(): (output_dir / name).chmod(0o444)
+        staged_path.replace(reference_path)
+        save_dexopt_stamp(managed, dexopt_key(json.loads(runtime.read_text())["identity"], root, metadata, code,
+                                              guest_env), root, code, False)
+        shutil.rmtree(aside)
+        moved = False
+    except OptimizationCancelled:
+        print(f"Optimizing {package} was cancelled by a new launch", flush=True)
+    except subprocess.TimeoutExpired:
+        print(f"Optimizing {package} timed out; it keeps its previous code", file=sys.stderr)
+    finally:
+        signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+        if moved:
+            for name in DEXOPT_OUTPUTS:
+                (output_dir / name).unlink(missing_ok=True)
+                if (aside / name).exists(): (aside / name).rename(output_dir / name)
+            shutil.rmtree(aside, ignore_errors=True)
+        staged_path.unlink(missing_ok=True)
+        if directory.exists(): directory.chmod(mode)
+        pid_file.unlink(missing_ok=True)
+        signal.signal(signal.SIGUSR1, previous_handler)
 
 
 def prepare_root(app, metadata, code, installed_root, framework, art, adapters, dex, media_mask=15):
@@ -922,13 +1016,19 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     if root.is_dir() and stamp.is_file():
         saved = json.loads(stamp.read_text())
         if saved.get("identity") == identity:
+            # A regular file lies inside the root when its directory does: resolve each directory once (resolving
+            # every one of the ~5,000 files took half a second per launch).
+            root_real, directories = root.resolve(), {}
+            def inside(target):
+                real = directories.get(target.parent)
+                if real is None: real = directories[target.parent] = target.parent.resolve()
+                return real == root_real or root_real in real.parents
             for relative, value in saved["immutable"].items():
                 target = root / relative
                 if "link" in value:
                     valid = target.is_symlink() and str(target.readlink()) == value["link"]
                 else:
-                    valid = (not target.is_symlink() and target.is_file() and
-                             target.resolve().is_relative_to(root.resolve()) and
+                    valid = (not target.is_symlink() and target.is_file() and inside(target) and
                              file_hash(target) == value["sha256"])
                 if not valid: raise ValueError("Modified managed runtime file: " + relative)
             backup = managed / "previous-rootfs"
@@ -1094,6 +1194,11 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
             from android_launcher import quit_reason  # an exit with status 0 is silent unless the log says why it quit
             if reason := quit_reason(log_path):
                 print(f"Managed app: {reason} See {log_path}", file=sys.stderr)
+        # What this session taught ART's profile is compiled now, for the next launch, not before it.
+        try:
+            optimize_after_session(app / "managed", root, metadata, code, emu, guest_env, no_jit)
+        except Exception as error:  # the session's own result stands; the next launch checks the code again
+            print(f"Optimizing {metadata['package']} after the session failed: {error}", file=sys.stderr)
         return status if status >= 0 else 128 - status
 
 

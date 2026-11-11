@@ -38,6 +38,12 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   a microG service bind, a GServices query and the chimera lookup. microG's
   `AdRequestService` stub is never bound (`FrameworkServiceRuntime`), so
   Google Mobile Ads uses its local request path; see the runtime guide.
+- Launch path cost (`Scripts/Android`): every SHA-256 goes through `Tools/Android/file_digests.py` (a digest is
+  reused while device, inode, size, mtime and ctime are unchanged; never call `hashlib` on installed files
+  directly). Profile merges and the recompiles they ask for run after the session (`optimize_after_session`),
+  never before a launch; it stages the profile, sets old artifacts aside and commits only after a successful
+  compile, and a launch cancels it through `managed/optimizing.pid` (SIGUSR1) instead of failing on the package
+  lock. `launcher.log` records each phase's duration. `DexoptCacheTests` and `test_file_digests.py` cover it.
 - Accounts: `FrameworkAccounts` is Android 15's AccountManagerService for one
   user, one instance per guest process over `FrameworkAccountStore`'s shared
   JSON file (`/data/system/users/0/bifrost-accounts.json`; lock, atomic replace,

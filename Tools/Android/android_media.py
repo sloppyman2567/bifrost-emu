@@ -15,6 +15,7 @@ import tempfile
 import zipfile
 
 import android_super
+import file_digests
 import download_progress
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -89,8 +90,7 @@ def update_inventory(metadata, manifest, files):
 
 
 def digest(path):
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+    return file_digests.digest(path)
 
 
 def verify_files(files):

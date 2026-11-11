@@ -46,6 +46,16 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (Android apps start sooner)
+
+- Preparing a launch took about 5.5 s for Subway Surfers before the emulator even started: each launch re-hashed
+  about 1.8 GiB of unchanged runtime and package files and ran `profman`, and some launches recompiled the app first
+  (7 s). File hashes are now reused while a file's size, timestamps and inode are unchanged (any write or permission
+  change still causes a full hash), and the profile merge and recompile run after the app exits, for the next launch,
+  as Android's background dexopt does. Preparation is now 0.3-0.65 s, and Subway Surfers showed its game surface about
+  6 s after launch in a test run (2026-11-11). Opening an app while that compile runs cancels it and keeps the
+  previous code. `launcher.log` lists each launch phase's duration.
+
 ### Fixed (Tier-2 region exits, FMOV immediates and profiler statistics)
 
 - A Tier-2 region's side exit whose target had no translation when the region was compiled went back to the dispatcher for

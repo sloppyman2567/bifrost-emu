@@ -2754,6 +2754,53 @@ class DexoptCacheTests(unittest.TestCase):
         (self.work / "dexopt.json").write_text(json.dumps(legacy))
         self.compile(); self.assertEqual(self.compiles, 4)
 
+    def test_profile_merge_and_recompile_run_after_the_session(self):
+        """optimize_after_session: profman merges into a staged reference; only kCompile recompiles, and the profile
+        and the record are committed with the new code. A cancelled or failed compile leaves the old code, profile
+        and record, so the next launch compiles nothing."""
+        self.compile(); self.assertEqual(self.compiles, 1)
+        package = self.metadata["package"]
+        current = self.root / f"data/misc/profiles/cur/0/{package}/primary.prof"
+        reference = self.root / f"data/misc/profiles/ref/{package}/primary.prof"
+        current.parent.mkdir(parents=True); current.write_bytes(b"session profile")
+        outputs = self.root / self.code.lstrip("/") / "oat/arm64"
+        merge = {"code": 1, "dex2oat": None}
+        def tool(root, emu, env, no_jit, binary, *args, timeout):
+            if binary.endswith("profman"):
+                staged = next(a for a in args if a.startswith("--reference-profile-file="))
+                (root / staged.split("=", 1)[1].lstrip("/")).write_bytes(b"merged profile " + str(self.compiles).encode())
+                return subprocess.CompletedProcess([], merge["code"], b"", b"")
+            if merge["dex2oat"] == "cancel": raise self.managed.OptimizationCancelled()
+            self.compiles += 1
+            for name in ("base.odex", "base.vdex", "base.art"):
+                (root / self.code.lstrip("/") / "oat/arm64" / name).write_bytes((name + str(self.compiles)).encode())
+            return subprocess.CompletedProcess([], 1 if merge["dex2oat"] == "fail" else 0, b"", b"")
+        self.mock.stop()
+        self.mock = patch.object(self.managed, "run_guest_tool", side_effect=tool); self.mock.start()
+        optimize = lambda: self.managed.optimize_after_session(self.work, self.root, self.metadata, self.code,
+                                                               Path("/unused"), self.env)
+        # kCompile: new code, then the committed profile; the next launch finds it valid.
+        optimize(); self.assertEqual(self.compiles, 2)
+        self.assertEqual(reference.read_bytes(), b"merged profile 1")
+        self.assertEqual(self.managed.read_dexopt_stamp(self.work)["filter"], "speed-profile")
+        self.compile(); self.assertEqual(self.compiles, 2)
+        # A small delta changes nothing.
+        merge["code"] = 2
+        optimize(); self.assertEqual(self.compiles, 2)
+        self.assertEqual(reference.read_bytes(), b"merged profile 1")
+        # A cancelled or failed compile restores the previous code exactly.
+        before = {path.name: path.read_bytes() for path in outputs.iterdir() if path.is_file()}
+        for outcome in ("cancel", "fail"):
+            merge.update(code=1, dex2oat=outcome)
+            optimize()
+            self.assertEqual({path.name: path.read_bytes() for path in outputs.iterdir() if path.is_file()}, before)
+            self.assertFalse((outputs / ".previous").exists())
+            self.assertEqual(reference.read_bytes(), b"merged profile 1")
+            self.assertFalse(reference.with_name("primary.prof.next").exists())
+            self.assertFalse((self.work / "optimizing.pid").exists())
+            compiles = self.compiles
+            self.compile(); self.assertEqual(self.compiles, compiles)
+
     def test_artifacts_survive_runtime_rebuild_but_not_framework_change(self):
         self.compile()
         fresh = self.work / "fresh"

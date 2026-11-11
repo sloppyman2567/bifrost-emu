@@ -630,14 +630,22 @@ Managed apps also get what installd and ART Service provide on a device.
 `/data/misc/profiles/{cur/0,ref}/<package>` exist and survive runtime
 replacement. The launcher registers the app's code paths with ART
 (`LoadedApk.registerAppInfoToArt`, which `systemMain()` otherwise skips), so
-ART's ProfileSaver and androidx ProfileInstaller write `primary.prof`. Before each
-launch, `dexopt` in `Scripts/Android/android_managed.py` runs the image's
-`profman` and `dex2oat64` under Bifrost, as
+ART's ProfileSaver and androidx ProfileInstaller write `primary.prof`.
+`Scripts/Android/android_managed.py` runs the image's `profman` and `dex2oat64` under Bifrost, as
 [artd](https://android.googlesource.com/platform/art/+/refs/heads/android15-release/artd/artd.cc)
-does. It merges the current profile into the reference profile and writes
-`<code>/oat/arm64/base.{odex,vdex,art}`: `speed-profile` with an app image once
+does, and writes `<code>/oat/arm64/base.{odex,vdex,art}`: `speed-profile` with an app image once
 a reference profile exists, otherwise `verify` (the image's install filter
-without a profile). `managed/dexopt.json` records the compilation inputs:
+without a profile). Before a launch, `dexopt` compiles only when no valid artifacts
+exist for the committed reference profile (the first launch, or a changed input below).
+Profile merges run after the session ends (`optimize_after_session`), as ART Service's
+background dexopt does: `profman` merges the session's current profile into a staged
+`primary.prof.next`, and only when it answers kCompile is the app recompiled, with the
+previous artifacts set aside; the staged profile and the record are committed after a
+successful compile. A failed compile restores the previous code. While it runs the
+supervisor holds the package lock and writes its pid to `managed/optimizing.pid`; a
+launch that finds the lock busy sends that pid SIGUSR1, which cancels the compile the
+same way, and takes the lock. Merging and recompiling before the launch had cost every
+start a `profman` run and some starts a 7 s compile (Subway Surfers). `managed/dexopt.json` records the compilation inputs:
 verified framework/ART image identity, APK contents and location, boot classpath,
 class-loader context, ART properties, compiler filter and reference profile.
 Launcher, microG, media routing and unrelated device-property changes (including
@@ -656,7 +664,15 @@ compiles in about 15 s with `verify` and 25 s with a synthetic 5% profile.
 An install lock and atomic metadata publication keep failed validation from
 replacing the active package. Reinstalling a reordered set is idempotent and
 preserves saves. Launch verifies stored package/runtime/adapter hashes before
-execution. This layout uses Bifrost's VFS root; it is not a validated host
+execution. Every SHA-256 the scripts take goes through `Tools/Android/file_digests.py`,
+which reuses a file's digest while its device, inode, size, modification time and change
+time are unchanged (`~/.cache/bifrost/file-digests.sqlite`; `BIFROST_FILE_DIGEST_CACHE=0`
+hashes everything). Any write, permission or timestamp change moves the change time,
+which an unprivileged process cannot set back, so ordinary modification is still found;
+changes outside the kernel's write path (disk corruption, raw device writes) are found
+only by a full hash after the cache is deleted. Rehashing about 1.8 GiB of unchanged
+runtime and package files was over 2 s of each Subway Surfers launch; its preparation
+went from about 5.5 s to 0.3-0.65 s (2026-11-11). This layout uses Bifrost's VFS root; it is not a validated host
 security sandbox or a complete Android permission/UID model. Concurrent app
 instances share their package's data directories.
 

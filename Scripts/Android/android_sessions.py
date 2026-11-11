@@ -203,6 +203,13 @@ class Session:
 
     def update(self, **changes):
         with self.lock:
+            # The preparation log records how long each launch phase took, for startup-time work.
+            phase = changes.get("phase")
+            if phase is not None and phase != self.data.get("phase"):
+                now = time.monotonic()
+                mark = getattr(self, "phase_started", self.started)
+                print(f"{self.data.get('phase')}: {now - mark:.2f} s", flush=True)
+                self.phase_started = now
             self.data.update(changes)
             publish(self.path, self.data)
             publish(self.directory / "session.json", self.data)
