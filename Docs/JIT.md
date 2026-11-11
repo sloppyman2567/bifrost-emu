@@ -27,20 +27,27 @@ cycles +8.6%. An IBS sample put the difference in the PC store before every chai
   once per entry (helpers in the region may read it); the back-edge jumps past it. `defer_pc_store()` is chain-skip alone.
 - **Every constituent of a region whose trial does not start is settled.** The fired path disables the counters of all trace
   blocks, but a failure before the trial starts settled only the head, so the others kept their edge profiles and the
-  PC-storing chain entry their fire call needs, for the rest of the run. In CoreMark the trial for `0x401f80` never starts:
-  its sampling copy translates to one instruction (`0x401f84` became its own block meanwhile) instead of twelve.
+  PC-storing chain entry their fire call needs, for the rest of the run.
+- **Stale block boundaries are refreshed, not given up on.** Tier-1 ends a block where another block starts, so a block
+  compiled before its neighbour can no longer be reproduced: CoreMark's `0x401f80` translates to one instruction once
+  `0x401f84` has its own block, not the twelve its trace holds, and the trial's sampling copy failed on every attempt. That
+  head and the stale block are now retranslated at the current boundaries without being settled
+  (`tier2_refresh_queue_`, at most twice per head through `tier2_retrains_`), so the head fires again with a current trace;
+  the other constituents are settled.
+- **Trials decide from longer, cheaper windows.** See the trial timing description below: CLOCK_MONOTONIC instead of the
+  thread CPU clock, 100 us pools instead of 10 us, twelve pairs with nine wins instead of eight with six.
 - **Region code.** W-form fusion and the one-instruction `LDRSB/LDRSH/LDRSW` run in regions as in Tier-1
   (`scan_w32_and_sext_loads`, one pre-scan for both; `fp_load_`, `lazy_load_` and `scaled_add_` stay Tier-1-only because
   they need its per-op materializers). `CBZ`/`CBNZ`/`TBZ`/`TBNZ` terminals test the operand where it is held: they copied it
   into RAX first, and `TBZ` used `BTS` on the copy. Region exits store the PC once instead of twice.
 
-CoreMark, one pinned core, same build: Tier-2 now executes +0.6% host instructions (150.83 G against 149.94 G at 150,000
-iterations, scaling with the iteration count) and +2.6% cycles; Tier-1 is unchanged (199.83 G at 200,000). The remaining
-instructions are counters of lukewarm blocks and trial runs; the cycle gap was not resolved and is inside the placement range
-measured below. The list-search region (`0x400f58`, two blocks) went from about 21 to 18 host operations per iteration
-against Tier-1's 27, but its trials measured 0.90 to 1.04 across runs and are usually rejected (keeping needs six of eight
-pairs under 0.97). The loop chases a linked list, so it runs close to load latency and fewer operations buy little; that is
-an inference from these ratios, not a measured latency. CoreMark's other hot loops are outside Tier-2's reach: the matrix
+CoreMark, one pinned core, same build, 200,000 iterations: Tier-1 is unchanged (199.83 G host instructions). Before the trial
+changes Tier-2 executed +0.6% (counters of lukewarm blocks and trial runs) and kept no region; after them it keeps the
+list-search region (`0x400f58`, two blocks, about 18 host operations per iteration against Tier-1's 27) in every run
+(medians 0.89 to 0.95, 11 or 12 of 12 wins) and rejects `0x401010` (1.05 to 1.06, no wins), where the old rule flipped
+between runs. Tier-2 then executes 197.70 G (-1.1% against Tier-1); its cycles were +2.9% and -0.8% in two runs, inside the
+placement range measured below, so no speedup is claimed. The loop chases a linked list, so it runs close to load latency and
+fewer operations buy little; that is an inference from the ratios, not a measured latency. CoreMark's other hot loops are outside Tier-2's reach: the matrix
 inner loop is a single block (trials need two), and `core_state_transition` ends in `ret`.
 
 Checked: the five `test_jit_tier2_*` scripts, the 45 `jit_` unit tests with and without `BIFROST_TIER2=1` (`jit_disk_cache`
@@ -1994,19 +2001,22 @@ early wherever the workload leaves. Real loops leave after a few dozen
 iterations, so no window has to complete: each one adds its time and guest
 instructions to its arm's CPU-local pool. A window that spends its whole quota
 in under 10 us raises the quota, up to 4096, to amortize timing overhead. The
-clock is CLOCK_THREAD_CPUTIME_ID, which measures CPU time consumed by the
-calling host thread, excluding time spent descheduled. A baseline pool closes
-at 10 us and 128 instructions; a candidate pool at 10 us and at least the
-baseline's instructions. A pair compares time per guest instruction.
-Eight pairs must show a median candidate/baseline ratio below 0.97,
-with at least six pairs below 0.97, to select the region. The arms run different
-live work, so a stretch of unusually cheap iterations can skew one pair: the
-median and the six-pair rule limit that, they do not rule it out. Windows also
+clock is CLOCK_MONOTONIC, read through the vDSO in tens of nanoseconds; the
+thread CPU clock used before is a system call costing about as much as a short
+loop visit, which both arms paid per visit and which pulled every ratio towards
+1. A window that loses the CPU becomes an outlier pair. A baseline pool closes
+at 100 us (`kTier2TrialWindowNs`) and 128 instructions; a candidate pool at
+100 us and at least the baseline's instructions: 10 us pools were dominated by
+the switch between the arms' code. A pair compares time per guest instruction.
+Twelve pairs (`kTier2TrialPairs`) must show a median candidate/baseline ratio
+below 0.97, with at least nine pairs below 0.97, to select the region. The arms
+run different live work, so a stretch of unusually cheap iterations can skew one
+pair: the median and the nine-pair rule limit that, they do not rule it out. Windows also
 leave out what happens after an exit, so a candidate that leaves badly can pass
 here and still lose over the whole program. Slower or noisy
 candidates restore Tier-1; a measured loss can schedule a smaller prefix after
 fresh profiling, following the bounded size search described above. A trial
-with insufficient evidence after 128 pools or 8192 visits also restores Tier-1. Version
+with insufficient evidence after 128 pools or 32768 visits also restores Tier-1. Version
 checks and normal revocation protect
 in-flight references across mapping changes and ST-to-MT transition.
 

@@ -18,9 +18,13 @@ namespace arm64emu {
 uint64_t tier2::measured_region_entry(CPU* cpu, Emulator* emu, void* trial) {
     return FrostJIT::running(*emu)->tier2_measure(*cpu, *emu, trial);
 }
-static uint64_t thread_cpu_ns() {
+// CLOCK_MONOTONIC is read through the vDSO (tens of nanoseconds). The thread
+// CPU clock is a system call costing about as much as one short loop visit,
+// which both arms paid per entry, pulling every ratio towards 1. A window that
+// loses the CPU meanwhile is an outlier the median of the pairs discards.
+static uint64_t trial_clock_ns() {
     timespec ts{};
-    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return uint64_t(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
 }
 
@@ -41,7 +45,6 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
     // Never replay guest memory or restore architectural state: each arm runs
     // once on the live workload, so the arms never see identical work: they
     // are compared by time per guest instruction over pools of equal work.
-    // CLOCK_THREAD_CPUTIME_ID excludes scheduler descheduling.
     // Timed arms stay on their private sampling chains: unbind the indirect-
     // branch table so a BR/RET cannot leave the sampled graph mid-window.
     struct Reset {
@@ -61,7 +64,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         : (trial.baseline_chain_sample ? trial.baseline_chain_sample : trial.baseline.chain_entry);
     cpu.jit_tier2_trial_remaining = trial.linear ? 1 : slot.sample_quota;
     cpu.jit_tier2_trial_work = 0;
-    const uint64_t start = thread_cpu_ns();
+    const uint64_t start = trial_clock_ns();
     for (unsigned dispatches = 0; dispatches < 2048; ++dispatches) {
         jit_grant_lease(cpu);
         fn(&cpu, &emu);
@@ -80,7 +83,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
             if (block.first == cpu.pc) { fn = block.second; break; }
         if (!fn) break;
     }
-    const uint64_t end = thread_cpu_ns();
+    const uint64_t end = trial_clock_ns();
     const uint64_t ns = end > start && start ? end - start : 0;
     const uint32_t work = cpu.jit_tier2_trial_work;
     const uint64_t exit = cpu.pc;
@@ -94,7 +97,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         // so a window ends wherever the workload does and counts towards its
         // arm's pool. Bound total timer calls even when CPU-local slots
         // collide or pools never fill: unproven code stays in Tier-1.
-        const bool exhausted = ++trial.entries >= 8192;
+        const bool exhausted = ++trial.entries >= 32768;
         if (ns && work && cpu.running && monitor->enabled.load(std::memory_order_acquire)) {
             slot.window_ns += ns;
             slot.window_work += work;
@@ -102,7 +105,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         if (!trial.linear && quota_spent && ns && ns < 10000 && slot.sample_quota < 4096)
             slot.sample_quota *= 2; // amortize timer cost on very fast loops
         const uint32_t needed = candidate ? slot.baseline_work : 128;
-        if (slot.window_ns >= 10000 && slot.window_work >= needed) {
+        if (slot.window_ns >= kTier2TrialWindowNs && slot.window_work >= needed) {
             ++trial.attempts;
             if (!candidate) {
                 slot.baseline_ns = slot.window_ns;
@@ -116,12 +119,12 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
             slot.window_ns = 0;
             slot.window_work = 0;
         }
-        if (trial.ratios.size() >= 8) {
+        if (trial.ratios.size() >= kTier2TrialPairs) {
             auto ratios = trial.ratios;
             std::sort(ratios.begin(), ratios.end());
-            const double median = (ratios[3] + ratios[4]) / 2;
+            const double median = (ratios[kTier2TrialPairs / 2 - 1] + ratios[kTier2TrialPairs / 2]) / 2;
             const unsigned wins = std::count_if(ratios.begin(), ratios.end(), [](double r) { return r < 0.97; });
-            keep = median < 0.97 && wins >= 6;
+            keep = median < 0.97 && wins >= (3 * kTier2TrialPairs + 3) / 4;
             finish = true;
             if (tier2_trace_enabled())
                 fprintf(stderr, "[tier2] measured head=%llx pairs=%zu candidate/baseline=%.4f wins=%u keep=%d\n",
@@ -209,7 +212,7 @@ void FrostJIT::finish_tier2_trial(Tier2Trial& trial, bool keep) {
         // Recompile later, outside the measured interval, after fresh Tier-1
         // counters and branch profiles warm up. Strictly descending caps bound
         // search without consuming the selected-region phase-change budget.
-        if (shorter && trial.ratios.size() >= 8 &&
+        if (shorter && trial.ratios.size() >= kTier2TrialPairs &&
             tier2_retrains_[trial.monitor->head] < 2 &&
             tier2_code_bytes.load(std::memory_order_relaxed) < 32ull * 1024 * 1024 &&
             tier2_compile_ns.load(std::memory_order_relaxed) < 2000000000ull) {

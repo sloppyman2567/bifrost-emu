@@ -634,6 +634,9 @@ public:
     // the running block. A code change forgets the decision, as it does the profile.
     std::set<uint64_t> tier2_settled_;
     std::vector<uint64_t> tier2_settle_queue_;
+    // Blocks to retranslate at the current block boundaries without settling them: a head whose
+    // trial could not start because a constituent no longer translates to its traced length.
+    std::vector<uint64_t> tier2_refresh_queue_;
     // Retired region blocks and the predecessors retirement forgot, to rebuild at a dispatch boundary.
     std::vector<uint64_t> tier2_rebuild_queue_, tier2_rebuild_sources_;
     std::atomic<bool> tier2_settle_pending_{false};
@@ -1209,6 +1212,11 @@ private:
         bool skips_dead_flag_store = false;
     };
     static_assert(CODE_BUF_SIZE <= UINT32_MAX, "BlockEntry code offsets are 32-bit");
+    // Measured trials: a timing pool closes after kTier2TrialWindowNs and the baseline's work (shorter
+    // pools were dominated by the switch between the arms' code); kTier2TrialPairs pairs decide, keeping
+    // the candidate when their median is under 0.97 and three quarters of them are.
+    static constexpr uint64_t kTier2TrialWindowNs = 100000;
+    static constexpr size_t kTier2TrialPairs = 12;
     struct Tier2Trial {
         Tier2RegionMonitor* monitor = nullptr;
         BlockEntry baseline, candidate_entry;

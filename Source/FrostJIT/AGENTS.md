@@ -157,7 +157,11 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   while they are on, and their checked path compares with the real bound before the
   page flags; other emitters test the flag. Read either at every access, never hoist.
 - A region compile disables the counters of every trace block; if no trial starts, all of them are settled
-  (`tier2_settle_locked`), not only the head, or they keep their profiles and PC-storing chain entries.
+  (`tier2_settle_locked`), not only the head, or they keep their profiles and PC-storing chain entries. A constituent
+  that now translates to another length (Tier-1 splits at block starts compiled since) is instead refreshed with the
+  head (`tier2_refresh_queue_`, unsettled, bounded by `tier2_retrains_`).
+- Trial policy constants are `kTier2TrialWindowNs` and `kTier2TrialPairs` (FrostJIT.hpp); `jit_tier2_measure` reads
+  them and calibrates its burn loops to one closed window per visit, so change them there, not in the test.
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation
   changes atomic target cells, not live instruction bytes; preserve compiler
   locking, invalidation generations and target revocation for Tier-1/Tier-2.

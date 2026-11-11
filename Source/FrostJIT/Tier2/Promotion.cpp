@@ -260,6 +260,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                 ~SamplingCompileGuard() { flag = false; }
             };
             bool samples_ok = true;
+            uint64_t stale_pc = 0;  // a constituent whose translation length changed
             {
                 SamplingCompileGuard sampling(tier2_sampling_compile_);
                 trial->baseline_blocks.clear();
@@ -267,6 +268,9 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                     BlockEntry copy;
                     if (!translate_block(emu, block.pc, &copy) || copy.instr_count != block.ir.count ||
                         copy.has_call || copy.has_svc || copy.has_selfloop_slot) {
+                        // A block start compiled since the traced block was
+                        // translated ends the copy earlier (Tier-1 splits there).
+                        if (copy.fn && copy.instr_count != block.ir.count) stale_pc = block.pc;
                         samples_ok = false;
                         break;
                     }
@@ -291,6 +295,21 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                     mt_edges_[k]->target.store(0, std::memory_order_release);
                 }
                 mt_source_refs_[pc] = old_source_edges;
+                // Stale boundaries: retranslate the head and that block where
+                // Tier-1 now splits, unsettled, so the head fires again with a
+                // trace of the current blocks (at most twice per head).
+                if (stale_pc && tier2_retrains_[pc] < 2) {
+                    ++tier2_retrains_[pc];
+                    settle.decided = false;
+                    for (uint64_t block : settle.constituents)
+                        if (block != pc && block != stale_pc) tier2_settle_locked(block);
+                    tier2_refresh_queue_.push_back(pc);
+                    if (stale_pc != pc) tier2_refresh_queue_.push_back(stale_pc);
+                    tier2_settle_pending_.store(true, std::memory_order_release);
+                    if (tier2_trace_enabled())
+                        fprintf(stderr, "[tier2] refresh head=%llx: block %llx translates to another length\n",
+                            (unsigned long long)pc, (unsigned long long)stale_pc);
+                }
                 return;
             }
             auto* trial_ptr = trial.get();

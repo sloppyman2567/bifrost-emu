@@ -60,6 +60,15 @@ void FrostJIT::tier2_settle_queued(Emulator& emu) {
             if (refs != back_refs_.end()) sources.insert(sources.end(), refs->second.begin(), refs->second.end());
         }
         tier2_settle_queue_.clear();
+        for (uint64_t pc : tier2_refresh_queue_) {
+            const auto block = blocks_.find(pc);
+            if (block == blocks_.end() || block->second.is_region ||
+                std::find(victims.begin(), victims.end(), pc) != victims.end()) continue;
+            victims.push_back(pc);
+            const auto refs = back_refs_.find(pc);
+            if (refs != back_refs_.end()) sources.insert(sources.end(), refs->second.begin(), refs->second.end());
+        }
+        tier2_refresh_queue_.clear();
         tier2_settling_ = true;
         retire_blocks_locked(victims);
         rebuilt.swap(tier2_rebuild_queue_);

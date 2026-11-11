@@ -54,7 +54,12 @@ names the library, and ASTC transcoding about four times faster in a real game.
 - A compiled region whose trial never started left every block but its head instrumented for the rest of the run; all of
   them are settled now.
 - Region code uses Tier-1's W-form fusion and one-instruction sign-extending loads, and `cbz`/`tbz` terminals test their
-  register in place. Tier-2 stays opt-in: CoreMark's regions are still usually rejected, as their loops are latency-bound.
+  register in place.
+- A head whose traced block no longer translates to the same length (Tier-1 split it at a newer block) is retranslated and
+  traced again instead of failing every time.
+- Trials time with the vDSO clock in 100 µs pools and decide on twelve pairs: the old 10 µs pools timed with a system call
+  pulled every ratio towards 1, so CoreMark's list region was kept or rejected at random. It is now kept in every run and
+  CoreMark executes 1.1% fewer host instructions than Tier-1, with cycles within noise. Tier-2 stays opt-in.
 
 ### Changed (ASTC textures load faster)
 
