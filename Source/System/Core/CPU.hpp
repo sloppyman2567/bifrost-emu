@@ -75,7 +75,8 @@ public:
     // stores it in three instructions and reloads it with `add al, 0x7f; sahf`:
     // N = bit 15 (SF), Z = bit 14 (ZF), bit 8 = x86 CF = NOT ARM C (the borrow
     // convention of a subtraction), V = bit 0. Other bits are don't-care (lahf
-    // also copies AF, PF and the always-set bit 1). C++ uses nzcv()/set_nzcv()
+    // also copies AF, PF and the always-set bit 1, and the JIT stores all of
+    // EAX, so bits 31:16 hold whatever RAX had). C++ uses nzcv()/set_nzcv()
     // or the flag accessors, never the raw value, except to save and restore it.
     uint32_t nzcv_host = kHostC;
     bool     running = true;

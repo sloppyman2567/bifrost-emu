@@ -481,7 +481,10 @@ void FrostJIT::emit_materialize_flags(bool from_sub, bool keep_rax) {
     if (!from_sub) emit_byte(0xF5);                     // cmc
     emit_byte(0x9F);                                    // lahf
     emit_byte(0x0F); emit_byte(0x90); emit_byte(0xC0);  // seto al
-    emit_byte(0x66); emit_byte(0x89); emit_modrm_disp(RAX, CPU_REG, NZCV_OFF);  // mov [nzcv], ax
+    // A 32-bit store (bits 31:16 are don't-care): every reader loads at least
+    // this dword, and a load wider than the store it depends on cannot be
+    // forwarded (a 16-bit store made bytecode-VM loops about twice as slow).
+    emit_byte(0x89); emit_modrm_disp(RAX, CPU_REG, NZCV_OFF);  // mov [nzcv], eax
     if (keep_rax) emit_pop(RAX);
 }
 // Load NZCV from cpu.nzcv_host into host flags in SUB convention:

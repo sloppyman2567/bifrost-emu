@@ -25,7 +25,7 @@ rewrites the flags before anything can fault, and most successors start with a l
 show the flags of the faulting instruction), so the pack stayed on most edges.
 
 The field is now `CPU::nzcv_host`, the image `lahf; seto al` leaves in AX: N = bit 15, Z = bit 14, bit 8 = x86 CF = NOT ARM
-C, V = bit 0, other bits don't-care. A pack is `lahf; seto al; mov [nzcv], ax`, with a `cmc` first when the producer's CF is
+C, V = bit 0, other bits don't-care. A pack is `lahf; seto al; mov [nzcv], eax`, with a `cmc` first when the producer's CF is
 the ARM carry (additions, logical ops); a reload is `mov eax, [nzcv]; add al, 0x7f; sahf` and clobbers only RAX. Nothing is
 skipped, so faults stay precise. One-flag `BRCOND` tests read the bit in memory (C as "CF bit clear"); the two-flag
 pstate arithmetic of 2026-11-08 is gone, since the reload is cheaper. `FP_CMP`, `FCCMP` and `CCMP` store constants converted
@@ -43,7 +43,13 @@ Host instructions (`perf stat -e instructions:u`, one run each, against the buil
 | `bench_dispatch` | 33.66 G | 32.86 G | -2.4% |
 | `bench_mips`, `bench_matrix` | | | under 0.1% |
 
-Run times and games were not measured. Following unconditional and compare branches in the dead-flag scan was measured first
+The store is 32 bits wide on purpose: a first version stored AX, and every reader's 32-bit load then missed store forwarding,
+which made a bytecode VM kernel 1.8x and a hash kernel 2.4x slower in cycles while executing fewer instructions.
+
+On the engine-shaped kernels of 2026-11-07 (one frame each, cycles per frame from a 350-frame minus a 50-frame run, pinned
+to one core, one run each, against the loop-pin build): audio mixing -16%, hash -9%, culling -6%, a bytecode VM -5%,
+collision -3%; skinning and particles unchanged within noise; matmul and anim are too short per frame to read. No game was
+measured. Following unconditional and compare branches in the dead-flag scan was measured first
 and rejected: it would have removed 3-5% of the remaining packs. `jit_flags_exit_dead` section K faults on a successor's first
 load after CMP, ADDS and TST and checks the signal frame's NZCV (dropping the `cmc` fails it); `jit_msr_nzcv`, `jit_fcmp_flags`,
 `jit_ccmp` and `jit_branch_flags` cover the conversions and the memory tests.

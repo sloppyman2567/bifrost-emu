@@ -53,7 +53,8 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   `clobber_flags` skip the store; every flag setter must clear it, and only public
   Tier-1 compiles use it (`host_flags_match_pstate()`). NZCV lives in `CPU::nzcv_host` as the
   `lahf; seto al` image (N bit 15, Z bit 14, bit 8 = x86 CF = NOT ARM C, V bit 0):
-  `emit_materialize_flags` adds a `cmc` for ADD-convention producers and clobbers RAX only, and
+  `emit_materialize_flags` adds a `cmc` for ADD-convention producers, stores all of EAX (a narrower
+  store than a reader's load misses store forwarding) and clobbers RAX only, and
   `emit_load_flags_from_pstate` (`add al, 0x7f; sahf`) clobbers RAX only. A constant NZCV goes
   through `host_from_arm_nzcv`; C++ uses `nzcv()`/`set_nzcv()`, never the raw bits. A BRCOND with
   its flags in memory tests one flag as a bit and reloads RFLAGS for the others.
