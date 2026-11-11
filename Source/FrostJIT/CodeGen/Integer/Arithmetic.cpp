@@ -921,115 +921,130 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             }
             return 0;
         case IROp::CCMP: {
-            // CCMP/CCMN: if cond then set flags from (rn - rm) [CCMP]
-            //            or (rn + rm) [CCMN]; else set flags to imm nzcv.
-            // inst.width = nzcv field (4 bits), inst.cond = ARM cond,
-            // inst.flags_op = 1 for CCMP (sub), 0 for CCMN (add).
+            // CCMP/CCMN: if cond then NZCV = flags of rn - rm [CCMP] or rn + rm
+            // [CCMN], else NZCV = the instruction's immediate. Both paths leave
+            // the result in host RFLAGS (flags_in_host_) for the consumer, with
+            // the operands wherever the allocator holds them: no fixed RAX/RCX
+            // homes and no NZCV store. Every allocation happens before the
+            // branch, so both paths end with the same register state; the
+            // instructions between the condition and the jcc are flag-neutral
+            // moves.
             const CcmpParams cp = inst.ccmp_params();
-            bool is_sub = cp.is_sub;
-            uint8_t nzcv = cp.nzcv & 0xF;
-            // Compute x86 cc (true when ARM cond is TRUE).
-            bool need_cmc = false;
-            uint8_t cc = resolve_arm_cond_with_carry(cp.cond, need_cmc);
-            // Ensure flags in host.
+            const bool is_sub = cp.is_sub;
+            const bool is_32 = !cp.sf;
+            const bool always = (cp.cond & 0xE) == 0xE;  // AL and NV are both true
+            // A single-flag condition tests its bit of cpu.nzcv_host when the
+            // flags are in memory (BRCOND's form; the stored C bit is NOT ARM C).
+            uint32_t direct_mask = 0;
+            bool direct_true_if_set = false;
             if (!flags_in_host_) {
-                // emit_load_flags_from_pstate only clobbers
-                // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
-                // vregs cached in R8/R9/R11/R12/R13/R15.
-                // No pushfq/popfq: see BRCOND comment for rationale.
-                constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
-                flush_dirty_host_regs(FLAGS3);
-                flush_scratch_host_regs(FLAGS3);
+                switch (cp.cond & 0xF) {
+                    case 0: direct_mask = kHostZ; direct_true_if_set = true;  break;  // EQ
+                    case 1: direct_mask = kHostZ; direct_true_if_set = false; break;  // NE
+                    case 2: direct_mask = kHostC; direct_true_if_set = false; break;  // CS
+                    case 3: direct_mask = kHostC; direct_true_if_set = true;  break;  // CC
+                    case 4: direct_mask = kHostN; direct_true_if_set = true;  break;  // MI
+                    case 5: direct_mask = kHostN; direct_true_if_set = false; break;  // PL
+                    case 6: direct_mask = kHostV; direct_true_if_set = true;  break;  // VS
+                    case 7: direct_mask = kHostV; direct_true_if_set = false; break;  // VC
+                    default: break;
+                }
+            }
+            if (!flags_in_host_ && !always && !direct_mask) {
+                // Two-flag conditions reload RFLAGS; the load clobbers only RAX.
+                flush_dirty_host_regs(1u << RAX);
+                flush_scratch_host_regs(1u << RAX);
                 emit_load_flags_from_pstate();
-                // emit_load_flags_from_pstate sets x86 CF = ARM C XOR from_sub.
-                // Normalize to SUB convention (x86 CF = NOT ARM C) so the
-                // default arm_cond_to_x86() mapping works correctly for ALL
-                // conditions (CS/CC/HI/LS included) regardless of whether
-                // the flags originally came from ADD or SUB. Without this
-                // normalization, CCMP after ADDS would use the wrong Jcc
-                // for the CC/CS condition (taking the wrong branch), causing
-                // pstate divergences like jit=0x8000000 ref=0x88000000
-                // (JIT skipped the compare; interpreter did it).
-                invalidate_host_regs(FLAGS3);
-                flags_in_host_ = true; flags_match_pstate_ = false;
-                flags_from_sub_ = true;  // CF is now in SUB convention
+                invalidate_host_regs(1u << RAX);
+                flags_in_host_ = true;
+                flags_from_sub_ = true;
             }
-            if (need_cmc) emit_byte(0xF5);
-            // Load src1 (rn) → RAX, src2 (rm) → RCX.
-            // Use force_two_vregs_to for proper aliasing/eviction handling.
-            // The old ensure_vreg + mov pattern could lose src1's value when
-            // the second ensure_vreg evicted RAX under register pressure.
-            if (inst.src1 == 32 && inst.src2 == 32) {
-                emit_mov_imm32_zext(RAX, 0);
-                emit_mov_imm32_zext(RCX, 0);
-            } else if (inst.src1 == 32) {
-                force_vreg_to_reg(inst.src2, RCX);
-                emit_mov_imm32_zext(RAX, 0);
-            } else if (inst.src2 == 32) {
-                force_vreg_to_reg(inst.src1, RAX);
-                emit_mov_imm32_zext(RCX, 0);
-            } else {
-                force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
-            }
-            // CCMP clobbers RAX, RCX, RDX (via emit_materialize_flags on the
-            // compare path, and via emit_mov_imm32_zext(RDX,...) on the else
-            // path). force_two_vregs_to handled RAX/RCX eviction, but RDX
-            // may still hold a live vreg (e.g., new_sp from a prior ADD).
-            // Spill it before clobbering. Without this, the vreg in RDX is
-            // lost — its value is only in the host reg, and the CCMP
-            // overwrites it. This was the root cause of the FWD crash on
-            // `toybox ls /` (v37 = new_sp was in RDX, lost to CCMP, then
-            // STORE_MEM [v37+0x40] used garbage as the base address).
-            flush_invalidate_host_regs((1u << RDX) | (1u << RAX) | (1u << RCX));
-            // jcc do_compare (if cond TRUE, do the compare)
-            size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);
-            // --- else path: cond FALSE, NZCV = the instruction's immediate ---
-            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(static_cast<uint32_t>(nzcv) << 28));
-            emit_store32(CPU_REG, NZCV_OFF, RDX);
-            // Jump to end.
-            size_t jmp_to_end = emit_jmp_rel32_placeholder();
-            // --- cond TRUE path: do the compare ---
-            size_t compare_off = code_buf_used_;
-            // which computes the x86 Sign Flag from bit 63 instead of
-            // bit 31. For 32-bit operations like `ccmp w3, #2`, if the
-            // result is e.g. 0xFFFFFFFD (w3=0xFFFFFFFF, w3-2), the 64-bit
-            // sub gives SF=0 (positive) while the 32-bit sub gives SF=1
-            // (negative). This caused the ARM N flag to be wrong, leading
-            // to incorrect conditional branches and eventually crashes
-            // in programs that use 32-bit ccmp (e.g., curl --version).
-            bool is_32bit_ccmp = !cp.sf;
-            if (is_sub) {
-                if (is_32bit_ccmp) {
-                    // 32-bit: sub eax, ecx (no REX.W)
-                    bool need_rex = (RAX >= 8) || (RCX >= 8);
-                    if (need_rex) emit_byte(rex(false, RCX>=8, false, RAX>=8));
-                    emit_byte(0x29); emit_byte(modrm(3, RCX&7, RAX&7));
-                } else {
-                    emit_sub_reg(RAX, RCX);
-                }
-            } else {
-                if (is_32bit_ccmp) {
-                    bool need_rex = (RAX >= 8) || (RCX >= 8);
-                    if (need_rex) emit_byte(rex(false, RCX>=8, false, RAX>=8));
-                    emit_byte(0x01); emit_byte(modrm(3, RCX&7, RAX&7));
-                } else {
-                    emit_add_reg(RAX, RCX);
+            bool need_cmc = false;
+            const uint8_t cc = direct_mask ? (direct_true_if_set ? 5 /*JNE: set*/ : 4 /*JE: clear*/)
+                             : always ? 0 : resolve_arm_cond_with_carry(cp.cond, need_cmc);
+            // Operands. A constant second operand (the #imm form) folds into
+            // the instruction; the fold-lookahead pre-scan (BlockCompiler.cpp)
+            // skips its mov under exactly these conditions.
+            bool use_imm = false;
+            int32_t imm = 0;
+            if (inst.src2 == 32) {
+                use_imm = true;
+            } else if (inst.src1 != inst.src2) {
+                auto cit = jit_consts_.find(inst.src2);
+                if (cit != jit_consts_.end() && vreg_last_use_this_op(inst.src2)) {
+                    const int64_t c = static_cast<int64_t>(cit->second);
+                    if (is_32 || static_cast<int64_t>(static_cast<int32_t>(c)) == c) {
+                        use_imm = true;
+                        imm = static_cast<int32_t>(c);
+                        kill_vreg(inst.src2);
+                    }
                 }
             }
-            // Materialize flags to pstate.
-            emit_materialize_flags(is_sub);
-            size_t end_off = code_buf_used_;
-            // Patch jumps.
-            int32_t rel_compare = static_cast<int32_t>(compare_off - (jcc_to_compare + 6));
-            patch_jcc_rel32(jcc_to_compare, rel_compare);
-            int32_t rel_end = static_cast<int32_t>(end_off - (jmp_to_end + 5));
-            patch_jmp_rel32(jmp_to_end, rel_end);
-            // After both paths, RAX/RCX/RDX hold garbage (materialize_flags
-            // or mov_imm32 clobbered them). Drop any stale cache mappings
-            // so later instructions reload from memory instead of using
-            // the clobbered host regs.
-            invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            flags_in_host_ = false;
+            int s1 = -1, s2 = -1;
+            if (use_imm) {
+                if (inst.src1 != 32) s1 = ensure_vreg(inst.src1);
+            } else if (inst.src1 != 32) {
+                ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
+            } else {
+                s2 = ensure_vreg(inst.src2);
+            }
+            if (s1 < 0) {
+                // XZR first operand: a zeroed scratch (mov leaves RFLAGS alone).
+                s1 = alloc_reg_excluding(s2, -1);
+                emit_mov_imm32_zext(s1, 0);
+            }
+            // CCMN has no non-destructive x86 form: add into a scratch copy.
+            int t = s1;
+            if (!is_sub) t = alloc_reg_excluding(s1, s2);
+            // The false path loads NZCV through AH/AL; keep RAX if it holds a value.
+            const bool save_rax = reg_vreg_[RAX] >= 0 || rax_holds_next_pc_;
+            auto emit_flag_op = [&]() {
+                if (!is_sub) {
+                    // mov t, s1 (32-bit form for W operands)
+                    if (const uint8_t px = rex(!is_32, s1 >= 8, false, t >= 8); px != 0x40) emit_byte(px);
+                    emit_byte(0x89); emit_byte(modrm(3, s1 & 7, t & 7));
+                }
+                const int kind = is_sub ? 7 : 0;  // cmp / add
+                if (use_imm) {
+                    if (const uint8_t px = rex(!is_32, false, false, t >= 8); px != 0x40) emit_byte(px);
+                    if (imm >= -128 && imm <= 127) {
+                        emit_byte(0x83); emit_byte(modrm(3, kind, t & 7)); emit_byte(static_cast<uint8_t>(imm));
+                    } else {
+                        emit_byte(0x81); emit_byte(modrm(3, kind, t & 7)); emit_u32(static_cast<uint32_t>(imm));
+                    }
+                } else {
+                    if (const uint8_t px = rex(!is_32, s2 >= 8, false, t >= 8); px != 0x40) emit_byte(px);
+                    emit_byte(is_sub ? 0x39 : 0x01); emit_byte(modrm(3, s2 & 7, t & 7));
+                }
+            };
+            if (always) {
+                emit_flag_op();
+            } else {
+                if (direct_mask) {
+                    emit_byte(0xF7); emit_modrm_disp(0, CPU_REG, NZCV_OFF);  // test dword [nzcv], mask
+                    emit_u32(direct_mask);
+                } else if (need_cmc) {
+                    emit_byte(0xF5);  // cmc: HI/LS after ADD/TST; both paths rewrite CF
+                }
+                const size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);
+                // Condition false: host flags = immediate NZCV in this op's carry
+                // convention (the image's bit 8 is NOT ARM C, a SUB-convention CF).
+                uint32_t image = host_from_arm_nzcv(static_cast<uint32_t>(cp.nzcv & 0xF) << 28);
+                if (!is_sub) image ^= kHostC;
+                if (save_rax) emit_push(RAX);
+                emit_mov_imm32_zext(RAX, image);
+                emit_byte(0x04); emit_byte(0x7F);  // add al, 0x7F: OF = V
+                emit_byte(0x9E);                   // sahf: SF, ZF, CF from AH
+                if (save_rax) emit_pop(RAX);
+                const size_t jmp_to_end = emit_jmp_rel32_placeholder();
+                patch_jcc_rel32(jcc_to_compare,
+                                static_cast<int32_t>(code_buf_used_ - (jcc_to_compare + 6)));
+                emit_flag_op();
+                patch_jmp_rel32(jmp_to_end, static_cast<int32_t>(code_buf_used_ - (jmp_to_end + 5)));
+            }
+            flags_in_host_ = true;
+            flags_match_pstate_ = false;
+            flags_from_sub_ = is_sub;
             return 0;
         }
         // ── UDIV / SDIV — native x86 div/idiv ────────────────────────

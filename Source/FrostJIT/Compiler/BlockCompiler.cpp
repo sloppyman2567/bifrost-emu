@@ -1018,6 +1018,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                     fold_ahead_kind_[i] = nx.addsub_params().bits == 32 ? 2 : 1;
                     break;
                 }
+                case IROp::CCMP:  // CCMP/CCMN #imm (Arithmetic.cpp): same widths
+                    fold_ahead_kind_[i] = nx.ccmp_params().sf ? 1 : 2;
+                    break;
                 default:
                     break;
             }

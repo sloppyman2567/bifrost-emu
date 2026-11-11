@@ -62,6 +62,9 @@ names the library.
   the FP game kernels run 5-7% fewer host instructions (cycles -1% to -6%).
 - Each SIMD register is stored as one 16-byte block, so the JIT moves a whole vector with one instruction: vector-heavy
   game kernels run 35-42% fewer cycles (skinning, animation blending).
+- `ccmp`/`ccmn` keep their operands in place and leave the flags in the host for the next branch or select, instead of
+  moving operands to fixed registers and storing the flags: a hash-map kernel runs 9.1% fewer host instructions. A `ccmp`
+  with the AL or NV condition now always compares (it used the immediate flags whenever Z was clear).
 - Host instructions executed fall by 11.9% on CoreMark, 12.2% on `bench_mips`, 5.8% on `bench_sort`, 5.2% on `bench_fib`
   and 3.5% on `bench_dispatch` (instruction counts, not run time; no game was measured). Details and what the sample
   still shows as waste are in [the JIT guide](JIT.md#pc-stores-behind-the-chain-slot-loop-pins-and-four-peepholes-2026-11-10).

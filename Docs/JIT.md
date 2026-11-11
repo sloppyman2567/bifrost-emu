@@ -16,6 +16,23 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## CCMP and CCMN leave their flags in the host (2026-11-10)
+
+`CCMP`/`CCMN` moved both operands into RAX and RCX (stack spills when other values lived there), flushed RDX, and on either path
+stored NZCV to `cpu.nzcv_host`, so the `b.cond` after it tested memory. Now the operands stay where the allocator holds them and a
+constant second operand (`#imm`) folds into the instruction; the fold-lookahead skips its `mov`. The condition is read from the host
+flags, from one bit of `cpu.nzcv_host` (EQ/NE/CS/CC/MI/PL/VS/VC with the flags in memory, as `BRCOND` does) or through a reload
+that clobbers only RAX. The true path is `cmp` (`CCMN`: `mov` + `add` into a scratch register); the false path sets the
+immediate NZCV in the host flags with `mov eax, image; add al, 0x7f; sahf`, inside `push rax`/`pop rax` when RAX holds a value.
+Both paths leave the flags live in the host, in the op's carry convention, and store nothing. AL and NV always compare: the old
+emitter mapped them to `je`, so `ccmp ..., al` used the immediate whenever Z was clear (compilers do not emit that form).
+
+The hash-map kernel's probe loop (`cmp w14, #0; ccmp w14, w11, #4, ne; b.eq`) ran 9.1% fewer host instructions per frame
+(1.473M to 1.339M). Its cycles fell 17.5% in one pinned run per build, inside the ±15% placement range below, so that figure
+is not established. Kernels without `ccmp` in their loops are unchanged. `jit_ccmp`'s table covers every condition with the
+incoming flags in memory, from `cmp` and from `cmn`, both ops and widths, register, immediate and XZR operands, against a C model
+that also passes under QEMU, read back by all fourteen `cset` conditions, `b.hi`, `mrs` and the operand registers.
+
 ## Guest register traffic and flag windows: measured, not merged (2026-11-10)
 
 On the integer kernels guest register loads and stores are 20-27% of the ops executed in translated code. Most are block
@@ -26,8 +43,8 @@ entry loads and live-out stores, which only cross-block allocation would remove.
   game kernels and CoreMark have one. An IR pass that hoists such pure scratch computations above the setter (stashed, not
   merged) removes it: the bytecode-VM kernel's hottest block went from 16 to 7 host instructions, -6% instructions overall,
   but averaged over 16 code placements its cycles moved -1%, within noise.
-- `CCMP` forces its operands into RAX/RCX (three stack spills in the hash kernel) and packs its flags to memory for the
-  following branch. Not changed.
+- `CCMP` forced its operands into RAX/RCX (three stack spills in the hash kernel) and packed its flags to memory for the
+  following branch. Changed since: see the section above.
 
 Code placement alone moves these kernels' cycles by up to ±15% (the hash kernel: 398k to 527k cycles per frame for identical
 code at 16 offsets of the code buffer). Compare builds over several placements before trusting a single-digit cycle change.
@@ -83,8 +100,8 @@ The field is now `CPU::nzcv_host`, the image `lahf; seto al` leaves in AX: N = b
 C, V = bit 0, other bits don't-care. A pack is `lahf; seto al; mov [nzcv], eax`, with a `cmc` first when the producer's CF is
 the ARM carry (additions, logical ops); a reload is `mov eax, [nzcv]; add al, 0x7f; sahf` and clobbers only RAX. Nothing is
 skipped, so faults stay precise. One-flag `BRCOND` tests read the bit in memory (C as "CF bit clear"); the two-flag
-pstate arithmetic of 2026-11-08 is gone, since the reload is cheaper. `FP_CMP`, `FCCMP` and `CCMP` store constants converted
-at compile time (`host_from_arm_nzcv`); `mrs`/`msr nzcv` convert with one multiply each. C++ reads and writes through
+pstate arithmetic of 2026-11-08 is gone, since the reload is cheaper. `FP_CMP` and `FCCMP` store constants converted
+at compile time (`host_from_arm_nzcv`), and `CCMP` loads one into the host flags; `mrs`/`msr nzcv` convert with one multiply each. C++ reads and writes through
 `nzcv()`/`set_nzcv()` (architectural view) and the flag accessors; only save-and-restore code copies the raw value. Signal
 frames, ptrace, the GDB stub, the C API and differential verification use the architectural view.
 
@@ -1269,7 +1286,7 @@ that exposed this as missing glyph pixels in Neverball. See
 
 FWD forwards both reads of `cmp w23, w23` to one vreg. ADDS/SUBS and TST
 accept the same host register for both inputs via `ensure_two_vregs()`;
-ADCS/SBCS and CCMP still use `force_two_vregs_to(v, RAX, v, RCX)`.
+ADCS/SBCS still use `force_two_vregs_to(v, RAX, v, RCX)`.
 A vreg has exactly one home: it stays in RAX, and RCX receives an unmapped
 copy when fixed placement is needed. Those callers compute in RAX, so their
 "spill a live src1 before overwriting RAX" logic sees the real home. An

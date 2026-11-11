@@ -84,6 +84,10 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   and anything else keep the branchy pstate sequence (jumps on the compare's own PF/CF/ZF, never `pushfq`), which measured faster
   when the outcome is predictable. The choice reads
   `cur_insts_`, the Tier-1 block being compiled (null elsewhere, so Tier-2 takes the pstate sequence); either path is correct.
+- `CCMP`/`CCMN` leave their result in the host flags on both paths (`flags_from_sub_` = CCMP) and store nothing. Every
+  allocation happens before the condition's jcc so both paths end with one register state; the false path loads the
+  immediate through `mov eax; add al, 0x7f; sahf`, saving RAX when it is mapped. Its `#imm` fold and the `fold_ahead_kind_`
+  CCMP entry must agree (constant src2 read only by the CCMP, 64-bit needs an imm32 fit). AL and NV always compare.
 - A single LD16/ST16 in Tier-1 is `compile_guarded_vec16`. Its 16-byte page checks stay in its own
   tail: the shared cold stubs exist for widths up to 8 (`flush_deferred_guards` checks `g.width`).
 - Block growth past the cap is only for loops (`selfloop_extent`, at most twice the cap); its look-ahead
