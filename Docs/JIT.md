@@ -1986,10 +1986,10 @@ short-lived execution cost and retained private code; validate application
 benchmarks as well as local trial decisions. Codegen/retirement oracles select candidates
 deterministically through a test friend; the separate timing oracle uses real
 controlled CPU work to verify both acceptance and rejection, without fake
-clock values. CoreMark comparisons use a fixed 160,000 iterations
-(`Scripts/Bench/run_benchmarks.py`, crcfinal 0xa14c, checked against QEMU) and
-labelled CRC/validation checks; the earlier 110,000 and 60,000 iterations now
-finish below CoreMark's ten-second minimum. Auto-calibrated iteration counts cannot be compared by
+clock values. CoreMark comparisons use a fixed 200,000 iterations
+(`Scripts/Bench/run_benchmarks.py`, crcfinal 0x4983, checked against QEMU 11.1.1) and
+labelled CRC/validation checks; the earlier 160,000 (9.7 s on 2026-11-10), 110,000 and 60,000
+iterations now finish below CoreMark's ten-second minimum. Auto-calibrated iteration counts cannot be compared by
 wall time. Counters expose measured pairs, keeps and rejections.
 
 Automatic compilation stops after 32 MiB of emitted region, private sampling

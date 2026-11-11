@@ -39,6 +39,8 @@ names the library.
 - The README's performance tables are re-measured (2026-11-08): CoreMark 14,874 iterations/s (shipped build) and 14,753
   (headless) against 12,711 for alpha.2 and 7,992 for QEMU 11.1.1, every CRC valid, and the `bench_*` speedups are 55x to 97x.
   Method, limits and the near-limit 160,000 iteration count are in [JIT.md](JIT.md#coremark-re-measurement-2026-11-08).
+- The benchmark runner's CoreMark count is 200,000 iterations (`crcfinal` 0x4983, the value QEMU 11.1.1 prints): 160,000
+  finished in 9.7 s on 2026-11-10, under CoreMark's ten-second minimum, so every run was reported invalid.
 - The site's Screenshots page showed no images: its relative `images/...` paths resolved below `/screenshots/`, so every request was
   a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
