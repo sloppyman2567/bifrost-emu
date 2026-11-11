@@ -52,6 +52,10 @@ names the library.
 - Sign-extending loads, `sxtb`/`sxth`/`sxtw`, a shifted index added to a base, and a compare against a register that is
   only in memory each take one host instruction fewer.
 - Block translation no longer scans 4,096 register slots per block.
+- The guest flags are stored the way the host leaves them (`lahf`), so saving them at a block exit takes three host
+  instructions instead of seven and reloading them three instead of fifteen. CoreMark runs 6.5% fewer host instructions,
+  `bench_fib` 6.1%, `bench_sort` 3.6% (counts, not run time). Signal frames, ptrace, the GDB stub and the C API still see
+  the architectural NZCV.
 - Host instructions executed fall by 11.9% on CoreMark, 12.2% on `bench_mips`, 5.8% on `bench_sort`, 5.2% on `bench_fib`
   and 3.5% on `bench_dispatch` (instruction counts, not run time; no game was measured). Details and what the sample
   still shows as waste are in [the JIT guide](JIT.md#pc-stores-behind-the-chain-slot-loop-pins-and-four-peepholes-2026-11-10).

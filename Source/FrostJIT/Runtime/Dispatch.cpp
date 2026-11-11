@@ -358,7 +358,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         uint64_t target = strtoull(s, nullptr, 0);
         if (pc == target) {
             fprintf(stderr, "[DBG] entry block @ 0x%llx pstate=0x%x x1=0x%llx x9=0x%llx x11=0x%llx x31=0x%llx\n",
-                    static_cast<unsigned long long>(pc), cpu.pstate,
+                    static_cast<unsigned long long>(pc), cpu.nzcv(),
                     static_cast<unsigned long long>(cpu.regs[1]),
                     static_cast<unsigned long long>(cpu.regs[9]),
                     static_cast<unsigned long long>(cpu.regs[11]),
@@ -511,7 +511,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (vtrace_) {
             fprintf(stderr, "[VTRACE] entry block @ 0x%llx x0=0x%llx x1=0x%llx pstate=0x%x\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
-                    static_cast<unsigned long long>(cpu.regs[1]), cpu.pstate);
+                    static_cast<unsigned long long>(cpu.regs[1]), cpu.nzcv());
         }
         // ── Verify-mode memory save/restore ─────────────────────────
         // Snapshot the original memory values at every STORE_MEM address
@@ -660,7 +660,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (vtrace_) {
             fprintf(stderr, "[VTRACE] exit  block @ 0x%llx x0=0x%llx pstate=0x%x jit_next=0x%llx\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
-                    cpu.pstate, static_cast<unsigned long long>(jit_next));
+                    cpu.nzcv(), static_cast<unsigned long long>(jit_next));
         }
         // Debug: print pstate after JIT
         if (dbg_) {
@@ -668,7 +668,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             uint64_t target = strtoull(s, nullptr, 0);
             if (pc == target) {
                 fprintf(stderr, "[DBG] exit  block @ 0x%llx pstate=0x%x x19=0x%llx x31=0x%llx jit_next=0x%llx\n",
-                        static_cast<unsigned long long>(pc), cpu.pstate,
+                        static_cast<unsigned long long>(pc), cpu.nzcv(),
                         static_cast<unsigned long long>(cpu.regs[19]),
                         static_cast<unsigned long long>(cpu.regs[31]),
                         static_cast<unsigned long long>(jit_next));
@@ -715,9 +715,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             if (cpu.sp != ref.sp)
                 fprintf(stderr, "[VERIFY]   sp: jit=0x%llx ref=0x%llx\n",
                         static_cast<unsigned long long>(cpu.sp), static_cast<unsigned long long>(ref.sp));
-            if (cpu.pstate != ref.pstate)
+            if (cpu.nzcv() != ref.nzcv())
                 fprintf(stderr, "[VERIFY]   pstate: jit=0x%llx ref=0x%llx\n",
-                        static_cast<unsigned long long>(cpu.pstate), static_cast<unsigned long long>(ref.pstate));
+                        static_cast<unsigned long long>(cpu.nzcv()), static_cast<unsigned long long>(ref.nzcv()));
             // Log but don't abort — the __syscall_ret CMN+HI carry divergence
             // is a known issue that doesn't affect program output (the error
             // path is never taken for valid fds). Real crashes will surface
@@ -761,19 +761,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 diverged = true;
             }
         }
-        if (cpu.pstate != ref.pstate && entry.reads_pstate_before_set &&
+        if (cpu.nzcv() != ref.nzcv() && entry.reads_pstate_before_set &&
             !entry.skips_dead_flag_store) {
-            // pstate comparison: mask out the internal from_sub marker bit
-            // (bit 27) since it's a JIT implementation detail, not part of
-            // the architectural NZCV state. Only compare the actual flags.
-            uint64_t mask = 0xF0000000ULL;  // N=bit31, Z=bit30, C=bit29, V=bit28
-            if ((cpu.pstate & mask) != (ref.pstate & mask)) {
-                fprintf(stderr, "[VERIFY] pstate: jit=0x%llx ref=0x%llx (flags only: jit=0x%llx ref=0x%llx)\n",
-                        static_cast<unsigned long long>(cpu.pstate), static_cast<unsigned long long>(ref.pstate),
-                        static_cast<unsigned long long>(cpu.pstate & mask),
-                        static_cast<unsigned long long>(ref.pstate & mask));
-                diverged = true;
-            }
+            fprintf(stderr, "[VERIFY] nzcv: jit=0x%x ref=0x%x\n", cpu.nzcv(), ref.nzcv());
+            diverged = true;
         }
         if (diverged) {
             // Log but don't abort — verify mode has known false positives

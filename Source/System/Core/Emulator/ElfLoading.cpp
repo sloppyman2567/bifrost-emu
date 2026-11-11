@@ -561,7 +561,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
                 saved.sp = cpu.sp;
                 saved.pc = cpu.pc;
-                saved.pstate = cpu.pstate;
+                saved.pstate = cpu.nzcv_host;
                 std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
                 std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
                 saved.fpcr = cpu.fpcr;
@@ -574,7 +574,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
                     cpu.sp = saved.sp;
                     cpu.pc = saved.pc;
-                    cpu.pstate = saved.pstate;
+                    cpu.nzcv_host = saved.pstate;
                     std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
                     std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
                     cpu.fpcr = saved.fpcr;
@@ -606,7 +606,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 cpu.sp = stack_top;
                 cpu.regs[30] = SENTINEL_LR;  // LR
                 cpu.running = true;
-                cpu.pstate = 0;
+                cpu.set_nzcv(0);
                 // Run the resolver. Cap at 1M instructions to avoid
                 // infinite loops in buggy resolvers.
                 constexpr uint64_t IRESOLVER_LIMIT = 1'000'000;
@@ -671,7 +671,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
                 saved.sp = cpu.sp;
                 saved.pc = cpu.pc;
-                saved.pstate = cpu.pstate;
+                saved.pstate = cpu.nzcv_host;
                 std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
                 std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
                 saved.fpcr = cpu.fpcr;
@@ -684,7 +684,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
                     cpu.sp = saved.sp;
                     cpu.pc = saved.pc;
-                    cpu.pstate = saved.pstate;
+                    cpu.nzcv_host = saved.pstate;
                     std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
                     std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
                     cpu.fpcr = saved.fpcr;
@@ -727,7 +727,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 cpu.sp = stack_top;
                 cpu.regs[30] = SENTINEL_LR;
                 cpu.running = true;
-                cpu.pstate = 0;
+                cpu.set_nzcv(0);
                 // Constructors may call libc functions (e.g., printf for
                 // debug logging), which may themselves use atomics / TLS.
                 // Cap at 10M instructions to avoid infinite loops in
@@ -782,7 +782,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
                 saved.sp = cpu.sp;
                 saved.pc = cpu.pc;
-                saved.pstate = cpu.pstate;
+                saved.pstate = cpu.nzcv_host;
                 std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
                 std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
                 saved.fpcr = cpu.fpcr;
@@ -795,7 +795,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
                     cpu.sp = saved.sp;
                     cpu.pc = saved.pc;
-                    cpu.pstate = saved.pstate;
+                    cpu.nzcv_host = saved.pstate;
                     std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
                     std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
                     cpu.fpcr = saved.fpcr;
@@ -837,7 +837,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 cpu.regs[2] = arg2;
                 cpu.regs[30] = SENTINEL_LR;
                 cpu.running = true;
-                cpu.pstate = 0;
+                cpu.set_nzcv(0);
                 constexpr uint64_t CALL_LIMIT = 50'000'000;
                 uint64_t steps = 0;
                 uint64_t result = 0;

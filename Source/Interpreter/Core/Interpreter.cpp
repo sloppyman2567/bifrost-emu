@@ -678,7 +678,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t b = cpu.regs[d.rm];
                 if (!d.sf) { a &= 0xFFFFFFFF; b &= 0xFFFFFFFF; }
                 uint64_t res;
-                if (cond_true(d.cond, cpu.pstate)) {
+                if (cond_true(d.cond, cpu.nzcv())) {
                     res = a;
                 } else {
                     switch (d.cls) {
@@ -707,7 +707,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 } else {
                     operand = (d.raw >> 16) & 0x1F;  // imm5
                 }
-                if (cond_true(d.cond, cpu.pstate)) {
+                if (cond_true(d.cond, cpu.nzcv())) {
                     if (d.cls == InstClass::CCMP) {
                         set_sub_flags(cpu, a, operand, width, true);
                     } else {

@@ -467,69 +467,32 @@ void FrostJIT::emit_store_arm(int ar, int xr) {
     else if (ar == 31)       emit_store(CPU_REG, SP_OFF, xr);
     // XZR — discard
 }
-// ── NZCV materialization to cpu.pstate ────────────────────────────────
-// Stores ARM NZCV flags to pstate. ARM C is inverted from x86 CF for SUB
-// (ARM C = NOT borrow). We also store a "from_sub" flag in bit 27 so
-// emit_load_flags_from_pstate can un-invert C back to x86 CF.
-//
-// pstate layout: N=bit31, Z=bit30, C=bit29, V=bit28, from_sub=bit27.
-// This is compatible with the interpreter's pstate format (it ignores
-// bit 27).
-//
-// Scratch: clobbers RDX, and RAX unless keep_rax saves it: epilogues with
-// rax_holds_next_pc_ commit flags after RAX already holds the next PC.
-//   lahf; seto al        eax: SF=15 ZF=14 CF=8 OF=0 (AF/PF/bit 9 masked)
-//   and  eax, 0xC101
-//   imul edx, eax, (1<<16)|(1<<21)|(1<<28)
-// The product sums three shifted copies: SF→31, ZF→30 (<<16), CF→29
-// (<<21), OF→28 (<<28). Each of bits 28..31 receives exactly one copy and
-// the lower copies (bits 16, 21, 24) are distinct, so no carry reaches
-// them. SUB then inverts C and sets from_sub with one XOR.
+// ── NZCV materialization to cpu.nzcv_host ─────────────────────────────
+// Scratch: clobbers RAX unless keep_rax saves it (epilogues with
+// rax_holds_next_pc_ commit flags after RAX already holds the next PC).
 // LAHF/SAHF in 64-bit mode (CPUID LAHF-SAHF) exists on every x86-64 CPU
 // except the first Athlon 64 / Pentium 4 steppings; it is not gated.
 void FrostJIT::emit_materialize_flags(bool from_sub, bool keep_rax) {
+    // cpu.nzcv_host is the `lahf; seto al` image with x86 CF = NOT ARM C, so a
+    // subtraction's flags store as they are and an addition's (or a logical
+    // op's, CF = 0 for C = 0) take one `cmc` first. Host CF is left flipped:
+    // callers that keep using the host flags wrap this in pushfq/popfq.
     if (keep_rax) emit_push(RAX);
+    if (!from_sub) emit_byte(0xF5);                     // cmc
     emit_byte(0x9F);                                    // lahf
     emit_byte(0x0F); emit_byte(0x90); emit_byte(0xC0);  // seto al
-    emit_byte(0x25); emit_u32(0xC101);                  // and eax, SF|ZF|CF|OF
-    emit_byte(0x69); emit_byte(0xD0);                   // imul edx, eax, imm32
-    emit_u32((1u << 16) | (1u << 21) | (1u << 28));
-    emit_byte(0x81); emit_byte(0xE2); emit_u32(0xF0000000u); // and edx, NZCV
-    if (from_sub) {
-        emit_byte(0x81); emit_byte(0xF2); emit_u32(0x28000000u); // xor edx, C|from_sub
-    }
-    emit_store32(CPU_REG, PSTATE_OFF, RDX);
+    emit_byte(0x66); emit_byte(0x89); emit_modrm_disp(RAX, CPU_REG, NZCV_OFF);  // mov [nzcv], ax
     if (keep_rax) emit_pop(RAX);
 }
-// Load NZCV from cpu.pstate into host flags in SUB convention:
-// SF=N, ZF=Z, OF=V and x86 CF = NOT ARM C, independent of the stored
-// from_sub bit, so arm_cond_to_x86() applies directly. Callers set
-// flags_from_sub_ = true.
-// Scratch contract: clobbers ONLY RAX/RCX/RDX (and RFLAGS). Callers that
-// flush+invalidate exactly FLAGS3 around this helper are correct. Do NOT
-// add another scratch register here: every other allocatable reg (R8, R9,
-// R11, R12+...) may hold a live vreg at the call site — the old sequence
-// used R8 for the from_sub extraction, and the CSEL/CCMP/BRCOND_SKIP/
-// ADCS-SBCS sites (which flush FLAGS3 only) silently lost whatever vreg
-// was staged in R8 (minecraft's sign() → step=(0,0,0) after fcmp).
-//
-// No POPFQ: SAHF loads SF/ZF/CF from AH and leaves OF alone; OF comes
-// from `add al, 0x7F` with AL = V (0x7F+1 overflows, 0x7F+0 does not),
-// which only writes AL, so the AH image survives for the SAHF after it.
+// Load NZCV from cpu.nzcv_host into host flags in SUB convention:
+// SF=N, ZF=Z, OF=V and x86 CF = NOT ARM C, so arm_cond_to_x86() applies
+// directly. Callers set flags_from_sub_ = true.
+// Clobbers only RAX (and RFLAGS); callers that flush FLAGS3 around it are
+// over-cautious but correct. SAHF loads SF/ZF/CF from AH and leaves OF
+// alone; OF comes from `add al, 0x7F` with AL = V (0x7F+1 overflows,
+// 0x7F+0 does not), which only writes AL, so AH survives for the SAHF.
 void FrostJIT::emit_load_flags_from_pstate() {
-    emit_load32(RCX, CPU_REG, PSTATE_OFF);              // ecx = pstate
-    emit_mov_reg(RDX, RCX);
-    emit_shift_imm8(RDX, 5, 16);                         // N→15, Z→14
-    emit_byte(0x81); emit_byte(0xE2); emit_u32(0xC000);  // and edx, 0xC000
-    emit_mov_reg(RAX, RCX);
-    emit_shift_imm8(RAX, 5, 21);                         // C→8
-    emit_byte(0x25); emit_u32(0x100);                    // and eax, 0x100
-    emit_byte(0x35); emit_u32(0x100);                    // xor eax, 0x100 (CF = !C)
-    emit_or_reg(RDX, RAX);
-    emit_shift_imm8(RCX, 5, 28);                         // V→0
-    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);   // and ecx, 1
-    emit_or_reg(RDX, RCX);
-    emit_mov_reg(RAX, RDX);
+    emit_load32(RAX, CPU_REG, NZCV_OFF);                // eax = nzcv_host
     emit_byte(0x04); emit_byte(0x7F);                    // add al, 0x7F → OF = V
     emit_byte(0x9E);                                     // sahf
 }

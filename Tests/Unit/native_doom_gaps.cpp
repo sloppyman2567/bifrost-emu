@@ -22,7 +22,7 @@ int main() {
   uint64_t pc=0x10000+index*16;uint32_t code[2]={word,0xd65f03c0u};e.mem().write(pc,code,8);
   bool memory=decoded.cls==InstClass::SIMD_LD1 || decoded.cls==InstClass::SIMD_ST1 || decoded.cls==InstClass::LDXR || decoded.cls==InstClass::STXR || decoded.cls==InstClass::LDAXR || decoded.cls==InstClass::STLXR || decoded.cls==InstClass::LDAR || decoded.cls==InstClass::STLR;
   for(unsigned sample=0;sample<32;sample++) {
-   ref.pc=pc;ref.running=true;ref.sp=0x40000;ref.pstate=(sample&15)<<28;ref.excl_clear();
+   ref.pc=pc;ref.running=true;ref.sp=0x40000;ref.set_nzcv((sample&15)<<28);ref.excl_clear();
    for(unsigned r=0;r<32;r++){ref.v_lo[r]=rng();ref.v_hi[r]=rng();ref.regs[r]=r==31?0:rng();}
    if(memory && decoded.rn!=31)ref.regs[decoded.rn]=0x40000;
    ref.regs[30]=0x30000;native.copy_arch_state_from(ref);native.excl_clear();
@@ -34,9 +34,9 @@ int main() {
    e.mem().write(0x40000,initial,sizeof(initial));
    unsigned blocks=0;while(native.running && native.pc!=0x30000 && blocks++<8)e.jit()->run_block(native,e);
    e.mem().read(0x40000,actual,sizeof(actual));
-   bool same=native.pc==ref.pc && native.sp==ref.sp && (native.pstate&0xF0000000)==(ref.pstate&0xF0000000) && !std::memcmp(actual,expected,sizeof(actual));
+   bool same=native.pc==ref.pc && native.sp==ref.sp && (native.nzcv()&0xF0000000)==(ref.nzcv()&0xF0000000) && !std::memcmp(actual,expected,sizeof(actual));
    for(unsigned r=0;r<32;r++)same=same && native.regs[r]==ref.regs[r] && native.v_lo[r]==ref.v_lo[r] && native.v_hi[r]==ref.v_hi[r];
-   if(!same){if(failures++<20){unsigned rd=word&31;std::printf("FAIL %08x sample=%u pc=%llx/%llx v%u=%llx:%llx/%llx:%llx flags=%x/%x\n",word,sample,(unsigned long long)native.pc,(unsigned long long)ref.pc,rd,(unsigned long long)native.v_hi[rd],(unsigned long long)native.v_lo[rd],(unsigned long long)ref.v_hi[rd],(unsigned long long)ref.v_lo[rd],native.pstate,ref.pstate);}}
+   if(!same){if(failures++<20){unsigned rd=word&31;std::printf("FAIL %08x sample=%u pc=%llx/%llx v%u=%llx:%llx/%llx:%llx flags=%x/%x\n",word,sample,(unsigned long long)native.pc,(unsigned long long)ref.pc,rd,(unsigned long long)native.v_hi[rd],(unsigned long long)native.v_lo[rd],(unsigned long long)ref.v_hi[rd],(unsigned long long)ref.v_lo[rd],native.nzcv(),ref.nzcv());}}
    {std::lock_guard<std::mutex> lock(shard->mu);shard->reservations.clear();}
    ++checks;
   }

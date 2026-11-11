@@ -51,9 +51,13 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   whose stub releases the bucket first. `CLEAR_EXCLUSIVE` implements CLREX.
 - `flags_match_pstate_` (host flags loaded by a BRCOND, unchanged since) lets exits and
   `clobber_flags` skip the store; every flag setter must clear it, and only public
-  Tier-1 compiles use it (`host_flags_match_pstate()`). A BRCOND with its flags still in
-  `pstate` tests them there: one flag as a bit, HI/LS and the signed pairs through RAX (and
-  RCX). `clobber_flags(false, true)` (RDX only, ALU ops and guarded accesses) is for callers
+  Tier-1 compiles use it (`host_flags_match_pstate()`). NZCV lives in `CPU::nzcv_host` as the
+  `lahf; seto al` image (N bit 15, Z bit 14, bit 8 = x86 CF = NOT ARM C, V bit 0):
+  `emit_materialize_flags` adds a `cmc` for ADD-convention producers and clobbers RAX only, and
+  `emit_load_flags_from_pstate` (`add al, 0x7f; sahf`) clobbers RAX only. A constant NZCV goes
+  through `host_from_arm_nzcv`; C++ uses `nzcv()`/`set_nzcv()`, never the raw bits. A BRCOND with
+  its flags in memory tests one flag as a bit and reloads RFLAGS for the others.
+  `clobber_flags(false, true)` (RDX only, ALU ops and guarded accesses) is for callers
   that pick registers through the allocator afterwards; others assume RAX/RCX/RDX and keep
   the RAX save, since they may hold a value in RAX the allocator does not know about.
 - `fold_ahead_kind_` (BlockCompiler.cpp) must mirror its consumer's fold guards exactly: a

@@ -856,13 +856,13 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             //   greater:   PF=0, CF=0, ZF=0
             //
             // Translation:
-            //   PF=1 (unordered) → pstate = 0x28000000 (C=1, V=1)
-            //   else CF=1 (less) → pstate = 0x80000000 (N=1)
-            //   else ZF=1 (equal) → pstate = 0x60000000 (Z=1, C=1)
-            //   else (greater) → pstate = 0x20000000 (C=1)
+            //   PF=1 (unordered) → NZCV 0x30000000 (C=1, V=1)
+            //   else CF=1 (less) → NZCV 0x80000000 (N=1)
+            //   else ZF=1 (equal) → NZCV 0x60000000 (Z=1, C=1)
+            //   else (greater) → NZCV 0x20000000 (C=1)
             //
-            // We use conditional sets (setcc) to build pstate in RDX,
-            // then store to cpu.pstate.
+            // RDX gets the chosen value as a cpu.nzcv_host image
+            // (host_from_arm_nzcv), which is stored whole.
             const FpCmpParams cp = inst.fp_cmp_params();
             bool is_double = (cp.ftype == 1);
             clobber_flags();
@@ -877,11 +877,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 if (need_cmc) emit_byte(0xF5);
                 if (cp.condition < 14) {
                     compare_branch = emit_jcc_rel32_placeholder(cc);
-                    emit_load32(RCX, CPU_REG, PSTATE_OFF);
-                    emit_byte(0x81); emit_byte(0xE1); emit_u32(0x07FFFFFF);
-                    emit_mov_imm32_zext(RDX, uint32_t(cp.nzcv) << 28);
-                    emit_or_reg(RDX, RCX);
-                    emit_store32(CPU_REG, PSTATE_OFF, RDX);
+                    emit_mov_imm32_zext(RDX, host_from_arm_nzcv(uint32_t(cp.nzcv) << 28));
+                    emit_store32(CPU_REG, NZCV_OFF, RDX);
                     skip_compare = emit_jmp_rel32_placeholder();
                     patch_jcc_rel32(compare_branch,
                         static_cast<int32_t>(code_buf_used_ - (compare_branch + 6)));
@@ -981,7 +978,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // a proper if-else chain. This is slightly more code but
             // unambiguously correct.
             // Default: RDX = 0x20000000 (greater → C=1)
-            emit_mov_imm32_zext(RDX, 0x20000000);
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x20000000));
             // Fixed flag conversion using clean if-else chain.
             // After `test rax, bit`:
             //   ZF=1 iff (rax & bit) == 0 (flag bit is 0)
@@ -992,41 +989,27 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // if PF=1 (unordered): RDX = 0x30000000, then jmp done
             emit_byte(0x48); emit_byte(0xA9); emit_u32(0x04); // test rax, 4 (PF bit)
             size_t jz_skip1 = emit_jcc_rel32_placeholder(0x4);  // JZ: PF=0, skip
-            emit_mov_imm32_zext(RDX, 0x30000000);
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x30000000));
             size_t jmp_done1 = emit_jmp_rel32_placeholder();
             size_t after_pf = code_buf_used_;
             patch_jcc_rel32(jz_skip1, static_cast<int32_t>(after_pf - (jz_skip1 + 6)));
             // if CF=1 (less): RDX = 0x80000000 (N=1)
             emit_byte(0x48); emit_byte(0xA9); emit_u32(0x01); // test rax, 1 (CF)
             size_t jz_skip2 = emit_jcc_rel32_placeholder(0x4);  // JZ: CF=0, skip
-            emit_mov_imm32_zext(RDX, 0x80000000);
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x80000000));
             size_t jmp_done2 = emit_jmp_rel32_placeholder();
             size_t after_cf = code_buf_used_;
             patch_jcc_rel32(jz_skip2, static_cast<int32_t>(after_cf - (jz_skip2 + 6)));
             // if ZF=1 (equal): RDX = 0x60000000 (Z=1, C=1)
             emit_byte(0x48); emit_byte(0xA9); emit_u32(0x40); // test rax, 0x40 (ZF)
             size_t jz_skip3 = emit_jcc_rel32_placeholder(0x4);  // JZ: ZF=0, skip
-            emit_mov_imm32_zext(RDX, 0x60000000);
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x60000000));
             size_t done_flags = code_buf_used_;
             patch_jcc_rel32(jz_skip3, static_cast<int32_t>(done_flags - (jz_skip3 + 6)));
             patch_jmp_rel32(jmp_done1, static_cast<int32_t>(done_flags - (jmp_done1 + 5)));
             patch_jmp_rel32(jmp_done2, static_cast<int32_t>(done_flags - (jmp_done2 + 5)));
             emit_byte(0x58);  // pop rax (discard)
-            // Store pstate (mask NZCV bits, OR in new value).
-            // BUGFIX: bit 27 of pstate is the JIT-internal `from_sub` flag
-            // used by BRCOND/ADCS/SBCS/CCMP to disambiguate CF semantics.
-            // FCMP produces architectural NZCV directly from a float
-            // comparison, NOT from a subtraction, so from_sub MUST be 0
-            // after FCMP. The old mask 0x0FFFFFFF preserved bits 0–27,
-            // leaving a stale from_sub from the prior SUBS — any flag
-            // consumer that didn't normalize would read inverted CF.
-            //
-            // Correct mask: 0x07FFFFFF (clear bit 27 AND NZCV bits 28-31,
-            // preserve bits 0-26 of other JIT-internal state).
-            emit_load32(RCX, CPU_REG, PSTATE_OFF);
-            emit_byte(0x81); emit_byte(0xE1); emit_u32(0x07FFFFFF);  // and ecx, 0x07FFFFFF (clear from_sub + NZCV)
-            emit_byte(0x48); emit_byte(0x09); emit_byte(0xCA);  // or rdx, rcx
-            emit_store32(CPU_REG, PSTATE_OFF, RDX);
+            emit_store32(CPU_REG, NZCV_OFF, RDX);  // RDX holds the whole nzcv_host image
             if (skip_compare) patch_jmp_rel32(skip_compare,
                 static_cast<int32_t>(code_buf_used_ - (skip_compare + 5)));
             flags_in_host_ = false;

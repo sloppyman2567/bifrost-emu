@@ -479,7 +479,7 @@ void Emulator::step(CPU& cpu) {
             static_cast<unsigned long long>(cpu.regs[24]), static_cast<unsigned long long>(cpu.regs[25]),
             static_cast<unsigned long long>(cpu.regs[26]), static_cast<unsigned long long>(cpu.regs[27]),
             static_cast<unsigned long long>(cpu.regs[28]), static_cast<unsigned long long>(cpu.regs[29]),
-            static_cast<unsigned long long>(cpu.regs[30]), cpu.pstate,
+            static_cast<unsigned long long>(cpu.regs[30]), cpu.nzcv(),
             static_cast<unsigned long long>(cpu.sp),
             static_cast<unsigned long long>(cpu.v_lo[0]), static_cast<unsigned long long>(cpu.v_hi[0]),
             static_cast<unsigned long long>(cpu.v_lo[1]), static_cast<unsigned long long>(cpu.v_hi[1]),

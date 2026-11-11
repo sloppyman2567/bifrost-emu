@@ -16,6 +16,38 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## NZCV stored as the `lahf` image (2026-11-10)
+
+`cpu.pstate` held NZCV in the architectural layout (N=31, Z=30, C=29, V=28) plus a JIT carry-convention bit 27. Every exit
+with live flags packed host RFLAGS into it with seven instructions (`lahf; seto al; and; imul; and; xor; mov`), and every
+block that needed them back in RFLAGS rebuilt them with fifteen. `nzcv_dead_in` only removes the pack when the successor
+rewrites the flags before anything can fault, and most successors start with a load, which can (a guest signal frame must
+show the flags of the faulting instruction), so the pack stayed on most edges.
+
+The field is now `CPU::nzcv_host`, the image `lahf; seto al` leaves in AX: N = bit 15, Z = bit 14, bit 8 = x86 CF = NOT ARM
+C, V = bit 0, other bits don't-care. A pack is `lahf; seto al; mov [nzcv], ax`, with a `cmc` first when the producer's CF is
+the ARM carry (additions, logical ops); a reload is `mov eax, [nzcv]; add al, 0x7f; sahf` and clobbers only RAX. Nothing is
+skipped, so faults stay precise. One-flag `BRCOND` tests read the bit in memory (C as "CF bit clear"); the two-flag
+pstate arithmetic of 2026-11-08 is gone, since the reload is cheaper. `FP_CMP`, `FCCMP` and `CCMP` store constants converted
+at compile time (`host_from_arm_nzcv`); `mrs`/`msr nzcv` convert with one multiply each. C++ reads and writes through
+`nzcv()`/`set_nzcv()` (architectural view) and the flag accessors; only save-and-restore code copies the raw value. Signal
+frames, ptrace, the GDB stub, the C API and differential verification use the architectural view.
+
+Host instructions (`perf stat -e instructions:u`, one run each, against the build before):
+
+| Program | Before | After | Change |
+|---|---|---|---|
+| CoreMark, 200,000 iterations | 332.86 G | 311.24 G | -6.5% |
+| `bench_fib` | 1.506 G | 1.414 G | -6.1% |
+| `bench_sort` | 1.433 G | 1.381 G | -3.6% |
+| `bench_dispatch` | 33.66 G | 32.86 G | -2.4% |
+| `bench_mips`, `bench_matrix` | | | under 0.1% |
+
+Run times and games were not measured. Following unconditional and compare branches in the dead-flag scan was measured first
+and rejected: it would have removed 3-5% of the remaining packs. `jit_flags_exit_dead` section K faults on a successor's first
+load after CMP, ADDS and TST and checks the signal frame's NZCV (dropping the `cmc` fails it); `jit_msr_nzcv`, `jit_fcmp_flags`,
+`jit_ccmp` and `jit_branch_flags` cover the conversions and the memory tests.
+
 ## PC stores behind the chain slot, loop pins and four peepholes (2026-11-10)
 
 A sample of the operations executed inside translated blocks (AMD IBS, `perf record -e ibs_op/cnt_ctl=1,swfilt=1/u` with
@@ -1075,7 +1107,7 @@ BIFROST_FWD_RANGES=0x400000-0x480000,0x500000-0x500100 ./bifrost-emu app.elf
   fallback used by fault tracing.
 - `BIFROST_BLOCK_TRACE=lo-hi[,...]` makes blocks starting in those ranges
   log every cold and chained entry: pc, whether FWD ran, NZCV and the raw
-  pstate (bit 27 is the JIT's carry-convention bit), x0-x7, sp and lr. A
+  `nzcv_host` image, x0-x7, sp and lr. A
   flag change between two consecutive entries points at the first block.
   Self-loop iterations re-enter past the prologue and are not logged.
 - `BIFROST_FWD_RANGES=lo-hi[,...]` restricts FWD to blocks starting in those

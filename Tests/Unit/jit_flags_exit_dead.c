@@ -3,12 +3,16 @@
 // that overwrite the flags first (the store is dead) or read/observe them first (the store is needed):
 // CSET/CCMP/ADC, a load (it can fault), MRS, a call. The conditional edge is checked both ways, for
 // B.cond (including HI/LS after an ADD), CBZ/TBZ and a plain B, and with FCMP as the overwriter.
-// The last section patches a successor of a warmed, chained block: the block must be retired, and may
-// be kept when the maintenance leaves the words unchanged.
+// Section J patches a successor of a warmed, chained block: the block must be retired, and may be kept
+// when the maintenance leaves the words unchanged. Section K faults on the successor's first load: the
+// signal frame must show the predecessor's flags from CMP, ADDS and TST (each carry convention).
+#include <setjmp.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 
 static int fails;
 static uint32_t nzcv_sub(uint64_t a, uint64_t b) {
@@ -28,6 +32,14 @@ static uint32_t nzcv_fcmp(double a, double b) {
 }
 #define CHECK(cond, what, a, b) do { if (!(cond)) { ++fails; if (fails < 16) printf("NG %s a=%llx b=%llx\n", what, (unsigned long long)(a), (unsigned long long)(b)); } } while (0)
 #define NZ(x) ((x) & 0xf0000000u)
+
+static sigjmp_buf k_env;
+static volatile uint64_t k_pstate;
+static void k_segv(int sig, siginfo_t* info, void* context) {
+    (void)sig; (void)info;
+    k_pstate = ((ucontext_t*)context)->uc_mcontext.pstate;
+    siglongjmp(k_env, 1);
+}
 
 int main(void) {
     static const uint64_t v[] = {0, 1, 2, 0x7f, 0x80, 0xffffffffull, 0x100000000ull, 0x7fffffffffffffffull,
@@ -130,6 +142,36 @@ int main(void) {
             if (NZ(got) != want) { CHECK(0, "J", phase, n); break; }
         }
     }
+    // K. The successor's first load faults before its compare: the handler sees the earlier flags.
+    uint8_t* guard = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (guard == MAP_FAILED) { printf("mmap failed\n"); return 2; }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = k_segv;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigaction(SIGSEGV, &sa, NULL);
+    for (int rep = 0; rep < 2; ++rep)
+        for (unsigned i = 0; i < sizeof v / sizeof *v; ++i)
+            for (unsigned j = 0; j < sizeof v / sizeof *v; ++j)
+                for (int kind = 0; kind < 3; ++kind) {
+                    const uint64_t a = v[i], b = v[j];
+                    uint32_t want = kind == 0 ? nzcv_sub(a, b) : kind == 1 ? nzcv_add(a, b)
+                                  : ((uint32_t)((a & b) >> 63) << 31) | ((uint32_t)((a & b) == 0) << 30);
+                    if (sigsetjmp(k_env, 1) == 0) {
+                        if (kind == 0)
+                            __asm__ volatile("cmp %0, %1\n b 1f\n 1: ldr x9, [%2]\n cmp x9, x9"
+                                : : "r"(a), "r"(b), "r"(guard) : "cc", "x9", "memory");
+                        else if (kind == 1)
+                            __asm__ volatile("adds x10, %0, %1\n b 1f\n 1: ldr x9, [%2]\n cmp x9, x9"
+                                : : "r"(a), "r"(b), "r"(guard) : "cc", "x9", "x10", "memory");
+                        else
+                            __asm__ volatile("tst %0, %1\n b 1f\n 1: ldr x9, [%2]\n cmp x9, x9"
+                                : : "r"(a), "r"(b), "r"(guard) : "cc", "x9", "memory");
+                        CHECK(0, "K no fault", a, b);
+                    } else if (NZ(k_pstate) != want) {
+                        CHECK(0, kind == 0 ? "K cmp" : kind == 1 ? "K adds" : "K tst", a, b);
+                    }
+                }
     printf("jit_flags_exit_dead: %s\n", fails ? "FAILED" : "ALL PASS");
     return fails != 0;
 }

@@ -1295,7 +1295,7 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     st->cpu.sp = stack + STACK_SIZE;
     st->cpu.regs[30] = 0x1000;            // sentinel LR: RET here = thread done
     st->cpu.running = true;
-    st->cpu.pstate = 0;
+    st->cpu.set_nzcv(0);
     st->cpu.tid = next_tid_.fetch_add(1);
     if (st->cpu.tid == main_cpu_.tid) st->cpu.tid = next_tid_.fetch_add(1);
     st->tid = static_cast<uint64_t>(st->cpu.tid);

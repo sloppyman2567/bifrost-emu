@@ -107,7 +107,7 @@ static bool check_signal_return(bool mt) {
     for (unsigned repeat = 0; repeat < 3; ++repeat) {
         CPU cpu;
         cpu.pc = resume; cpu.sp = top; cpu.regs[30] = stop;
-        cpu.regs[19] = 41; cpu.pstate = 0xa0000000;
+        cpu.regs[19] = 41; cpu.set_nzcv(0xa0000000);
         if (!deliver_signal(*e, cpu, e->signals(), BIFROST_SIGUSR1)) return false;
         // A block that reaches a syscall leaves it pending, and the next run_block runs it.
         const auto dispatch = [&] {
@@ -120,7 +120,7 @@ static bool check_signal_return(bool mt) {
         if (next != (chained ? resume : TRAMPOLINE_ADDR)) return false;
         if (!chained && dispatch() != resume) return false;
         if (!cpu.sig_frames.empty() || cpu.sp != top || cpu.regs[19] != 41 ||
-            cpu.regs[30] != stop || cpu.sigmask || (cpu.pstate & 0xf0000000) != 0xa0000000)
+            cpu.regs[30] != stop || cpu.sigmask || (cpu.nzcv() & 0xf0000000) != 0xa0000000)
             return false;
     }
     // Executable host stop addresses and nested helper return boundaries
@@ -199,7 +199,7 @@ static bool check_selfloops() {
         auto initialize = [&](CPU& cpu) {
             cpu.pc = head; cpu.regs[0] = kind == 2 ? 0 : 5000;
             cpu.regs[1] = 7; cpu.regs[30] = stop; cpu.jit_stop_pc = stop;
-            cpu.pstate = 0xa0000000;
+            cpu.set_nzcv(0xa0000000);
             const double one = 1.0, three = 3.0;
             std::memcpy(&cpu.v_lo[1], &one, 8);
             std::memcpy(&cpu.v_hi[1], &three, 8);
@@ -215,11 +215,11 @@ static bool check_selfloops() {
             double lo, hi;
             std::memcpy(&lo, &cpu.v_lo[0], 8); std::memcpy(&hi, &cpu.v_hi[0], 8);
             if (cpu.pc != stop || cpu.regs[1] != n * (n - 1) / 2 + 7 + (kind == 4 ? n : 0) ||
-                cpu.regs[2] != n || (cpu.pstate & 0xf0000000) != nzcv ||
+                cpu.regs[2] != n || (cpu.nzcv() & 0xf0000000) != nzcv ||
                 (kind == 3 && (lo != double(n) || hi != 3.0 * n))) {
                 std::fprintf(stderr, "selfloop kind %u run: pc=0x%llx x1=%llu x2=%llu flags=0x%x\n", kind,
                              (unsigned long long)cpu.pc, (unsigned long long)cpu.regs[1],
-                             (unsigned long long)cpu.regs[2], cpu.pstate >> 28);
+                             (unsigned long long)cpu.regs[2], cpu.nzcv() >> 28);
                 ++failures;
             }
         };
@@ -282,10 +282,10 @@ static bool check_selfloops() {
                 !pc_ok ||
                 cpu.regs[1] != n * (n - 1) / 2 + 7 + (kind == 4 ? n : 0) ||
                 cpu.regs[0] != (kind == 2 ? n : 5000 - n) ||
-                (cpu.pstate & 0xf0000000) != nzcv ||
+                (cpu.nzcv() & 0xf0000000) != nzcv ||
                 (kind == 3 && (lo != double(n) || hi != 3.0 * n))) {
                 std::fprintf(stderr, "selfloop kind %u mode %u: n=%llu pc=0x%llx flags=0x%x\n", kind, mode,
-                             (unsigned long long)n, (unsigned long long)cpu.pc, cpu.pstate >> 28);
+                             (unsigned long long)n, (unsigned long long)cpu.pc, cpu.nzcv() >> 28);
                 ++failures;
             }
         }

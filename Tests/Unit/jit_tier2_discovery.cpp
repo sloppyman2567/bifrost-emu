@@ -465,7 +465,7 @@ static bool check_cached_integer_simd(bool mt) {
         const uint64_t start=region ? head : body, stop=body+code.size()*4;
         for (unsigned count : {1u,7u}) {
             CPU actual,reference; actual.pc=start; actual.regs[0]=count;
-            actual.pstate=0xa0000000;
+            actual.set_nzcv(0xa0000000);
             for (unsigned v=0;v<32;++v) {
                 actual.v_lo[v]=UINT64_C(0x80ff017fdeadbeef)^(UINT64_C(0x123456789abcdef)*v);
                 actual.v_hi[v]=~actual.v_lo[v];
@@ -480,7 +480,7 @@ static bool check_cached_integer_simd(bool mt) {
                 }
             }
             if (actual.pc!=stop || actual.regs[0]!=reference.regs[0] ||
-                ((actual.pstate^reference.pstate)&0xf0000000u) ||
+                ((actual.nzcv()^reference.nzcv())&0xf0000000u) ||
                 std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
                 std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
                 std::fprintf(stderr,"integer SIMD cache mismatch: word=%08x region=%d n=%u\n",

@@ -439,7 +439,7 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     // Set CPU state for the new program.
     cpu.pc = exec_entry;
     cpu.sp = sp;
-    cpu.pstate = 0;
+    cpu.set_nzcv(0);
     cpu.running = true;
     cpu.exit_code = 0;
     memset(cpu.regs, 0, sizeof(cpu.regs));

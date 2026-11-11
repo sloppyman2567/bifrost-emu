@@ -53,7 +53,7 @@ static void interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
                 static_cast<unsigned long long>(cpu->regs[2]),
                 static_cast<unsigned long long>(cpu->regs[24]),
                 static_cast<unsigned long long>(cpu->regs[27]),
-                cpu->pstate);
+                cpu->nzcv());
     }
     try {
         if (!dbg().fallback_profile.empty()) {
@@ -86,7 +86,7 @@ static void interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
                 static_cast<unsigned long long>(cpu->pc),
                 static_cast<unsigned long long>(cpu->regs[0]),
                 static_cast<unsigned long long>(cpu->regs[24]),
-                cpu->pstate);
+                cpu->nzcv());
     }
 }
 extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
@@ -105,16 +105,15 @@ extern "C" void jit_guard_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu, uint
 // BIFROST_BLOCK_TRACE: called from the prologue of blocks whose start pc
 // is in range, after the chain-skip entry, so chained entries log too.
 // Architectural registers are all in cpu.regs at block entry. One fprintf
-// per line keeps concurrent threads' lines intact. Flags are in cpu.pstate
-// at entry too (cold entries load them, chain edges flush them first):
-// nzcv is bits 31:28, and the raw pstate shows the JIT's carry-convention
-// bit 27 as well.
+// per line keeps concurrent threads' lines intact. Flags are in
+// cpu.nzcv_host at entry too (cold entries load them, chain edges flush
+// them first); `host` is that raw image.
 extern "C" void jit_trace_block_entry(arm64emu::CPU* cpu, uint64_t block_pc, uint64_t fwd) {
     const auto* r = cpu->regs;
     auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
-    fprintf(stderr, "[block] tid=%d pc=0x%llx fwd=%d nzcv=%x pstate=0x%08x x0=0x%llx x1=0x%llx "
+    fprintf(stderr, "[block] tid=%d pc=0x%llx fwd=%d nzcv=%x host=0x%04x x0=0x%llx x1=0x%llx "
             "x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x6=0x%llx x7=0x%llx sp=0x%llx lr=0x%llx\n",
-            cpu->tid, u(block_pc), static_cast<int>(fwd), cpu->pstate >> 28, cpu->pstate,
+            cpu->tid, u(block_pc), static_cast<int>(fwd), cpu->nzcv() >> 28, cpu->nzcv_host,
             u(r[0]), u(r[1]), u(r[2]), u(r[3]), u(r[4]), u(r[5]), u(r[6]), u(r[7]),
             u(cpu->sp), u(r[30]));
 }

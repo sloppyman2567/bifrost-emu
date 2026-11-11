@@ -232,21 +232,21 @@ struct GuestDebugger::Impl {
                 case ReadRegs: {
                     uint64_t regs[34];
                     memcpy(regs, cpu.regs, 31 * 8);
-                    regs[31] = cpu.sp; regs[32] = cpu.pc; regs[33] = cpu.pstate & 0xf0000000ULL;
+                    regs[31] = cpu.sp; regs[32] = cpu.pc; regs[33] = cpu.nzcv();
                     memcpy(t.packet, regs, t.count);
                     break;
                 }
                 case WriteRegs: {
                     uint64_t regs[34];
                     memcpy(regs, cpu.regs, 31 * 8);
-                    regs[31] = cpu.sp; regs[32] = cpu.pc; regs[33] = cpu.pstate & 0xf0000000ULL;
+                    regs[31] = cpu.sp; regs[32] = cpu.pc; regs[33] = cpu.nzcv();
                     memcpy(regs, t.packet, t.count);
                     // Linux validates EL0t and unmasked DAIF here; reserved
                     // PSTATE bits are sanitized. PC alignment faults when
                     // executed, rather than rejecting SETREGSET itself.
                     if (regs[33] & 0x3df) { t.result = -EINVAL; break; }
                     memcpy(cpu.regs, regs, 31 * 8);
-                    cpu.sp = regs[31]; cpu.pc = regs[32]; cpu.pstate = (cpu.pstate & ~0xf0000000U) | static_cast<uint32_t>(regs[33]);
+                    cpu.sp = regs[31]; cpu.pc = regs[32]; cpu.set_nzcv(static_cast<uint32_t>(regs[33]) & 0xf0000000U);
                     cpu.excl_tag_valid = false;
                     cpu.jit_dispatch_requested = true;
                     break;

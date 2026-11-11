@@ -82,7 +82,7 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
             std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
             saved.sp = cpu.sp;
             saved.pc = cpu.pc;
-            saved.pstate = cpu.pstate;
+            saved.pstate = cpu.nzcv_host;
             std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
             std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
             saved.fpcr = cpu.fpcr;
@@ -95,7 +95,7 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
                 std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
                 cpu.sp = saved.sp;
                 cpu.pc = saved.pc;
-                cpu.pstate = saved.pstate;
+                cpu.nzcv_host = saved.pstate;
                 std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
                 std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
                 cpu.fpcr = saved.fpcr;
@@ -164,7 +164,7 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
             }
             cpu.regs[30] = SENTINEL_LR;
             cpu.running = true;
-            cpu.pstate = 0;
+            cpu.set_nzcv(0);
             constexpr uint64_t CALL_LIMIT = 50'000'000;
             uint64_t steps = 0;
             uint64_t result = 0;
@@ -316,14 +316,14 @@ void Emulator::ensure_thunk_linker_() {
     dyn_linker_->set_ifunc_resolver([this](CPU& cpu, uint64_t a) -> uint64_t {
         if (a == 0) return 0;
         struct SavedState { uint64_t regs[32]; uint64_t sp, pc; uint32_t pstate; uint64_t v_lo[32], v_hi[32]; uint32_t fpcr, fpsr; uint64_t tpidr_el0, tpidrro_el0; uint64_t sigmask; bool running; } s{};
-        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate=cpu.pstate;
+        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate = cpu.nzcv_host;
         std::memcpy(s.v_lo, cpu.v_lo, sizeof(s.v_lo)); std::memcpy(s.v_hi, cpu.v_hi, sizeof(s.v_hi));
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
-        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
+        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.nzcv_host = s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
         static thread_local uint64_t scratch=0; static thread_local const Emulator* scratch_owner=nullptr;
         if (scratch==0 || scratch_owner!=this) { scratch=mem_.mmap_alloc_callback_stack(64*1024); scratch_owner=this; if(scratch==0){ restore(); return 0; } }
         uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
-        cpu.pc=a; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
+        cpu.pc=a; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.set_nzcv(0);
         constexpr uint64_t LIM=1'000'000; uint64_t steps=0;
         try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(...) {}
         // Limit tripped → likely infinite resolver: return 0 like the
@@ -334,30 +334,30 @@ void Emulator::ensure_thunk_linker_() {
     dyn_linker_->set_init_runner([this](CPU& cpu, uint64_t fn) {
         if(!fn) return;
         struct SavedState { uint64_t regs[32]; uint64_t sp, pc; uint32_t pstate; uint64_t v_lo[32], v_hi[32]; uint32_t fpcr, fpsr; uint64_t tpidr_el0, tpidrro_el0; uint64_t sigmask; bool running; } s{};
-        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate=cpu.pstate;
+        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate = cpu.nzcv_host;
         std::memcpy(s.v_lo, cpu.v_lo, sizeof(s.v_lo)); std::memcpy(s.v_hi, cpu.v_hi, sizeof(s.v_hi));
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
-        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
+        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.nzcv_host = s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
         if(dyn_linker_ && dyn_linker_->static_tls_size()>0 && cpu.tpidr_el0==0){ cpu.tpidr_el0=dyn_linker_->thread_pointer(); cpu.tpidrro_el0=cpu.tpidr_el0; }
         static thread_local uint64_t scratch=0; static thread_local const Emulator* scratch_owner=nullptr;
         if (scratch==0 || scratch_owner!=this) { scratch=mem_.mmap_alloc_callback_stack(64*1024); scratch_owner=this; if(scratch==0){ restore(); return; } }
         uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
-        cpu.pc=fn; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
+        cpu.pc=fn; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.set_nzcv(0);
         constexpr uint64_t LIM=10'000'000; uint64_t steps=0;
         try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(const std::exception& e){ if(dbg().dynlink_trace) fprintf(stderr,"[%s] init 0x%llx: %s\n", CODENAME, (unsigned long long)fn, e.what()); }
         restore();
     });
     dyn_linker_->set_guest_call_args([this](CPU& cpu, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2) -> uint64_t {
         struct SavedState { uint64_t regs[32]; uint64_t sp, pc; uint32_t pstate; uint64_t v_lo[32], v_hi[32]; uint32_t fpcr, fpsr; uint64_t tpidr_el0, tpidrro_el0; uint64_t sigmask; bool running; } s{};
-        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate=cpu.pstate;
+        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate = cpu.nzcv_host;
         std::memcpy(s.v_lo, cpu.v_lo, sizeof(s.v_lo)); std::memcpy(s.v_hi, cpu.v_hi, sizeof(s.v_hi));
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
-        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
+        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.nzcv_host = s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
         if(dyn_linker_ && dyn_linker_->static_tls_size()>0 && cpu.tpidr_el0==0){ cpu.tpidr_el0=dyn_linker_->thread_pointer(); cpu.tpidrro_el0=cpu.tpidr_el0; }
         static thread_local uint64_t ss=0; static thread_local const Emulator* ss_owner=nullptr;
         if(!ss || ss_owner!=this){ ss=mem_.mmap_alloc_callback_stack(64*1024); ss_owner=this; if(!ss){ restore(); return 0; } }
         uint64_t top=ss+64*1024; constexpr uint64_t SR=0x1000;
-        cpu.pc=fn; cpu.sp=top; cpu.regs[0]=a0; cpu.regs[1]=a1; cpu.regs[2]=a2; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
+        cpu.pc=fn; cpu.sp=top; cpu.regs[0]=a0; cpu.regs[1]=a1; cpu.regs[2]=a2; cpu.regs[30]=SR; cpu.running=true; cpu.set_nzcv(0);
         constexpr uint64_t LIM=50'000'000; uint64_t steps=0;
         try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(...) {}
         uint64_t r=cpu.regs[0]; restore(); return r;
@@ -390,7 +390,7 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
     std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
     saved.sp = cpu.sp;
     saved.pc = cpu.pc;
-    saved.pstate = cpu.pstate;
+    saved.pstate = cpu.nzcv_host;
     std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
     std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
     saved.fpcr = cpu.fpcr;
@@ -403,7 +403,7 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
         std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
         cpu.sp = saved.sp;
         cpu.pc = saved.pc;
-        cpu.pstate = saved.pstate;
+        cpu.nzcv_host = saved.pstate;
         std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
         std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
         cpu.fpcr = saved.fpcr;
@@ -472,7 +472,7 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
     }
     cpu.regs[30] = SENTINEL_LR;
     cpu.running = true;
-    cpu.pstate = 0;
+    cpu.set_nzcv(0);
     constexpr uint64_t CALL_LIMIT = 50'000'000;
     uint64_t steps = 0;
     uint64_t result = 0;

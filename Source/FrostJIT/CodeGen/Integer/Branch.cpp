@@ -394,62 +394,32 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
         case IROp::BRCOND: {
             const BrCondParams bp = inst.brcond_params();
             // A condition on a single flag (EQ/NE: Z, CS/CC: C, MI/PL: N, VS/VC: V)
-            // needs no host flags when they are still in cpu.pstate: test that bit
-            // in memory and branch. Nothing is loaded, clobbered or stored back.
+            // needs no host flags when they are still in cpu.nzcv_host: test that
+            // bit in memory and branch. Nothing is loaded, clobbered or stored back.
+            // The stored C bit is x86 CF, the inverse of ARM C.
             uint32_t direct_mask = 0;
             bool direct_taken_if_set = false;
             if (!flags_in_host_) {
                 switch (bp.cond & 0xF) {
-                    case 0: direct_mask = 0x40000000u; direct_taken_if_set = true;  break;  // EQ
-                    case 1: direct_mask = 0x40000000u; direct_taken_if_set = false; break;  // NE
-                    case 2: direct_mask = 0x20000000u; direct_taken_if_set = true;  break;  // CS
-                    case 3: direct_mask = 0x20000000u; direct_taken_if_set = false; break;  // CC
-                    case 4: direct_mask = 0x80000000u; direct_taken_if_set = true;  break;  // MI
-                    case 5: direct_mask = 0x80000000u; direct_taken_if_set = false; break;  // PL
-                    case 6: direct_mask = 0x10000000u; direct_taken_if_set = true;  break;  // VS
-                    case 7: direct_mask = 0x10000000u; direct_taken_if_set = false; break;  // VC
+                    case 0: direct_mask = kHostZ; direct_taken_if_set = true;  break;  // EQ
+                    case 1: direct_mask = kHostZ; direct_taken_if_set = false; break;  // NE
+                    case 2: direct_mask = kHostC; direct_taken_if_set = false; break;  // CS
+                    case 3: direct_mask = kHostC; direct_taken_if_set = true;  break;  // CC
+                    case 4: direct_mask = kHostN; direct_taken_if_set = true;  break;  // MI
+                    case 5: direct_mask = kHostN; direct_taken_if_set = false; break;  // PL
+                    case 6: direct_mask = kHostV; direct_taken_if_set = true;  break;  // VS
+                    case 7: direct_mask = kHostV; direct_taken_if_set = false; break;  // VC
                     default: break;
                 }
             }
-            // Two-flag conditions also test pstate (N=31 Z=30 C=29 V=28, C in ARM
-            // convention whatever set it) instead of rebuilding RFLAGS:
-            //   HI/LS: (pstate & (Z|C)) == C          RAX
-            //   GE/LT: sign of pstate ^ (pstate << 3)  RAX     (N ^ V)
-            //   GT/LE: sign of that | (pstate << 1)    RAX+RCX (Z | N ^ V)
-            // Taken iff the even (HI/GE/GT) form holds, as for the jcc below.
-            int pstate_test = 0;  // 1 HI/LS, 2 GE/LT, 3 GT/LE
-            uint16_t pstate_regs = 0;
             if (!flags_in_host_ && !direct_mask) {
-                switch (bp.cond & 0xE) {
-                    case 0x8: pstate_test = 1; pstate_regs = 1u << RAX; break;
-                    case 0xA: pstate_test = 2; pstate_regs = 1u << RAX; break;
-                    case 0xC: pstate_test = 3; pstate_regs = (1u << RAX) | (1u << RCX); break;
-                    default: break;
-                }
-                if (pinned_host_regs_ & pstate_regs) pstate_test = 0;
-                if (pstate_test) {
-                    // Same spill-then-drop the flag load does, for fewer registers.
-                    flush_dirty_host_regs(pstate_regs);
-                    flush_scratch_host_regs(pstate_regs);
-                    invalidate_host_regs(pstate_regs);
-                }
-            }
-            if (!flags_in_host_ && !direct_mask && !pstate_test) {
-                // emit_load_flags_from_pstate clobbers only RAX/RCX/RDX
-                // (the C^from_sub extraction is RDX-only since the R8-scratch
-                // fix; see the contract comment in X86Emitter.cpp). Use
-                // targeted flush+invalidate to preserve vregs cached in
-                // R8/R9/R11/R12/R13/R15 across the flag load. This is a big
-                // win in branch-heavy code (loops with many live variables).
-                // No pushfq/popfq: the goal is to LOAD flags, and
-                // popfq would restore the pre-load (garbage) flags.
-                constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
-                flush_dirty_host_regs(FLAGS3);
-                flush_scratch_host_regs(FLAGS3);
+                // Two-flag conditions reload RFLAGS (mov eax; add al; sahf). The
+                // load clobbers only RAX, so vregs in every other register stay
+                // cached across it. No pushfq/popfq: the goal is to LOAD flags.
+                flush_dirty_host_regs(1u << RAX);
+                flush_scratch_host_regs(1u << RAX);
                 emit_load_flags_from_pstate();
-                // Normalize CF to SUB convention so the default
-                // arm_cond_to_x86() mapping works for all conditions.
-                invalidate_host_regs(FLAGS3);
+                invalidate_host_regs(1u << RAX);
                 flags_from_sub_ = true;  // CF is now in SUB convention
                 flags_in_host_ = true;
                 flags_match_pstate_ = true;  // BRCOND only consumes them
@@ -458,10 +428,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // With flags_from_sub_=true (SUB convention, whether originally
             // from SUB or normalized), the default mapping is used.
             bool need_cmc_for_hi_ls = false;
-            const bool cond_holds_if_even = (bp.cond & 1) == 0;
             uint8_t cc = direct_mask ? (direct_taken_if_set ? 5 /*JNE: bit set*/ : 4 /*JE: bit clear*/)
-                       : pstate_test == 1 ? (cond_holds_if_even ? 4 /*JE*/ : 5 /*JNE*/)
-                       : pstate_test ? (cond_holds_if_even ? 9 /*JNS*/ : 8 /*JS*/)
                        : resolve_arm_cond_with_carry(bp.cond, need_cmc_for_hi_ls);
             // Emit the JCC first — it consumes host RFLAGS directly, so no
             // flag materialization is needed before it. Flags are materialized
@@ -474,23 +441,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // preload raises max_vreg_), never from cpu.regs[].
             flush_all_vregs_but_pins();
             if (direct_mask) {
-                emit_byte(0xF7); emit_modrm_disp(0, CPU_REG, PSTATE_OFF);  // test dword [pstate], mask
+                emit_byte(0xF7); emit_modrm_disp(0, CPU_REG, NZCV_OFF);  // test dword [nzcv], mask
                 emit_u32(direct_mask);
-            } else if (pstate_test) {
-                emit_load32(RAX, CPU_REG, PSTATE_OFF);                     // mov eax, [pstate]
-                if (pstate_test == 1) {
-                    emit_byte(0x25); emit_u32(0x60000000u);                // and eax, Z|C
-                    emit_byte(0x3D); emit_u32(0x20000000u);                // cmp eax, C
-                } else {
-                    // 32-bit forms throughout: SF is bit 31 of each result.
-                    if (pstate_test == 3) { emit_byte(0x89); emit_byte(0xC1); }  // mov ecx, eax
-                    emit_byte(0xC1); emit_byte(0xE0); emit_byte(3);        // shl eax, 3: V→31
-                    emit_byte(0x33); emit_modrm_disp(RAX, CPU_REG, PSTATE_OFF); // xor eax, [pstate]
-                    if (pstate_test == 3) {
-                        emit_byte(0x01); emit_byte(0xC9);                  // add ecx, ecx: Z→31
-                        emit_byte(0x09); emit_byte(0xC8);                  // or eax, ecx: SF = Z | N^V
-                    }
-                }
             } else if (need_cmc_for_hi_ls) {
                 emit_byte(0xF5);  // cmc — invert CF for HI/LS after ADD/TST
             }

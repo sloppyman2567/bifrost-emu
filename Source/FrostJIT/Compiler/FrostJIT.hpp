@@ -780,7 +780,7 @@ public:
     static constexpr int REGS_OFF   = 0;
     static constexpr int SP_OFF     = 256;
     static constexpr int PC_OFF     = 264;
-    static constexpr int PSTATE_OFF = 272;
+    static constexpr int NZCV_OFF = 272;
     static constexpr int V_LO_OFF   = 288;  // v_lo[0] — 32 × uint64_t
     static constexpr int V_HI_OFF   = 544;  // v_hi[0] — 32 × uint64_t
     static constexpr int FPCR_OFF   = 800;

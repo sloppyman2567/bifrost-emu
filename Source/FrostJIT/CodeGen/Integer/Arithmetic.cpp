@@ -983,17 +983,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             flush_invalidate_host_regs((1u << RDX) | (1u << RAX) | (1u << RCX));
             // jcc do_compare (if cond TRUE, do the compare)
             size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);
-            // --- else path: cond FALSE, set pstate = nzcv ---
-            // The else path sets NZCV directly from the instruction's nzcv
-            // immediate — there's no subtraction, so C is NOT in SUB
-            // convention (inverted). Setting from_sub=1 would cause the
-            // flag loader to invert C, producing wrong flags. This was the
-            // CCMP's else path set C=1 (from nzcv) but from_sub=1 caused
-            // the next conditional branch to see C=0, taking the wrong path.
-            uint32_t pstate_else = (static_cast<uint32_t>(nzcv) << 28);
-            // from_sub (bit 27) is NOT set — C is raw, not inverted.
-            emit_mov_imm32_zext(RDX, pstate_else);
-            emit_store32(CPU_REG, PSTATE_OFF, RDX);
+            // --- else path: cond FALSE, NZCV = the instruction's immediate ---
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(static_cast<uint32_t>(nzcv) << 28));
+            emit_store32(CPU_REG, NZCV_OFF, RDX);
             // Jump to end.
             size_t jmp_to_end = emit_jmp_rel32_placeholder();
             // --- cond TRUE path: do the compare ---

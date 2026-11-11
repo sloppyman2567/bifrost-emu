@@ -421,8 +421,7 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
     memcpy(buf + 184, cpu.regs, REGS_BYTES);
     memcpy(buf + 432, &cpu.sp,     8);
     memcpy(buf + 440, &cpu.pc,     8);
-    // cpu.pstate is only 32 bits and includes a private JIT carry marker.
-    const uint64_t pstate = cpu.pstate & 0xF0000000u;
+    const uint64_t pstate = cpu.nzcv();
     memcpy(buf + 448, &pstate, 8);
     // The reserved FPSIMD context is also 16-byte aligned.
     memcpy(buf + 464 + 0, &FPSIMD_MAGIC, 4);
@@ -474,7 +473,7 @@ bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr) {
     cpu.regs[31] = 0;
     cpu.sp = read64(432);
     cpu.pc = read64(440);
-    cpu.pstate = static_cast<uint32_t>(pstate) & 0xF0000000u;
+    cpu.set_nzcv(static_cast<uint32_t>(pstate) & 0xF0000000u);
     cpu.sigmask = read64(40) & ~UNBLOCKABLE_MASK;
     cpu.fpsr = read32(fpsimd + 8);
     cpu.fpcr = read32(fpsimd + 12);
@@ -760,7 +759,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     memcpy(frame.regs, cpu.regs, sizeof(frame.regs));
     frame.sp          = cpu.sp;
     frame.pc          = cpu.pc;
-    frame.pstate      = cpu.pstate;
+    frame.pstate      = cpu.nzcv();
     frame.saved_mask  = saved_mask;
     frame.fault_addr  = fault_addr;
     frame.si_code     = si_code;

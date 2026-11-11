@@ -40,7 +40,7 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             return;
         }
         case InstClass::Bcond: {
-            if (cond_true(d.cond, cpu.pstate))
+            if (cond_true(d.cond, cpu.nzcv()))
                 next_pc = cpu.pc + d.imm;
             return;
         }

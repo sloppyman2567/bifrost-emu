@@ -445,7 +445,7 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         } else {
             nzcv = 0x30000000;  // half-precision: treat as unordered
         }
-        cpu.pstate = (cpu.pstate & 0x0FFFFFFF) | nzcv;
+        cpu.set_nzcv(nzcv);
         return;
     }
     // ── FCCMP/FCCMPE: FP conditional compare ──────────────────
@@ -462,7 +462,7 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     if ((op & 0xFF200C00) == 0x1E200400) {
         uint8_t cond = (op >> 12) & 0xF;
         uint8_t nzcv = op & 0xF;
-        if (cond_true(cond, cpu.pstate)) {
+        if (cond_true(cond, cpu.nzcv())) {
             bool unordered = false, less = false, equal = false;
             if (ftype == 1) {  // double
                 double a = read_fp_d(cpu, rn);
@@ -484,10 +484,10 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             else if (less)       n = 0x80000000;
             else if (equal)      n = 0x60000000;
             else                 n = 0x20000000;
-            cpu.pstate = (cpu.pstate & 0x0FFFFFFF) | n;
+            cpu.set_nzcv(n);
         } else {
             uint32_t n = static_cast<uint32_t>(nzcv) << 28;
-            cpu.pstate = (cpu.pstate & 0x0FFFFFFF) | n;
+            cpu.set_nzcv(n);
         }
         return;
     }
@@ -831,10 +831,10 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     if ((op & 0xFF200C00) == 0x1E200C00) {  // FCSEL (bit 21=0, bits[13:10]=1100)
         uint8_t cond = (op >> 12) & 0xF;
         if (ftype) {
-            double r = cond_true(cond, cpu.pstate) ? read_fp_d(cpu, rn) : read_fp_d(cpu, rm);
+            double r = cond_true(cond, cpu.nzcv()) ? read_fp_d(cpu, rn) : read_fp_d(cpu, rm);
             write_fp_d(cpu, rd, r);
         } else {
-            float r = cond_true(cond, cpu.pstate) ? read_fp_s(cpu, rn) : read_fp_s(cpu, rm);
+            float r = cond_true(cond, cpu.nzcv()) ? read_fp_s(cpu, rn) : read_fp_s(cpu, rm);
             write_fp_s(cpu, rd, r);
         }
         return;

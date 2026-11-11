@@ -69,7 +69,7 @@ void report_crash(const CPU& cpu, const Memory& mem, const char* reason,
         if ((i & 3) == 3) fprintf(stderr, "\n");
     }
     fprintf(stderr, "  sp=0x%llx pc=0x%llx pstate=0x%x\n",
-            (unsigned long long)cpu.sp, (unsigned long long)cpu.pc, cpu.pstate);
+            (unsigned long long)cpu.sp, (unsigned long long)cpu.pc, cpu.nzcv());
 
     // stack: 16 words at sp.
     fprintf(stderr, "  stack @0x%llx:\n", (unsigned long long)cpu.sp);

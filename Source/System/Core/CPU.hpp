@@ -49,6 +49,17 @@ struct SignalFrame {
     uint64_t tpidr_el0 = 0;
     uint64_t tpidrro_el0 = 0;
 };
+// CPU::nzcv_host bits (see there) and conversions to and from the
+// architectural NZCV layout (N=31, Z=30, C=29, V=28).
+constexpr uint32_t kHostN = 0x8000, kHostZ = 0x4000, kHostC = 0x100, kHostV = 0x1;
+constexpr uint32_t host_from_arm_nzcv(uint32_t arm) {
+    return ((arm >> 31) & 1 ? kHostN : 0) | ((arm >> 30) & 1 ? kHostZ : 0) |
+           ((arm >> 29) & 1 ? 0 : kHostC) | ((arm >> 28) & 1 ? kHostV : 0);
+}
+constexpr uint32_t arm_from_host_nzcv(uint32_t host) {
+    return (host & kHostN ? 1u << 31 : 0) | (host & kHostZ ? 1u << 30 : 0) |
+           (host & kHostC ? 0 : 1u << 29) | (host & kHostV ? 1u << 28 : 0);
+}
 class CPU {
 public:
     // We store 32 entries; regs[31] is always 0 (XZR). This lets us index
@@ -60,7 +71,13 @@ public:
     uint64_t regs[32] = {0};
     uint64_t sp = 0;
     uint64_t pc = 0;
-    uint32_t pstate = 0;        // NZCV in bits 31:28 (N=31,Z=30,C=29,V=28)
+    // NZCV in the image x86 `lahf; seto al` leaves in AX, so generated code
+    // stores it in three instructions and reloads it with `add al, 0x7f; sahf`:
+    // N = bit 15 (SF), Z = bit 14 (ZF), bit 8 = x86 CF = NOT ARM C (the borrow
+    // convention of a subtraction), V = bit 0. Other bits are don't-care (lahf
+    // also copies AF, PF and the always-set bit 1). C++ uses nzcv()/set_nzcv()
+    // or the flag accessors, never the raw value, except to save and restore it.
+    uint32_t nzcv_host = kHostC;
     bool     running = true;
     int      exit_code = 0;
     // SIMD/FP register file. Each Vn is 128 bits (16 bytes). We store as
@@ -414,15 +431,19 @@ public:
     uint32_t jit_tier2_trial_remaining = 0;
     uint32_t jit_tier2_trial_work = 0;
 
-    // ── PSTATE flag accessors ────────────────────────────────────────
-    void set_flag_n(bool v) { if (v) pstate |= (1u<<31); else pstate &= ~(1u<<31); }
-    void set_flag_z(bool v) { if (v) pstate |= (1u<<30); else pstate &= ~(1u<<30); }
-    void set_flag_c(bool v) { if (v) pstate |= (1u<<29); else pstate &= ~(1u<<29); }
-    void set_flag_v(bool v) { if (v) pstate |= (1u<<28); else pstate &= ~(1u<<28); }
-    bool flag_n() const { return pstate & (1u<<31); }
-    bool flag_z() const { return pstate & (1u<<30); }
-    bool flag_c() const { return pstate & (1u<<29); }
-    bool flag_v() const { return pstate & (1u<<28); }
+    // ── NZCV accessors ───────────────────────────────────────────────
+    void set_flag_n(bool v) { if (v) nzcv_host |= kHostN; else nzcv_host &= ~kHostN; }
+    void set_flag_z(bool v) { if (v) nzcv_host |= kHostZ; else nzcv_host &= ~kHostZ; }
+    void set_flag_c(bool v) { if (v) nzcv_host &= ~kHostC; else nzcv_host |= kHostC; }
+    void set_flag_v(bool v) { if (v) nzcv_host |= kHostV; else nzcv_host &= ~kHostV; }
+    bool flag_n() const { return nzcv_host & kHostN; }
+    bool flag_z() const { return nzcv_host & kHostZ; }
+    bool flag_c() const { return !(nzcv_host & kHostC); }
+    bool flag_v() const { return nzcv_host & kHostV; }
+    // The architectural view: N, Z, C, V in bits 31:28 (the NZCV register,
+    // the signal frame's pstate), other bits zero.
+    uint32_t nzcv() const { return arm_from_host_nzcv(nzcv_host); }
+    void set_nzcv(uint32_t arm) { nzcv_host = host_from_arm_nzcv(arm); }
     // Read a register operand; XZR (31) reads as 0.
     uint64_t r(int r) const { return regs[r & 31]; }
     // Write a register operand; writes to XZR (31) are discarded.
@@ -438,7 +459,7 @@ public:
         std::memcpy(regs, src.regs, sizeof(regs));
         sp = src.sp;
         pc = src.pc;
-        pstate = src.pstate;
+        nzcv_host = src.nzcv_host;
         running = src.running;
         exit_code = src.exit_code;
         std::memcpy(v_lo, src.v_lo, sizeof(v_lo));

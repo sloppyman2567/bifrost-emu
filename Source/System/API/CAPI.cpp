@@ -228,12 +228,12 @@ void bifrost_set_fp_reg(bifrost_emu_t* emu, int reg,
 uint32_t bifrost_get_pstate(const bifrost_emu_t* emu) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().pstate;
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().nzcv();
 }
 void bifrost_set_pstate(bifrost_emu_t* emu, uint32_t value) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return;
-    e->emu.main_cpu().pstate = value;
+    e->emu.main_cpu().set_nzcv(value);
 }
 int bifrost_get_flag(const bifrost_emu_t* emu, int flag) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);

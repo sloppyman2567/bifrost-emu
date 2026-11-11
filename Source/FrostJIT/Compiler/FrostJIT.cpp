@@ -110,7 +110,7 @@ bool FrostJIT::tier2_trace_enabled() {
 static_assert(offsetof(CPU, regs)   == FrostJIT::REGS_OFF,   "CPU regs offset mismatch");
 static_assert(offsetof(CPU, sp)     == FrostJIT::SP_OFF,     "CPU sp offset mismatch");
 static_assert(offsetof(CPU, pc)     == FrostJIT::PC_OFF,     "CPU pc offset mismatch");
-static_assert(offsetof(CPU, pstate) == FrostJIT::PSTATE_OFF, "CPU pstate offset mismatch");
+static_assert(offsetof(CPU, nzcv_host) == FrostJIT::NZCV_OFF, "CPU nzcv_host offset mismatch");
 static_assert(offsetof(CPU, v_lo)   == FrostJIT::V_LO_OFF,   "CPU v_lo offset mismatch");
 static_assert(offsetof(CPU, v_hi)   == FrostJIT::V_HI_OFF,   "CPU v_hi offset mismatch");
 static_assert(offsetof(CPU, fpcr)   == FrostJIT::FPCR_OFF,   "CPU fpcr offset mismatch");
@@ -936,17 +936,20 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                     // Drop cache mappings for RAX/RCX/RDX (clobbered by materialize).
                     invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
                 }
-                // Read pstate and mask off the internal `from_sub` flag
-                // (bit 27) that emit_materialize_flags stores alongside
-                // NZCV. Without this mask, `mrs x0, nzcv` after a SUBS
-                // returns 0x?a8000000 instead of 0x?a0000000, diverging
-                // from the interpreter. Only bits 31:28 (N/Z/C/V) are
-                // architecturally visible in the NZCV sysreg.
+                // nzcv_host → architectural bits 31:28. With C restored
+                // (CF inverted) and only N15 Z14 C8 V0 kept, one multiply by
+                // (1<<16)|(1<<21)|(1<<28) puts them at 31..28; the other
+                // partial products land on distinct lower bits (or past bit
+                // 31), so nothing carries into the field the mask keeps.
+                flush_invalidate_host_regs(1u << RAX);
                 int d2 = alloc_reg_for(inst.dest, RAX);
-                emit_load32(d2, CPU_REG, PSTATE_OFF);
-                // and r/m32, 0xF0000000 — 32-bit op (no REX.W), REX.B if
-                // the dest is r8–r15. emit_load32 already zero-extended
-                // the high 32 bits, so the 32-bit AND keeps them zero.
+                emit_load32(RAX, CPU_REG, NZCV_OFF);
+                emit_byte(0x35); emit_u32(kHostC);                     // xor eax, CF → C
+                emit_byte(0x25); emit_u32(kHostN | kHostZ | kHostC | kHostV);  // and eax
+                if (d2 >= 8) emit_byte(0x44);                          // REX.R
+                emit_byte(0x69); emit_byte(modrm(3, d2 & 7, RAX));     // imul d2, eax, imm32
+                emit_u32((1u << 16) | (1u << 21) | (1u << 28));
+                // and r/m32, 0xF0000000 — 32-bit op (no REX.W) zero-extends.
                 if (d2 >= 8) emit_byte(0x41);
                 emit_byte(0x81); emit_byte(modrm(3, 4, d2 & 7));
                 emit_u32(0xF0000000u);
@@ -1012,17 +1015,18 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 // cpu.regs[rt] instead, which is stale once optimize_ir
                 // drops rt's STORE_REG because a later instruction in the
                 // block overwrites rt (`msr nzcv, x2; add x2, x1, #248`
-                // set NZCV from the old x2). Like the interpreter, only
-                // bits 31:28 change, so the carry-convention bit 27 stays.
-                clobber_flags();  // pending host flags land in pstate first
+                // set NZCV from the old x2). Architectural bits 31:28 →
+                // nzcv_host: after `shr 28`, a multiply by 0x1081 copies bit
+                // k to k+12, k+7 and k (all twelve products distinct, so no
+                // carries); the mask keeps N15 Z14 C8 V0 and C is inverted.
+                clobber_flags();  // pending host flags land in nzcv_host first
                 flush_invalidate_host_regs((1u << RAX) | (1u << RCX));
                 load_vreg_to_reg(RAX, inst.src1);
-                emit_byte(0x25); emit_u32(0xF0000000u);       // and eax, 0xF0000000
-                emit_load32(RCX, CPU_REG, PSTATE_OFF);
-                emit_byte(0x81); emit_byte(modrm(3, 4, RCX));  // and ecx, 0x0FFFFFFF
-                emit_u32(0x0FFFFFFFu);
-                emit_or_reg(RCX, RAX);
-                emit_store32(CPU_REG, PSTATE_OFF, RCX);
+                emit_byte(0xC1); emit_byte(0xE8); emit_byte(28);       // shr eax, 28
+                emit_byte(0x69); emit_byte(0xC0); emit_u32(0x1081);    // imul eax, eax, 0x1081
+                emit_byte(0x25); emit_u32(kHostN | kHostZ | kHostC | kHostV);  // and eax
+                emit_byte(0x35); emit_u32(kHostC);                     // xor eax, C → CF
+                emit_store32(CPU_REG, NZCV_OFF, RAX);
                 return false;
             }
             // Cache maintenance (crn 7) never reaches here: the translator
