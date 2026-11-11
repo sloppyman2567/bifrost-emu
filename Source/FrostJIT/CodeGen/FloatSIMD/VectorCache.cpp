@@ -378,8 +378,8 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
 
 void FrostJIT::vec_writeback_one(int v) {
     const int xmm = vec_cache_[v];
-    store_lo(xmm, V_LO_OFF + v * 8);
-    if (!fp_cache_active_) store_hi(xmm, V_HI_OFF + v * 8);
+    if (fp_cache_active_) store_lo(xmm, vlo_off(v));  // the lo-only cache never writes v_hi
+    else store_v16(xmm, v);
     ++vec_spills_;
 }
 
@@ -673,17 +673,11 @@ void FrostJIT::vec_cache_reset() {
 }
 
 // ── Prologue / epilogue ────────────────────────────────────────────────
-// movsd xmm, [rbx+lo] + movhpd xmm, [rbx+hi].
+// The whole register: movups xmm, [rbx+v[vreg]].
 void FrostJIT::vec_emit_load_lo_hi(int xmm, int vreg) {
     vec_valid_[vreg] = true;
     ++vec_reloads_;
-    bool r = (xmm >= 8);
-    emit_rex_if_needed(r, false, false);
-    emit_byte(0x0F); emit_byte(0x10);                  // movsd
-    emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + vreg * 8);
-    emit_rex_if_needed(r, false, false);
-    emit_byte(0x0F); emit_byte(0x16);                  // movhpd
-    emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + vreg * 8);
+    load_v16(xmm, vreg);
 }
 
 void FrostJIT::vec_emit_prologue_loads() {
@@ -692,15 +686,13 @@ void FrostJIT::vec_emit_prologue_loads() {
         if (fp_cache_active_) {
             // Scalar-FP cache: lo-only. v_hi is never cached and never
             // loaded here (scalar FP ops don't read it; vector ops can't
-            // appear in an fp-cache block). MOVSD (F2 0F 10) is 64-bit —
-            // a bare 0F 10 (MOVUPS) would load 128 bits and read the NEXT
-            // register's lo slot into the XMM's upper half.
+            // appear in an fp-cache block): MOVSD (F2 0F 10), 64 bits.
             int xmm = vec_cache_[v];
             bool r = (xmm >= 8);
             emit_byte(0xF2);
             emit_rex_if_needed(r, false, false);
             emit_byte(0x0F); emit_byte(0x10);          // movsd
-            emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
+            emit_modrm_disp(xmm, CPU_REG, vlo_off(v));
             ++vec_reloads_;
         } else {
             vec_emit_load_lo_hi(vec_cache_[v], v);
@@ -719,20 +711,10 @@ void FrostJIT::vec_cache_writeback_all(bool clear_flags) {
     for (int i = 0; i < vec_pinned_count_; i++) {
         int v = vec_pinned_[i];
         if (!vec_dirty_[v]) continue;
-        int xmm = vec_cache_[v];
-        bool r = (xmm >= 8);
-        // MOVSD (F2 0F 11) — 64-bit store. A bare 0F 11 (MOVUPS) would
-        // write the XMM's upper half into the NEXT register's lo slot,
-        // silently corrupting v_lo[v+1] every time v is written back.
-        emit_byte(0xF2);
-        emit_rex_if_needed(r, false, false);
-        emit_byte(0x0F); emit_byte(0x11);              // movsd
-        emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
-        if (!fp_cache_active_) {
-            emit_rex_if_needed(r, false, false);
-            emit_byte(0x0F); emit_byte(0x17);          // movhpd
-            emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
-        }
+        // The lo-only fp cache stores 8 bytes (v_hi is not in its XMM); the
+        // vector cache stores the whole register.
+        if (fp_cache_active_) store_lo(vec_cache_[v], vlo_off(v));
+        else store_v16(vec_cache_[v], v);
         ++vec_spills_;
         if (clear_flags) vec_dirty_[v] = false;
     }
@@ -749,18 +731,8 @@ void FrostJIT::vec_cache_writeback_all_pinned(bool clear_flags) {
         // self-loop iteration. It is always safe to flush a clean reg
         // (its XMM value equals its slot).
         if (!vec_valid_[v] || (!vec_dirty_[v] && !vec_written_this_block_[v])) continue;
-        int xmm = vec_cache_[v];
-        bool r = (xmm >= 8);
-        // MOVSD (F2 0F 11) — 64-bit store (see vec_cache_writeback_all).
-        emit_byte(0xF2);
-        emit_rex_if_needed(r, false, false);
-        emit_byte(0x0F); emit_byte(0x11);              // movsd
-        emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
-        if (!fp_cache_active_) {
-            emit_rex_if_needed(r, false, false);
-            emit_byte(0x0F); emit_byte(0x17);          // movhpd
-            emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
-        }
+        if (fp_cache_active_) store_lo(vec_cache_[v], vlo_off(v));  // see vec_cache_writeback_all
+        else store_v16(vec_cache_[v], v);
         ++vec_spills_;
         if (clear_flags) vec_dirty_[v] = false;
     }
@@ -825,7 +797,7 @@ void FrostJIT::emit_vec_zero_upper(int xmm) {
 // ── Scalar-FP-cache helpers ────────────────────────────────────────────
 // Load FP operand `vreg` (raw ARM FP reg 0-31) into XMM `xmm`. When the fp
 // cache is active and the operand is pinned, this is a reg-reg move (no
-// memory access); otherwise it loads cpu.v_lo[vreg] exactly like the
+// memory access); otherwise it loads cpu.v[vreg].lo exactly like the
 // non-cached codegen. `is_double` selects MOVSD (F2) vs MOVSS (F3).
 void FrostJIT::fp_load_operand(int xmm, int vreg, bool is_double) {
     uint8_t prefix = is_double ? 0xF2 : 0xF3;
@@ -839,7 +811,7 @@ void FrostJIT::fp_load_operand(int xmm, int vreg, bool is_double) {
     } else {
         emit_byte(prefix);
         emit_byte(0x0F); emit_byte(0x10);
-        emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + vreg * 8);
+        emit_modrm_disp(xmm, CPU_REG, vlo_off(vreg));
     }
 }
 
@@ -865,12 +837,12 @@ void FrostJIT::fp_load_lane(int xmm, int vreg, int lane, bool is_double) {
     emit_byte(is_double ? 0xF2 : 0xF3);  // movsd/movss xmm, [element]
     emit_rex_if_needed(xmm >= 8, false, false);
     emit_byte(0x0F); emit_byte(0x10);
-    emit_modrm_disp(xmm, CPU_REG, bytes < 8 ? V_LO_OFF + vreg * 8 + bytes
-                                            : V_HI_OFF + vreg * 8 + bytes - 8);
+    emit_modrm_disp(xmm, CPU_REG, bytes < 8 ? vlo_off(vreg) + bytes
+                                            : vhi_off(vreg) + bytes - 8);
 }
 
 // Resolve FP operand `vreg` to the XMM holding its value: the pinned XMM
-// if cached (no code), else `scratch` after loading v_lo[vreg] into it.
+// if cached (no code), else `scratch` after loading v[vreg].lo into it.
 int FrostJIT::fp_resolve_operand(int vreg, int scratch, bool is_double) {
     int xs = vec_xmm(vreg);
     if (xs >= 0) return xs;
@@ -880,7 +852,7 @@ int FrostJIT::fp_resolve_operand(int vreg, int scratch, bool is_double) {
 
 // Store XMM `xmm` into FP operand `vreg`. When pinned, this is a reg-reg
 // move into the pinned XMM (marked dirty); otherwise it stores to
-// cpu.v_lo[vreg] like the non-cached codegen. The caller is responsible
+// cpu.v[vreg].lo like the non-cached codegen. The caller is responsible
 // for zeroing/copying v_hi via fp_zero_hi / the FP_MOV double path.
 void FrostJIT::fp_store_operand(int xmm, int vreg, bool is_double) {
     uint8_t prefix = is_double ? 0xF2 : 0xF3;
@@ -910,18 +882,18 @@ void FrostJIT::fp_store_operand(int xmm, int vreg, bool is_double) {
     } else {
         emit_byte(prefix);
         emit_byte(0x0F); emit_byte(0x11);
-        emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + vreg * 8);
+        emit_modrm_disp(xmm, CPU_REG, vlo_off(vreg));
         if (!is_double) {
             // Same canonicalization for the memory path: movss m32 leaves
             // the old high dword in place — zero it explicitly.
             emit_byte(0xC7);
-            emit_modrm_disp(0, CPU_REG, V_LO_OFF + vreg * 8 + 4);
+            emit_modrm_disp(0, CPU_REG, vlo_off(vreg) + 4);
             emit_u32(0);
         }
     }
 }
 
-// Zero v_hi[vreg]. A vector-cache XMM holds v_hi in bits 127:64, already
+// Zero v[vreg].hi. A vector-cache XMM holds v_hi in bits 127:64, already
 // zero when this op's fp_store_operand wrote it; otherwise (the lo-only
 // fp cache, or an unpinned register) it is `pxor xmm0, xmm0; movsd [hi],
 // xmm0`. Keep that pair: `mov qword [hi], 0` is one instruction fewer but
@@ -937,7 +909,7 @@ void FrostJIT::fp_zero_hi(int vreg) {
     }
     emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF); emit_byte(0xC0);  // pxor xmm0, xmm0
     emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);                    // movsd [hi], xmm0
-    emit_modrm_disp(0, CPU_REG, V_HI_OFF + vreg * 8);
+    emit_modrm_disp(0, CPU_REG, vhi_off(vreg));
 }
 
 // movq xmm, gpr:  66 REX.W 0F 6E /r  (reg = xmm, rm = gpr)

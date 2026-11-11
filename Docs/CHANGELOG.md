@@ -60,6 +60,8 @@ names the library.
   fewer cycles per frame.
 - `ldr s`/`ldr d` load straight into the cached SSE register, and scalar FP results reach theirs in fewer instructions:
   the FP game kernels run 5-7% fewer host instructions (cycles -1% to -6%).
+- Each SIMD register is stored as one 16-byte block, so the JIT moves a whole vector with one instruction: vector-heavy
+  game kernels run 35-42% fewer cycles (skinning, animation blending).
 - Host instructions executed fall by 11.9% on CoreMark, 12.2% on `bench_mips`, 5.8% on `bench_sort`, 5.2% on `bench_fib`
   and 3.5% on `bench_dispatch` (instruction counts, not run time; no game was measured). Details and what the sample
   still shows as waste are in [the JIT guide](JIT.md#pc-stores-behind-the-chain-slot-loop-pins-and-four-peepholes-2026-11-10).

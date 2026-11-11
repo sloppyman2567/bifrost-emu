@@ -31,7 +31,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // SIMD&FP LDR/STR (B/H/S/D/Q) are translated natively below.
             // previously these fell back to CALL_INTERP
             // because the GPR path below reads/writes cpu.regs[d.rt] while
-            // vector instructions address cpu.v_lo/v_hi[d.rt]. The vector
+            // vector instructions address cpu.v_lo/v[d.rt].hi. The vector
             // branch handles the vreg storage (SIMD_LD16/ST16 for 16-byte
             // Q forms, FMOV_G2F/FMOV_F2G + LOAD_MEM/STORE_MEM for B/H/S/D).
             bool is_load = (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
@@ -108,7 +108,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     if (vec_q) {
                         emit_st16(block, addr, d.rt, St16Params{1, false, static_cast<uint64_t>(mem_off)}, cur_pc);
                     } else {
-                        // Store: read v_lo[d.rt] into a scratch vreg.
+                        // Store: read v[d.rt].lo into a scratch vreg.
                         uint16_t lo = g_alloc.alloc();
                         block.insts.push_back(IRInst::make(IROp::FMOV_F2G, lo, d.rt, 0, 0, cur_pc));
                         MemParams mp;

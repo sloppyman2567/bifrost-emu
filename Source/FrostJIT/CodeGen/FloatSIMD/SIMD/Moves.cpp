@@ -10,7 +10,7 @@ namespace arm64emu {
 bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
     switch (inst.op) {
         case IROp::SIMD_DUP: {
-            // v_lo[dest] = v_hi[dest] = broadcast of src1's low element.
+            // v[dest].lo = v[dest].hi = broadcast of src1's low element.
             // width = esize (1/2/4/8, default 8); flags_op = Q.
             // esize<8: mask the low element then shift-replicate it across
             // the qword in RAX (RCX = scratch); esize==8: full GPR value.
@@ -92,8 +92,8 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
                 clobber_host_reg(RAX);
             }
             emit_dup_qword();
-            int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t offlo = vlo_off(static_cast<int>(inst.dest));
+            int32_t offhi = vhi_off(static_cast<int>(inst.dest));
             emit_store(CPU_REG, offlo, RAX);
             if (q) {
                 emit_store(CPU_REG, offhi, RAX);
@@ -120,9 +120,7 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
             const int esize = mp.esize ? static_cast<int>(mp.esize) : 8;
             const int index = static_cast<int>(mp.index);
             const int byte_off = index * esize;        // offset into the 16-byte vector
-            const int qword = byte_off / 8;            // 0 -> v_lo, 1 -> v_hi
-            const int32_t off = (qword == 0 ? V_LO_OFF : V_HI_OFF)
-                              + static_cast<int>(inst.src1) * 8 + (byte_off % 8);
+            const int32_t off = vlo_off(static_cast<int>(inst.src1)) + byte_off;  // Vn is 16 contiguous bytes
             int d = alloc_reg();
             switch (esize) {
                 case 1:  emit_load8(d, CPU_REG, off);  break;
@@ -148,9 +146,7 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
             const int esize = mp.esize ? static_cast<int>(mp.esize) : 4;
             const int index = static_cast<int>(mp.index);
             const int byte_off = index * esize;        // offset into the 16-byte vector
-            const int qword = byte_off / 8;            // 0 -> v_lo, 1 -> v_hi
-            const int32_t off = (qword == 0 ? V_LO_OFF : V_HI_OFF)
-                              + static_cast<int>(inst.src1) * 8 + (byte_off % 8);
+            const int32_t off = vlo_off(static_cast<int>(inst.src1)) + byte_off;  // Vn is 16 contiguous bytes
             int d = alloc_reg();
             switch (esize) {
                 case 1:  emit_load8(d, CPU_REG, off);  break;
@@ -204,7 +200,7 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
             return true;
         }
         // ── SIMD MOVI/MVNI (broadcast lane pattern, AdvSIMD modified imm) ──
-        // v_lo[dest] = imm; v_hi[dest] = Q ? imm : 0. flags_op = Q.
+        // v[dest].lo = imm; v[dest].hi = Q ? imm : 0. flags_op = Q.
         // One movabs + one vmovq (vmovq already zeroes the upper half for
         // Q=0); vmovddup broadcasts the pattern to both halves for Q=1.
         case IROp::SIMD_MOVI: {
@@ -221,8 +217,8 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
                     return true;
                 }
             }
-            int32_t mofflo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t moffhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t mofflo = vlo_off(static_cast<int>(inst.dest));
+            int32_t moffhi = vhi_off(static_cast<int>(inst.dest));
             emit_store(CPU_REG, mofflo, RAX);
             if (mp.q) {
                 emit_store(CPU_REG, moffhi, RAX);
@@ -233,7 +229,7 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
             return true;
         }
         // ── SIMD ORR/BIC immediate (read-modify-write the destination) ──
-        // v_lo[dest],v_hi[dest] = dest OR/BIC imm. cond = 0=ORR, 1=BIC;
+        // v[dest].lo,v[dest].hi = dest OR/BIC imm. cond = 0=ORR, 1=BIC;
         // flags_op = Q. ORR/BIC (vector, immediate) read Vd as their source,
         // exactly like the interpreter's apply_or_bic_u{32,16}.
         case IROp::SIMD_ORRIMM: {
@@ -263,8 +259,8 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
                 }
             }
             // Memory path: GPR or/and against the pattern in RAX.
-            int32_t olo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t ohi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t olo = vlo_off(static_cast<int>(inst.dest));
+            int32_t ohi = vhi_off(static_cast<int>(inst.dest));
             emit_load(RCX, CPU_REG, olo);
             if (op.invert) { emit_not_reg(RAX); emit_and_reg(RCX, RAX); }
             else           { emit_or_reg(RCX, RAX); }

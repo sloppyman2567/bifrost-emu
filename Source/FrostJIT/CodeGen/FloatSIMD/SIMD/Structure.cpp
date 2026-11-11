@@ -115,15 +115,15 @@ bool FrostJIT::compile_simd_structure_(const IRInst& inst) {
         sse2_op(size == 1 ? 0x68 : size == 2 ? 0x69 : size == 4 ? 0x6A : 0x6D, dst, src);
     };
     auto source = [&](int xmm, int reg) {  // a 64-bit register keeps only its low half
-        load_lo(xmm, V_LO_OFF + reg * 8);
-        if (q) load_hi(xmm, V_HI_OFF + reg * 8);
+        if (q) load_v16(xmm, reg);
+        else load_lo(xmm, vlo_off(reg));
     };
     auto result = [&](int xmm, int reg) {
-        store_lo(xmm, V_LO_OFF + reg * 8);
-        if (q) store_hi(xmm, V_HI_OFF + reg * 8);
-        else {  // a 64-bit result clears the upper half
+        if (q) store_v16(xmm, reg);
+        else {
+            store_lo(xmm, vlo_off(reg));  // a 64-bit result clears the upper half
             sse2_op(0xEF, 15, 15);  // pxor xmm15, xmm15
-            store_lo(15, V_HI_OFF + reg * 8);
+            store_lo(15, vhi_off(reg));
         }
     };
     // 4x4 transpose of the 32-bit lanes of x0, x1, x2, x12. The rows come out in x15, x13, x1, x0.

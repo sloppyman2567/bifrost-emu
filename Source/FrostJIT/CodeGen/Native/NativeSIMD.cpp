@@ -7,11 +7,11 @@ namespace arm64emu {
 namespace {
 struct Vec { uint8_t bytes[16]{}; };
 Vec read(const CPU* cpu, unsigned reg) {
-    Vec v; std::memcpy(v.bytes, &cpu->v_lo[reg], 8);
-    std::memcpy(v.bytes+8, &cpu->v_hi[reg], 8); return v;
+    Vec v; std::memcpy(v.bytes, &cpu->v[reg].lo, 8);
+    std::memcpy(v.bytes+8, &cpu->v[reg].hi, 8); return v;
 }
 void write(CPU* cpu, unsigned reg, const Vec& v) {
-    std::memcpy(&cpu->v_lo[reg], v.bytes, 8); std::memcpy(&cpu->v_hi[reg], v.bytes+8, 8);
+    std::memcpy(&cpu->v[reg].lo, v.bytes, 8); std::memcpy(&cpu->v[reg].hi, v.bytes+8, 8);
 }
 uint64_t get(const Vec& v, unsigned lane, unsigned size) {
     // Lanes are at most 8 bytes; the cap tells the compiler so.

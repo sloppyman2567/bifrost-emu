@@ -551,7 +551,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     uint64_t regs[32];
                     uint64_t sp, pc;
                     uint32_t pstate;
-                    uint64_t v_lo[32], v_hi[32];
+                    VReg v[32];
                     uint32_t fpcr, fpsr;
                     uint64_t tpidr_el0, tpidrro_el0;
                     uint64_t sigmask;
@@ -562,8 +562,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 saved.sp = cpu.sp;
                 saved.pc = cpu.pc;
                 saved.pstate = cpu.nzcv_host;
-                std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
-                std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
+                std::memcpy(saved.v, cpu.v, sizeof(saved.v));
                 saved.fpcr = cpu.fpcr;
                 saved.fpsr = cpu.fpsr;
                 saved.tpidr_el0 = cpu.tpidr_el0;
@@ -575,8 +574,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.sp = saved.sp;
                     cpu.pc = saved.pc;
                     cpu.nzcv_host = saved.pstate;
-                    std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
-                    std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                    std::memcpy(cpu.v, saved.v, sizeof(saved.v));
                     cpu.fpcr = saved.fpcr;
                     cpu.fpsr = saved.fpsr;
                     cpu.tpidr_el0 = saved.tpidr_el0;
@@ -662,7 +660,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     uint64_t regs[32];
                     uint64_t sp, pc;
                     uint32_t pstate;
-                    uint64_t v_lo[32], v_hi[32];
+                    VReg v[32];
                     uint32_t fpcr, fpsr;
                     uint64_t tpidr_el0, tpidrro_el0;
                     uint64_t sigmask;
@@ -672,8 +670,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 saved.sp = cpu.sp;
                 saved.pc = cpu.pc;
                 saved.pstate = cpu.nzcv_host;
-                std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
-                std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
+                std::memcpy(saved.v, cpu.v, sizeof(saved.v));
                 saved.fpcr = cpu.fpcr;
                 saved.fpsr = cpu.fpsr;
                 saved.tpidr_el0 = cpu.tpidr_el0;
@@ -685,8 +682,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.sp = saved.sp;
                     cpu.pc = saved.pc;
                     cpu.nzcv_host = saved.pstate;
-                    std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
-                    std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                    std::memcpy(cpu.v, saved.v, sizeof(saved.v));
                     cpu.fpcr = saved.fpcr;
                     cpu.fpsr = saved.fpsr;
                     cpu.tpidr_el0 = saved.tpidr_el0;
@@ -773,7 +769,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     uint64_t regs[32];
                     uint64_t sp, pc;
                     uint32_t pstate;
-                    uint64_t v_lo[32], v_hi[32];
+                    VReg v[32];
                     uint32_t fpcr, fpsr;
                     uint64_t tpidr_el0, tpidrro_el0;
                     uint64_t sigmask;
@@ -783,8 +779,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 saved.sp = cpu.sp;
                 saved.pc = cpu.pc;
                 saved.pstate = cpu.nzcv_host;
-                std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
-                std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
+                std::memcpy(saved.v, cpu.v, sizeof(saved.v));
                 saved.fpcr = cpu.fpcr;
                 saved.fpsr = cpu.fpsr;
                 saved.tpidr_el0 = cpu.tpidr_el0;
@@ -796,8 +791,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.sp = saved.sp;
                     cpu.pc = saved.pc;
                     cpu.nzcv_host = saved.pstate;
-                    std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
-                    std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                    std::memcpy(cpu.v, saved.v, sizeof(saved.v));
                     cpu.fpcr = saved.fpcr;
                     cpu.fpsr = saved.fpsr;
                     cpu.tpidr_el0 = saved.tpidr_el0;

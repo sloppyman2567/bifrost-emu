@@ -374,7 +374,7 @@ inline void store_arm_reg(IRBlock& b, uint8_t ar, uint16_t v, bool is_sp = false
 // float variable) to read 0.0 under the JIT.
 //
 // Fix: use the `sf` field as an `is_fp` flag on LOAD_REG/STORE_REG.
-// When is_fp=1, the JIT and IR executor access cpu.v_lo[] instead of
+// When is_fp=1, the JIT and IR executor access cpu.v[].lo instead of
 // cpu.regs[]. This is only used for LDR/STR with d.is_vec=true —
 // all other FP ops (SCVTF, FCVT, FADD, etc.) access v_lo directly
 // via their own codegen.

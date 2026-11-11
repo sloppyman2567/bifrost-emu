@@ -47,7 +47,7 @@ namespace arm64emu {
 bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
     switch (inst.op) {
         // ── FMOV (general ↔ FP) — native codegen via emit_fmov_helper ───
-        // These ops move data between cpu.regs[] and cpu.v_lo[]/v_hi[]
+        // These ops move data between cpu.regs[] and cpu.v[].lo/v[].hi
         // using direct memory access through CPU_REG (RBX).
         // No CALL_INTERP needed — pure memory moves through RAX.
         case IROp::FMOV_G2F:
@@ -62,7 +62,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         case IROp::FMOV_G2FHI:  emit_fmov_helper(/*dir=*/0, /*field=*/1, inst.dest, inst.src1, inst.dest); return true;
         case IROp::FMOV_FHI2G:  emit_fmov_helper(/*dir=*/1, /*field=*/1, inst.src1, inst.src1, inst.dest); return true;
         // ── FP conditional select (FCSEL Sd/Dd, Sn, Sm, cond) ──────────
-        // v_lo[dest] = cond ? v_lo[src1] : v_lo[src2]; v_hi[dest] = 0
+        // v[dest].lo = cond ? v[src1].lo : v[src2].lo; v[dest].hi = 0
         // → VBLENDVPS/VPD with a flags-derived sign mask in XMM0.
         // The mask build (mov/cmov/vmovq) is RFLAGS-neutral, so the guest
         // flags stay valid in host RFLAGS after this op.
@@ -143,7 +143,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         // and stores. Only mask-building operations need a GPR scratch;
         // ordinary arithmetic retains the allocator's live GPR values.
         case IROp::FP_BINOP: {
-            // v_lo[dest] = op(v_lo[src1], v_lo[src2]); v_hi[dest] = 0
+            // v[dest].lo = op(v[src1].lo, v[src2].lo); v[dest].hi = 0
             const FpBinopParams bp = inst.fp_binop_params();
             bool is_double = (bp.ftype == 1);
             uint8_t ld_prefix = is_double ? 0xF2 : 0xF3;  // MOVSD/MOVSS
@@ -230,7 +230,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // (fp_store_operand writes the pinned XMM directly when dest is
             // cached, marking it dirty; unpinned dests store to memory).
             fp_store_operand(0, inst.dest, is_double);
-            // Zero v_hi[dest]
+            // Zero v[dest].hi
             fp_zero_hi(inst.dest);
             if (minmax) emit_fp_cold_tail(inst, {unordered, special});
             else emit_fp_cold_tail(inst, {special});
@@ -285,9 +285,9 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         }
         // ── FP↔FP register move (FMOV Dd,Dn / Sd,Sn) ────────────────
         case IROp::FP_MOV: {
-            // v_lo[dest] = v_lo[src1] (low 32/64 bits); v_hi[dest] = 0. ARM
+            // v[dest].lo = v[src1].lo (low 32/64 bits); v[dest].hi = 0. ARM
             // scalar FMOV Sd,Sn / Dd,Dn zero every bit above the element —
-            // a Dd copy must NOT carry v_hi[src1] along. Pure XMM0 move —
+            // a Dd copy must NOT carry v[src1].hi along. Pure XMM0 move —
             // no arithmetic. Replaces the old 4-op GPR round-trip.
             const FpMovParams mp = inst.fp_mov_params();
             bool is_double = (mp.ftype == 1);
@@ -304,7 +304,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         }
         // ── FP→int conversion (FCVTZS/FCVTZU) ──────────────────────
         case IROp::FP_F2I: {
-            // regs[dest] = (int/uint)(v_lo[src1])
+            // regs[dest] = (int/uint)(v[src1].lo)
             // proper unsigned conversion via the
             // "subtract 2^63, convert signed, add 2^63" trick.
             //
@@ -529,7 +529,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         }
         // ── int→FP conversion (SCVTF/UCVTF) ────────────────────────
         case IROp::FP_I2F: {
-            // v_lo[dest] = (float/double)(regs[src1]); v_hi = 0.
+            // v[dest].lo = (float/double)(regs[src1]); v_hi = 0.
             // sf selects the source width (Wn/Xn); emit_int_to_fp_xmm0 holds
             // the signed/unsigned and single-rounding details.
             const FpI2FParams fp = inst.fp_i2f_params();
@@ -544,7 +544,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX));
             load_vreg_to_reg(RAX, inst.src1);
             emit_int_to_fp_xmm0(is_double, is_unsigned, is_64bit_src);
-            // Store to v_lo[dest] (fp_store_operand: pinned dest → reg-reg + dirty,
+            // Store to v[dest].lo (fp_store_operand: pinned dest → reg-reg + dirty,
             // unpinned → memory) and zero v_hi.
             fp_store_operand(0, inst.dest, is_double);
             fp_zero_hi(inst.dest);
@@ -770,7 +770,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             size_t done_path = code_buf_used_;
             patch_jmp_rel32(jmp_done, static_cast<int32_t>(done_path - (jmp_done + 5)));
             // Store result. For the AdvSIMD-scalar form (subop 3, fp_dest) the
-            // integer goes into v_lo[dest] (an FP register) with v_hi cleared;
+            // integer goes into v[dest].lo (an FP register) with v_hi cleared;
             // a 32-bit result is zero-extended (ARM: write to Sd zeroes the
             // upper 32 bits), matching the interpreter.
             if (fp_dest) {
@@ -779,7 +779,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                     emit_mov_imm32_zext(RCX, 0xFFFFFFFFu);
                     emit_byte(0x48); emit_byte(0x21); emit_byte(0xC8);  // and rax, rcx
                 }
-                // fp_store_operand writes v_lo[dest] from XMM0 — but the
+                // fp_store_operand writes v[dest].lo from XMM0 — but the
                 // result is in RAX, so move it into XMM0 first (reg-reg into
                 // the pinned XMM when cached, else a memory store below).
                 int xd = vec_xmm(inst.dest);
@@ -787,7 +787,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                     emit_vmovq_gpr_to_xmm(xd, RAX);
                     vec_cache_mark_dirty(inst.dest);
                 } else {
-                    emit_store(CPU_REG, V_LO_OFF + static_cast<int>(inst.dest) * 8, RAX);
+                    emit_store(CPU_REG, vlo_off(static_cast<int>(inst.dest)), RAX);
                 }
                 fp_zero_hi(inst.dest);
             } else {
@@ -809,7 +809,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX));
             // Load GPR into RAX. For the AdvSIMD-scalar form (subop 2, fp_src)
-            // the integer bits come from v_lo[src1] instead of cpu.regs[].
+            // the integer bits come from v[src1].lo instead of cpu.regs[].
             if (fp_src) {
                 check_fp_reg_index(inst.src1, "FP_I2F_FIXED FP src1");
                 // fp_cache: reg-reg move from the pinned XMM (reads the full
@@ -819,9 +819,9 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 if (xs >= 0) {
                     emit_vmovq_xmm_to_gpr(RAX, xs);
                 } else if (is_64bit_src) {
-                    emit_load(RAX, CPU_REG, V_LO_OFF + static_cast<int>(inst.src1) * 8);
+                    emit_load(RAX, CPU_REG, vlo_off(static_cast<int>(inst.src1)));
                 } else {
-                    emit_load32(RAX, CPU_REG, V_LO_OFF + static_cast<int>(inst.src1) * 8);
+                    emit_load32(RAX, CPU_REG, vlo_off(static_cast<int>(inst.src1)));
                 }
             } else {
                 load_vreg_to_reg(RAX, inst.src1);
@@ -842,7 +842,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             }
             // fp_store_operand: pinned dest → reg-reg + dirty, else memory.
             fp_store_operand(0, inst.dest, is_double);
-            // Zero v_hi[dest]
+            // Zero v[dest].hi
             fp_zero_hi(inst.dest);
             return true;
         }
@@ -900,7 +900,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // (register form with rm==0) would be indistinguishable from
             // FCMP Dn, #0.0 (zero form), because both have IR src2 == 0.
             //
-            // Register form: src2 = rm (0..30). Load v_lo[src2] into XMM1.
+            // Register form: src2 = rm (0..30). Load v[src2].lo into XMM1.
             // Zero form: src2 = 0, imm bit 0 = 1. Use xorps to zero XMM1.
             bool with_zero = cp.with_zero;
             if (!with_zero) {
@@ -987,7 +987,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         }
         // ── FMOV immediate (load decoded FP immediate) ──────────────
         case IROp::FP_MOVI: {
-            // v_lo[dest] = imm; v_hi[dest] = 0
+            // v[dest].lo = imm; v[dest].hi = 0
             // clobber_host_reg evicts any dirty GPR vreg
             // cached in RAX BEFORE we overwrite it with the immediate.
             clobber_host_reg(RAX);
@@ -997,7 +997,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_vmovq_gpr_to_xmm(xd, RAX);
                 vec_cache_mark_dirty(inst.dest);
             } else {
-                emit_store(CPU_REG, V_LO_OFF + static_cast<int>(inst.dest) * 8, RAX);
+                emit_store(CPU_REG, vlo_off(static_cast<int>(inst.dest)), RAX);
             }
             fp_zero_hi(inst.dest);
             return true;
@@ -1009,7 +1009,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // FCVT only clobbers RAX (zero store).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            // Load FP value from v_lo[src1] into XMM0. Source width:
+            // Load FP value from v[src1].lo into XMM0. Source width:
             // FCVT_S2D reads a single (movss), FCVT_D2S reads a double
             // (movsd). fp_load_operand uses a reg-reg move when pinned.
             bool src_double = (inst.op == IROp::FCVT_D2S);
@@ -1026,7 +1026,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             }
             // x86 quiets NaNs like Arm; FPCR.DN needs the interpreter step.
             const size_t special = emit_fp_nan_check(dst_double);
-            // Store result to v_lo[dest] (fp_store_operand: pinned dest →
+            // Store result to v[dest].lo (fp_store_operand: pinned dest →
             // reg-reg + dirty, else memory) and zero v_hi.
             fp_store_operand(0, inst.dest, dst_double);
             fp_zero_hi(inst.dest);

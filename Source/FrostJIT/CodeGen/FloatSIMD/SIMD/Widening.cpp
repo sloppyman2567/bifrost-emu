@@ -338,9 +338,9 @@ bool FrostJIT::compile_simd_widening_(const IRInst& inst) {
                 emit_byte(0x88);  // [r0, r1, r0, r1]: the result in both halves, like pack*
             }
             if (q) {
-                store_hi(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+                store_hi(0, vhi_off(static_cast<int>(inst.dest)));
             } else {
-                store_lo(0, V_LO_OFF + static_cast<int>(inst.dest) * 8);
+                store_lo(0, vlo_off(static_cast<int>(inst.dest)));
                 fp_zero_hi(static_cast<int>(inst.dest));
             }
             return true;

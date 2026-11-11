@@ -999,13 +999,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     //   - esize=8 (D-form): 8 bytes (all of v_lo)
                     //   - esize=16 (Q-form): 16 bytes (v_lo + v_hi)
                     //
-                    //   mem_.write(addr, &v_lo[rt], esize, ...)
+                    //   mem_.write(addr, &v[rt].lo, esize, ...)
                     // with esize=16, which read 16 bytes from the 8-byte
-                    // v_lo[rt] field — a buffer overread that wrote v_lo[rt]
-                    // (8 bytes) + v_lo[rt+1] (8 garbage bytes from the NEXT
+                    // v[rt].lo field — a buffer overread that wrote v[rt].lo
+                    // (8 bytes) + v[rt+1].lo (8 garbage bytes from the NEXT
                     // register). The subsequent hi-half write fixed bytes
                     // 8-15, but the 16-byte overread was still UB and could
-                    // corrupt data if v_lo[rt+1] was in a different thread's
+                    // corrupt data if v[rt+1].lo was in a different thread's
                     // context (it isn't, but the pattern is still wrong).
                     //
                     // Fix: for Q-form stores, write v_lo (8 bytes) then v_hi
@@ -1018,10 +1018,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             uint64_t lo1 = 0, lo2 = 0;
                             mem_.read(addr, &lo1, esize);
                             mem_.read(addr + esize, &lo2, esize);
-                            cpu.v_lo[d.rt] = lo1;
-                            cpu.v_hi[d.rt] = 0;
-                            cpu.v_lo[d.rt2] = lo2;
-                            cpu.v_hi[d.rt2] = 0;
+                            cpu.v[d.rt].lo = lo1;
+                            cpu.v[d.rt].hi = 0;
+                            cpu.v[d.rt2].lo = lo2;
+                            cpu.v[d.rt2].hi = 0;
                         } else {
                             // Q-form (esize=16): read 16 bytes = lo + hi.
                             uint64_t lo1, hi1, lo2, hi2;
@@ -1029,23 +1029,23 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             mem_.read(addr + 8, &hi1, 8);
                             mem_.read(addr + 16, &lo2, 8);
                             mem_.read(addr + 24, &hi2, 8);
-                            cpu.v_lo[d.rt] = lo1;
-                            cpu.v_hi[d.rt] = hi1;
-                            cpu.v_lo[d.rt2] = lo2;
-                            cpu.v_hi[d.rt2] = hi2;
+                            cpu.v[d.rt].lo = lo1;
+                            cpu.v[d.rt].hi = hi1;
+                            cpu.v[d.rt2].lo = lo2;
+                            cpu.v[d.rt2].hi = hi2;
                         }
                     } else {
                         if (esize <= 8) {
                             // S/D-form: write esize bytes from v_lo.
-                            mem_.write(addr, &cpu.v_lo[d.rt], esize);
-                            mem_.write(addr + esize, &cpu.v_lo[d.rt2], esize);
+                            mem_.write(addr, &cpu.v[d.rt].lo, esize);
+                            mem_.write(addr + esize, &cpu.v[d.rt2].lo, esize);
                         } else {
                             // Q-form (esize=16): write v_lo (8 bytes) then
                             // v_hi (8 bytes) for each register.
-                            mem_.write(addr, &cpu.v_lo[d.rt], 8);
-                            mem_.write(addr + 8, &cpu.v_hi[d.rt], 8);
-                            mem_.write(addr + 16, &cpu.v_lo[d.rt2], 8);
-                            mem_.write(addr + 24, &cpu.v_hi[d.rt2], 8);
+                            mem_.write(addr, &cpu.v[d.rt].lo, 8);
+                            mem_.write(addr + 8, &cpu.v[d.rt].hi, 8);
+                            mem_.write(addr + 16, &cpu.v[d.rt2].lo, 8);
+                            mem_.write(addr + 24, &cpu.v[d.rt2].hi, 8);
                         }
                     }
                 } else {
@@ -1149,11 +1149,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint64_t lo = 0, hi = 0;
                         mem_.read(addr, &lo, std::min(nbytes, 8));
                         if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
-                        cpu.v_lo[d.rt] = lo;
-                        cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
+                        cpu.v[d.rt].lo = lo;
+                        cpu.v[d.rt].hi = (nbytes >= 16) ? hi : 0;
                     } else {
-                        uint64_t lo = cpu.v_lo[d.rt];
-                        uint64_t hi = cpu.v_hi[d.rt];
+                        uint64_t lo = cpu.v[d.rt].lo;
+                        uint64_t hi = cpu.v[d.rt].hi;
                         static bool vdbg_ = dbg().ld2;
                         if (vdbg_ && nbytes == 16) {
                             fprintf(stderr, "[STRQ-DBG] addr=0x%llx rt=%d bytes:",
@@ -1214,13 +1214,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint64_t lo = 0, hi = 0;
                         mem_.read(addr, &lo, std::min(nbytes, 8));
                         if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
-                        cpu.v_lo[d.rt] = lo;
-                        cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
+                        cpu.v[d.rt].lo = lo;
+                        cpu.v[d.rt].hi = (nbytes >= 16) ? hi : 0;
                     } else {
-                        uint64_t lo = cpu.v_lo[d.rt];
+                        uint64_t lo = cpu.v[d.rt].lo;
                         mem_.write(addr, &lo, std::min(nbytes, 8));
                         if (nbytes > 8) {
-                            uint64_t hi = cpu.v_hi[d.rt];
+                            uint64_t hi = cpu.v[d.rt].hi;
                             mem_.write(addr + 8, &hi, nbytes - 8);
                         }
                     }
@@ -1266,13 +1266,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint64_t lo = 0, hi = 0;
                         mem_.read(addr, &lo, std::min(nbytes, 8));
                         if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
-                        cpu.v_lo[d.rt] = lo;
-                        cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
+                        cpu.v[d.rt].lo = lo;
+                        cpu.v[d.rt].hi = (nbytes >= 16) ? hi : 0;
                     } else {
-                        uint64_t lo = cpu.v_lo[d.rt];
+                        uint64_t lo = cpu.v[d.rt].lo;
                         mem_.write(addr, &lo, std::min(nbytes, 8));
                         if (nbytes > 8) {
-                            uint64_t hi = cpu.v_hi[d.rt];
+                            uint64_t hi = cpu.v[d.rt].hi;
                             mem_.write(addr + 8, &hi, nbytes - 8);
                         }
                     }

@@ -584,7 +584,7 @@ extern "C" {
         }
         return val;
     }
-    // 16-byte SIMD load slow path. Writes v_lo[dst]/v_hi[dst] directly so the
+    // 16-byte SIMD load slow path. Writes v[dst].lo/v[dst].hi directly so the
     // JIT fast path can do a single bounds-check + one movupd instead of two
     // 8-byte LOAD_MEM/STORE_MEM (each with its own check + window add).
     void jit_load_mem16_slow(Emulator* emu, CPU* cpu, uint64_t addr, int dst) {
@@ -597,11 +597,11 @@ extern "C" {
                            si_code, e.addr);
             return;
         }
-        cpu->v_lo[dst & 31] = buf[0];
-        cpu->v_hi[dst & 31] = buf[1];
+        cpu->v[dst & 31].lo = buf[0];
+        cpu->v[dst & 31].hi = buf[1];
     }
     void jit_store_mem16_slow(Emulator* emu, CPU* cpu, uint64_t addr, int src) {
-        uint64_t buf[2] = {cpu->v_lo[src & 31], cpu->v_hi[src & 31]};
+        uint64_t buf[2] = {cpu->v[src & 31].lo, cpu->v[src & 31].hi};
         try {
             Memory::note_interp_pc(cpu->pc);  // BIFROST_WRITE_TRACE attribution
             emu->mem().write(addr, buf, 16);

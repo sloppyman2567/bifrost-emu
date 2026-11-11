@@ -221,7 +221,7 @@ int32_t FrostJIT::vreg_stack_slot(int v) {
 }
 // FP register index validation. FP ops use inst.dest/src1/src2 as FP
 // register indices (0-31). Values > 31 would cause out-of-bounds writes
-// to the CPU struct (v_lo[32+] or v_hi[32+] = past the array).
+// to the CPU struct (v[32+].lo or v[32+].hi = past the array).
 void FrostJIT::check_fp_reg_index(int idx, const char* context) const {
     if (!regalloc_check_enabled()) return;
     if (idx < 0 || idx > 31) {
@@ -1078,10 +1078,10 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
 }
 // ── emit_fmov_helper ───────────────────────────────────────────────────
 // Unified FMOV codegen for all four GPR↔FP register moves:
-//   dir=0, fp_field=0: FMOV_G2F   — v_lo[idx] = src1; v_hi[idx] = 0
-//   dir=0, fp_field=1: FMOV_G2FHI — v_hi[idx] = src1
-//   dir=1, fp_field=0: FMOV_F2G   — dest = v_lo[idx]
-//   dir=1, fp_field=1: FMOV_FHI2G — dest = v_hi[idx]
+//   dir=0, fp_field=0: FMOV_G2F   — v[idx].lo = src1; v[idx].hi = 0
+//   dir=0, fp_field=1: FMOV_G2FHI — v[idx].hi = src1
+//   dir=1, fp_field=0: FMOV_F2G   — dest = v[idx].lo
+//   dir=1, fp_field=1: FMOV_FHI2G — dest = v[idx].hi
 //
 // G→F path uses RCX as scratch for the zero store
 // (v_hi) so src1 stays cached in RAX. The F→G path loads the FP slot

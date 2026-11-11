@@ -341,48 +341,43 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
     if ((op & 0xFFFFCC00) == 0x4E284800) {
         const unsigned sub = (op >> 12) & 0x3;
         uint8_t state[16], key[16];
-        memcpy(key, &cpu.v_lo[rn], 8);
-        memcpy(key + 8, &cpu.v_hi[rn], 8);
+        memcpy(key, &cpu.v[rn].lo, 8);
+        memcpy(key + 8, &cpu.v[rn].hi, 8);
         const uint8_t src = sub < 2 ? rd : rn;
-        memcpy(state, &cpu.v_lo[src], 8);
-        memcpy(state + 8, &cpu.v_hi[src], 8);
+        memcpy(state, &cpu.v[src].lo, 8);
+        memcpy(state + 8, &cpu.v[src].hi, 8);
         switch (sub) {
             case 0: aes_aese(state, key); break;
             case 1: aes_aesd(state, key); break;
             case 2: aes_aesmc(state); break;
             case 3: aes_aesimc(state); break;
         }
-        memcpy(&cpu.v_lo[rd], state, 8);
-        memcpy(&cpu.v_hi[rd], state + 8, 8);
+        memcpy(&cpu.v[rd].lo, state, 8);
+        memcpy(&cpu.v[rd].hi, state + 8, 8);
         return true;
     }
     // ── SHA1H (0x5E280800) ─────────────────────────────────────────
     // SHA1H Sd, Sn: Sd = ROR(Sn, 2). Operates on 32-bit scalar (lower
     // 32 bits of Vd).
     if ((op & 0xFFFFFC00) == 0x5E280800) {
-        uint32_t s = static_cast<uint32_t>(cpu.v_lo[rn]);
+        uint32_t s = static_cast<uint32_t>(cpu.v[rn].lo);
         uint32_t r = rotr32(s, 2);
-        cpu.v_lo[rd] = r;
-        cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = r;
+        cpu.v[rd].hi = 0;
         return true;
     }
-    // Helper to load a full 128-bit V register into a uint32_t[4].
-    // The CPU stores Vn as v_lo[n] (bits 63:0) + v_hi[n] (bits 127:64),
-    // NOT as a contiguous 16-byte block. The previous SHA code did
-    // `memcpy(vd, &cpu.v_lo[rd], 16)` which read v_lo[rd] + v_lo[rd+1]
-    // instead of v_lo[rd] + v_hi[rd] — corrupting the high 64 bits and
-    // producing wrong hashes for any SHA1/SHA256 code using crypto
-    // extensions.
+    // Helper to load a full 128-bit V register into a uint32_t[4]: v[n].lo
+    // holds bits 63:0 and v[n].hi bits 127:64.
     auto load_vreg = [](const CPU& c, uint8_t idx, uint32_t out[4]) {
-        out[0] = static_cast<uint32_t>(c.v_lo[idx]);
-        out[1] = static_cast<uint32_t>(c.v_lo[idx] >> 32);
-        out[2] = static_cast<uint32_t>(c.v_hi[idx]);
-        out[3] = static_cast<uint32_t>(c.v_hi[idx] >> 32);
+        out[0] = static_cast<uint32_t>(c.v[idx].lo);
+        out[1] = static_cast<uint32_t>(c.v[idx].lo >> 32);
+        out[2] = static_cast<uint32_t>(c.v[idx].hi);
+        out[3] = static_cast<uint32_t>(c.v[idx].hi >> 32);
     };
     auto store_vreg = [](CPU& c, uint8_t idx, const uint32_t in[4]) {
-        c.v_lo[idx] = static_cast<uint64_t>(in[0]) |
+        c.v[idx].lo = static_cast<uint64_t>(in[0]) |
                       (static_cast<uint64_t>(in[1]) << 32);
-        c.v_hi[idx] = static_cast<uint64_t>(in[2]) |
+        c.v[idx].hi = static_cast<uint64_t>(in[2]) |
                       (static_cast<uint64_t>(in[3]) << 32);
     };
     // ── SHA1SU1 (0x5E281800) ───────────────────────────────────────
@@ -418,7 +413,7 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         uint32_t vd[4], vm[4];
         load_vreg(cpu, rd, vd);
         load_vreg(cpu, rm, vm);
-        uint32_t e = static_cast<uint32_t>(cpu.v_lo[rn]);
+        uint32_t e = static_cast<uint32_t>(cpu.v[rn].lo);
         sha1_round<0>(vd, e, vm);
         store_vreg(cpu, rd, vd);
         return true;
@@ -427,7 +422,7 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         uint32_t vd[4], vm[4];
         load_vreg(cpu, rd, vd);
         load_vreg(cpu, rm, vm);
-        uint32_t e = static_cast<uint32_t>(cpu.v_lo[rn]);
+        uint32_t e = static_cast<uint32_t>(cpu.v[rn].lo);
         sha1_round<1>(vd, e, vm);
         store_vreg(cpu, rd, vd);
         return true;
@@ -436,7 +431,7 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         uint32_t vd[4], vm[4];
         load_vreg(cpu, rd, vd);
         load_vreg(cpu, rm, vm);
-        uint32_t e = static_cast<uint32_t>(cpu.v_lo[rn]);
+        uint32_t e = static_cast<uint32_t>(cpu.v[rn].lo);
         sha1_round<2>(vd, e, vm);
         store_vreg(cpu, rd, vd);
         return true;
@@ -496,8 +491,8 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
     // destination always receives eight widened 16-bit polynomial products.
     if ((op & 0xBFE0FC00) == 0x0E20E000) {
         const bool high = (op >> 30) & 1;
-        const uint64_t a = high ? cpu.v_hi[rn] : cpu.v_lo[rn];
-        const uint64_t b = high ? cpu.v_hi[rm] : cpu.v_lo[rm];
+        const uint64_t a = high ? cpu.v[rn].hi : cpu.v[rn].lo;
+        const uint64_t b = high ? cpu.v[rm].hi : cpu.v[rm].lo;
         uint64_t result[2] = {};
         for (int lane = 0; lane < 8; ++lane) {
             const uint16_t x = (a >> (lane * 8)) & 0xff;
@@ -507,8 +502,8 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
                 if ((y >> bit) & 1) product ^= x << bit;
             result[lane / 4] |= static_cast<uint64_t>(product) << ((lane % 4) * 16);
         }
-        cpu.v_lo[rd] = result[0];
-        cpu.v_hi[rd] = result[1];
+        cpu.v[rd].lo = result[0];
+        cpu.v[rd].hi = result[1];
         return true;
     }
     // ── PMULL/PMULL2 (size=11, 64-bit polynomial multiply) ──────────
@@ -519,19 +514,19 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
     // 64-bit polynomial multiply — that's what distinguishes PMULL from
     // the 8-bit form (size=00, used by GHASH byte-wise).
     if ((op & 0xFFE0FC00) == 0x0EE0E000) {  // PMULL
-        uint64_t a = cpu.v_lo[rn];
-        uint64_t b = cpu.v_lo[rm];
+        uint64_t a = cpu.v[rn].lo;
+        uint64_t b = cpu.v[rm].lo;
         __uint128_t r = pmull_64(a, b);
-        cpu.v_lo[rd] = static_cast<uint64_t>(r);
-        cpu.v_hi[rd] = static_cast<uint64_t>(r >> 64);
+        cpu.v[rd].lo = static_cast<uint64_t>(r);
+        cpu.v[rd].hi = static_cast<uint64_t>(r >> 64);
         return true;
     }
     if ((op & 0xFFE0FC00) == 0x4EE0E000) {  // PMULL2
-        uint64_t a = cpu.v_hi[rn];
-        uint64_t b = cpu.v_hi[rm];
+        uint64_t a = cpu.v[rn].hi;
+        uint64_t b = cpu.v[rm].hi;
         __uint128_t r = pmull_64(a, b);
-        cpu.v_lo[rd] = static_cast<uint64_t>(r);
-        cpu.v_hi[rd] = static_cast<uint64_t>(r >> 64);
+        cpu.v[rd].lo = static_cast<uint64_t>(r);
+        cpu.v[rd].hi = static_cast<uint64_t>(r >> 64);
         return true;
     }
     // Not a recognized crypto instruction.

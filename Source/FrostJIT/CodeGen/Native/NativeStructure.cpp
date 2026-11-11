@@ -12,7 +12,7 @@ uint64_t native_structure(Emulator* emu, CPU* cpu, uint64_t bits) {
     // Snapshot all aliased sources before committing any destination.
     for(unsigned i=0;i<p.count;i++) {
         unsigned r=(p.first+i)&31;
-        std::memcpy(regs[i],&cpu->v_lo[r],8); std::memcpy(regs[i]+8,&cpu->v_hi[r],8);
+        std::memcpy(regs[i],&cpu->v[r].lo,8); std::memcpy(regs[i]+8,&cpu->v[r].hi,8);
     }
     try {
         emu->mem().check_access(base,total,p.load?Memory::GUEST_PROT_READ:Memory::GUEST_PROT_WRITE);
@@ -38,7 +38,7 @@ uint64_t native_structure(Emulator* emu, CPU* cpu, uint64_t bits) {
         }
         if(p.load) for(unsigned i=0;i<p.count;i++) {
             unsigned r=(p.first+i)&31;
-            std::memcpy(&cpu->v_lo[r],regs[i],8); std::memcpy(&cpu->v_hi[r],regs[i]+8,8);
+            std::memcpy(&cpu->v[r].lo,regs[i],8); std::memcpy(&cpu->v[r].hi,regs[i]+8,8);
         } else {
             Memory::note_interp_pc(cpu->pc);
             emu->mem().write(base,memory,total);

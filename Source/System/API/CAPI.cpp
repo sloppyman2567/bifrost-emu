@@ -208,20 +208,20 @@ void bifrost_set_pc(bifrost_emu_t* emu, uint64_t value) {
 uint64_t bifrost_get_fp_reg_lo(const bifrost_emu_t* emu, int reg) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e || reg < 0 || reg > 31) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().v_lo[reg];
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().v[reg].lo;
 }
 uint64_t bifrost_get_fp_reg_hi(const bifrost_emu_t* emu, int reg) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e || reg < 0 || reg > 31) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().v_hi[reg];
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().v[reg].hi;
 }
 void bifrost_set_fp_reg(bifrost_emu_t* emu, int reg,
                         uint64_t lo, uint64_t hi) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e || reg < 0 || reg > 31) return;
     auto& cpu = e->emu.main_cpu();
-    cpu.v_lo[reg] = lo;
-    cpu.v_hi[reg] = hi;
+    cpu.v[reg].lo = lo;
+    cpu.v[reg].hi = hi;
 }
 // ── PSTATE / flag access ───────────────────────────────────────────────
 // NZCV flags are in bits [31:28] of pstate.

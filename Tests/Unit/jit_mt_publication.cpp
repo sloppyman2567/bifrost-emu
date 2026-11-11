@@ -201,8 +201,8 @@ static bool check_selfloops() {
             cpu.regs[1] = 7; cpu.regs[30] = stop; cpu.jit_stop_pc = stop;
             cpu.set_nzcv(0xa0000000);
             const double one = 1.0, three = 3.0;
-            std::memcpy(&cpu.v_lo[1], &one, 8);
-            std::memcpy(&cpu.v_hi[1], &three, 8);
+            std::memcpy(&cpu.v[1].lo, &one, 8);
+            std::memcpy(&cpu.v[1].hi, &three, 8);
         };
         std::atomic<unsigned> failures{0};
         auto run = [&] {
@@ -213,7 +213,7 @@ static bool check_selfloops() {
             const uint64_t n = kind == 2 ? 256 : 5000;
             const uint32_t nzcv = kind == 0 || kind == 4 ? 0x60000000 : 0xa0000000;
             double lo, hi;
-            std::memcpy(&lo, &cpu.v_lo[0], 8); std::memcpy(&hi, &cpu.v_hi[0], 8);
+            std::memcpy(&lo, &cpu.v[0].lo, 8); std::memcpy(&hi, &cpu.v[0].hi, 8);
             if (cpu.pc != stop || cpu.regs[1] != n * (n - 1) / 2 + 7 + (kind == 4 ? n : 0) ||
                 cpu.regs[2] != n || (cpu.nzcv() & 0xf0000000) != nzcv ||
                 (kind == 3 && (lo != double(n) || hi != 3.0 * n))) {
@@ -276,7 +276,7 @@ static bool check_selfloops() {
             const uint64_t ret_block = head + 4 * (loops[kind].size() - 1);  // kind 3's loop is a word longer
             const bool pc_ok = finished ? cpu.pc == stop || cpu.pc == ret_block : cpu.pc == head;
             double lo, hi;
-            std::memcpy(&lo, &cpu.v_lo[0], 8); std::memcpy(&hi, &cpu.v_hi[0], 8);
+            std::memcpy(&lo, &cpu.v[0].lo, 8); std::memcpy(&hi, &cpu.v[0].hi, 8);
             // The JIT's own preemption ticker can end a mode 0 run early too.
             if (!n || n > total || (mode == 0 && !finished && !preempted) || ((mode == 1 || mode == 2) && n != 1) ||
                 !pc_ok ||

@@ -40,8 +40,8 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         int esize = (1 << size);  // bytes per element
         int container = is_rev32 ? 4 : 8;  // REV32: 32-bit, REV64: 64-bit
         uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+        memcpy(buf, &cpu.v[rn].lo, 8);
+        if (Q) memcpy(buf + 8, &cpu.v[rn].hi, 8);
         int nbytes = Q ? 16 : 8;
         for (int i = 0; i < nbytes; i += container) {
             // Reverse elements within this container
@@ -52,21 +52,21 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
                 }
             }
         }
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
+        memcpy(&cpu.v[rd].lo, buf, 8);
+        if (Q) memcpy(&cpu.v[rd].hi, buf + 8, 8);
+        else cpu.v[rd].hi = 0;
         return true;
     }
     // ── REV16 (vector) ──
     case 0x0E201800: {
         uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+        memcpy(buf, &cpu.v[rn].lo, 8);
+        if (Q) memcpy(buf + 8, &cpu.v[rn].hi, 8);
         int nbytes = Q ? 16 : 8;
         for (int i = 0; i < nbytes; i += 2) std::swap(buf[i], buf[i+1]);
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
+        memcpy(&cpu.v[rd].lo, buf, 8);
+        if (Q) memcpy(&cpu.v[rd].hi, buf + 8, 8);
+        else cpu.v[rd].hi = 0;
         return true;
     }
     // ── CNT / NOT / RBIT (vector) ──
@@ -83,8 +83,8 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         bool is_rbit = ((op >> 22) & 1) == 1;   // size=1
         bool is_not  = !is_rbit && ((op >> 29) & 1) == 1;
         uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+        memcpy(buf, &cpu.v[rn].lo, 8);
+        if (Q) memcpy(buf + 8, &cpu.v[rn].hi, 8);
         int nbytes = Q ? 16 : 8;
         for (int i = 0; i < nbytes; i++) {
             if (is_rbit) {
@@ -100,9 +100,9 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
                 buf[i] = __builtin_popcount(buf[i]);
             }
         }
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
+        memcpy(&cpu.v[rd].lo, buf, 8);
+        if (Q) memcpy(&cpu.v[rd].hi, buf + 8, 8);
+        else cpu.v[rd].hi = 0;
         return true;
     }
     // ── Integer compare against zero (SIMD 2-reg misc) ───────
@@ -126,8 +126,8 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         int esize = 1 << size;
         int elems = (Q ? 16 : 8) / esize;
         uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+        memcpy(buf, &cpu.v[rn].lo, 8);
+        if (Q) memcpy(buf + 8, &cpu.v[rn].hi, 8);
         for (int i = 0; i < elems; i++) {
             int64_t v = 0;
             memcpy(&v, buf + i * esize, esize);
@@ -140,9 +140,9 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
                                       : (sv < 0);
             memset(buf + i * esize, pass ? 0xFF : 0x00, esize);
         }
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
+        memcpy(&cpu.v[rd].lo, buf, 8);
+        if (Q) memcpy(&cpu.v[rd].hi, buf + 8, 8);
+        else cpu.v[rd].hi = 0;
         return true;
     }
     // ── SMAXV/SMINV/UMAXV/UMINV (across-lanes reduction) ─────
@@ -162,8 +162,8 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         bool is_unsigned = (op >> 29) & 1;
         bool is_min = (op >> 16) & 1;
         uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+        memcpy(buf, &cpu.v[rn].lo, 8);
+        if (Q) memcpy(buf + 8, &cpu.v[rn].hi, 8);
         uint64_t best = 0;
         memcpy(&best, buf, esize);
         for (int i = 1; i < elems; i++) {
@@ -179,9 +179,9 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
                 if (is_min ? (sv < sb) : (sv > sb)) best = v;
             }
         }
-        cpu.v_lo[rd] = 0;
-        cpu.v_hi[rd] = 0;
-        memcpy(&cpu.v_lo[rd], &best, esize);
+        cpu.v[rd].lo = 0;
+        cpu.v[rd].hi = 0;
+        memcpy(&cpu.v[rd].lo, &best, esize);
         return true;
     }
     default: break;
@@ -191,16 +191,16 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         int esize = 1 << size;
         int elems = (Q ? 16 : 8) / esize;
         uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+        memcpy(buf, &cpu.v[rn].lo, 8);
+        if (Q) memcpy(buf + 8, &cpu.v[rn].hi, 8);
         uint64_t sum = 0;
         for (int i = 0; i < elems; i++) {
             uint64_t v = 0;
             memcpy(&v, buf + i * esize, esize);
             sum += v;
         }
-        cpu.v_lo[rd] = sum & ((1ULL << (esize*8))-1);
-        cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = sum & ((1ULL << (esize*8))-1);
+        cpu.v[rd].hi = 0;
         return true;
     }
     // SADDLV/UADDLV: widen the horizontal sum to twice the lane
@@ -214,8 +214,8 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         const int elems = (Q ? 16 : 8) / esize;
         const bool uns = (op >> 29) & 1;
         uint8_t source[16] = {};
-        memcpy(source, &cpu.v_lo[rn], 8);
-        if (Q) memcpy(source + 8, &cpu.v_hi[rn], 8);
+        memcpy(source, &cpu.v[rn].lo, 8);
+        if (Q) memcpy(source + 8, &cpu.v[rn].hi, 8);
         int64_t sum = 0;
         for (int i = 0; i < elems; ++i) {
             uint64_t value = 0;
@@ -226,8 +226,8 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
                 sum += static_cast<int64_t>(value);
         }
         const uint64_t mask = bits == 32 ? ~0ULL : (1ULL << (bits * 2)) - 1;
-        cpu.v_lo[rd] = static_cast<uint64_t>(sum) & mask;
-        cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = static_cast<uint64_t>(sum) & mask;
+        cpu.v[rd].hi = 0;
         return true;
     }
     // INS (element, vector): mov vd.<T>[i], vn.<T>[j]
@@ -255,15 +255,15 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         uint64_t src_val;
         int elems_per_qword = 8 / esize;
         if (sidx < elems_per_qword) {
-            const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_lo[rn]);
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v[rn].lo);
             memcpy(&src_val, p + sidx * esize, esize);
         } else {
-            const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_hi[rn]);
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v[rn].hi);
             memcpy(&src_val, p + (sidx - elems_per_qword) * esize, esize);
         }
         uint8_t* d = (didx < elems_per_qword)
-            ? reinterpret_cast<uint8_t*>(&cpu.v_lo[rd])
-            : reinterpret_cast<uint8_t*>(&cpu.v_hi[rd]);
+            ? reinterpret_cast<uint8_t*>(&cpu.v[rd].lo)
+            : reinterpret_cast<uint8_t*>(&cpu.v[rd].hi);
         memcpy(d + (didx % elems_per_qword) * esize, &src_val, esize);
         return true;
     }
@@ -276,21 +276,21 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
         uint8_t buf[32];
         // EXT forms Vn || Vm for both vector lengths. Q=0 uses
         // only the low 64 bits of each source; Q=1 uses all 128.
-        memcpy(buf, &cpu.v_lo[rn], 8);
+        memcpy(buf, &cpu.v[rn].lo, 8);
         if (Q) {
-            memcpy(buf + 8, &cpu.v_hi[rn], 8);
-            memcpy(buf + 16, &cpu.v_lo[rm], 8);
-            memcpy(buf + 24, &cpu.v_hi[rm], 8);
+            memcpy(buf + 8, &cpu.v[rn].hi, 8);
+            memcpy(buf + 16, &cpu.v[rm].lo, 8);
+            memcpy(buf + 24, &cpu.v[rm].hi, 8);
         } else {
             // Do not insert Vn's unused high half between sources.
-            memcpy(buf + 8, &cpu.v_lo[rm], 8);
+            memcpy(buf + 8, &cpu.v[rm].lo, 8);
         }
         uint8_t out[16] = {0};
         int nbytes = Q ? 16 : 8;
         memcpy(out, buf + imm4, nbytes);
-        memcpy(&cpu.v_lo[rd], out, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
-        else cpu.v_hi[rd] = 0;
+        memcpy(&cpu.v[rd].lo, out, 8);
+        if (Q) memcpy(&cpu.v[rd].hi, out + 8, 8);
+        else cpu.v[rd].hi = 0;
         return true;
     }
     // ZIP1/ZIP2 / UZP1/UZP2 / TRN1/TRN2 — permute pairs.
@@ -307,10 +307,10 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
             int pairs = (Q ? 16 : 8) / (esize * 2);
             if (pairs < 1) pairs = 1;
             uint8_t a[16], b[16], out[16] = {0};
-            memcpy(a, &cpu.v_lo[rn], 8);
-            if (Q) memcpy(a + 8, &cpu.v_hi[rn], 8);
-            memcpy(b, &cpu.v_lo[rm], 8);
-            if (Q) memcpy(b + 8, &cpu.v_hi[rm], 8);
+            memcpy(a, &cpu.v[rn].lo, 8);
+            if (Q) memcpy(a + 8, &cpu.v[rn].hi, 8);
+            memcpy(b, &cpu.v[rm].lo, 8);
+            if (Q) memcpy(b + 8, &cpu.v[rm].hi, 8);
             int part = (opc6 == 0x16 || opc6 == 0x1A || opc6 == 0x1E) ? 1 : 0;
             bool is_zip = (opc6 == 0x0E || opc6 == 0x1E);
             bool is_uzp = (opc6 == 0x06 || opc6 == 0x16);
@@ -344,9 +344,9 @@ bool Emulator::exec_simd_misc(const SimdDpFields& f, CPU& cpu) {
                     memcpy(out + (2 * i + 1) * esize, s1, esize);
                 }
             }
-            memcpy(&cpu.v_lo[rd], out, 8);
-            if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
-            else cpu.v_hi[rd] = 0;
+            memcpy(&cpu.v[rd].lo, out, 8);
+            if (Q) memcpy(&cpu.v[rd].hi, out + 8, 8);
+            else cpu.v[rd].hi = 0;
             return true;
         }
     }

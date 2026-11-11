@@ -122,9 +122,9 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
         //
         // The fell back to CALL_INTERP because the IR
         // translator was passing VREG indices (>= 33) as inst.dest/
-        // inst.src1, causing out-of-bounds writes to v_lo[33+]. The
+        // inst.src1, causing out-of-bounds writes to v[33+].lo. The
         // translator now passes ARM FP reg indices (0-31) directly
-        // (same convention as FP_BINOP/FP_UNOP), so V_LO_OFF + idx*8
+        // (same convention as FP_BINOP/FP_UNOP), so vlo_off(idx)
         // is correct. This makes floor/ceil/trunc/round execute
         // natively under JIT instead of falling back to interpreter.
         case IROp::FRINT: {
@@ -139,7 +139,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             // regressions).
             check_fp_reg_index(inst.dest, "FRINT dest");
             check_fp_reg_index(inst.src1, "FRINT src1");
-            // FRINT only clobbers RAX (zero store to v_hi[dest]).
+            // FRINT only clobbers RAX (zero store to v[dest].hi).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX));
             const FpFrintParams fp = inst.fp_frint_params();

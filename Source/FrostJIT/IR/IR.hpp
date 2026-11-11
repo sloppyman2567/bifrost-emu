@@ -114,25 +114,25 @@ enum class IROp : uint8_t {
     // Syscall (treated as block-ending side effect)
     SVC,            // call syscall handler; pc may change
     // FMOV (general ↔ FP register) — native JIT support
-    FMOV_G2F,      // v_lo[dest] = src1; v_hi[dest] = 0  (GPR → FP, 64-bit)
-    FMOV_F2G,      // dest = v_lo[src1]                    (FP → GPR, 64-bit)
-    FMOV_G2FHI,    // v_hi[dest] = src1                    (GPR → FP high half)
-    FMOV_FHI2G,    // dest = v_hi[src1]                    (FP high half → GPR)
+    FMOV_G2F,      // v[dest].lo = src1; v[dest].hi = 0  (GPR → FP, 64-bit)
+    FMOV_F2G,      // dest = v[src1].lo                    (FP → GPR, 64-bit)
+    FMOV_G2FHI,    // v[dest].hi = src1                    (GPR → FP high half)
+    FMOV_FHI2G,    // dest = v[src1].hi                    (FP high half → GPR)
     // Native FP scalar arithmetic (operate on v_lo/v_hi directly)
-    FP_BINOP,      // v_lo[dest] = op(v_lo[src1], v_lo[src2]); v_hi[dest]=0
+    FP_BINOP,      // v[dest].lo = op(v[src1].lo, v[src2].lo); v[dest].hi=0
                    // imm = opcode (0=mul,1=div,2=add,3=sub,4=max,5=min,6=nmul)
                    // width = ftype (0=S, 1=D)
-    FP_UNOP,       // v_lo[dest] = op(v_lo[src1]); v_hi[dest]=0
+    FP_UNOP,       // v[dest].lo = op(v[src1].lo); v[dest].hi=0
                    // imm = opcode (0=mov,1=abs,2=neg,3=sqrt)
                    // width = ftype (0=S, 1=D)
-    FP_MOV,        // FP↔FP register move: v_lo[dest] = v_lo[src1]
-                    // width = ftype (0=S single: v_lo[dest] = (float)v_lo[src1],
-                    // v_hi[dest] = 0; 1=D double: v_lo/v_hi both copied).
+    FP_MOV,        // FP↔FP register move: v[dest].lo = v[src1].lo
+                    // width = ftype (0=S single: v[dest].lo = (float)v[src1].lo,
+                    // v[dest].hi = 0; 1=D double: v_lo/v_hi both copied).
                     // One IR op instead of the old 4-op
                     // FMOV_F2G→(IMM/AND)→FMOV_G2F(→FHI2G/G2FHI) round-trip —
                     // noise3/grad3 alone emit 67 fmovs per body.
     // Native SIMD/NEON ops (operate on v_lo/v_hi directly via SSE2/AVX)
-    SIMD_LOGICAL,  // v_lo[dest],v_hi[dest] = src1 OP src2
+    SIMD_LOGICAL,  // v[dest].lo,v[dest].hi = src1 OP src2
                    // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
     SIMD_NATIVE_STRUCT, // structured vector memory helper, terminates block
     SIMD_STRUCT_MEM, // LD2-LD4/ST2-ST4 multiple structures, native, does not end the block:
@@ -140,7 +140,7 @@ enum class IROp : uint8_t {
                      // count, element size, q, load). Post-index writeback is separate IR.
     SIMD_NATIVE_EXTRA, // dedicated compiled SIMD helper (no interpreter dispatch)
     SIMD_SCALAR_DUP, // SimdScalarDupParams: copy one lane, clear remaining bits
-    SIMD_DUP,      // v_lo[dest] = v_hi[dest] = src1 (broadcast 64-bit)
+    SIMD_DUP,      // v[dest].lo = v[dest].hi = src1 (broadcast 64-bit)
     SIMD_UMOV,     // regs[dest] = element[imm] of vector src1 (v_lo/v_hi)
                    // width = element size in bytes (1, 2, 4, 8);
                    // imm = lane index (0..15/esize-1); flags_op = Q
@@ -151,35 +151,35 @@ enum class IROp : uint8_t {
                     // .D form is UNALLOCATED and never emitted); imm = lane
                     // index; flags_op = Q (0=Wd sext to 32 bits, 1=Xd sext
                     // to 64 bits)
-    SIMD_SATADDSUB,// v_lo[dest],v_hi[dest] = SATURATING src1 +/- src2
+    SIMD_SATADDSUB,// v[dest].lo,v[dest].hi = SATURATING src1 +/- src2
                     // imm = subop (0=SQADD, 1=UQADD, 2=SQSUB, 3=UQSUB);
                     // width = element size in bytes (1 or 2 ONLY — the table
                     // guard `size < 2` keeps 32/64-bit lanes on the interp,
                     // which has no pre-AVX512 native form); flags_op = Q
-    SIMD_MOVI,     // v_lo[dest],v_hi[dest] = broadcast of imm (MOVI/MVNI)
+    SIMD_MOVI,     // v[dest].lo,v[dest].hi = broadcast of imm (MOVI/MVNI)
                    // imm = pre-expanded 64-bit lane pattern; flags_op = Q
                    // (1=128-bit: v_hi = pattern; 0=64-bit: v_hi = 0)
-    SIMD_ORRIMM,   // v_lo[dest],v_hi[dest] = dest OR/BIC imm (read-modify-write:
+    SIMD_ORRIMM,   // v[dest].lo,v[dest].hi = dest OR/BIC imm (read-modify-write:
                    // ORR/BIC (vector, immediate) read the DESTINATION as their
                    // source, like the interpreter). imm = lane pattern;
                    // cond = 0=ORR, 1=BIC; flags_op = Q.
     SIMD_LDST,     // Load/store 128-bit from memory
                    // dest = vreg index, src1 = addr vreg, imm = offset
                    // width = 0 (store), 1 (load)
-    SIMD_LD16,     // 16-byte vector load: v_lo[dest]&v_hi[dest] = mem[src1+imm]
+    SIMD_LD16,     // 16-byte vector load: v[dest].lo&v[dest].hi = mem[src1+imm]
                    // single bounds-check + one 16-byte load (unlike two
                    // 8-byte LOAD_MEM). src2 ignored.
-    SIMD_ST16,     // 16-byte vector store: mem[src1+imm] = v_lo[src2]&v_hi[src2]
+    SIMD_ST16,     // 16-byte vector store: mem[src1+imm] = v[src2].lo&v[src2].hi
                    // single bounds-check + one 16-byte store.
                    // flags_op = register count (1..4, contiguous regs src2+i);
                    // cond=1 → broadcast (`stp q0,q0`): every half stores the
                    // SAME src2 vector (nregs halves span 16*nregs bytes).
-    SIMD_ARITH,    // v_lo[dest],v_hi[dest] = src1 OP src2 (integer lane-wise)
+    SIMD_ARITH,    // v[dest].lo,v[dest].hi = src1 OP src2 (integer lane-wise)
                    // imm = opcode (0=add,1=sub,2=mul,3=umin,4=umax,5=smin,6=smax,
                    //                7=orr_imm_lo,8=orr_imm_hi)  — see JIT
                    // width = element size in bytes (1, 2, 4, 8)
                    //   size=8 only valid for add/sub (no pmul etc.)
-    SIMD_CMP,      // v_lo[dest],v_hi[dest] = compare(src1, src2) ? all-ones : 0
+    SIMD_CMP,      // v[dest].lo,v[dest].hi = compare(src1, src2) ? all-ones : 0
                    // imm = opcode (0=eq CMEQ, 1=gt_s CMGT, 2=ge_s CMGE,
                    //              3=gt_u CMHI, 4=ge_u CMHS)
                    // width = element size in bytes (1, 2, 4, 8)
@@ -325,11 +325,11 @@ enum class IROp : uint8_t {
     // imm = subop | (lane_index << 8); flags_op = Q.
     SIMD_MUL_ELEM,
     // Native FP↔int conversions
-    FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
+    FP_F2I,        // regs[dest] = (int/uint)(v[src1].lo)
                    // imm = 0 (signed), 1 (unsigned); width = ftype
                    // flags_op = sf (JIT ignores this; ir_translate emits
                    //                an explicit ZEXT after FP_F2I when sf=0)
-    FP_I2F,        // v_lo[dest] = (float/double)(regs[src1]); v_hi=0
+    FP_I2F,        // v[dest].lo = (float/double)(regs[src1]); v_hi=0
                    // imm = 0 (signed), 1 (unsigned); width = ftype
                    // flags_op = sf (0=32-bit GPR source, 1=64-bit GPR source)
     // Native FP↔int fixed-point conversions (FCVTZS/FCVTZU/SCVTF/UCVTF with
@@ -341,18 +341,18 @@ enum class IROp : uint8_t {
     // These used to route to CALL_INTERP (~20% overhead on workloads
     // that use them, like MD5 K-table init and audio DSP). Native IR ops
     // avoid the interpreter round-trip.
-    FP_F2I_FIXED,  // regs[dest] = sat_trunc(v_lo[src1] * 2^fbits, signedness/range)
+    FP_F2I_FIXED,  // regs[dest] = sat_trunc(v[src1].lo * 2^fbits, signedness/range)
                    // imm = 0 (signed), 1 (unsigned); width = ftype
                    // flags_op = sf (0=32-bit dest, 1=64-bit dest)
                    // immr = fbits (1..64)
-    FP_I2F_FIXED,  // v_lo[dest] = (float/double)(regs[src1]) / 2^fbits; v_hi=0
+    FP_I2F_FIXED,  // v[dest].lo = (float/double)(regs[src1]) / 2^fbits; v_hi=0
                    // imm = 0 (signed), 1 (unsigned); width = ftype
                    // flags_op = sf (0=32-bit GPR source, 1=64-bit GPR source)
                    // immr = fbits (1..64)
-    FP_CMP,        // compare v_lo[src1] vs v_lo[src2], set pstate
+    FP_CMP,        // compare v[src1].lo vs v[src2].lo, set pstate
                    // imm bit 0 = 1 for FCMP Dn,#0.0 form, 0 for register form;
                    // width = ftype
-    FP_MOVI,       // v_lo[dest] = imm (decoded FP immediate); v_hi=0
+    FP_MOVI,       // v[dest].lo = imm (decoded FP immediate); v_hi=0
                    // width = ftype (0=S, 1=D)
     // Native division (x86 div/idiv)
     UDIV,          // dest = src1 / src2 (unsigned, 64-bit)
@@ -367,16 +367,16 @@ enum class IROp : uint8_t {
     SMSUBL,        // dest = (int64_t)acc - (int64)(int32)src1 * (int32)src2
     UMSUBL,        // dest = (uint64_t)acc - (uint64)(uint32)src1 * (uint32)src2
     // Native FP conversions (float <-> double, via x86 cvtss2sd/cvtsd2ss)
-    FCVT_S2D,      // v_lo[dest] = (double)(float)v_lo[src1]
-    FCVT_D2S,      // v_lo[dest] = (float)(double)v_lo[src1]
+    FCVT_S2D,      // v[dest].lo = (double)(float)v[src1].lo
+    FCVT_D2S,      // v[dest].lo = (float)(double)v[src1].lo
     // Native FP round to integer (via x86 roundss/roundsd)
-    FRINT,         // v_lo[dest] = round(v_lo[src1]); imm = rounding mode
+    FRINT,         // v[dest].lo = round(v[src1].lo); imm = rounding mode
                    // 0=N(nearest), 1=P(+inf), 2=M(-inf), 3=Z(0), 4=I(current), 5=X(exact)
     // Native FP fused multiply-add (via x86 vfmadd or decomposition)
-    // FMADD:  v_lo[dest] =  v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
-    // FMSUB:  v_lo[dest] =  v_lo[acc] - v_lo[src2] * v_lo[src1]; width=ftype
-    // FNMADD: v_lo[dest] = -(v_lo[src2] * v_lo[src1] + v_lo[acc]); width=ftype
-    // FNMSUB: v_lo[dest] =  v_lo[src2] * v_lo[src1] - v_lo[acc]; width=ftype
+    // FMADD:  v[dest].lo =  v[src2].lo * v[src1].lo + v[acc].lo; width=ftype
+    // FMSUB:  v[dest].lo =  v[acc].lo - v[src2].lo * v[src1].lo; width=ftype
+    // FNMADD: v[dest].lo = -(v[src2].lo * v[src1].lo + v[acc].lo); width=ftype
+    // FNMSUB: v[dest].lo =  v[src2].lo * v[src1].lo - v[acc].lo; width=ftype
     //
     // On x86 with FMA3 (Haswell+, 2013+): emit vfmadd231ss/sd (FMADD),
     // vfmsub231ss/sd (FMSUB), vfnmadd231ss/sd (FNMADD), vfnmsub231ss/sd
@@ -386,10 +386,10 @@ enum class IROp : uint8_t {
     // IEEE 754-correct for edge cases — a known limitation).
     // The decomposition path produces the same numerical result as the
     // interpreter (which also decomposes), so JIT/interpreter agree.
-    FMADD,         // v_lo[dest] = v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
-    FMSUB,         // v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
-    FNMADD,        // v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype (negated product)
-    FNMSUB,        // v_lo[dest] = -v_lo[src2] * v_lo[src1] - v_lo[acc]; width=ftype
+    FMADD,         // v[dest].lo = v[src2].lo * v[src1].lo + v[acc].lo; width=ftype
+    FMSUB,         // v[dest].lo = -v[src2].lo * v[src1].lo + v[acc].lo; width=ftype
+    FNMADD,        // v[dest].lo = -v[src2].lo * v[src1].lo + v[acc].lo; width=ftype (negated product)
+    FNMSUB,        // v[dest].lo = -v[src2].lo * v[src1].lo - v[acc].lo; width=ftype
     // System register access (TPIDR_EL0, NZCV, FPCR, FPSR)
     MRS,           // dest = system_reg[imm]  (imm = reg index)
     MSR,           // system_reg[imm] = src1
@@ -429,7 +429,7 @@ enum class IROp : uint8_t {
     // CALL_INTERP (which calls the interpreter's software table-driven
     // implementation in Crypto.hpp).
     AES_CRYPTO,
-    FP_CSEL,  // fcsel Sd/Dd,Sn,Sm,cond → v_lo[d] = cond ? v_lo[n] : v_lo[m]; v_hi[d]=0
+    FP_CSEL,  // fcsel Sd/Dd,Sn,Sm,cond → v[d].lo = cond ? v[n].lo : v[m].lo; v[d].hi=0
 };
 // Condition codes (same encoding as ARM64 cond field).
 // 0=EQ, 1=NE, 2=CS, 3=CC, 4=MI, 5=PL, 6=VS, 7=VC,

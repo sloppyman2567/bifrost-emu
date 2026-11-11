@@ -13,16 +13,16 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
             const auto p = inst.scalar_dup_params();
             flush_invalidate_host_regs(1u << RAX);
             int byte = p.lane * p.esize;
-            int off = (byte < 8 ? V_LO_OFF : V_HI_OFF) + inst.src1 * 8 + byte % 8;
+            int off = vlo_off(inst.src1) + byte;
             switch (p.esize) {
                 case 1: emit_load8(RAX, CPU_REG, off); break;
                 case 2: emit_load16(RAX, CPU_REG, off); break;
                 case 4: emit_load32(RAX, CPU_REG, off); break;
                 default: emit_load(RAX, CPU_REG, off); break;
             }
-            emit_store(CPU_REG, V_LO_OFF + inst.dest * 8, RAX);
+            emit_store(CPU_REG, vlo_off(inst.dest), RAX);
             emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + inst.dest * 8, RAX);
+            emit_store(CPU_REG, vhi_off(inst.dest), RAX);
             return true;
         }
         case IROp::SIMD_FP_UNARY: {
@@ -55,10 +55,10 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
             // Uncached fallback: load both halves before writing either,
             // preserving same-register aliasing.
             emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-            emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.src1*8);
+            emit_modrm_disp(0,CPU_REG,vlo_off(inst.src1));
             if (p.q) {
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-                emit_modrm_disp(1,CPU_REG,V_HI_OFF + inst.src1*8);
+                emit_modrm_disp(1,CPU_REG,vhi_off(inst.src1));
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x6C); emit_byte(0xC1);
             }
             SimdFpGuard special_done{};
@@ -75,13 +75,13 @@ bool FrostJIT::compile_simd_floating_point_(const IRInst& inst) {
                 emit_byte(0x0F); emit_byte(p.subop == 0 ? 0x54 : 0x57); emit_byte(0xC1);
             }
             emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
-            emit_modrm_disp(0,CPU_REG,V_LO_OFF + inst.dest*8);
+            emit_modrm_disp(0,CPU_REG,vlo_off(inst.dest));
             if (p.q) {
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x73); emit_byte(0xD8); emit_byte(8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
-                emit_modrm_disp(0,CPU_REG,V_HI_OFF + inst.dest*8);
+                emit_modrm_disp(0,CPU_REG,vhi_off(inst.dest));
             } else {
-                emit_mov_imm32_zext(RAX,0); emit_store(CPU_REG,V_HI_OFF + inst.dest*8,RAX);
+                emit_mov_imm32_zext(RAX,0); emit_store(CPU_REG,vhi_off(inst.dest),RAX);
             }
             if (p.subop == 2)
                 finish_simd_fp_guard(special_done);

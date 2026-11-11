@@ -71,10 +71,10 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
             // the rounding round-trip). The translator already routed
             // non-native cases to CALL_INTERP, which self-flushes. No GPR
             // flush needed.
-            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t off1lo = vlo_off(static_cast<int>(inst.src1));
+            int32_t off1hi = vhi_off(static_cast<int>(inst.src1));
+            int32_t offdlo = vlo_off(static_cast<int>(inst.dest));
+            int32_t offdhi = vhi_off(static_cast<int>(inst.dest));
             // movsd xmmN, [rbx+off]  (F2 0F 10 — load 64 bits, zero upper 64)
             auto emit_load64 = [&](int x, int32_t off) {
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
@@ -385,11 +385,11 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
                 // AES_CRYPTO disqualifies the vector/scalar FP caches, so
                 // XMM3 is available as well as the usual XMM0-2 scratch set.
                 // Load BOTH selected halves before writing an aliased Vd.
-                const int32_t source = sub_op == 6 ? V_LO_OFF : V_HI_OFF;
+                const int32_t half = sub_op == 6 ? 0 : 8;  // lo or hi qword
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-                emit_modrm_disp(0, CPU_REG, source + static_cast<int>(inst.src1) * 8);
+                emit_modrm_disp(0, CPU_REG, vlo_off(static_cast<int>(inst.src1)) + half);
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-                emit_modrm_disp(1, CPU_REG, source + static_cast<int>(inst.src2) * 8);
+                emit_modrm_disp(1, CPU_REG, vlo_off(static_cast<int>(inst.src2)) + half);
                 auto sse = [&](uint8_t opcode, int dest, int src) {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(opcode);
                     emit_byte(static_cast<uint8_t>(0xC0 | (dest << 3) | src));
@@ -414,11 +414,11 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
                     }
                 }
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
-                emit_modrm_disp(2, CPU_REG, V_LO_OFF + static_cast<int>(inst.dest) * 8);
+                emit_modrm_disp(2, CPU_REG, vlo_off(static_cast<int>(inst.dest)));
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x73);
                 emit_byte(0xDA); emit_byte(0x08);  // psrldq xmm2,8
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
-                emit_modrm_disp(2, CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+                emit_modrm_disp(2, CPU_REG, vhi_off(static_cast<int>(inst.dest)));
                 return true;
             }
             // PMULL/PMULL2 — use PCLMULQDQ when available.
@@ -427,12 +427,12 @@ bool FrostJIT::compile_simd_shifts_(const IRInst& inst) {
                 // PCLMULQDQ path is XMM-only (movq/pclmulqdq/psrldq); the
                 // AESE/AESD fallback goes through emit_call_interp, which
                 // self-flushes. No GPR flush needed.
-                int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-                int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-                int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-                int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
-                int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-                int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+                int32_t off1lo = vlo_off(static_cast<int>(inst.src1));
+                int32_t off1hi = vhi_off(static_cast<int>(inst.src1));
+                int32_t off2lo = vlo_off(static_cast<int>(inst.src2));
+                int32_t off2hi = vhi_off(static_cast<int>(inst.src2));
+                int32_t offdlo = vlo_off(static_cast<int>(inst.dest));
+                int32_t offdhi = vhi_off(static_cast<int>(inst.dest));
                 // Select the architectural source half before loading. MOVQ
                 // zeroes the other half and needs only SSE2, avoiding PINSRQ/
                 // PEXTRQ and their extra SSE4.1 and REX.W requirements.

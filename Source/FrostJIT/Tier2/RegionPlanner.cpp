@@ -283,7 +283,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     //
     // Pure GPR ops: no flags, no memory, no arch writes beyond dest. The
     // dest>32 scratch guard automatically leaves all FP/SIMD state alone
-    // (those write v_lo/v_hi[dest] with dest = the FP reg index 0-31) and all
+    // (those write v_lo/v[dest].hi with dest = the FP reg index 0-31) and all
     // arch writes, flag setters, memory ops, STORE_REG, calls and branches in
     // place.
     auto is_m2_pure_gpr = [](IROp op) -> bool {

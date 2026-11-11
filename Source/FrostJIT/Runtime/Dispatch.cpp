@@ -754,10 +754,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // v_lo directly and a GPR-only compare can't see it (the fp-cache
         // call-guard corruption bug manifested only here).
         for (int i = 0; i < 32; i++) {
-            if (cpu.v_lo[i] != ref.v_lo[i]) {
-                fprintf(stderr, "[VERIFY] v_lo[%d]: jit=0x%llx ref=0x%llx\n",
-                        i, static_cast<unsigned long long>(cpu.v_lo[i]),
-                        static_cast<unsigned long long>(ref.v_lo[i]));
+            if (cpu.v[i].lo != ref.v[i].lo) {
+                fprintf(stderr, "[VERIFY] v[%d].lo: jit=0x%llx ref=0x%llx\n",
+                        i, static_cast<unsigned long long>(cpu.v[i].lo),
+                        static_cast<unsigned long long>(ref.v[i].lo));
                 diverged = true;
             }
         }

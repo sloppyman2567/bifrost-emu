@@ -781,8 +781,11 @@ public:
     static constexpr int SP_OFF     = 256;
     static constexpr int PC_OFF     = 264;
     static constexpr int NZCV_OFF = 272;
-    static constexpr int V_LO_OFF   = 288;  // v_lo[0] — 32 × uint64_t
-    static constexpr int V_HI_OFF   = 544;  // v_hi[0] — 32 × uint64_t
+    static constexpr int V_OFF      = 288;  // v[0] — 32 × 16-byte VReg {lo, hi}
+    // Byte offsets of Vn's halves: lo (bits 63:0) and hi (bits 127:64). A whole
+    // register is one 16-byte access at vlo_off(n).
+    static constexpr int vlo_off(int n) { return V_OFF + 16 * n; }
+    static constexpr int vhi_off(int n) { return V_OFF + 16 * n + 8; }
     static constexpr int FPCR_OFF   = 800;
     static constexpr int FPSR_OFF   = 804;
     // x86 reg constants.
@@ -1847,11 +1850,11 @@ private:
                             int src2, int host_reg2);
     // ── FMOV helper ───────────────────────────────────────────────────
     // Moves a 64-bit value between a GPR vreg and an FP register slot
-    // (cpu.v_lo[] or cpu.v_hi[]) via RAX (G→F) or a fresh reg (F→G).
+    // (cpu.v[].lo or cpu.v[].hi) via RAX (G→F) or a fresh reg (F→G).
     //
     //   dir = 0: GPR → FP,  fp_field = 0 (v_lo) or 1 (v_hi)
     //            Stores src1 vreg into the FP slot. If fp_field == 0
-    //            (FMOV_G2F), also zeros v_hi[dest] — ARM semantics.
+    //            (FMOV_G2F), also zeros v[dest].hi — ARM semantics.
     //            Uses RCX as scratch for the zero store so src1 stays
     //            cached in RAX for later readers.
     //   dir = 1: FP → GPR, fp_field = 0 (v_lo) or 1 (v_hi)
@@ -1956,6 +1959,8 @@ private:
     void movdqa(int dst, int src);
     void load_lo(int xmm, int off);
     void load_hi(int xmm, int off);
+    void load_v16(int xmm, int vreg);   // movups xmm, [Vn] (all 16 bytes)
+    void store_v16(int xmm, int vreg);  // movups [Vn], xmm
     void store_lo(int xmm, int off);
     void store_hi(int xmm, int off);
     void load_vec(int xmm, int vreg);
@@ -2245,15 +2250,15 @@ private:
     uint64_t vec_reloads_ = 0;
     uint64_t vec_spills_ = 0;
     // Scalar-FP cache: the same XMM3-15 pinning machinery
-    // reused for scalar FP regs (s0-s31 / d0-d31), which share cpu.v_lo[0..31]
+    // reused for scalar FP regs (s0-s31 / d0-d31), which share cpu.v[0..31].lo
     // with NEON vectors. A block is EITHER a vec-cache block OR an fp-cache
     // block (never both — the gates are exclusive), so the pinned XMMs and
     // dirty tracking are shared. The fp cache is LO-ONLY:
-    //   - prologue loads only v_lo[vreg] (movsd)
-    //   - v_hi[vreg] is NEVER pinned; hi writes go straight to memory
+    //   - prologue loads only v[vreg].lo (movsd)
+    //   - v[vreg].hi is NEVER pinned; hi writes go straight to memory
     //     (every scalar FP write zeroes it except FP_MOV double which
     //     copies it, both done inline in the op codegen)
-    //   - writeback stores only v_lo[vreg]
+    //   - writeback stores only v[vreg].lo
     // Scalar FP regs also overlap the GPR vreg space in the allocator:
     // vregs 0-31 are guest GPRs, so the FP operands use the raw ARM reg
     // indices (0-31) directly, never allocator vregs.
@@ -2319,7 +2324,7 @@ private:
     void emit_fp_interp_step(const IRInst& inst);
     // FP-cache-aware operand load/store helpers. When the fp cache is
     // active and the FP reg is pinned, they use reg-reg moves (no memory);
-    // otherwise they load/store cpu.v_lo[vreg] exactly as the non-cached
+    // otherwise they load/store cpu.v[vreg].lo exactly as the non-cached
     // codegen does. `is_double` selects MOVSD/MOVSS width.
     void fp_load_operand(int xmm, int vreg, bool is_double);
     // Element `lane` of FP register `vreg` into scratch `xmm`'s low element
@@ -2328,11 +2333,11 @@ private:
     void fp_store_operand(int xmm, int vreg, bool is_double);
     // Resolve FP operand `vreg` to the XMM that holds its value: the pinned
     // XMM if cached (no code emitted), else `scratch` after loading
-    // v_lo[vreg] into it. For ops whose arithmetic can take any XMM
+    // v[vreg].lo into it. For ops whose arithmetic can take any XMM
     // (FMADD family) this avoids the redundant copy fp_load_operand emits
     // for pinned operands.
     int  fp_resolve_operand(int vreg, int scratch, bool is_double);
-    // Zero v_hi[vreg] (pxor xmm0, xmm0 + movsd [hi], xmm0). No GPR touched.
+    // Zero v[vreg].hi (pxor xmm0, xmm0 + movsd [hi], xmm0). No GPR touched.
     // v_hi is never cached in fp-cache blocks, so this is always a memory
     // store. MUST be called after the lo result is stored.
     void fp_zero_hi(int vreg);

@@ -36,10 +36,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
         // Move 64-bit GPR to/from HIGH 64 bits of vector register.
         // Used by musl's 128-bit softfloat routines.
         case InstClass::FMOV_VD1:
-            cpu.v_hi[d.rd] = cpu.regs[d.rn];
+            cpu.v[d.rd].hi = cpu.regs[d.rn];
             return;
         case InstClass::FMOV_RVD1:
-            if (d.rd != 31) cpu.regs[d.rd] = cpu.v_hi[d.rn];
+            if (d.rd != 31) cpu.regs[d.rd] = cpu.v[d.rn].hi;
             return;
         // ── SIMD load/store multiple structures (LD1/ST1) ─────────
         case InstClass::SIMD_LD1:
@@ -85,12 +85,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             int r = (d.rt + i) & 31;
                             mem_.read(base + (uint64_t)i * esize, buf, esize);
                             for (int off = 0; off < 8; off += esize)
-                                memcpy(reinterpret_cast<uint8_t*>(&cpu.v_lo[r]) + off, buf, esize);
+                                memcpy(reinterpret_cast<uint8_t*>(&cpu.v[r].lo) + off, buf, esize);
                             if (Q) {
                                 for (int off = 0; off < 8; off += esize)
-                                    memcpy(reinterpret_cast<uint8_t*>(&cpu.v_hi[r]) + off, buf, esize);
+                                    memcpy(reinterpret_cast<uint8_t*>(&cpu.v[r].hi) + off, buf, esize);
                             } else {
-                                cpu.v_hi[r] = 0;
+                                cpu.v[r].hi = 0;
                             }
                         }
                     }
@@ -156,21 +156,21 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     if (esize == 1) {
                         // Write into byte `idx` of the V register.
                         uint8_t* vp = (idx < 8)
-                            ? reinterpret_cast<uint8_t*>(&cpu.v_lo[r]) + idx
-                            : reinterpret_cast<uint8_t*>(&cpu.v_hi[r]) + (idx - 8);
+                            ? reinterpret_cast<uint8_t*>(&cpu.v[r].lo) + idx
+                            : reinterpret_cast<uint8_t*>(&cpu.v[r].hi) + (idx - 8);
                         *vp = buf[0];
                     } else if (esize == 2) {
                         uint16_t* vp = (idx < 4)
-                            ? reinterpret_cast<uint16_t*>(&cpu.v_lo[r]) + idx
-                            : reinterpret_cast<uint16_t*>(&cpu.v_hi[r]) + (idx - 4);
+                            ? reinterpret_cast<uint16_t*>(&cpu.v[r].lo) + idx
+                            : reinterpret_cast<uint16_t*>(&cpu.v[r].hi) + (idx - 4);
                         memcpy(vp, buf, 2);
                     } else if (esize == 4) {
                         uint32_t* vp = (idx < 2)
-                            ? reinterpret_cast<uint32_t*>(&cpu.v_lo[r]) + idx
-                            : reinterpret_cast<uint32_t*>(&cpu.v_hi[r]) + (idx - 2);
+                            ? reinterpret_cast<uint32_t*>(&cpu.v[r].lo) + idx
+                            : reinterpret_cast<uint32_t*>(&cpu.v[r].hi) + (idx - 2);
                         memcpy(vp, buf, 4);
                     } else {  // esize == 8 (D)
-                        uint64_t* vp = (idx == 0) ? &cpu.v_lo[r] : &cpu.v_hi[r];
+                        uint64_t* vp = (idx == 0) ? &cpu.v[r].lo : &cpu.v[r].hi;
                         memcpy(vp, buf, 8);
                     }
                 } else {
@@ -178,21 +178,21 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     uint8_t buf[8] = {0};
                     if (esize == 1) {
                         const uint8_t* vp = (idx < 8)
-                            ? reinterpret_cast<const uint8_t*>(&cpu.v_lo[r]) + idx
-                            : reinterpret_cast<const uint8_t*>(&cpu.v_hi[r]) + (idx - 8);
+                            ? reinterpret_cast<const uint8_t*>(&cpu.v[r].lo) + idx
+                            : reinterpret_cast<const uint8_t*>(&cpu.v[r].hi) + (idx - 8);
                         buf[0] = *vp;
                     } else if (esize == 2) {
                         const uint16_t* vp = (idx < 4)
-                            ? reinterpret_cast<const uint16_t*>(&cpu.v_lo[r]) + idx
-                            : reinterpret_cast<const uint16_t*>(&cpu.v_hi[r]) + (idx - 4);
+                            ? reinterpret_cast<const uint16_t*>(&cpu.v[r].lo) + idx
+                            : reinterpret_cast<const uint16_t*>(&cpu.v[r].hi) + (idx - 4);
                         memcpy(buf, vp, 2);
                     } else if (esize == 4) {
                         const uint32_t* vp = (idx < 2)
-                            ? reinterpret_cast<const uint32_t*>(&cpu.v_lo[r]) + idx
-                            : reinterpret_cast<const uint32_t*>(&cpu.v_hi[r]) + (idx - 2);
+                            ? reinterpret_cast<const uint32_t*>(&cpu.v[r].lo) + idx
+                            : reinterpret_cast<const uint32_t*>(&cpu.v[r].hi) + (idx - 2);
                         memcpy(buf, vp, 4);
                     } else {
-                        const uint64_t* vp = (idx == 0) ? &cpu.v_lo[r] : &cpu.v_hi[r];
+                        const uint64_t* vp = (idx == 0) ? &cpu.v[r].lo : &cpu.v[r].hi;
                         memcpy(buf, vp, 8);
                     }
                     mem_.write(addr, buf, esize);
@@ -239,12 +239,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         for (int k = 0; k < 16; k++) fprintf(stderr, " %02x", regbuf[k]);
                         fprintf(stderr, "\n");
                     }
-                    memcpy(&cpu.v_lo[r], regbuf, 8);
-                    if (total_bytes == 16) memcpy(&cpu.v_hi[r], regbuf + 8, 8);
-                    else cpu.v_hi[r] = 0;
+                    memcpy(&cpu.v[r].lo, regbuf, 8);
+                    if (total_bytes == 16) memcpy(&cpu.v[r].hi, regbuf + 8, 8);
+                    else cpu.v[r].hi = 0;
                 } else {
-                    memcpy(regbuf, &cpu.v_lo[r], 8);
-                    if (total_bytes == 16) memcpy(regbuf + 8, &cpu.v_hi[r], 8);
+                    memcpy(regbuf, &cpu.v[r].lo, 8);
+                    if (total_bytes == 16) memcpy(regbuf + 8, &cpu.v[r].hi, 8);
                     for (int e = 0; e < elems; e++)
                         mem_.write(base + reg_off(i, e), regbuf + e * esize, esize);
                 }

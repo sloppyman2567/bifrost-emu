@@ -444,8 +444,7 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     cpu.exit_code = 0;
     memset(cpu.regs, 0, sizeof(cpu.regs));
     emu.debugger().exec(cpu);
-    memset(cpu.v_lo, 0, sizeof(cpu.v_lo));
-    memset(cpu.v_hi, 0, sizeof(cpu.v_hi));
+    memset(cpu.v, 0, sizeof(cpu.v));
     cpu.tid = emu.vfs().process_ids().pid;  // exec keeps the PID; the leader TID equals it
     // begin_new_exec: comm becomes the basename of the exec'd path.
     emu.set_guest_comm(path.substr(path.find_last_of('/') + 1));

@@ -81,14 +81,14 @@ static bool check_region_vectors(bool mt, bool benchmark) {
             c.pc=head; c.regs[0]=count;
             if (arithmetic==0x4e61d400u || arithmetic==0x1e612800u) {
                 const double one=1.0,two=2.0;
-                std::memcpy(&c.v_lo[1],&one,8); std::memcpy(&c.v_hi[1],&two,8);
-                if (nan) c.v_lo[1]=UINT64_C(0x7ff8000000001234);
+                std::memcpy(&c.v[1].lo,&one,8); std::memcpy(&c.v[1].hi,&two,8);
+                if (nan) c.v[1].lo=UINT64_C(0x7ff8000000001234);
             } else {
-                c.v_lo[1]=UINT64_C(0x400000003f800000);
-                c.v_hi[1]=UINT64_C(0x4080000040400000);
-                if (nan) c.v_lo[1]=UINT64_C(0x400000007fc01234);
+                c.v[1].lo=UINT64_C(0x400000003f800000);
+                c.v[1].hi=UINT64_C(0x4080000040400000);
+                if (nan) c.v[1].lo=UINT64_C(0x400000007fc01234);
             }
-            c.v_hi[0]=UINT64_C(0x3ff000003f800000);
+            c.v[0].hi=UINT64_C(0x3ff000003f800000);
         };
         for (uint64_t count : {0ULL,1ULL,7ULL,257ULL}) for (bool nan : {false,true}) {
             CPU actual,reference; init(actual,count,nan); init(reference,count,nan);
@@ -100,17 +100,17 @@ static bool check_region_vectors(bool mt, bool benchmark) {
             }
             while (reference.pc!=exit) e->step(reference);
             if (actual.pc!=exit || actual.regs[0]!=reference.regs[0] ||
-                actual.v_lo[0]!=reference.v_lo[0] || actual.v_hi[0]!=reference.v_hi[0]) {
+                actual.v[0].lo!=reference.v[0].lo || actual.v[0].hi!=reference.v[0].hi) {
                 std::fprintf(stderr,"region vector mismatch: op=%08x n=%llu nan=%d lo=%llx/%llx hi=%llx/%llx\n",
                     arithmetic,(unsigned long long)count,nan,
-                    (unsigned long long)actual.v_lo[0],(unsigned long long)reference.v_lo[0],
-                    (unsigned long long)actual.v_hi[0],(unsigned long long)reference.v_hi[0]);
+                    (unsigned long long)actual.v[0].lo,(unsigned long long)reference.v[0].lo,
+                    (unsigned long long)actual.v[0].hi,(unsigned long long)reference.v[0].hi);
                 return false;
             }
         }
         if (benchmark) {
             CPU c; init(c,2000000,false);
-            c.v_hi[0]=0;
+            c.v[0].hi=0;
             const auto begin=std::chrono::steady_clock::now();
             FrostJIT::FaultScope scope(j);
             while (c.pc==head) { jit_grant_lease(c); c.pc=fn(&c,e.get()); }
@@ -127,7 +127,7 @@ static bool check_region_vectors(bool mt, bool benchmark) {
                 lo=low_bits;
                 if (!scalar) lo|=uint64_t(high_bits)<<32;
             }
-            if (c.pc!=exit || c.regs[0] || c.v_lo[0]!=lo || c.v_hi[0]!=hi) {
+            if (c.pc!=exit || c.regs[0] || c.v[0].lo!=lo || c.v[0].hi!=hi) {
                 std::fputs("region vector benchmark oracle failed\n",stderr); return false;
             }
             std::printf("region vector op=%08x: %.3f ms\n",arithmetic,ms);
@@ -153,8 +153,8 @@ static bool check_region_vectors(bool mt, bool benchmark) {
                 jit_grant_lease(c); c.pc=fn(&c,e.get());
             }
         }
-        if (c.running || c.exit_code!=139 || c.v_lo[0]!=reference.v_lo[0] ||
-            c.v_hi[0]!=reference.v_hi[0]) {
+        if (c.running || c.exit_code!=139 || c.v[0].lo!=reference.v[0].lo ||
+            c.v[0].hi!=reference.v[0].hi) {
             std::fprintf(stderr,"region vector fault-state mismatch: op=%08x\n",arithmetic);
             return false;
         }
@@ -188,13 +188,12 @@ static bool check_region_native_simd(bool mt) {
         for (unsigned n : {0u,1u,7u,257u}) for (bool nan : {false,true}) {
             CPU actual,reference;
             actual.pc=head; actual.regs[0]=n;
-            actual.v_lo[1]=UINT64_C(0x400000003f800000);
-            actual.v_hi[1]=UINT64_C(0x4080000040400000);
-            actual.v_lo[3]=nan ? UINT64_C(0x4400420040007d55) : UINT64_C(0x4400420040003c00);
+            actual.v[1].lo=UINT64_C(0x400000003f800000);
+            actual.v[1].hi=UINT64_C(0x4080000040400000);
+            actual.v[3].lo=nan ? UINT64_C(0x4400420040007d55) : UINT64_C(0x4400420040003c00);
             actual.fpcr=1u<<25;
             reference.pc=actual.pc; reference.regs[0]=n; reference.fpcr=actual.fpcr;
-            std::memcpy(reference.v_lo,actual.v_lo,sizeof(actual.v_lo));
-            std::memcpy(reference.v_hi,actual.v_hi,sizeof(actual.v_hi));
+            std::memcpy(reference.v,actual.v,sizeof(actual.v));
             unsigned entries=0;
             FrostJIT::FaultScope scope(j);
             while (actual.pc==head && ++entries<=n+2) {
@@ -202,8 +201,7 @@ static bool check_region_native_simd(bool mt) {
             }
             while (reference.pc!=exit) e->step(reference);
             if (actual.pc!=exit || actual.regs[0]!=reference.regs[0] ||
-                std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
-                std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
+                std::memcmp(actual.v,reference.v,sizeof(actual.v))) {
                 std::fprintf(stderr,"region inline SIMD mismatch: half=%d n=%u nan=%d\n",half,n,nan);
                 return false;
             }
@@ -260,9 +258,9 @@ static bool check_tier1_vector_allocation(bool mt) {
             for (unsigned v=0;v<32;++v) {
                 const float value=float(v+1);
                 uint32_t bits; std::memcpy(&bits,&value,4);
-                actual.v_lo[v]=actual.v_hi[v]=uint64_t(bits)|(uint64_t(bits)<<32);
+                actual.v[v].lo=actual.v[v].hi=uint64_t(bits)|(uint64_t(bits)<<32);
             }
-            if (nan) actual.v_lo[0]=UINT64_C(0x3f8000007fc12345);
+            if (nan) actual.v[0].lo=UINT64_C(0x3f8000007fc12345);
             reference.copy_arch_state_from(actual);
             const uint64_t stop=fault ? head+8*4 : head+code.size()*4;
             while (reference.pc!=stop) e->step(reference);
@@ -275,8 +273,7 @@ static bool check_tier1_vector_allocation(bool mt) {
             }
             if ((fault ? actual.running || actual.exit_code!=139 : actual.pc!=stop) ||
                 actual.regs[0]!=reference.regs[0] ||
-                std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
-                std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
+                std::memcmp(actual.v,reference.v,sizeof(actual.v))) {
                 std::fprintf(stderr,"Tier-1 vector mismatch: op=%08x n=%u nan=%d fault=%d\n",
                     boundary,count,nan,fault);
                 return false;
@@ -321,8 +318,8 @@ static bool check_allocation_definitions(bool mt) {
         actual.regs[2]=0xbeef000; actual.regs[5]=UINT64_C(0xfedcba9876543210);
         actual.fpcr=1u<<25;
         for (unsigned v=0;v<32;++v) {
-            actual.v_lo[v]=UINT64_C(0x1122334455667788)^v;
-            actual.v_hi[v]=UINT64_C(0xdeadbeef98765432)^v;
+            actual.v[v].lo=UINT64_C(0x1122334455667788)^v;
+            actual.v[v].hi=UINT64_C(0xdeadbeef98765432)^v;
         }
         reference.copy_arch_state_from(actual);
         const uint64_t reference_stop=fault?head+14*4:stop;
@@ -332,8 +329,7 @@ static bool check_allocation_definitions(bool mt) {
             actual.pc=fn(&actual,e.get());
         }
         if ((fault?actual.running || actual.exit_code!=139:actual.pc!=stop) ||
-            std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
-            std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
+            std::memcmp(actual.v,reference.v,sizeof(actual.v))) {
             std::fprintf(stderr,"allocation definition mismatch: mixed=%d fault=%d\n",mixed,fault);
             return false;
         }
@@ -373,8 +369,8 @@ static bool check_demand_entry_carry(bool mt) {
         for (unsigned count : {1u,2u,7u}) {
             CPU actual,reference; actual.pc=head; actual.regs[0]=count;
             for (unsigned v=0;v<32;++v) {
-                actual.v_lo[v]=UINT64_C(0x123456789abcdef0)^v;
-                actual.v_hi[v]=UINT64_C(0xfedcba9876543210)^(v<<8);
+                actual.v[v].lo=UINT64_C(0x123456789abcdef0)^v;
+                actual.v[v].hi=UINT64_C(0xfedcba9876543210)^(v<<8);
             }
             reference.copy_arch_state_from(actual);
             const uint64_t end=region?stop:start+code.size()*4;
@@ -384,8 +380,7 @@ static bool check_demand_entry_carry(bool mt) {
                 jit_grant_lease(actual); actual.pc=fn(&actual,e.get());
             }
             if (actual.pc!=end || actual.regs[0]!=reference.regs[0] ||
-                std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
-                std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
+                std::memcmp(actual.v,reference.v,sizeof(actual.v))) {
                 std::fprintf(stderr,"demand entry carry mismatch: region=%d n=%u\n",region,count);
                 return false;
             }
@@ -467,8 +462,8 @@ static bool check_cached_integer_simd(bool mt) {
             CPU actual,reference; actual.pc=start; actual.regs[0]=count;
             actual.set_nzcv(0xa0000000);
             for (unsigned v=0;v<32;++v) {
-                actual.v_lo[v]=UINT64_C(0x80ff017fdeadbeef)^(UINT64_C(0x123456789abcdef)*v);
-                actual.v_hi[v]=~actual.v_lo[v];
+                actual.v[v].lo=UINT64_C(0x80ff017fdeadbeef)^(UINT64_C(0x123456789abcdef)*v);
+                actual.v[v].hi=~actual.v[v].lo;
             }
             reference.copy_arch_state_from(actual);
             while (reference.pc!=stop) e->step(reference);
@@ -481,8 +476,7 @@ static bool check_cached_integer_simd(bool mt) {
             }
             if (actual.pc!=stop || actual.regs[0]!=reference.regs[0] ||
                 ((actual.nzcv()^reference.nzcv())&0xf0000000u) ||
-                std::memcmp(actual.v_lo,reference.v_lo,sizeof(actual.v_lo)) ||
-                std::memcmp(actual.v_hi,reference.v_hi,sizeof(actual.v_hi))) {
+                std::memcmp(actual.v,reference.v,sizeof(actual.v))) {
                 std::fprintf(stderr,"integer SIMD cache mismatch: word=%08x region=%d n=%u\n",
                     code[prefix],region,count); return false;
             }
@@ -514,14 +508,14 @@ static bool check_superblocks(bool mt) {
     }
     auto run=[&](unsigned side) {
         CPU c; c.pc=head; c.regs[30]=stop; c.jit_stop_pc=stop;
-        c.v_lo[1]=c.v_hi[1]=UINT64_C(0x3ff0000000000000);
+        c.v[1].lo=c.v[1].hi=UINT64_C(0x3ff0000000000000);
         if (side<8) c.regs[side+2]=1;
         unsigned dispatches=0;
         while (c.pc!=stop && ++dispatches<100) c.pc=j->run_block(c,*e);
         const double expected=side<8 ? side+1 : 8;
         uint64_t bits; std::memcpy(&bits,&expected,8);
         return c.pc==stop && c.regs[1]==uint64_t(expected) &&
-            c.v_lo[0]==bits && c.v_hi[0]==bits;
+            c.v[0].lo==bits && c.v[0].hi==bits;
     };
     for (unsigned k=0;k<96;++k) if (!run(8)) return false;
     if (!j->tier2_regions.load()) {
@@ -551,7 +545,7 @@ static bool check_region_fp_memory(bool mt) {
     e->enable_jit(); auto* j=e->jit(); if (mt) j->enter_multithreaded();
     auto trace=j->collect_tier2_trace(*e,head); auto fn=j->compile_tier2_region(*e,trace);
     if (!fn) return false;
-    CPU c; c.pc=head; c.regs[0]=10; c.regs[2]=3; c.regs[3]=data; c.v_lo[1]=UINT64_C(0x3ff0000000000000);
+    CPU c; c.pc=head; c.regs[0]=10; c.regs[2]=3; c.regs[3]=data; c.v[1].lo=UINT64_C(0x3ff0000000000000);
     FrostJIT::FaultScope scope(j);
     unsigned entries=0;
     while (c.pc==head && ++entries<8) { jit_grant_lease(c); c.pc=fn(&c,e.get()); }

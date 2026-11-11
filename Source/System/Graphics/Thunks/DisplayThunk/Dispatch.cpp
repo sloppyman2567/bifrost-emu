@@ -77,8 +77,8 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         const std::string& n = entry.name;
 
         auto set_f32 = [&](float f) {
-            std::memcpy(&cpu.v_lo[0], &f, sizeof(float));
-            cpu.v_hi[0] = 0;
+            std::memcpy(&cpu.v[0].lo, &f, sizeof(float));
+            cpu.v[0].hi = 0;
             cpu.regs[0] = 0;
         };
         static constexpr uint64_t kFakeConfig = 0xA90004000005ULL;
@@ -527,7 +527,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         } else if (n == "ANativeWindow_setFrameRate" ||
                    n == "ANativeWindow_setFrameRateWithChangeStrategy") {
             float rate;
-            std::memcpy(&rate, &cpu.v_lo[0], sizeof(rate));
+            std::memcpy(&rate, &cpu.v[0].lo, sizeof(rate));
             cpu.regs[0] = static_cast<uint64_t>(mgr.set_frame_rate(cpu.regs[0], rate,
                 static_cast<int8_t>(cpu.regs[1]), n == "ANativeWindow_setFrameRate" ? 0 :
                 static_cast<int8_t>(cpu.regs[2])));
@@ -557,7 +557,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.flags & DisplayThunk::THUNK_DOUBLE) {
         double dv[8] = {0};
         for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
-            std::memcpy(&dv[i], &cpu.v_lo[i], sizeof(double));
+            std::memcpy(&dv[i], &cpu.v[i].lo, sizeof(double));
         }
         if (trace) {
             fprintf(stderr, "[display-thunk] dispatch: %s (double×%u) d0=%g d1=%g d2=%g d3=%g\n",
@@ -582,7 +582,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         && !(entry.flags & THUNK_GET_PROC)) {
         float fv[8] = {0};
         for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
-            std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
+            std::memcpy(&fv[i], &cpu.v[i].lo, sizeof(float));
         }
         if (trace) {
             fprintf(stderr, "[display-thunk] dispatch: %s (fp×%u) f0=%g f1=%g f2=%g f3=%g\n",
@@ -611,7 +611,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (ni > 4) ni = 4;
         for (uint8_t i = 0; i < ni; i++) iv[i] = cpu.regs[i];
         for (uint8_t i = 0; i < entry.n_float && i < 4; i++) {
-            std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
+            std::memcpy(&fv[i], &cpu.v[i].lo, sizeof(float));
         }
         if (trace) {
             fprintf(stderr, "[display-thunk] dispatch: %s (mixed int×%u fp×%u) i0=%lld f0=%g\n",

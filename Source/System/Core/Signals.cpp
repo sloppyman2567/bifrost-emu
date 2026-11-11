@@ -430,8 +430,8 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
     memcpy(buf + 464 + 12, &cpu.fpcr,    4);
     // Interleave (v_lo, v_hi) into 16-byte vregs[] entries.
     for (int i = 0; i < 32; i++) {
-        memcpy(buf + 464 + 16 + i * 16,     &cpu.v_lo[i], 8);
-        memcpy(buf + 464 + 16 + i * 16 + 8, &cpu.v_hi[i], 8);
+        memcpy(buf + 464 + 16 + i * 16,     &cpu.v[i].lo, 8);
+        memcpy(buf + 464 + 16 + i * 16 + 8, &cpu.v[i].hi, 8);
     }
     mem.write(uc_addr, buf, sizeof(buf));
     return uc_addr + sizeof(buf);
@@ -478,8 +478,8 @@ bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr) {
     cpu.fpsr = read32(fpsimd + 8);
     cpu.fpcr = read32(fpsimd + 12);
     for (int i = 0; i < 32; ++i) {
-        cpu.v_lo[i] = read64(fpsimd + 16 + i * 16);
-        cpu.v_hi[i] = read64(fpsimd + 24 + i * 16);
+        cpu.v[i].lo = read64(fpsimd + 16 + i * 16);
+        cpu.v[i].hi = read64(fpsimd + 24 + i * 16);
     }
     cpu.altstack.sp = read64(16);
     cpu.altstack.size = read64(32);
@@ -764,8 +764,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     frame.fault_addr  = fault_addr;
     frame.si_code     = si_code;
     frame.on_altstack = on_altstack;
-    memcpy(frame.v_lo, cpu.v_lo, sizeof(frame.v_lo));
-    memcpy(frame.v_hi, cpu.v_hi, sizeof(frame.v_hi));
+    memcpy(frame.v, cpu.v, sizeof(frame.v));
     frame.fpcr = cpu.fpcr;
     frame.fpsr = cpu.fpsr;
     frame.tpidr_el0 = cpu.tpidr_el0;

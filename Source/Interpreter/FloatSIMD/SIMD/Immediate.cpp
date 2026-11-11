@@ -49,8 +49,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
             (((op >> 16) & 0x7) << 5) | ((op >> 5) & 0x1F));
         bool opbit = (op >> 29) & 1;  // 'op' in ARM encoding
         uint8_t dst[16];
-        memcpy(dst, &cpu.v_lo[rd], 8);
-        memcpy(dst + 8, &cpu.v_hi[rd], 8);
+        memcpy(dst, &cpu.v[rd].lo, 8);
+        memcpy(dst + 8, &cpu.v[rd].hi, 8);
 
         auto replicate_u32 = [&](uint32_t lane) {
             int n = Q ? 4 : 2;
@@ -120,8 +120,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
             uint64_t val = 0;
             for (int i = 0; i < 8; i++)
                 val |= static_cast<uint64_t>(imm8) << (i * 8);
-            cpu.v_lo[rd] = val;
-            cpu.v_hi[rd] = Q ? val : 0;
+            cpu.v[rd].lo = val;
+            cpu.v[rd].hi = Q ? val : 0;
             return true;
         } else if (cmode == 0xE && opbit) {
             // MOVI 64-bit: each imm8 bit selects 0x00 or 0xFF byte
@@ -130,8 +130,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
                 if (imm8 & (1u << i))
                     val |= 0xFFULL << (i * 8);
             }
-            cpu.v_lo[rd] = val;
-            cpu.v_hi[rd] = Q ? val : 0;
+            cpu.v[rd].lo = val;
+            cpu.v[rd].hi = Q ? val : 0;
             return true;
         } else {
             // cmode=0xF FMOV (vector, immediate): floating-point
@@ -143,22 +143,22 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
                 if (imm8 & 0x80) val |= 0x8000000000000000ULL;   // sign
                 if (imm8 & 0x40) val |= 0x3FC0000000000000ULL;   // exp
                 else             val |= 0x4000000000000000ULL;
-                cpu.v_lo[rd] = val;
-                cpu.v_hi[rd] = Q ? val : 0;
+                cpu.v[rd].lo = val;
+                cpu.v[rd].hi = Q ? val : 0;
             } else {
                 uint32_t val = (static_cast<uint32_t>(imm8 & 0x3F)) << 19;
                 if (imm8 & 0x80) val |= 0x80000000u;             // sign
                 if (imm8 & 0x40) val |= 0x3E000000u;             // exp[7:2] = 0:11111
                 else             val |= 0x40000000u;
                 replicate_u32(val);
-                memcpy(&cpu.v_lo[rd], dst, 8);
-                memcpy(&cpu.v_hi[rd], dst + 8, 8);
+                memcpy(&cpu.v[rd].lo, dst, 8);
+                memcpy(&cpu.v[rd].hi, dst + 8, 8);
                 return true;
             }
             return true;
         }
-        memcpy(&cpu.v_lo[rd], dst, 8);
-        memcpy(&cpu.v_hi[rd], dst + 8, 8);
+        memcpy(&cpu.v[rd].lo, dst, 8);
+        memcpy(&cpu.v[rd].hi, dst + 8, 8);
         return true;
     }
     // Shift by immediate (SSHR/USHR, SSRA/USRA, SRSHR/URSHR, SRSRA/URSRA,
@@ -184,8 +184,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
         int esize = is_double ? 8 : 4;
         int elems = (Q ? 16 : 8) / esize;
         uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        memcpy(buf + 8, &cpu.v_hi[rn], 8);
+        memcpy(buf, &cpu.v[rn].lo, 8);
+        memcpy(buf + 8, &cpu.v[rn].hi, 8);
         for (int i = 0; i < elems; i++) {
             if (is_double) {
                 uint64_t v; memcpy(&v, buf + i*8, 8);
@@ -217,9 +217,9 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
                 memcpy(buf + i*4, &v, 4);
             }
         }
-        memcpy(&cpu.v_lo[rd], buf, 8);
-        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-        else cpu.v_hi[rd] = 0;
+        memcpy(&cpu.v[rd].lo, buf, 8);
+        if (Q) memcpy(&cpu.v[rd].hi, buf + 8, 8);
+        else cpu.v[rd].hi = 0;
         return true;
     }
     // Narrowing shift right (SHRN). immh determines SOURCE element size
@@ -252,8 +252,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
         if (shift < 0) shift = 0;  // sanity: shift can't be negative
         // Source is ALWAYS the full 128-bit register (8/4/2 elements).
         uint8_t buf[16];
-        memcpy(buf, &cpu.v_lo[rn], 8);
-        memcpy(buf + 8, &cpu.v_hi[rn], 8);  // always read full 128 bits
+        memcpy(buf, &cpu.v[rn].lo, 8);
+        memcpy(buf + 8, &cpu.v[rn].hi, 8);  // always read full 128 bits
         int dst_elems = 16 / esize;  // 8 for 16-bit, 4 for 32-bit, 2 for 64-bit
         uint8_t out[16] = {0};
         for (int i = 0; i < dst_elems; i++) {
@@ -264,11 +264,11 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
         }
         if (Q) {
             // SHRN2: write to upper 64 bits, preserve lower 64 bits.
-            memcpy(&cpu.v_hi[rd], out, 8);
+            memcpy(&cpu.v[rd].hi, out, 8);
         } else {
             // SHRN: write to lower 64 bits, zero upper 64 bits.
-            memcpy(&cpu.v_lo[rd], out, 8);
-            cpu.v_hi[rd] = 0;
+            memcpy(&cpu.v[rd].lo, out, 8);
+            cpu.v[rd].hi = 0;
         }
         return true;
     }
@@ -290,8 +290,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
         shift = ((immh << 3) | immb) - (src_esize * 8);
         if (shift < 0) shift = 0;
         uint8_t src[16];
-        memcpy(src, &cpu.v_lo[rn], 8);
-        memcpy(src + 8, &cpu.v_hi[rn], 8);
+        memcpy(src, &cpu.v[rn].lo, 8);
+        memcpy(src + 8, &cpu.v[rn].hi, 8);
         int elems = 8 / src_esize;  // always 8/4/2 from a 64-bit half
         int src_base = Q ? 8 : 0;
         uint8_t out[16] = {0};
@@ -307,8 +307,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
             v <<= shift;
             memcpy(out + i * dst_esize, &v, dst_esize);
         }
-        memcpy(&cpu.v_lo[rd], out, 8);
-        memcpy(&cpu.v_hi[rd], out + 8, 8);
+        memcpy(&cpu.v[rd].lo, out, 8);
+        memcpy(&cpu.v[rd].hi, out + 8, 8);
         return true;
         }
     }
@@ -346,8 +346,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
             int dst_bits = dst_esize * 8;
             int shift = src_bits - (int)((immh << 3) | immb);
             uint8_t buf_n[16];
-            memcpy(buf_n, &cpu.v_lo[rn], 8);
-            memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+            memcpy(buf_n, &cpu.v[rn].lo, 8);
+            memcpy(buf_n + 8, &cpu.v[rn].hi, 8);
             uint8_t out[8];
             for (int i = 0; i < 8 / dst_esize; i++) {
                 uint64_t a = 0;
@@ -367,10 +367,10 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
                 memcpy(out + i * dst_esize, &r, dst_esize);
             }
             if (Q) {
-                memcpy(&cpu.v_hi[rd], out, 8);
+                memcpy(&cpu.v[rd].hi, out, 8);
             } else {
-                memcpy(&cpu.v_lo[rd], out, 8);
-                cpu.v_hi[rd] = 0;
+                memcpy(&cpu.v[rd].lo, out, 8);
+                cpu.v[rd].hi = 0;
             }
             return true;
         }
@@ -428,13 +428,13 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
             const int bw = esize * 8;
             const uint64_t mask = esize == 8 ? ~0ULL : ((1ULL << bw) - 1);
             uint8_t buf_n[16], buf_m[16], vd[16];
-            memcpy(buf_n, &cpu.v_lo[rn], 8);
-            memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
-            memcpy(buf_m, &cpu.v_lo[rm_reg], 8);
-            memcpy(buf_m + 8, &cpu.v_hi[rm_reg], 8);
+            memcpy(buf_n, &cpu.v[rn].lo, 8);
+            memcpy(buf_n + 8, &cpu.v[rn].hi, 8);
+            memcpy(buf_m, &cpu.v[rm_reg].lo, 8);
+            memcpy(buf_m + 8, &cpu.v[rm_reg].hi, 8);
             if (accum) {
-                memcpy(vd, &cpu.v_lo[rd], 8);
-                memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                memcpy(vd, &cpu.v[rd].lo, 8);
+                memcpy(vd + 8, &cpu.v[rd].hi, 8);
             } else {
                 memset(vd, 0, sizeof(vd));
             }
@@ -468,8 +468,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
                 // Q=0 same-width ops zero the unused upper half.
                 memset(vd + elems * esize, 0, 16 - elems * esize);
             }
-            memcpy(&cpu.v_lo[rd], vd, 8);
-            memcpy(&cpu.v_hi[rd], vd + 8, 8);
+            memcpy(&cpu.v[rd].lo, vd, 8);
+            memcpy(&cpu.v[rd].hi, vd + 8, 8);
             return true;
         }
     }

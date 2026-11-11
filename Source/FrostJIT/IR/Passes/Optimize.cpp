@@ -290,7 +290,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     // Used by both Pass 0 (pre-FWD) and Pass 1.5 (post-substitution).
     auto dse_pass = [&block]() {
         // to the same register index are treated as different destinations.
-        // GPR reg 0 writes cpu.regs[0]; FP reg 0 writes cpu.v_lo[0].
+        // GPR reg 0 writes cpu.regs[0]; FP reg 0 writes cpu.v[0].lo.
         auto store_key = [](const IRInst& inst) -> uint32_t {
             return (static_cast<uint32_t>(inst.dest) << 1) | inst.sf;
         };
@@ -826,7 +826,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 break;
             }
             case IROp::FP_I2F_FIXED: {
-                // Same as FP_I2F: writes to v_lo[dest] (FP reg file),
+                // Same as FP_I2F: writes to v[dest].lo (FP reg file),
                 // not to an ARM reg vreg. Just invalidate dest's cache
                 // entry so we don't propagate a stale constant through it.
                 invalidate_vreg_in_cache(inst.dest);

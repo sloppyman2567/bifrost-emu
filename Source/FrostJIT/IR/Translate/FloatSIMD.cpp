@@ -104,13 +104,13 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
     switch (d.cls) {
         case InstClass::FMOV_VD1: {
-            // FMOV Vd.D[1], Rn → v_hi[Vd] = regs[Rn]
+            // FMOV Vd.D[1], Rn → v[Vd].hi = regs[Rn]
             uint16_t val = load_arm_reg(block, d.rn);
             block.insts.push_back(IRInst::make(IROp::FMOV_G2FHI, d.rd, val, 0, 0, cur_pc));
             return true;
         }
         case InstClass::FMOV_RVD1: {
-            // FMOV Rn, Vm.D[1] → regs[Rn] = v_hi[Vm]
+            // FMOV Rn, Vm.D[1] → regs[Rn] = v[Vm].hi
             uint16_t v = g_alloc.alloc();
             block.insts.push_back(IRInst::make(IROp::FMOV_FHI2G, v, d.rn, 0, 0, cur_pc));
             store_arm_reg(block, d.rd, v);
@@ -185,22 +185,22 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // mirroring the 64-bit check above. Without this guard,
             // `scvtf s0, w0` (0x1E220000) and `ucvtf s0, w0` (0x1E230000)
             // match this mask and get misdecoded as a raw GPR↔FP bit copy.
-            // FMOV Sn, Wn → v_lo[rd] = (uint32_t)regs[rn]; v_hi[rd] = 0
-            // FMOV Wd, Sn → regs[rd] = (uint32_t)v_lo[rn]
+            // FMOV Sn, Wn → v[rd].lo = (uint32_t)regs[rn]; v[rd].hi = 0
+            // FMOV Wd, Sn → regs[rd] = (uint32_t)v[rn].lo
             // Bit[17]=1 additionally excludes FCVTAS (0x1E240000, bit17=0),
             // which would otherwise be misdecoded as a raw GPR↔FP bit copy.
             if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))
                 && (op & (1u << 17))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) {
-                    // Wn → Sn: mask GPR to 32 bits before storing to v_lo[rd].
+                    // Wn → Sn: mask GPR to 32 bits before storing to v[rd].lo.
                     uint16_t val = load_arm_reg(block, rn);
                     uint16_t mask = load_imm(block, 0xFFFFFFFFULL);
                     uint16_t masked = g_alloc.alloc();
                     block.insts.push_back(IRInst::make(IROp::AND, masked, val, mask));
                     block.insts.push_back(IRInst::make(IROp::FMOV_G2F, rd, masked, 0, 0, cur_pc));
                 } else {
-                    // Sn → Wd: load v_lo[rn] (full 64 bits), mask to 32 bits.
+                    // Sn → Wd: load v[rn].lo (full 64 bits), mask to 32 bits.
                     uint16_t v = g_alloc.alloc();
                     block.insts.push_back(IRInst::make(IROp::FMOV_F2G, v, rn, 0, 0, cur_pc));
                     uint16_t mask = load_imm(block, 0xFFFFFFFFULL);
@@ -212,8 +212,8 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             // FMOV (FP↔FP register): native path.
             // Encoding: 0x1E604000 (double) or 0x1E204000 (single).
-            // FMOV Dd, Dn → v_lo[rd] = v_lo[rn]; v_hi[rd] = 0
-            // FMOV Sd, Sn → v_lo[rd] = v_lo[rn] (low 32 bits); v_hi[rd] = 0
+            // FMOV Dd, Dn → v[rd].lo = v[rn].lo; v[rd].hi = 0
+            // FMOV Sd, Sn → v[rd].lo = v[rn].lo (low 32 bits); v[rd].hi = 0
             // Single FP_MOV IR op (codegen = vmovsd/vmovss between the v_lo/
             // v_hi slots). The old 4-op FMOV_F2G→(IMM/AND)→FMOV_G2F(→FHI2G/
             // G2FHI) round-trip through a GPR scratch cost ~4 memory accesses
@@ -340,11 +340,11 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // to the FRINT IR op — do NOT use load_arm_reg/store_arm_reg.
                 // Those helpers allocate vregs (indices >= 33) and emit
                 // LOAD_REG/STORE_REG which access cpu.regs[] (GPR array),
-                // not cpu.v_lo[] (FP array). The JIT codegen and IR executor
+                // not cpu.v[].lo (FP array). The JIT codegen and IR executor
                 // both treat inst.dest/inst.src1 as ARM FP reg indices
-                // (0-31) and access V_LO_OFF + idx*8 — same convention as
+                // (0-31) and access vlo_off(idx) — same convention as
                 // FP_BINOP/FP_UNOP. Passing vregs caused out-of-bounds
-                // writes to v_lo[33+] and broke floor/ceil/round/trunc
+                // writes to v[33+].lo and broke floor/ceil/round/trunc
                 // under JIT. The masked this by falling back
                 // to CALL_INTERP; this is the proper fix.
                 //
@@ -368,7 +368,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         default: frint_mode = 0; break;    // 0x0D unused
                     }
                     // Pass rd (dest) and rn (src1) as ARM FP reg indices.
-                    // The JIT reads/writes V_LO_OFF + idx*8 directly.
+                    // The JIT reads/writes vlo_off(idx) directly.
                     FpFrintParams fp;
                     fp.bits = ftype ? 64 : 32;
                     fp.mode = frint_mode;
@@ -455,7 +455,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             //
             // For subops 2/3 the source integer lives in an FP register
             // (e.g. GCC's `scvtf s0, s0, #1` in (float)x hit tests) so the
-            // JIT codegen must read/write v_lo[] instead of a GPR; that is
+            // JIT codegen must read/write v[].lo instead of a GPR; that is
             // signalled via inst.imms bit 0.
             {
                 fpfixed::Op fc = fpfixed::classify(op);
@@ -649,7 +649,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     else if ( neg && !sub) op_e = IROp::FNMADD;
                     else                   op_e = IROp::FNMSUB;
                     // Pass FP register indices directly — the JIT reads
-                    // operands from V_LO_OFF + idx*8. Do NOT use
+                    // operands from vlo_off(idx). Do NOT use
                     // load_arm_reg (that loads GPRs, not FP regs).
                     FpFusedParams fp;
                     fp.bits = ftype ? 64 : 32;
@@ -681,7 +681,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // and they used to CALL_INTERP on every execution (the game's
             // `ushr dN, dM, #32` was the top remaining SIMD/FP fallback).
             // Reuse the SIMD shift IR ops with a single 64-bit lane
-            // (esize=8, q=0): v_lo[rd] = shift(v_lo[rn]); v_hi[rd] = 0.
+            // (esize=8, q=0): v[rd].lo = shift(v[rn].lo); v[rd].hi = 0.
             //   SHL  (op & 0xFF00FC00) == 0x5F005400: shift = immh:immb - 64
             //   USHR (op & 0xFF00FC00) == 0x7F000400: shift = 128 - immh:immb
             //   SSHR (op & 0xFF00FC00) == 0x5F000400: shift = 128 - immh:immb

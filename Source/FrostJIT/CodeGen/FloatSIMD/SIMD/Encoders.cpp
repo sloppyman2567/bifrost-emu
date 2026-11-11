@@ -10,22 +10,21 @@ namespace arm64emu {
 // Scratch vectors are assembled completely before a tentative FP result
 // is committed. A NaN exit must see the original instruction's inputs.
 void FrostJIT::load_fp_vector(int xmm, int v, bool q) {
-    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
-    emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
     if (q) {
-        emit_byte(0x0F); emit_byte(0x16);
-        emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
+        load_v16(xmm, v);
+        return;
     }
+    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);  // movq: zeroes bits 127:64
+    emit_modrm_disp(xmm, CPU_REG, vlo_off(v));
 }
 void FrostJIT::store_fp_vector(int v, bool q) {
-    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
-    emit_modrm_disp(0, CPU_REG, V_LO_OFF + v * 8);
     if (q) {
-        emit_byte(0x0F); emit_byte(0x17);
-        emit_modrm_disp(0, CPU_REG, V_HI_OFF + v * 8);
+        store_v16(0, v);
     } else {
+        emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+        emit_modrm_disp(0, CPU_REG, vlo_off(v));
         emit_push(RAX); emit_mov_imm32_zext(RAX, 0);
-        emit_store(CPU_REG, V_HI_OFF + v * 8, RAX); emit_pop(RAX);
+        emit_store(CPU_REG, vhi_off(v), RAX); emit_pop(RAX);
     }
 }
 // ── Local emit helpers for the memory-path SIMD ops ──
@@ -79,6 +78,15 @@ void FrostJIT::sse2_imm(int op, int dst, int digit, uint8_t cnt) {
 }
 // movdqa dst, src (register form).
 void FrostJIT::movdqa(int dst, int src) { sse2_op(0x6F, dst, src); }
+// A whole Vn (16 contiguous bytes at vlo_off): movups xmm, [v] / movups [v], xmm.
+void FrostJIT::load_v16(int xmm, int vreg) {
+    emit_xmm_rex(xmm, 0); emit_byte(0x0F); emit_byte(0x10);
+    emit_modrm_disp(xmm & 7, CPU_REG, vlo_off(vreg));
+}
+void FrostJIT::store_v16(int xmm, int vreg) {
+    emit_xmm_rex(xmm, 0); emit_byte(0x0F); emit_byte(0x11);
+    emit_modrm_disp(xmm & 7, CPU_REG, vlo_off(vreg));
+}
 // 64-bit loads/stores to the guest vreg memory space (movsd/movhpd).
 void FrostJIT::load_lo(int xmm, int off) {
     emit_byte(0xF2); emit_xmm_rex(xmm, 0); emit_byte(0x0F); emit_byte(0x10);
@@ -103,8 +111,7 @@ void FrostJIT::load_vec(int xmm, int vreg) {
         movdqa(xmm, pinned);
         return;
     }
-    load_lo(xmm, V_LO_OFF + vreg * 8);
-    load_hi(xmm, V_HI_OFF + vreg * 8);
+    load_v16(xmm, vreg);
 }
 // Store the low 8 bytes of an XMM reg to a vector, zeroing v_hi for Q=0.
 void FrostJIT::store_vec(int xmm, int vreg, bool q) {
@@ -115,9 +122,12 @@ void FrostJIT::store_vec(int xmm, int vreg, bool q) {
         vec_cache_mark_dirty(vreg);
         return;
     }
-    store_lo(xmm, V_LO_OFF + vreg * 8);
-    if (q) store_hi(xmm, V_HI_OFF + vreg * 8);
-    else   fp_zero_hi(vreg);
+    if (q) {
+        store_v16(xmm, vreg);
+    } else {
+        store_lo(xmm, vlo_off(vreg));
+        fp_zero_hi(vreg);
+    }
 }
 // Broadcast a 64-bit constant into both halves of an XMM register:
 // movabs RAX, c; vmovq xmm, rax; punpcklqdq xmm, xmm

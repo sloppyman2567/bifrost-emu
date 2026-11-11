@@ -249,17 +249,11 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
         if (pinned >= 0) {
             vec_cache_mark_dirty(reg);
         } else {
-            emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);  // movsd [v_lo], xmm0
-            emit_modrm_disp(0, CPU_REG, V_LO_OFF + reg * 8);
-            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x17);  // movhpd [v_hi], xmm0
-            emit_modrm_disp(0, CPU_REG, V_HI_OFF + reg * 8);
+            store_v16(0, reg);
         }
     } else {
         if (pinned < 0) {
-            emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);  // movsd xmm0, [v_lo]
-            emit_modrm_disp(0, CPU_REG, V_LO_OFF + reg * 8);
-            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x16);  // movhpd xmm0, [v_hi]
-            emit_modrm_disp(0, CPU_REG, V_HI_OFF + reg * 8);
+            load_v16(0, reg);
         }
         access(pinned >= 0 ? pinned : 0, 0x11);
     }
@@ -451,7 +445,7 @@ void FrostJIT::flush_deferred_guards() {
 }
 // ── FrostJIT::compile_ir_mem ───────────────────────────────────────────
 // Handles LOAD_MEM, STORE_MEM, LOAD_REG, STORE_REG. These are the only
-// IR ops that touch cpu.regs[]/cpu.v_lo[]/memory directly via the
+// IR ops that touch cpu.regs[]/cpu.v[].lo/memory directly via the
 // regalloc-aware helpers (load_vreg_to_reg, store_reg_to_vreg,
 // emit_load_mem, emit_store_mem, emit_load_arm, emit_store_arm).
 // A lazy LOAD_REG whose consumer did not fold it: load it now. Nothing ran
@@ -496,14 +490,14 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     d = alloc_reg_excluding(s, -1);
                     emit_mov_reg(d, s);
                 } else if (inst.is_fp_load()) {
-                    // FP register: load from cpu.v_lo[src1] (or, when the fp
+                    // FP register: load from cpu.v[src1].lo (or, when the fp
                     // cache pins src1, the pinned XMM — reg-reg move).
                     d = alloc_reg();
                     int xs = vec_xmm(inst.src1);
                     if (xs >= 0) {
                         emit_vmovq_xmm_to_gpr(d, xs);
                     } else {
-                        emit_load(d, CPU_REG, V_LO_OFF + 8 * inst.src1);
+                        emit_load(d, CPU_REG, vlo_off(inst.src1));
                     }
                 } else {
                     d = alloc_reg();
@@ -607,14 +601,14 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 }
                 int s = ensure_vreg(inst.src1);
                 if (inst.is_fp_store() && inst.dest <= 30) {
-                    // FP register: store to cpu.v_lo[dest] (or, when the fp
+                    // FP register: store to cpu.v[dest].lo (or, when the fp
                     // cache pins dest, the pinned XMM — reg-reg move + dirty).
                     int xd = vec_xmm(inst.dest);
                     if (xd >= 0) {
                         emit_vmovq_gpr_to_xmm(xd, s);
                         vec_cache_mark_dirty(inst.dest);
                     } else {
-                        emit_store(CPU_REG, V_LO_OFF + 8 * inst.dest, s);
+                        emit_store(CPU_REG, vlo_off(inst.dest), s);
                     }
                 } else {
                     emit_store_arm(inst.dest, s);

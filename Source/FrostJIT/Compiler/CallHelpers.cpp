@@ -333,8 +333,7 @@ void FrostJIT::emit_fp_interp_step(const IRInst& inst) {
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
 void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
                                 uint16_t src1, uint16_t dest) {
-    int32_t fp_off = (fp_field == 0 ? V_LO_OFF : V_HI_OFF)
-                   + static_cast<int>(idx) * 8;
+    int32_t fp_off = fp_field == 0 ? vlo_off(idx) : vhi_off(idx);
     if (dir == 0) {
         // GPR → FP: load src1 vreg into RAX, store to fp_off.
         // We use RAX as a scratch for the memory store. src1's cached
@@ -347,7 +346,7 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
         // printf("%f", 3.14) → "2.000000" under BIFROST_ENABLE_FWD=1
         // because v46 (the bfxil result holding x1's low 48 bits) was
         // in RAX and got clobbered by the FMOV_G2F that copies x9 to
-        // v_lo[0]. Fix: spill RAX's occupant BEFORE overwriting it.
+        // v[0].lo. Fix: spill RAX's occupant BEFORE overwriting it.
         int s = ensure_vreg(src1, RAX);
         // ── FP-cache path (FMOV_G2F only — lo half): ────────────────
         // Store the GPR value into the pinned XMM (reg-reg) instead of
@@ -371,17 +370,17 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
             emit_mov_reg(RAX, s);
         }
         emit_store(CPU_REG, fp_off, RAX);
-        // FMOV_G2F (fp_field==0) also zeros v_hi[idx] per ARM semantics.
+        // FMOV_G2F (fp_field==0) also zeros v[idx].hi per ARM semantics.
         // The zero-load clobbers RAX, so we must spill any dirty vreg
         // cached there BEFORE overwriting. Use a DIFFERENT reg (RCX) for
         // the zero to avoid clobbering src1 in RAX entirely.
         if (fp_field == 0) {
-            int32_t vhi_off = V_HI_OFF + static_cast<int>(idx) * 8;
+            const int32_t hi_off = vhi_off(static_cast<int>(idx));
             // Use RCX as scratch for the zero (doesn't disturb src1 in RAX).
             // clobber_host_reg(RCX) spills any dirty vreg cached in RCX.
             clobber_host_reg(RCX);
             emit_mov_imm32_zext(RCX, 0);
-            emit_store(CPU_REG, vhi_off, RCX);
+            emit_store(CPU_REG, hi_off, RCX);
         }
         // src1 stays cached in its reg (RAX or wherever ensure_vreg put it).
         // No mapping drop needed — the store didn't modify src1.

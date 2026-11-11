@@ -93,21 +93,21 @@ bool Emulator::exec_simd_scalar_lane(uint32_t op, CPU& cpu) {
     const bool has_rm = !(form->mask & 0x10000) && form->shape != LaneShape::ShiftNarrow;
     const uint32_t rm_field = indexed && size == 1 ? 0xF0000u : 0x1F0000u;
     const unsigned rd = op & 31, rn = (op >> 5) & 31, rm = (op & rm_field) >> 16;
-    const uint64_t n_lo = cpu.v_lo[rn], d_lo = cpu.v_lo[rd];
-    const uint64_t m_lo = cpu.v_lo[rm], m_hi = cpu.v_hi[rm];
+    const uint64_t n_lo = cpu.v[rn].lo, d_lo = cpu.v[rd].lo;
+    const uint64_t m_lo = cpu.v[rm].lo, m_hi = cpu.v[rm].hi;
     struct Scratch {
         CPU& cpu;
         uint64_t lo[3], hi[3];
         explicit Scratch(CPU& c) : cpu(c) {
-            for (int i = 0; i < 3; ++i) { lo[i] = c.v_lo[i]; hi[i] = c.v_hi[i]; }
+            for (int i = 0; i < 3; ++i) { lo[i] = c.v[i].lo; hi[i] = c.v[i].hi; }
         }
-        ~Scratch() { for (int i = 0; i < 3; ++i) { cpu.v_lo[i] = lo[i]; cpu.v_hi[i] = hi[i]; } }
+        ~Scratch() { for (int i = 0; i < 3; ++i) { cpu.v[i].lo = lo[i]; cpu.v[i].hi = hi[i]; } }
     } scratch(cpu);
     // Every source element fits in the low 64 bits (src_bytes <= 8).
-    cpu.v_lo[0] = form->acc ? low(d_lo, dst_bytes) : 0; cpu.v_hi[0] = 0;
-    cpu.v_lo[1] = low(n_lo, src_bytes); cpu.v_hi[1] = 0;
-    if (indexed) { cpu.v_lo[2] = m_lo; cpu.v_hi[2] = m_hi; }
-    else { cpu.v_lo[2] = low(m_lo, src_bytes); cpu.v_hi[2] = 0; }
+    cpu.v[0].lo = form->acc ? low(d_lo, dst_bytes) : 0; cpu.v[0].hi = 0;
+    cpu.v[1].lo = low(n_lo, src_bytes); cpu.v[1].hi = 0;
+    if (indexed) { cpu.v[2].lo = m_lo; cpu.v[2].hi = m_hi; }
+    else { cpu.v[2].lo = low(m_lo, src_bytes); cpu.v[2].hi = 0; }
     // Vector word: bit 28 clear, registers v0/v1/v2, Q=0 for the forms
     // whose Q=1 variant is the upper-half ("2") operation.
     uint32_t vec = (op & ~(1u << 28) & ~0x3FFu) | (1u << 5);
@@ -120,10 +120,10 @@ bool Emulator::exec_simd_scalar_lane(uint32_t op, CPU& cpu) {
         handled = false;
     }
     if (!handled) throw DecodeError(cpu.pc, op);  // scratch restores v0-v2
-    const uint64_t result = low(cpu.v_lo[0], dst_bytes);
+    const uint64_t result = low(cpu.v[0].lo, dst_bytes);
     if (rd < 3) { scratch.lo[rd] = result; scratch.hi[rd] = 0; }
-    cpu.v_lo[rd] = result;
-    cpu.v_hi[rd] = 0;
+    cpu.v[rd].lo = result;
+    cpu.v[rd].hi = 0;
     return true;
 }
 void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
@@ -147,12 +147,12 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     const uint32_t compare = op & 0xFFE0FC00;
     if (compare == 0x5EE03400 || compare == 0x5EE03C00 ||
         compare == 0x7EE03400 || compare == 0x7EE03C00) {
-        const uint64_t a = cpu.v_lo[rn], b = cpu.v_lo[rm];
+        const uint64_t a = cpu.v[rn].lo, b = cpu.v[rm].lo;
         const bool ge = (op >> 11) & 1, uns = (op >> 29) & 1;
         bool result = uns ? (ge ? a >= b : a > b)
                          : (ge ? int64_t(a) >= int64_t(b) : int64_t(a) > int64_t(b));
-        cpu.v_lo[rd] = result ? ~0ULL : 0;
-        cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = result ? ~0ULL : 0;
+        cpu.v[rd].hi = 0;
         return;
     }
     // AdvSIMD scalar compares producing an all-ones/zero mask in the low
@@ -183,13 +183,13 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             case 0x5EE0A800: icase = 6; break;
         }
         if (icase >= 0) {
-            const uint64_t a = cpu.v_lo[rn], b = cpu.v_lo[rm];
+            const uint64_t a = cpu.v[rn].lo, b = cpu.v[rm].lo;
             const int64_t s = static_cast<int64_t>(a);
             const bool t = icase == 0 ? (a & b) != 0 : icase == 1 ? a == b
                 : icase == 2 ? s > 0 : icase == 3 ? s >= 0 : icase == 4 ? s == 0
                 : icase == 5 ? s <= 0 : s < 0;
-            cpu.v_lo[rd] = t ? ~0ULL : 0;
-            cpu.v_hi[rd] = 0;
+            cpu.v[rd].lo = t ? ~0ULL : 0;
+            cpu.v[rd].hi = 0;
             return;
         }
         int fcase = -1;  // eq, ge, gt, acge, acgt, gt0, ge0, eq0, le0, lt0
@@ -220,8 +220,8 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
                 case 9: t = a < b; break;
                 default: t = a > b; break;
             }
-            cpu.v_lo[rd] = t ? (dbl ? ~0ULL : 0xFFFFFFFFull) : 0;
-            cpu.v_hi[rd] = 0;
+            cpu.v[rd].lo = t ? (dbl ? ~0ULL : 0xFFFFFFFFull) : 0;
+            cpu.v[rd].hi = 0;
             return;
         }
     }
@@ -257,14 +257,14 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         uint64_t src_val = 0;
         int elems_per_qword = 8 / esize;
         if (idx < elems_per_qword) {
-            const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_lo[rn]);
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v[rn].lo);
             memcpy(&src_val, p + idx * esize, esize);
         } else {
-            const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_hi[rn]);
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v[rn].hi);
             memcpy(&src_val, p + (idx - elems_per_qword) * esize, esize);
         }
-        cpu.v_lo[rd] = src_val;
-        cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = src_val;
+        cpu.v[rd].hi = 0;
         return;
     }
     // FP register access + half-precision helpers are now
@@ -278,8 +278,8 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))
         && (op & (1u << 17))) {
         bool to_fp = (op >> 16) & 1;
-        if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn]; cpu.v_hi[rd] = 0; }
-        else if (rd != 31) { cpu.regs[rd] = cpu.v_lo[rn]; }
+        if (to_fp) { cpu.v[rd].lo = cpu.regs[rn]; cpu.v[rd].hi = 0; }
+        else if (rd != 31) { cpu.regs[rd] = cpu.v[rn].lo; }
         return;
     }
     // FMOV (general ↔ FP, 32-bit)
@@ -297,8 +297,8 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))
         && (op & (1u << 17))) {
         bool to_fp = (op >> 16) & 1;
-        if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn] & 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
-        else if (rd != 31) { cpu.regs[rd] = cpu.v_lo[rn] & 0xFFFFFFFF; }
+        if (to_fp) { cpu.v[rd].lo = cpu.regs[rn] & 0xFFFFFFFF; cpu.v[rd].hi = 0; }
+        else if (rd != 31) { cpu.regs[rd] = cpu.v[rn].lo & 0xFFFFFFFF; }
         return;
     }
     // FMOV (scalar, immediate)
@@ -313,9 +313,9 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         uint8_t imm8 = (op >> 13) & 0xFF;
         uint64_t bits = fp_decode::vfp_expand_imm(imm8, ftype);
         if (ftype == 1) {
-            cpu.v_lo[rd] = bits; cpu.v_hi[rd] = 0;
+            cpu.v[rd].lo = bits; cpu.v[rd].hi = 0;
         } else if (ftype == 0) {
-            cpu.v_lo[rd] = bits; cpu.v_hi[rd] = 0;
+            cpu.v[rd].lo = bits; cpu.v[rd].hi = 0;
         } else {
             // ftype == 3 → half precision. We don't model 16-bit
             // FP natively, so expand to single-precision bits via
@@ -350,15 +350,15 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
                       | ((sexp - 15 + 127) << 23)
                       | (smant << 13);
             }
-            cpu.v_lo[rd] = sbits; cpu.v_hi[rd] = 0;
+            cpu.v[rd].lo = sbits; cpu.v[rd].hi = 0;
         }
         return;
     }
     // FMOV (register, FP to FP)
     if ((op & 0xFFFFFC00) == 0x1E604000 || (op & 0xFFFFFC00) == 0x1E204000) {
-        cpu.v_lo[rd] = cpu.v_lo[rn];
-        if (ftype) cpu.v_hi[rd] = 0;
-        else { cpu.v_lo[rd] &= 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
+        cpu.v[rd].lo = cpu.v[rn].lo;
+        if (ftype) cpu.v[rd].hi = 0;
+        else { cpu.v[rd].lo &= 0xFFFFFFFF; cpu.v[rd].hi = 0; }
         return;
     }
     // FP arithmetic (2-source): FADD/FSUB/FMUL/FDIV/FMAX/FMIN/
@@ -591,26 +591,26 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         // Half is stored in low 16 bits of v_lo.
         double d = read_fp_d(cpu, rn);
         uint16_t hbits = d2h(d, (cpu.fpcr >> 25) & 1);
-        cpu.v_lo[rd] = hbits; cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = hbits; cpu.v[rd].hi = 0;
         return;
     }
     if ((op & 0xFFFFFC00) == 0x1E23C000) { // FCVT Hn, Sn (S → H)
         float f = read_fp_s(cpu, rn);
         uint16_t hbits = f2h(f, (cpu.fpcr >> 25) & 1);
-        cpu.v_lo[rd] = hbits; cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = hbits; cpu.v[rd].hi = 0;
         return;
     }
     // FCVT encodes the source in ftype (11 = H) and the destination in opc.
     // These two used to match unallocated encodings (0x1E634000 and
     // 0x1E224000), leaving the real H → S/D forms to the FP-NOP fallback.
     if ((op & 0xFFFFFC00) == 0x1EE24000) { // FCVT Sd, Hn (H → S)
-        uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
+        uint16_t hbits = static_cast<uint16_t>(cpu.v[rn].lo & 0xFFFF);
         float f = h2f(hbits, (cpu.fpcr >> 25) & 1);
         write_fp_s(cpu, rd, f);
         return;
     }
     if ((op & 0xFFFFFC00) == 0x1EE2C000) { // FCVT Dd, Hn (H → D)
-        uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
+        uint16_t hbits = static_cast<uint16_t>(cpu.v[rn].lo & 0xFFFF);
         double d = static_cast<double>(h2f(hbits, (cpu.fpcr >> 25) & 1));
         write_fp_d(cpu, rd, d);
         return;
@@ -682,7 +682,7 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
                 bool is_unsigned = (op >> 29) & 1;
                 bool is_double = (op >> 22) & 1;
                 int fbits = 64 - static_cast<int>((op >> 16) & 0x3F);
-                uint64_t src_bits = cpu.v_lo[rn];
+                uint64_t src_bits = cpu.v[rn].lo;
                 if (fc.subop == 2) {
                     if (is_double) {
                         double v = is_unsigned
@@ -705,8 +705,8 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
                         uint64_t out = fp_to_unsigned_sat(scaled, is_double);
                         // Write to Sd zeroes the upper 32 bits (matches
                         // the two-register-misc FCVTZS handler below).
-                        cpu.v_lo[rd] = is_double ? out : (out & 0xFFFFFFFFULL);
-                        cpu.v_hi[rd] = 0;
+                        cpu.v[rd].lo = is_double ? out : (out & 0xFFFFFFFFULL);
+                        cpu.v[rd].hi = 0;
                     } else {
                         double hi = is_double ? 9223372036854775808.0
                                               : 2147483648.0;
@@ -714,9 +714,9 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
                                     : (scaled >= hi) ? (is_double ? INT64_MAX : INT32_MAX)
                                     : (scaled < -hi) ? (is_double ? INT64_MIN : INT32_MIN)
                                     : static_cast<int64_t>(scaled);
-                        cpu.v_lo[rd] = is_double ? static_cast<uint64_t>(out)
+                        cpu.v[rd].lo = is_double ? static_cast<uint64_t>(out)
                                                  : (static_cast<uint32_t>(out) & 0xFFFFFFFFULL);
-                        cpu.v_hi[rd] = 0;
+                        cpu.v[rd].hi = 0;
                     }
                 }
             }
@@ -788,7 +788,7 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         bool is_double = (op >> 22) & 1;  // also doubles as "is 64-bit int"
         if (opcode == 0x1D) {  // SCVTF/UCVTF (int → FP, FP source)
             // Read integer bits from FP source register.
-            uint64_t src_bits = cpu.v_lo[rn];
+            uint64_t src_bits = cpu.v[rn].lo;
             if (is_double) {
                 // 64-bit int → double-precision float
                 double v = is_unsigned
@@ -819,8 +819,8 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             uint64_t out = is_unsigned
                 ? fp_to_unsigned_sat(v, is_double)
                 : static_cast<uint64_t>(fp_to_signed_sat(v, is_double));
-            cpu.v_lo[rd] = is_double ? out : out & 0xFFFFFFFFULL;
-            cpu.v_hi[rd] = 0;
+            cpu.v[rd].lo = is_double ? out : out & 0xFFFFFFFFULL;
+            cpu.v[rd].hi = 0;
             return;
         }
         // Other opcodes in this group (FRINTN, FABS, etc.) are
@@ -879,13 +879,13 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     // (cmtst d = 0x5EE18C02, cmeq d = 0x7EE18C02). mimalloc's
     // bitmap code does `add d2, d0, d1` then `str d2`.
     if ((op & 0xFFE0FC00) == 0x5EE08400) {
-        cpu.v_lo[rd] = cpu.v_lo[rn] + cpu.v_lo[rm];
-        cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = cpu.v[rn].lo + cpu.v[rm].lo;
+        cpu.v[rd].hi = 0;
         return;
     }
     if ((op & 0xFFE0FC00) == 0x7EE08400) {
-        cpu.v_lo[rd] = cpu.v_lo[rn] - cpu.v_lo[rm];
-        cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = cpu.v[rn].lo - cpu.v[rm].lo;
+        cpu.v[rd].hi = 0;
         return;
     }
     // ── Scalar FCVTXN (Sd ← Dn, round-to-odd) ─────────────────
@@ -895,13 +895,13 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     // the rest of Vd, like every scalar AdvSIMD result.
     // The vector forms live in the SIMD_DP section above.
     if ((op & 0xFFFFFC00) == 0x7E616800) {
-        uint64_t raw = cpu.v_lo[rn];
+        uint64_t raw = cpu.v[rn].lo;
         double dv;
         memcpy(&dv, &raw, 8);
         float fv = fp_to_f32_rto(dv);
         uint32_t bits; memcpy(&bits, &fv, 4);
-        cpu.v_lo[rd] = bits;  // scalar writes clear the rest of Vd
-        cpu.v_hi[rd] = 0;
+        cpu.v[rd].lo = bits;  // scalar writes clear the rest of Vd
+        cpu.v[rd].hi = 0;
         return;
     }
     // ── Scalar pairwise FADDP/FMAXP/FMINP/FMAXNMP/FMINNMP ─────
@@ -922,8 +922,8 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
         // Previously fell to the FP-NOP fallback (stale d31 read
         // back, e.g. sum {1,2,3,4} returned 3).
         if (pw == 0x5EF1B800) {
-            cpu.v_lo[rd] = cpu.v_lo[rn] + cpu.v_hi[rn];
-            cpu.v_hi[rd] = 0;
+            cpu.v[rd].lo = cpu.v[rn].lo + cpu.v[rn].hi;
+            cpu.v[rd].hi = 0;
             return;
         }
         if (pw == 0x7E30D800 || pw == 0x7E70D800 ||
@@ -941,13 +941,13 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             const bool dn = (cpu.fpcr >> 25) & 1;
             if (op & 0x00400000) {  // double: lanes = Vn.2D
                 double a = read_fp_d(cpu, rn);
-                uint64_t hi_bits = cpu.v_hi[rn];
+                uint64_t hi_bits = cpu.v[rn].hi;
                 double b; memcpy(&b, &hi_bits, 8);
                 write_fp_d(cpu, rd, arm_fp_binop(kind, a, b, dn));
             } else {                // single: both lanes in Vn low word
-                uint32_t lbits = static_cast<uint32_t>(cpu.v_lo[rn]);
+                uint32_t lbits = static_cast<uint32_t>(cpu.v[rn].lo);
                 float a; memcpy(&a, &lbits, 4);
-                uint32_t hbits = static_cast<uint32_t>(cpu.v_lo[rn] >> 32);
+                uint32_t hbits = static_cast<uint32_t>(cpu.v[rn].lo >> 32);
                 float b; memcpy(&b, &hbits, 4);
                 write_fp_s(cpu, rd, arm_fp_binop(kind, a, b, dn));
             }
@@ -981,12 +981,12 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
             double elem;
             float elem_s;
             if (is_dbl) {
-                uint64_t bits = idx ? cpu.v_hi[rm_reg]
-                                    : cpu.v_lo[rm_reg];
+                uint64_t bits = idx ? cpu.v[rm_reg].hi
+                                    : cpu.v[rm_reg].lo;
                 memcpy(&elem, &bits, 8);
             } else {
                 const uint64_t& src =
-                    (idx >= 2) ? cpu.v_hi[rm_reg] : cpu.v_lo[rm_reg];
+                    (idx >= 2) ? cpu.v[rm_reg].hi : cpu.v[rm_reg].lo;
                 uint32_t w = static_cast<uint32_t>(
                     src >> ((idx & 1) ? 32 : 0));
                 memcpy(&elem_s, &w, 4);

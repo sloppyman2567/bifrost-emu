@@ -311,7 +311,7 @@ std::optional<int64_t> GraphicThunk::dispatch_special_policies_(CPU& cpu, const 
         cpu.regs[0] = 0;
         if (entry.spec && (entry.spec->ret == thunk::RetKind::FLOAT ||
                            entry.spec->ret == thunk::RetKind::DOUBLE))
-            cpu.v_lo[0] = cpu.v_hi[0] = 0;
+            cpu.v[0].lo = cpu.v[0].hi = 0;
         return 0;
     }
     return std::nullopt;

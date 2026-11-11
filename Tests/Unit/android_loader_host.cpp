@@ -53,7 +53,7 @@ static TaggedRun run_tagged(bool jit, uint64_t tag) {
     assert(e->mem().mprotect_guest(code, 4096, 5));
     CPU cpu;
     cpu.pc = code; cpu.regs[0] = (tag << 56) | data; cpu.regs[1] = 0x1122334455667788ULL;
-    cpu.v_lo[0] = 0x0123456789abcdefULL; cpu.v_hi[0] = 0xfedcba9876543210ULL;
+    cpu.v[0].lo = 0x0123456789abcdefULL; cpu.v[0].hi = 0xfedcba9876543210ULL;
     cpu.regs[30] = stop; cpu.jit_stop_pc = stop;
     if (jit) e->enable_jit();
     for (unsigned n = 0; cpu.pc != stop && n < 1000; ++n) {
@@ -63,7 +63,7 @@ static TaggedRun run_tagged(bool jit, uint64_t tag) {
     assert(cpu.pc == stop);
     TaggedRun r{};
     std::memcpy(r.regs, cpu.regs, sizeof(r.regs));
-    r.q1[0] = cpu.v_lo[1]; r.q1[1] = cpu.v_hi[1];
+    r.q1[0] = cpu.v[1].lo; r.q1[1] = cpu.v[1].hi;
     e->mem().read(data, r.data, sizeof(r.data));
     r.steps = cpu.decode_cache_hits + cpu.decode_cache_misses;  // interpreter steps only
     return r;

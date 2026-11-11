@@ -297,14 +297,14 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
             };
             load_vec(0, static_cast<int>(inst.src1));
             reduce(0);
-            int32_t dlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t dlo = vlo_off(static_cast<int>(inst.dest));
             if (q) {
                 // Load Vm before any destination write: Vd may alias Vm.
                 load_vec(3, static_cast<int>(inst.src2));
                 store_lo(0, dlo);
                 movdqa(0, 3);
                 reduce(0);
-                store_lo(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+                store_lo(0, vhi_off(static_cast<int>(inst.dest)));
             } else {
                 // 8B form: dest[0..3] = Vn pairs, dest[4..7] = Vm pairs.
                 movdqa(3, 0);                        // save r_n
@@ -412,9 +412,9 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
                 }
             }
             if (sp.q) {
-                store_lo(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+                store_lo(0, vhi_off(static_cast<int>(inst.dest)));
             } else {
-                store_lo(0, V_LO_OFF + static_cast<int>(inst.dest) * 8);
+                store_lo(0, vlo_off(static_cast<int>(inst.dest)));
                 fp_zero_hi(static_cast<int>(inst.dest));
             }
             return true;
@@ -488,14 +488,11 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
             const SimdInsParams ip = inst.ins_params();
             const int esize = static_cast<int>(ip.esize);
             const int src_byte = static_cast<int>(ip.sidx) * esize;
-            const int sq = src_byte / 8;                   // 0 → v_lo, 1 → v_hi
-            const int32_t soff = (sq ? V_HI_OFF : V_LO_OFF)
-                + static_cast<int>(inst.src1) * 8 + (src_byte % 8);
+            const int32_t soff = vlo_off(static_cast<int>(inst.src1)) + src_byte;
             const int dst_byte = static_cast<int>(ip.dst_off);
             const int dq = dst_byte / 8;
             const int b_in_q = dst_byte % 8;               // field offset in the qword
-            const int32_t doff = (dq ? V_HI_OFF : V_LO_OFF)
-                + static_cast<int>(inst.dest) * 8;
+            const int32_t doff = dq ? vhi_off(static_cast<int>(inst.dest)) : vlo_off(static_cast<int>(inst.dest));
             // Mask: keep everything except the esize-byte field at b_in_q.
             const int field_top = b_in_q * 8 + esize * 8;
             const uint64_t keep_high = (field_top < 64) ? (~0ULL << field_top) : 0;

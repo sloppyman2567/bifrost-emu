@@ -31,7 +31,7 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
 
         // ── SIMD LOGICAL (AND/ORR/EOR/BIC/ORN/EON) — native SSE2 ────
         case IROp::SIMD_LOGICAL: {
-            // v_lo[dest],v_hi[dest] = src1 OP src2
+            // v[dest].lo,v[dest].hi = src1 OP src2
             // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
             // SIMD_LOGICAL only touches XMM0/XMM1/XMM2, no GPRs.
             //
@@ -108,12 +108,12 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
-            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t off1lo = vlo_off(static_cast<int>(inst.src1));
+            int32_t off1hi = vhi_off(static_cast<int>(inst.src1));
+            int32_t off2lo = vlo_off(static_cast<int>(inst.src2));
+            int32_t off2hi = vhi_off(static_cast<int>(inst.src2));
+            int32_t offdlo = vlo_off(static_cast<int>(inst.dest));
+            int32_t offdhi = vhi_off(static_cast<int>(inst.dest));
             emit_logical_half(off1lo, off2lo, offdlo);
             if (logic.q) emit_logical_half(off1hi, off2hi, offdhi);
             else {
@@ -252,12 +252,12 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
-            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t off1lo = vlo_off(static_cast<int>(inst.src1));
+            int32_t off1hi = vhi_off(static_cast<int>(inst.src1));
+            int32_t off2lo = vlo_off(static_cast<int>(inst.src2));
+            int32_t off2hi = vhi_off(static_cast<int>(inst.src2));
+            int32_t offdlo = vlo_off(static_cast<int>(inst.dest));
+            int32_t offdhi = vhi_off(static_cast<int>(inst.dest));
             emit_arith_half(off1lo, off2lo, offdlo);
             if (ap.q) emit_arith_half(off1hi, off2hi, offdhi);
             else {
@@ -376,12 +376,12 @@ bool FrostJIT::compile_simd_arithmetic_(const IRInst& inst) {
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
-            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t off1lo = vlo_off(static_cast<int>(inst.src1));
+            int32_t off1hi = vhi_off(static_cast<int>(inst.src1));
+            int32_t off2lo = vlo_off(static_cast<int>(inst.src2));
+            int32_t off2hi = vhi_off(static_cast<int>(inst.src2));
+            int32_t offdlo = vlo_off(static_cast<int>(inst.dest));
+            int32_t offdhi = vhi_off(static_cast<int>(inst.dest));
             emit_cmp_half(off1lo, off2lo, offdlo);
             if (Q) {
                 emit_cmp_half(off1hi, off2hi, offdhi);

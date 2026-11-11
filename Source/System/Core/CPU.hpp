@@ -26,6 +26,12 @@ class Emulator;
 // (each thread owns its own handler-call stack), so the stack lives in CPU,
 // not in the process-wide SignalTable. The definition lives here rather
 // than signal.h to avoid a CPU.hpp <-> signal.h include cycle.
+// One SIMD&FP register Vn, its 128 bits in host (little-endian) order: lo is
+// bits 63:0 (Dn, and the low lanes), hi bits 127:64. Contiguous and 16-byte
+// aligned, so generated code moves a whole register with one 16-byte access.
+struct alignas(16) VReg {
+    uint64_t lo, hi;
+};
 struct SignalFrame {
     uint64_t regs[31];   // X0..X30
     uint64_t sp;
@@ -38,8 +44,7 @@ struct SignalFrame {
     bool     on_altstack; // was the handler entered on the altstack?
     // FP/SIMD state must survive handler execution: handlers using NEON
     // (crypto, DSP, image processing) would otherwise see corrupted V regs.
-    uint64_t v_lo[32];    // bits 63:0 of each V register
-    uint64_t v_hi[32];    // bits 127:64 of each V register
+    VReg v[32];
     uint32_t fpcr;
     uint32_t fpsr;
     // TLS + exclusive state: a handler calling pthread funcs or LDXR/STXR
@@ -83,8 +88,7 @@ public:
     int      exit_code = 0;
     // SIMD/FP register file. Each Vn is 128 bits (16 bytes). We store as
     // two 64-bit halves (low and high). FP scalar ops use the low bits.
-    uint64_t v_lo[32] = {0};    // bits 63:0 of each V register
-    uint64_t v_hi[32] = {0};    // bits 127:64 of each V register
+    VReg v[32] = {};
     uint32_t fpcr = 0;
     uint32_t fpsr = 0;
     // Thread-local storage pointers. glibc's __libc_setup_tls sets
@@ -463,8 +467,7 @@ public:
         nzcv_host = src.nzcv_host;
         running = src.running;
         exit_code = src.exit_code;
-        std::memcpy(v_lo, src.v_lo, sizeof(v_lo));
-        std::memcpy(v_hi, src.v_hi, sizeof(v_hi));
+        std::memcpy(v, src.v, sizeof(v));
         fpcr = src.fpcr;
         fpsr = src.fpsr;
         tpidr_el0 = src.tpidr_el0;

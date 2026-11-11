@@ -111,23 +111,20 @@ static_assert(offsetof(CPU, regs)   == FrostJIT::REGS_OFF,   "CPU regs offset mi
 static_assert(offsetof(CPU, sp)     == FrostJIT::SP_OFF,     "CPU sp offset mismatch");
 static_assert(offsetof(CPU, pc)     == FrostJIT::PC_OFF,     "CPU pc offset mismatch");
 static_assert(offsetof(CPU, nzcv_host) == FrostJIT::NZCV_OFF, "CPU nzcv_host offset mismatch");
-static_assert(offsetof(CPU, v_lo)   == FrostJIT::V_LO_OFF,   "CPU v_lo offset mismatch");
-static_assert(offsetof(CPU, v_hi)   == FrostJIT::V_HI_OFF,   "CPU v_hi offset mismatch");
+static_assert(offsetof(CPU, v)      == FrostJIT::V_OFF,      "CPU v offset mismatch");
+static_assert(offsetof(CPU, v) % 16 == 0 && sizeof(VReg) == 16 && offsetof(VReg, hi) == 8,
+              "each VReg is 16 aligned bytes, lo then hi");
 static_assert(offsetof(CPU, fpcr)   == FrostJIT::FPCR_OFF,   "CPU fpcr offset mismatch");
 static_assert(offsetof(CPU, fpsr)   == FrostJIT::FPSR_OFF,   "CPU fpsr offset mismatch");
 // MRS/MSR TPIDR_EL0 / TPIDRRO_EL0 use these offsets as literals.
 static_assert(offsetof(CPU, tpidr_el0)   == 808, "CPU tpidr_el0 offset mismatch");
 static_assert(offsetof(CPU, tpidrro_el0) == 816, "CPU tpidrro_el0 offset mismatch");
-// Additional layout checks: the JIT hardcodes element counts (regs[31],
-// v_lo[32], v_hi[32]) and element sizes (8 bytes each). If the CPU struct
-// ever changes — e.g. v_lo becomes uint32_t[32] — the JIT's
-// `V_LO_OFF + idx*8` addressing would silently produce wrong code.
-// These static_asserts catch that at compile time.
+// The JIT hardcodes element counts and sizes: regs[31] of 8 bytes and
+// v[32] of 16 (vlo_off/vhi_off); a layout change must fail here, not in
+// generated code.
 static_assert(sizeof(CPU::regs) >= 31 * 8, "CPU::regs must hold 31 × 8-byte regs");
-static_assert(sizeof(CPU::v_lo) == 32 * 8, "CPU::v_lo must be 32 × 8 bytes (uint64_t[32])");
-static_assert(sizeof(CPU::v_hi) == 32 * 8, "CPU::v_hi must be 32 × 8 bytes (uint64_t[32])");
+static_assert(sizeof(CPU::v) == 32 * 16, "CPU::v must be 32 × 16 bytes");
 static_assert(sizeof(((CPU*)0)->regs[0]) == 8, "CPU reg element must be 8 bytes");
-static_assert(sizeof(((CPU*)0)->v_lo[0]) == 8, "CPU v_lo element must be 8 bytes");
 // ── Forward decls of slow-path helpers defined in X86Emitter.cpp ──────
 // These are extern "C" so JIT-compiled code can call them by address
 // without name-mangling concerns. The CPU* arg is used for SIGSEGV

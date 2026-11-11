@@ -16,29 +16,29 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         uint64_t bits = 0;
         if (entry.spec->ret == thunk::RetKind::FLOAT) {
             float a, b, result;
-            std::memcpy(&a, &cpu.v_lo[0], 4);
-            std::memcpy(&b, &cpu.v_lo[1], 4);
+            std::memcpy(&a, &cpu.v[0].lo, 4);
+            std::memcpy(&b, &cpu.v[1].lo, 4);
             if (!strcmp(shape, "f")) result = reinterpret_cast<float (*)(float)>(entry.host_fn)(a);
             else if (!strcmp(shape, "ff")) result = reinterpret_cast<float (*)(float, float)>(entry.host_fn)(a, b);
             else return -ENOSYS;
             std::memcpy(&bits, &result, 4);
         } else {
             double a, b, result;
-            std::memcpy(&a, &cpu.v_lo[0], 8);
-            std::memcpy(&b, &cpu.v_lo[1], 8);
+            std::memcpy(&a, &cpu.v[0].lo, 8);
+            std::memcpy(&b, &cpu.v[1].lo, 8);
             if (!strcmp(shape, "d")) result = reinterpret_cast<double (*)(double)>(entry.host_fn)(a);
             else if (!strcmp(shape, "dd")) result = reinterpret_cast<double (*)(double, double)>(entry.host_fn)(a, b);
             else return -ENOSYS;
             std::memcpy(&bits, &result, 8);
         }
-        cpu.v_lo[0] = bits;
-        cpu.v_hi[0] = 0;
+        cpu.v[0].lo = bits;
+        cpu.v[0].hi = 0;
         return 0;
     }
     // SDL's mixed FP APIs also have pointer-width and return-value contracts
     // that cannot be represented by the legacy int32/void GL setter casts.
     if (entry.name == "SDL_CalculateGammaRamp") {
-        float gamma; std::memcpy(&gamma, &cpu.v_lo[0], 4);
+        float gamma; std::memcpy(&gamma, &cpu.v[0].lo, 4);
         uint16_t ramp[256];
         reinterpret_cast<void (*)(float, uint16_t*)>(entry.host_fn)(gamma, ramp);
         if (cpu.regs[0]) impl_->mem->write(cpu.regs[0], ramp, sizeof(ramp));
@@ -47,7 +47,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
     }
     if (entry.name == "SDL_RenderSetScale") {
         float x, y;
-        std::memcpy(&x, &cpu.v_lo[0], 4); std::memcpy(&y, &cpu.v_lo[1], 4);
+        std::memcpy(&x, &cpu.v[0].lo, 4); std::memcpy(&y, &cpu.v[1].lo, 4);
         int rc = reinterpret_cast<int (*)(void*, float, float)>(entry.host_fn)(
             reinterpret_cast<void*>(cpu.regs[0]), x, y);
         cpu.regs[0] = static_cast<int64_t>(rc);
@@ -58,7 +58,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         if (cpu.regs[2]) impl_->mem->read(cpu.regs[2], src, sizeof(src));
         if (cpu.regs[3]) impl_->mem->read(cpu.regs[3], dst, sizeof(dst));
         if (cpu.regs[4]) impl_->mem->read(cpu.regs[4], center, sizeof(center));
-        double angle; std::memcpy(&angle, &cpu.v_lo[0], 8);
+        double angle; std::memcpy(&angle, &cpu.v[0].lo, 8);
         using Fn = int (*)(void*, void*, const void*, const void*, double, const void*, int);
         int rc = reinterpret_cast<Fn>(entry.host_fn)(
             reinterpret_cast<void*>(cpu.regs[0]), reinterpret_cast<void*>(cpu.regs[1]),
@@ -79,7 +79,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
             uint64_t iv = cpu.regs[0];
             double dv[2] = {0, 0};
             for (uint8_t i = 0; i < entry.n_float && i < 2; i++) {
-                std::memcpy(&dv[i], &cpu.v_lo[i], sizeof(double));
+                std::memcpy(&dv[i], &cpu.v[i].lo, sizeof(double));
             }
             if (dbg().thunk_trace) {
                 fprintf(stderr, "[thunk] dispatch: %s (mixed int+double) "
@@ -100,7 +100,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         }
         double dv[8] = {0};
         for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
-            std::memcpy(&dv[i], &cpu.v_lo[i], sizeof(double));
+            std::memcpy(&dv[i], &cpu.v[i].lo, sizeof(double));
         }
         if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s (double×%u) d0=%g d1=%g d2=%g d3=%g\n",
@@ -157,7 +157,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         && !(entry.flags & THUNK_GET_PROC)) {
         float fv[8] = {0};
         for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
-            std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
+            std::memcpy(&fv[i], &cpu.v[i].lo, sizeof(float));
         }
         uint64_t local_args[12] = {0};
         for (int i = 0; i < 8; i++) local_args[i] = cpu.regs[i];
@@ -205,7 +205,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         if (ni > 4) ni = 4;
         for (uint8_t i = 0; i < ni; i++) iv[i] = cpu.regs[i];
         for (uint8_t i = 0; i < entry.n_float && i < 4; i++) {
-            std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
+            std::memcpy(&fv[i], &cpu.v[i].lo, sizeof(float));
         }
         if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s (mixed int×%u fp×%u) "

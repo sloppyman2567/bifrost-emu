@@ -100,6 +100,9 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   the layout) and the `FMOV_G2F` emits nothing. A scalar result written to a cached XMM leaves every bit above it
   zero (`xorps; movss` or `movq`), so the vector cache's `fp_zero_hi` is free that op (`fp_hi_zeroed_vreg_`, reset
   per op). Keep `v_hi` zero stores as `pxor; movsd`: an immediate `mov qword` made scalar loops ~30% slower.
+- Vn is `CPU::v[n]`, 16 contiguous bytes (`lo` bits 63:0, then `hi`), addressed as `vlo_off(n)`/`vhi_off(n)`; byte `b` of
+  Vn is `vlo_off(n) + b`. Move a whole register with one 16-byte access (`load_v16`/`store_v16`), never a lo/hi pair, but the
+  lo-only scalar FP cache stores 8 bytes: its XMM does not hold `v_hi`.
 - Native saturating integer SIMD must set FPSR.QC like the interpreter
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.

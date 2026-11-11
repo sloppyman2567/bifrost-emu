@@ -50,12 +50,12 @@ void dispatch_legacy_gl(Memory& mem, CPU& cpu, const thunk::Spec& spec, void* ho
         switch (spec.args[i]) {
             case 'f':
                 if (fp >= 8) throw std::runtime_error("legacy GL FP stack arguments unsupported");
-                std::memcpy(&values[i].single, &cpu.v_lo[fp++], sizeof(float));
+                std::memcpy(&values[i].single, &cpu.v[fp++].lo, sizeof(float));
                 types[i] = &ffi_type_float;
                 break;
             case 'd':
                 if (fp >= 8) throw std::runtime_error("legacy GL FP stack arguments unsupported");
-                std::memcpy(&values[i].dbl, &cpu.v_lo[fp++], sizeof(double));
+                std::memcpy(&values[i].dbl, &cpu.v[fp++].lo, sizeof(double));
                 types[i] = &ffi_type_double;
                 break;
             default: {

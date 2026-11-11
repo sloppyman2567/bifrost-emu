@@ -16,6 +16,22 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## One 16-byte slot per vector register (2026-11-10)
+
+The CPU kept SIMD&FP registers as two arrays, `v_lo[32]` (bits 63:0) and `v_hi[32]` (bits 127:64), so moving a whole
+register between memory and an XMM took two instructions (`movsd`/`movq` + `movhpd`). The vector cache's reload went further:
+a 16-byte `movups` from `v_lo[n]` (which also read `v_lo[n+1]`) and a `movhpd` that replaced the wrong half. That load spans two
+earlier 8-byte stores, which store forwarding cannot serve.
+
+`CPU::v[32]` is now `struct VReg { uint64_t lo, hi; }`, 16-byte aligned, at the same offset and size, so nothing after it moved.
+Generated code addresses `vlo_off(n)`/`vhi_off(n)` and moves a whole register with one `movups` (`load_v16`/`store_v16`): the
+vector cache's reloads and writebacks, `load_vec`/`store_vec`, the Q forms of the FP vector helpers, LD2-LD4/ST2-ST4 and the
+uncached 16-byte guarded access. The lo-only scalar FP cache still stores 8 bytes: its XMM does not hold `v_hi`. Element
+offsets are `vlo_off(n) + byte`. C++ reads `cpu.v[n].lo`/`.hi`; whole-state copies are one `memcpy` of `v`.
+
+Cycles per frame against the previous commit (best of two runs, pinned): skinning -42%, anim -35% (both -9.5% host
+instructions); the scalar and integer kernels are unchanged within noise. No game was measured.
+
 ## Scalar FP loads into cached XMMs and cheaper scalar results (2026-11-10)
 
 An IBS sample of the engine-shaped kernels (ops inside translated code, each classified by operand pattern) found real

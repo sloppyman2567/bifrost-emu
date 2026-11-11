@@ -254,16 +254,16 @@ struct GuestDebugger::Impl {
                 case ReadFP: case WriteFP: {
                     uint8_t fp[528]{};
                     for (unsigned i = 0; i < 32; ++i) {
-                        memcpy(fp + i * 16, &cpu.v_lo[i], 8);
-                        memcpy(fp + i * 16 + 8, &cpu.v_hi[i], 8);
+                        memcpy(fp + i * 16, &cpu.v[i].lo, 8);
+                        memcpy(fp + i * 16 + 8, &cpu.v[i].hi, 8);
                     }
                     memcpy(fp + 512, &cpu.fpsr, 4); memcpy(fp + 516, &cpu.fpcr, 4);
                     if (t.command == ReadFP) memcpy(t.packet, fp, t.count);
                     else {
                         memcpy(fp, t.packet, t.count);
                         for (unsigned i = 0; i < 32; ++i) {
-                            memcpy(&cpu.v_lo[i], fp + i * 16, 8);
-                            memcpy(&cpu.v_hi[i], fp + i * 16 + 8, 8);
+                            memcpy(&cpu.v[i].lo, fp + i * 16, 8);
+                            memcpy(&cpu.v[i].hi, fp + i * 16 + 8, 8);
                         }
                         memcpy(&cpu.fpsr, fp + 512, 4); memcpy(&cpu.fpcr, fp + 516, 4);
                     }

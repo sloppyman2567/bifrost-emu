@@ -481,9 +481,9 @@ void Emulator::step(CPU& cpu) {
             static_cast<unsigned long long>(cpu.regs[28]), static_cast<unsigned long long>(cpu.regs[29]),
             static_cast<unsigned long long>(cpu.regs[30]), cpu.nzcv(),
             static_cast<unsigned long long>(cpu.sp),
-            static_cast<unsigned long long>(cpu.v_lo[0]), static_cast<unsigned long long>(cpu.v_hi[0]),
-            static_cast<unsigned long long>(cpu.v_lo[1]), static_cast<unsigned long long>(cpu.v_hi[1]),
-            static_cast<unsigned long long>(cpu.v_lo[2]), static_cast<unsigned long long>(cpu.v_hi[2]));
+            static_cast<unsigned long long>(cpu.v[0].lo), static_cast<unsigned long long>(cpu.v[0].hi),
+            static_cast<unsigned long long>(cpu.v[1].lo), static_cast<unsigned long long>(cpu.v[1].hi),
+            static_cast<unsigned long long>(cpu.v[2].lo), static_cast<unsigned long long>(cpu.v[2].hi));
     }
     uint32_t inst = mem_.fetch_inst(cpu.pc);
     uint64_t next_pc = cpu.pc + 4;

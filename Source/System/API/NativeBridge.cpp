@@ -90,7 +90,7 @@ static void nb_closure_fn(ffi_cif* cif, void* ret, void** args, void* userdata) 
             case 'F': {
                 // Guest expects the float in the LOW 32 bits of the s/d
                 // register. call_guest_function memcpy's the 8-byte double
-                // into v_lo[], so pack the float bits into the low 32 and
+                // into v[].lo, so pack the float bits into the low 32 and
                 // zero the high 32.
                 float f = *static_cast<float*>(ap);
                 uint32_t fb;
@@ -122,7 +122,7 @@ static void nb_closure_fn(ffi_cif* cif, void* ret, void** args, void* userdata) 
     char rt = d->shorty[0];
     if (rt == 'F' || rt == 'D') {
         // FP return: guest leaves the result in s0/d0 (low 32 / full 64 of
-        // v_lo[0]); bifrost_call_f returns that as a double. A float result
+        // v[0].lo); bifrost_call_f returns that as a double. A float result
         // occupies the low 32 bits of the returned double's bit pattern.
         double fres = bifrost_call_f(d->emu, d->guest_fn, iargs, ni, fargs, nf);
         if (rt == 'F') {

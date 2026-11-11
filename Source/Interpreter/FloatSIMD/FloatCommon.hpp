@@ -26,12 +26,12 @@ namespace arm64emu {
 // them to file scope eliminates that overhead.
 static inline double read_fp_d(const CPU& cpu, int r) {
     if (r < 0 || r > 31) r = 0;  // defensive: prevent OOB access
-    uint64_t bits = cpu.v_lo[r];
+    uint64_t bits = cpu.v[r].lo;
     double d; memcpy(&d, &bits, 8); return d;
 }
 static inline float read_fp_s(const CPU& cpu, int r) {
     if (r < 0 || r > 31) r = 0;  // defensive: prevent OOB access
-    uint32_t bits = static_cast<uint32_t>(cpu.v_lo[r]);
+    uint32_t bits = static_cast<uint32_t>(cpu.v[r].lo);
     float f; memcpy(&f, &bits, 4); return f;
 }
 static inline void write_fp_d(CPU& cpu, int r, double d) {
@@ -39,14 +39,14 @@ static inline void write_fp_d(CPU& cpu, int r, double d) {
     if (dbg().nan_trace && std::isnan(d))
         fprintf(stderr, "[NAN-D] r%d = %.17g pc=0x%llx\n", r, d, (unsigned long long)cpu.pc);
     uint64_t bits; memcpy(&bits, &d, 8);
-    cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
+    cpu.v[r].lo = bits; cpu.v[r].hi = 0;
 }
 static inline void write_fp_s(CPU& cpu, int r, float f) {
     if (r < 0 || r > 31) return;  // defensive: prevent OOB write
     if (dbg().nan_trace && std::isnan(f))
         fprintf(stderr, "[NAN-S] r%d = %.9g pc=0x%llx\n", r, f, (unsigned long long)cpu.pc);
     uint32_t bits; memcpy(&bits, &f, 4);
-    cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
+    cpu.v[r].lo = bits; cpu.v[r].hi = 0;
 }
 // ── Half-precision (FP16) helpers ──────────────────────────────────────
 // IEEE 754 binary16: 1 sign + 5 exp + 10 mantissa. These follow Arm's
@@ -491,8 +491,8 @@ static inline bool exec_reciprocal(uint32_t op, CPU& cpu) {
     const unsigned bytes = dbl ? 8 : 4;
     const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / bytes;
     uint8_t a[16], b[16], result[16]{};
-    memcpy(a, &cpu.v_lo[rn], 8); memcpy(a + 8, &cpu.v_hi[rn], 8);
-    memcpy(b, &cpu.v_lo[rm], 8); memcpy(b + 8, &cpu.v_hi[rm], 8);
+    memcpy(a, &cpu.v[rn].lo, 8); memcpy(a + 8, &cpu.v[rn].hi, 8);
+    memcpy(b, &cpu.v[rm].lo, 8); memcpy(b + 8, &cpu.v[rm].hi, 8);
     RecipFpEnv env(cpu);
     for (unsigned i = 0; i < lanes; ++i) {
         if (dbl) {
@@ -507,7 +507,7 @@ static inline bool exec_reciprocal(uint32_t op, CPU& cpu) {
             memcpy(result + i * 4, &r, 4);
         }
     }
-    memcpy(&cpu.v_lo[rd], result, 8); memcpy(&cpu.v_hi[rd], result + 8, 8);
+    memcpy(&cpu.v[rd].lo, result, 8); memcpy(&cpu.v[rd].hi, result + 8, 8);
     return true;
 }
 // FCVTNS/NU, FCVTPS/PU, FCVTMS/MU, FCVTAS/AU (vector): false for any other
@@ -526,8 +526,8 @@ static inline bool exec_vector_fcvt_round(uint32_t op, CPU& cpu) {
         const bool dbl = (op >> 22) & 1;
         if (dbl && !Q) throw DecodeError(cpu.pc, op);
         uint8_t source[16], result[16] = {};
-        memcpy(source, &cpu.v_lo[rn], 8);
-        memcpy(source + 8, &cpu.v_hi[rn], 8);
+        memcpy(source, &cpu.v[rn].lo, 8);
+        memcpy(source + 8, &cpu.v[rn].hi, 8);
         RecipFpEnv environment(cpu);
         fesetround(FE_TONEAREST);
         const int bytes = dbl ? 8 : 4;
@@ -544,8 +544,8 @@ static inline bool exec_vector_fcvt_round(uint32_t op, CPU& cpu) {
                                  : static_cast<uint64_t>(fp_to_signed_sat(rounded, dbl));
             memcpy(result + i * bytes, &integer, bytes);
         }
-        memcpy(&cpu.v_lo[rd], result, 8);
-        memcpy(&cpu.v_hi[rd], result + 8, 8);
+        memcpy(&cpu.v[rd].lo, result, 8);
+        memcpy(&cpu.v[rd].hi, result + 8, 8);
         return true;
     }
     return false;
@@ -663,8 +663,8 @@ static inline bool arm_simd_shift_imm(uint32_t op, CPU& cpu) {
     const unsigned rn = (op >> 5) & 31, rd = op & 31;
     const __int128 lane_mask = (static_cast<__int128>(1) << bits) - 1;
     uint8_t n[16], d[16], out[16] = {0};
-    memcpy(n, &cpu.v_lo[rn], 8); memcpy(n + 8, &cpu.v_hi[rn], 8);
-    memcpy(d, &cpu.v_lo[rd], 8); memcpy(d + 8, &cpu.v_hi[rd], 8);
+    memcpy(n, &cpu.v[rn].lo, 8); memcpy(n + 8, &cpu.v[rn].hi, 8);
+    memcpy(d, &cpu.v[rd].lo, 8); memcpy(d + 8, &cpu.v[rd].hi, 8);
     for (int i = 0; i < elems; ++i) {
         uint64_t a = 0, acc = 0;
         memcpy(&a, n + i * esize, esize);
@@ -701,9 +701,9 @@ static inline bool arm_simd_shift_imm(uint32_t op, CPU& cpu) {
         const uint64_t bits_out = static_cast<uint64_t>(r & lane_mask);
         memcpy(out + i * esize, &bits_out, esize);
     }
-    memcpy(&cpu.v_lo[rd], out, 8);
-    memcpy(&cpu.v_hi[rd], out + 8, 8);
-    if (!scalar && !Q) cpu.v_hi[rd] = 0;
+    memcpy(&cpu.v[rd].lo, out, 8);
+    memcpy(&cpu.v[rd].hi, out + 8, 8);
+    if (!scalar && !Q) cpu.v[rd].hi = 0;
     return true;
 }
 // SIMD_DP fields decoded once by execute_fp and shared by every group.

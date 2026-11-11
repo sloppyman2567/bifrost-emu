@@ -56,12 +56,12 @@ uint32_t helper_hash(NativeSimdFn fn, uint32_t word, CPU* cpu) {
             fill(&n, k);
             fill(&m, k + 17);
             for (int i = 0; i < 16; ++i) d.b[i] = static_cast<uint8_t>(0xa5 ^ (i * 29 + k));
-            std::memcpy(&cpu->v_lo[0], n.b, 8); std::memcpy(&cpu->v_hi[0], n.b + 8, 8);
-            std::memcpy(&cpu->v_lo[1], m.b, 8); std::memcpy(&cpu->v_hi[1], m.b + 8, 8);
-            std::memcpy(&cpu->v_lo[2], d.b, 8); std::memcpy(&cpu->v_hi[2], d.b + 8, 8);
+            std::memcpy(&cpu->v[0].lo, n.b, 8); std::memcpy(&cpu->v[0].hi, n.b + 8, 8);
+            std::memcpy(&cpu->v[1].lo, m.b, 8); std::memcpy(&cpu->v[1].hi, m.b + 8, 8);
+            std::memcpy(&cpu->v[2].lo, d.b, 8); std::memcpy(&cpu->v[2].hi, d.b + 8, 8);
             std::memcpy(&cpu->regs[0], n.b, 8);
             fn(cpu, word);
-            std::memcpy(out.b, &cpu->v_lo[2], 8); std::memcpy(out.b + 8, &cpu->v_hi[2], 8);
+            std::memcpy(out.b, &cpu->v[2].lo, 8); std::memcpy(out.b + 8, &cpu->v[2].hi, 8);
             for (int i = 0; i < 16; ++i) h = (h ^ out.b[i]) * 16777619u;
         }
     }
