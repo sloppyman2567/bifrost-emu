@@ -5,8 +5,10 @@
 // back by later processes and launches: the PackageInfo, and what
 // FrameworkPackages derives from a full parse (intent filters, the platform's
 // protected broadcasts). An entry is keyed by the archive's path, size and
-// modification time (every file of a split directory), the request and the
-// platform resources' identity; any unreadable entry is a miss.
+// modification time (every APK of a split directory), the request and the
+// platform resources' identity; any unreadable entry is a miss. The host keeps
+// the directory when it rebuilds an app's runtime while this class and
+// FrameworkPackages are unchanged (android_managed.PARSE_CACHE_SOURCES).
 import android.content.ComponentName;
 import android.content.IntentFilter;
 import android.content.pm.PackageInfo;
@@ -114,11 +116,14 @@ final class FrameworkParseCache {
     }
 
     // The archive's identity: path, size and modification time of it and, for a
-    // directory of splits, of every file in it; plus the platform resources.
+    // directory of splits, of every APK in it (its oat and lib directories change
+    // with each compile and are not parsed); plus the platform resources.
     private static String identity(File archive, String set) {
         File platform = new File("/system/framework/framework-res.apk");
         StringBuilder text = new StringBuilder(set).append('|').append(archive.getPath());
-        File[] files = archive.isDirectory() ? archive.listFiles() : new File[] {archive};
+        File[] files = archive.isDirectory()
+                ? archive.listFiles(file -> file.isFile() && file.getName().endsWith(".apk"))
+                : new File[] {archive};
         if (files != null) {
             Arrays.sort(files);
             for (File file : files) text.append('|').append(file.getName()).append(':').append(file.length())

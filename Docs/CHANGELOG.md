@@ -46,6 +46,15 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (the first launch after an update starts sooner)
+
+- An app's parsed package cache now survives an update of Asgard (2026-11-11). Rebuilding an app's Android runtime emptied
+  it, so the first launch after every update parsed WebView and the app again on the main thread: about 3.7 s of Subway
+  Surfers' 14 s launch (7.5 s from runtime start to its parsed manifest against 3.2 s warm). The cache is kept unless the
+  launcher code that fills it changed, and a split app's entries no longer go stale when the app is recompiled. The first
+  rebuild after this change still starts empty; checked with tests and the real runtime preparation on a copy of a Subway
+  Surfers install, not yet timed in a real launch.
+
 ### Added (static AudioTracks and SoundPool sounds)
 
 - Android apps can play static AudioTracks (2026-11-11): `MODE_STATIC` tracks and SoundPool, which plays every sound through

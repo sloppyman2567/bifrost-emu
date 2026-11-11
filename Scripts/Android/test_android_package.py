@@ -17,6 +17,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 import time
 from types import SimpleNamespace
 import unittest
@@ -2900,73 +2901,121 @@ class DexoptCacheTests(unittest.TestCase):
             self.compile(); self.assertEqual(tool.call_count, 2)
 
 
+def managed_runtime_fixture(work):
+    """A framework, adapter set, launcher dex and installed app small enough for prepare_root, with the image
+    installers patched out by `managed_runtime_patches`. Returns (app, framework, adapters, dex, metadata, code)."""
+    import json
+    import android_managed as managed
+    app, framework, adapters, dex = (work / n for n in ("app", "framework", "adapters", "launcher.dex"))
+    app.mkdir()
+    (framework / "system/bin").mkdir(parents=True)
+    (framework / "vendor/etc").mkdir(parents=True)
+    (framework / "bifrost-framework.json").write_text("{}")
+    (framework / "system/build.prop").write_text("ro.kernel.qemu=1\n")
+    (framework / "vendor/etc/media_codecs.xml").write_text('<MediaCodecs/>')
+    names = ("libbifrost-activity.so", "managed/am", "managed/zygote", "managed/libandroid.so", "managed/libEGL.so",
+             "managed/libGLESv1_CM.so", "managed/libGLESv2.so", "managed/libGLESv3.so",
+             "managed/libaaudio.so", "managed/libOpenSLES.so", "managed/mapper.bifrost.so",
+             "managed/vulkan.bifrost.so", "managed/libbifrost-binder-attach.so")
+    files = {}
+    for name in names:
+        path = adapters / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name)
+        files[name] = managed.file_hash(path)
+    (adapters / "adapters.json").write_text(json.dumps({"files": files}))
+    dex.write_text("launcher version one")
+    code = "/data/app/fixture"
+    package_dir = framework / code.lstrip("/"); package_dir.mkdir(parents=True)
+    (package_dir / "base.apk").write_text("fixture APK")
+    metadata = {"package": "org.bifrost.fixture", "files": {"base.apk": managed.file_hash(package_dir / "base.apk")}}
+    return app, framework, adapters, dex, metadata, code
+
+
+def managed_runtime_patches(stack):
+    import android_managed as managed
+    stack.enter_context(patch.object(managed.android_framework, "install", return_value={"environment": {}}))
+    stack.enter_context(patch.object(managed.android_microg, "install"))
+    stack.enter_context(patch.object(managed, "install_managed_graphics"))
+
+
 class SettingsIdentityTests(unittest.TestCase):
     def test_saved_properties_survive_reprovisioning_and_reset_to_image_defaults(self):
         import json
         import android_managed as managed
         from android_settings import save
-        with tempfile.TemporaryDirectory(prefix="bifrost-properties-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="bifrost-properties-") as temporary, ExitStack() as patches:
             work = Path(temporary)
-            app, framework, adapters, dex = (work / n for n in ("app", "framework", "adapters", "launcher.dex"))
-            app.mkdir()
-            (framework / "system/bin").mkdir(parents=True)
-            (framework / "vendor/etc").mkdir(parents=True)
-            (framework / "bifrost-framework.json").write_text("{}")
-            (framework / "system/build.prop").write_text("ro.kernel.qemu=1\n")
-            (framework / "vendor/etc/media_codecs.xml").write_text('<MediaCodecs/>')
-            names = ("libbifrost-activity.so", "managed/am", "managed/libandroid.so", "managed/libEGL.so",
-                     "managed/libGLESv1_CM.so", "managed/libGLESv2.so", "managed/libGLESv3.so",
-                     "managed/libaaudio.so", "managed/libOpenSLES.so", "managed/mapper.bifrost.so",
-                     "managed/vulkan.bifrost.so",
-                     "managed/libbifrost-binder-attach.so")
-            files = {}
-            for name in names:
-                path = adapters / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(name)
-                files[name] = managed.file_hash(path)
-            (adapters / "adapters.json").write_text(json.dumps({"files": files}))
-            dex.write_text("launcher version one")
-            code = "/data/app/fixture"
-            package_dir = framework / code.lstrip("/"); package_dir.mkdir(parents=True)
-            (package_dir / "base.apk").write_text("fixture APK")
-            metadata = {"package": "org.bifrost.fixture", "files": {"base.apk": managed.file_hash(package_dir / "base.apk")}}
+            app, framework, adapters, dex, metadata, code = managed_runtime_fixture(work)
             def prepare():
                 return managed.prepare_root(app, metadata, "/data/app/fixture", None,
                                             framework, work / "art", adapters, dex)[0]
-            with patch.object(managed.android_framework, "install", return_value={"environment": {}}), \
-                    patch.object(managed.android_microg, "install"), \
-                    patch.object(managed, "install_managed_graphics"):
-                save(app, {"property.ro.kernel.qemu": "0"})
-                root = prepare()
-                values = lambda: managed.image_properties(root, {"ro.kernel.qemu", "media.c2.hal.selection"})
-                self.assertEqual(values(), {"ro.kernel.qemu": "0", "media.c2.hal.selection": "aidl"})
-                data = root / "data/user/0/org.bifrost.fixture/save"
-                data.write_text("saved game")
-                artifacts = root / code.lstrip("/") / "oat/arm64"; artifacts.mkdir(parents=True)
-                for name in ("base.odex", "base.vdex"): (artifacts / name).write_text(name)
-                identity = json.loads((app / "managed/runtime.json").read_text())["identity"]
-                key = managed.dexopt_key(identity, root, metadata, code, {})
-                managed.save_dexopt_stamp(app / "managed", key, root, code, False)
-                self.assertEqual(prepare(), root)  # verified cached runtime
-                dex.write_text("launcher version two")  # force runtime replacement
+            managed_runtime_patches(patches)
+            save(app, {"property.ro.kernel.qemu": "0"})
+            root = prepare()
+            values = lambda: managed.image_properties(root, {"ro.kernel.qemu", "media.c2.hal.selection"})
+            self.assertEqual(values(), {"ro.kernel.qemu": "0", "media.c2.hal.selection": "aidl"})
+            data = root / "data/user/0/org.bifrost.fixture/save"
+            data.write_text("saved game")
+            artifacts = root / code.lstrip("/") / "oat/arm64"; artifacts.mkdir(parents=True)
+            for name in ("base.odex", "base.vdex"): (artifacts / name).write_text(name)
+            identity = json.loads((app / "managed/runtime.json").read_text())["identity"]
+            key = managed.dexopt_key(identity, root, metadata, code, {})
+            managed.save_dexopt_stamp(app / "managed", key, root, code, False)
+            self.assertEqual(prepare(), root)  # verified cached runtime
+            dex.write_text("launcher version two")  # force runtime replacement
+            prepare()
+            self.assertEqual(values()["ro.kernel.qemu"], "0")
+            self.assertEqual(data.read_text(), "saved game")
+            save(app, {})
+            prepare()
+            self.assertEqual(values()["ro.kernel.qemu"], "1")
+            self.assertEqual(data.read_text(), "saved game")
+            self.assertTrue((artifacts / "base.odex").is_file())
+            immutable = json.loads((app / "managed/runtime.json").read_text())["immutable"]
+            self.assertFalse(any("/oat/" in name for name in immutable))
+            with patch.object(managed, "run_guest_tool") as tool:
+                managed.dexopt(app / "managed", root, metadata, code, Path("/unused"), {})
+                tool.assert_not_called()
+            prop = root / "debug_ramdisk/adb_debug.prop"
+            prop.write_text(prop.read_text() + "ro.kernel.qemu=0\n")
+            with self.assertRaisesRegex(ValueError, "Modified managed runtime file"):
                 prepare()
-                self.assertEqual(values()["ro.kernel.qemu"], "0")
-                self.assertEqual(data.read_text(), "saved game")
-                save(app, {})
-                prepare()
-                self.assertEqual(values()["ro.kernel.qemu"], "1")
-                self.assertEqual(data.read_text(), "saved game")
-                self.assertTrue((artifacts / "base.odex").is_file())
-                immutable = json.loads((app / "managed/runtime.json").read_text())["immutable"]
-                self.assertFalse(any("/oat/" in name for name in immutable))
-                with patch.object(managed, "run_guest_tool") as tool:
-                    managed.dexopt(app / "managed", root, metadata, code, Path("/unused"), {})
-                    tool.assert_not_called()
-                prop = root / "debug_ramdisk/adb_debug.prop"
-                prop.write_text(prop.read_text() + "ro.kernel.qemu=0\n")
-                with self.assertRaisesRegex(ValueError, "Modified managed runtime file"):
-                    prepare()
+
+    def test_a_rebuilt_runtime_keeps_the_parse_cache_while_its_sources_are_unchanged(self):
+        import json
+        import android_managed as managed
+        with tempfile.TemporaryDirectory(prefix="bifrost-parse-cache-") as temporary, ExitStack() as patches:
+            work = Path(temporary)
+            app, framework, adapters, dex, metadata, code = managed_runtime_fixture(work)
+            sources = {"FrameworkPackages.java": "1" * 64, "FrameworkParseCache.java": "2" * 64, "Other.java": "3" * 64}
+            manifest = dex.parent / "sources.json"
+            manifest.write_text(json.dumps({"sources": sources}))
+            managed_runtime_patches(patches)
+            prepare = lambda: managed.prepare_root(app, metadata, code, None, framework, work / "art", adapters, dex)[0]
+            root = prepare()
+            cache = root / managed.PARSE_CACHE
+            cache.mkdir(parents=True)
+            (cache / "webview.apk-info-1-abc.bin").write_bytes(b"parsed")    # written by the guest
+            dex.write_text("launcher version two")                          # other launcher code changed
+            sources["Other.java"] = "4" * 64
+            manifest.write_text(json.dumps({"sources": sources}))
+            root = prepare()
+            self.assertEqual((root / managed.PARSE_CACHE / "webview.apk-info-1-abc.bin").read_bytes(), b"parsed")
+            immutable = json.loads((app / "managed/runtime.json").read_text())["immutable"]
+            self.assertFalse(any(name.startswith(managed.PARSE_CACHE) for name in immutable))
+            (root / managed.PARSE_CACHE / "webview.apk-info-1-abc.bin").write_bytes(b"parsed again")
+            self.assertEqual(prepare(), root)                               # the guest may rewrite its cache
+            dex.write_text("launcher version three")                        # the code deriving entries changed
+            sources["FrameworkPackages.java"] = "5" * 64
+            manifest.write_text(json.dumps({"sources": sources}))
+            root = prepare()
+            self.assertFalse((root / managed.PARSE_CACHE).exists())
+            manifest.unlink()                                               # unknown sources: never carried
+            (root / managed.PARSE_CACHE).mkdir(parents=True)
+            (root / managed.PARSE_CACHE / "entry.bin").write_bytes(b"x")
+            dex.write_text("launcher version four")
+            self.assertFalse((prepare() / managed.PARSE_CACHE).exists())
 
     def test_concurrent_first_launches_share_a_persistent_user_key(self):
         from android_managed import settings_user_key, install_settings_key

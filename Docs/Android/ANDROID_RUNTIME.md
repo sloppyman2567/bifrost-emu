@@ -3266,10 +3266,24 @@ the app's root: the `PackageInfo` for `getPackageArchiveInfo` calls
 (`installWebView`, `runApp`, `parseMicroG`, the platform permissions) and what
 `FrameworkPackages` derives from a full parse (filters of activities, services,
 providers and receivers, and the platform's protected broadcasts). An entry is
-keyed by the archive's path, size and modification time (all files of a split
-directory), the request flags, the platform resources' identity and the build
-fingerprint; entries for an older version of the same archive are deleted, and
-an unreadable entry is parsed again and rewritten. Writes are atomic renames.
+keyed by the archive's path, size and modification time (every APK of a split
+directory; its `oat` and `lib` directories change with each compile), the request
+flags, the platform resources' identity and the build fingerprint; entries for an
+older version of the same archive are deleted, and an unreadable entry is parsed
+again and rewritten. Writes are atomic renames.
+
+A runtime rebuild (any change of the launcher, adapters, framework, microG or the
+app's settings) used to start with an empty cache, so the first launch after every
+update paid the parses again: Subway Surfers on 2026-11-11 took 7.5 s from runtime
+start to its parsed manifest after a rebuild and 3.2 s with a warm cache, WebView
+(1.9 s) and its own `base.apk` (1.8 s) on the main thread. `prepare_root` now copies
+the old root's cache into the new one when the launcher sources that derive the
+entries (`PARSE_CACHE_SOURCES`: `FrameworkPackages`, `FrameworkParseCache`) have the
+digests recorded in `runtime.json` (`parse_cache_code`, from the launcher's
+`sources.json`); otherwise, or without a record, the new root starts empty. The
+cache is not part of the root's immutable inventory: the guest rewrites it. On a
+copy of a real Subway Surfers state, the rebuild carried all 19 entries, and the
+archives they are keyed on kept their size and modification time.
 
 Measured with a trivial fixture app (`ManagedSplash`), three launches in one
 root: first launch (empty cache) window added at 8.2 s with the WebView parse at
@@ -3278,7 +3292,8 @@ launches 4.85 and 4.93 s with no manifest parse in the log. The remaining
 warm time is runtime start (about 2 s), font configuration (about 1 s) and
 garbage collection. Not changed: the stalls inside apps after the first window
 (Unity, Dynamite's class loading, Firebase), which dominate a game's first 30
-seconds in those logs. A first launch after install still pays the parses.
+seconds in those logs. A first launch after install, and the first after a change
+of `PARSE_CACHE_SOURCES`, still pays the parses.
 
 ## Managed APK launcher (2026-10-08)
 

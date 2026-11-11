@@ -1048,6 +1048,23 @@ def optimize_after_session(managed, root, metadata, code, emu, guest_env, no_jit
         signal.signal(signal.SIGUSR1, previous_handler)
 
 
+# FrameworkParseCache (/data/local/tmp/package-cache) holds what the launcher derives from parsing immutable archives,
+# keyed in the guest by each archive's path, size and time, the platform resources and the build fingerprint. A rebuilt
+# runtime keeps it while the sources that derive the entries are unchanged: WebView's and the app's parses cost about
+# 2 s each on the main thread.
+PARSE_CACHE = "data/local/tmp/package-cache"
+PARSE_CACHE_SOURCES = ("FrameworkPackages.java", "FrameworkParseCache.java")
+
+
+def parse_cache_code(dex):
+    """The digests of the launcher sources that derive parse cache entries, from the dex's build manifest, or None."""
+    try:
+        sources = json.loads((Path(dex).parent / "sources.json").read_text())["sources"]
+        return {name: sources[name] for name in PARSE_CACHE_SOURCES}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def prepare_root(app, metadata, code, installed_root, framework, art, adapters, dex, media_mask=15):
     """Rebuild only the runtime; retain app data across starts and upgrades.
 
@@ -1107,6 +1124,11 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
             return root, environment
     backup = managed / "previous-rootfs"
     if backup.exists() and not root.exists(): backup.rename(root)
+    parse_code = parse_cache_code(dex)
+    try:
+        saved_parse_code = json.loads(stamp.read_text()).get("parse_cache_code") if stamp.is_file() else None
+    except ValueError:
+        saved_parse_code = None
     with tempfile.TemporaryDirectory(prefix=".prepare-", dir=managed) as temporary:
         fresh = Path(temporary) / "rootfs"
         shutil.copytree(framework, fresh, symlinks=True)
@@ -1116,6 +1138,10 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         android_settings.install_properties(fresh, property_overrides)
         local = fresh / "data/local/tmp"
         local.mkdir(parents=True, exist_ok=True)
+        old_cache = root / PARSE_CACHE
+        if (parse_code is not None and parse_code == saved_parse_code and old_cache.is_dir()
+                and not old_cache.is_symlink() and not root.is_symlink()):
+            shutil.copytree(old_cache, fresh / PARSE_CACHE, symlinks=True)
         shutil.copy2(dex, local / "launcher.dex")
         (local / "launcher.dex").chmod(0o444)  # ART rejects writable DEX for ordinary app UIDs.
         shutil.copy2(adapters / "libbifrost-activity.so", local / "libbifrost-activity.so")
@@ -1149,7 +1175,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
                      if (name.startswith(("system/", "system_ext/", "product/", "vendor/", "apex/",
                                          "data/app/", "data/local/tmp/"))
                      or name in ("data/system/users/0/bifrost-ssaid-key", "debug_ramdisk/adb_debug.prop"))
-                     and not name.startswith(code.lstrip("/") + "/oat/")}
+                     and not name.startswith((code.lstrip("/") + "/oat/", PARSE_CACHE + "/"))}
         backup = managed / "previous-rootfs"
         if backup.exists():
             raise ValueError("Interrupted managed runtime replacement; preserve previous-rootfs before retrying")
@@ -1161,7 +1187,8 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
             if backup.exists(): backup.rename(root)
             raise
         pending = managed / ".runtime.json"
-        pending.write_text(json.dumps({"identity": identity, "immutable": immutable}, sort_keys=True) + "\n")
+        pending.write_text(json.dumps({"identity": identity, "immutable": immutable, "parse_cache_code": parse_code},
+                                      sort_keys=True) + "\n")
         pending.replace(stamp)
         if retained_dexopt is not None:
             save_dexopt_stamp(managed, retained_dexopt[0], root, code, retained_dexopt[1])

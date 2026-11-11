@@ -108,8 +108,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   (`/data/local/tmp/package-cache` in the root): `getPackageArchiveInfo`
   results, filters and the platform's protected broadcasts. Add a new
   archive parse there; never cache an archive that can change under the same
-  path, size and modification time. Run
-  `test_managed_parse_cache_skips_manifest_parsing`.
+  path, size and modification time. A rebuilt runtime keeps the cache while
+  `android_managed.PARSE_CACHE_SOURCES` are unchanged, so a source that starts
+  deriving cached data joins that list. Run
+  `test_managed_parse_cache_skips_manifest_parsing` and
+  `test_a_rebuilt_runtime_keeps_the_parse_cache_while_its_sources_are_unchanged`.
 - `FrameworkStallWatch` reads the main thread's stack from a daemon thread
   (no process-wide suspension) and stays bounded; keep any new diagnostic of
   that kind cheap and rate-limited rather than spamming the log.
