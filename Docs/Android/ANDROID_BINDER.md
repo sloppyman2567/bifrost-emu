@@ -178,7 +178,9 @@ the mode before opening a Binder endpoint; an explicit guest context-manager
 registration is rejected while the host manager is selected.
 
 A transaction's sender UID is the Android identity under `--android-runtime` and 0 without it, whatever the host
-account is: host UID 1000 would otherwise be Android's privileged system UID.
+account is: host UID 1000 would otherwise be Android's privileged system UID. It is taken when the device is opened, so
+an `--android-zygote` child that has dropped to its app UID opens Binder as that UID; the uid-0 Zygote itself is refused
+(`EPERM`), so the broker never sees a root sender.
 The Android property area reports `servicemanager.ready=true` in this mode and
 `false` without it, so native libbinder can contact the selected registry.
 

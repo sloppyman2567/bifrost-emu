@@ -234,7 +234,7 @@ std::string Yggdrasil::proc_status_text(const std::string& task_fields) const {
     s += "VmSwap:\t 0 kB\n";
     s += "HugetlbPages:\t 0 kB\n";
     s += "CoreDumping:\t0\n";
-    s += "Threads:\t1\n";
+    s += "Threads:\t" + std::to_string(task_list_provider_ ? task_list_provider_().size() : 1) + "\n";
     s += "SigQ:\t0/256\n";
     s += "SigPnd:\t0000000000000000\n";
     s += "ShdPnd:\t0000000000000000\n";
@@ -242,8 +242,10 @@ std::string Yggdrasil::proc_status_text(const std::string& task_fields) const {
     s += "SigIgn:\t0000000000000000\n";
     s += "SigCgt:\t0000000000000000\n";
     s += "CapInh:\t0000000000000000\n";
-    s += process_uid_ ? "CapPrm:\t0000000000000000\n" : "CapPrm:\t0000003fffffffff\n";
-    s += process_uid_ ? "CapEff:\t0000000000000000\n" : "CapEff:\t0000003fffffffff\n";
+    // capget agrees: a Zygote's uid 0 carries no capabilities.
+    const bool capable = !process_uid_ && !zygote_;
+    s += capable ? "CapPrm:\t0000003fffffffff\n" : "CapPrm:\t0000000000000000\n";
+    s += capable ? "CapEff:\t0000003fffffffff\n" : "CapEff:\t0000000000000000\n";
     s += "CapBnd:\t0000003fffffffff\n";
     s += "CapAmb:\t0000000000000000\n";
     s += "NoNewPrivs:\t0\n";
@@ -404,7 +406,7 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
                 if (slash != std::string::npos) comm = comm.substr(slash + 1);
                 if (comm.size() > 15) comm = comm.substr(0, 15);
             }
-            // The guest is a host process: its state, CPU times, nice value, thread count, start time and
+            // The guest is a host process: its state, CPU times, nice value, start time and
             // memory sizes are the host's own (a stat file with a zero start time and size is not a process's).
             std::vector<std::string> host_fields(53);
             if (FILE* host = fopen("/proc/self/stat", "r")) {
@@ -431,8 +433,12 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
                         stat += std::to_string(mapped ? mapped : 8ull * 1024 * 1024);
                         break;
                     }
-                    case 14: case 15: case 16: case 17: case 19: case 20: case 22: case 24:
-                        stat += from_host(field, field == 20 ? "1" : "0"); break;
+                    case 20:  // num_threads: the guest's tasks, never the emulator's host threads (ART's
+                              // WaitUntilSingleThreaded reads it before a Zygote forks)
+                        stat += task_list_provider_ ? std::to_string(task_list_provider_().size()) : from_host(20, "1");
+                        break;
+                    case 14: case 15: case 16: case 17: case 19: case 22: case 24:
+                        stat += from_host(field, "0"); break;
                     case 4: stat += std::to_string(ids.ppid); break;
                     case 5: stat += std::to_string(ids.pgid); break;
                     case 6: stat += std::to_string(ids.sid); break;

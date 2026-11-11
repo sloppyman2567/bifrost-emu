@@ -78,6 +78,7 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
     }
     if (path == "/dev/binder" || path == "/dev/hwbinder" || path == "/dev/vndbinder") {
         if ((flags & O_ACCMODE) != O_RDWR) { *err_out = -EINVAL; return nullptr; }
+        if (zygote_unspecialized()) { *err_out = -EPERM; return nullptr; }
         if (!binder_broker_.empty())
             return open_broker_binder(binder_broker_, path, flags, binder_uid_, ::getpid(), err_out);
         std::lock_guard<std::mutex> lock(binder_mu_);

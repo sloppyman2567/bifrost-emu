@@ -86,6 +86,13 @@ public:
     void set_process_identity(uint32_t uid, uint32_t gid) { process_uid_ = binder_uid_ = uid; process_gid_ = gid; }
     uint32_t process_uid() const { return process_uid_; }
     uint32_t process_gid() const { return process_gid_; }
+    // An Android Zygote (--android-zygote) starts as uid/gid 0 and specializes each forked child once, as
+    // SpecializeCommon does: the group while still uid 0, then the user, both to an app or isolated identity.
+    // A uid-0 Zygote never opens Binder, so the broker never sees a root sender.
+    void set_zygote_identity() { process_uid_ = process_gid_ = binder_uid_ = 0; zygote_ = true; }
+    bool zygote_unspecialized() const { return zygote_ && process_uid_ == 0; }
+    void specialize_gid(uint32_t gid) { process_gid_ = gid; }
+    void specialize_uid(uint32_t uid) { process_uid_ = binder_uid_ = uid; }
     static bool binder_device_stat(const std::string& path, struct stat* st);
     // Synthetic stat for the SysFS tree (fstatat/statx/faccessat do
     // not consult Yggdrasil::open — they go straight to the host via
@@ -318,6 +325,7 @@ private:
     bool android_properties_ = false;
     uint32_t process_uid_ = ::geteuid(), process_gid_ = ::getegid();
     uint32_t binder_uid_ = 0;  // never the host account: host IDs must not select privileged Android paths
+    bool zygote_ = false;
     std::once_flag property_area_once_;
     std::string property_area_;  // built from the root on first open
     std::unordered_map<std::string, std::shared_ptr<BinderDomain>> binder_domains_;

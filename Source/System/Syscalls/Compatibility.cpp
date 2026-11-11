@@ -439,39 +439,31 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0); return 0;
         }
         // ── Identity / process-group syscalls ────────────────────────
-        // Fixed Android app credentials: unprivileged callers may retain
-        // their IDs, but cannot switch identity. Linux keeps legacy behavior.
-        case 143: { // setregid(rgid, egid) — accept silently
-            if (emu.android_runtime() &&
-                ((uint32_t(a0) != UINT32_MAX && uint32_t(a0) != emu.vfs().process_gid()) ||
-                 (uint32_t(a1) != UINT32_MAX && uint32_t(a1) != emu.vfs().process_gid()))) {
-                ret_err(EPERM); return 0;
+        // Fixed Android app credentials: unprivileged callers may retain their IDs, but cannot switch identity. An
+        // unspecialized Zygote (uid 0) may drop to one app or isolated identity, group first (VFS.hpp). Linux keeps
+        // legacy behavior.
+        case 143:   // setregid(rgid, egid)
+        case 144:   // setgid(gid)
+        case 145:   // setreuid(ruid, euid)
+        case 146:   // setuid(uid)
+        case 147:   // setresuid(ruid, euid, suid)
+        case 149: { // setresgid(rgid, egid, sgid)
+            if (!emu.android_runtime()) { ret_host(0); return 0; }
+            const bool user = num == 145 || num == 146 || num == 147;
+            const int count = num == 144 || num == 146 ? 1 : num == 147 || num == 149 ? 3 : 2;
+            const uint32_t requested[3] = {uint32_t(a0), uint32_t(a1), uint32_t(a2)};
+            const uint32_t current = user ? emu.vfs().process_uid() : emu.vfs().process_gid();
+            uint32_t target = current;
+            for (int i = 0; i < count; i++) {
+                const uint32_t id = requested[i];
+                if (id == UINT32_MAX || id == current || id == target) continue;
+                const bool app = (id >= 10000 && id <= 19999) || (id >= 99000 && id <= 99999);
+                if (target != current || !app || !emu.vfs().zygote_unspecialized()) { ret_err(EPERM); return 0; }
+                target = id;
             }
-            ret_host(0); return 0;
-        }
-        case 144: { // setgid(gid)
-            if (emu.android_runtime() && uint32_t(a0) != emu.vfs().process_gid()) {
-                ret_err(EPERM); return 0;
-            }
-            ret_host(0); return 0;
-        }
-        case 145: { // setreuid(ruid, euid)
-            if (emu.android_runtime() &&
-                ((uint32_t(a0) != UINT32_MAX && uint32_t(a0) != emu.vfs().process_uid()) ||
-                 (uint32_t(a1) != UINT32_MAX && uint32_t(a1) != emu.vfs().process_uid()))) {
-                ret_err(EPERM); return 0;
-            }
-            ret_host(0); return 0;
-        }
-        case 146: { // setuid(uid)
-            if (emu.android_runtime() && uint32_t(a0) != emu.vfs().process_uid()) {
-                ret_err(EPERM); return 0;
-            }
-            ret_host(0); return 0;
-        }
-        case 147: { // setresuid(ruid, euid, suid)
-            if (emu.android_runtime()) for (uint32_t id : {uint32_t(a0), uint32_t(a1), uint32_t(a2)}) {
-                if (id != UINT32_MAX && id != emu.vfs().process_uid()) { ret_err(EPERM); return 0; }
+            if (target != current) {
+                if (user) emu.vfs().specialize_uid(target);
+                else emu.vfs().specialize_gid(target);
             }
             ret_host(0); return 0;
         }
@@ -482,12 +474,6 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (!pointer && !emu.android_runtime()) continue;
                 try { mem_.store<uint32_t>(pointer, id); }
                 catch (...) { ret_err(EFAULT); return 0; }
-            }
-            ret_host(0); return 0;
-        }
-        case 149: { // setresgid(rgid, egid, sgid)
-            if (emu.android_runtime()) for (uint32_t id : {uint32_t(a0), uint32_t(a1), uint32_t(a2)}) {
-                if (id != UINT32_MAX && id != emu.vfs().process_gid()) { ret_err(EPERM); return 0; }
             }
             ret_host(0); return 0;
         }

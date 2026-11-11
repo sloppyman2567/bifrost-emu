@@ -12,7 +12,9 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"process Binder line %d errno %d\n",__LINE__,errno); return 1; } } while (0)
 struct scatter_root { uint64_t pointer; int32_t files[2]; uint64_t tag; };
@@ -53,6 +55,25 @@ int main(int argc,char** argv) {
     int server=argc>1&&!strcmp(argv[1],"server");
     int death=argc>2&&!strcmp(argv[2],"death");
     int notify=argc>2&&!strcmp(argv[2],"notify");
+    if(argc>2&&!strcmp(argv[2],"zygote")) {
+        // --android-zygote: uid 0 without Binder; a fork child drops once to an app identity, group first,
+        // and dies with its parent. It then runs as an ordinary client.
+        CHECK(getuid()==0&&getgid()==0);
+        CHECK(open("/dev/hwbinder",O_RDWR)<0&&errno==EPERM);
+        pid_t child=fork();CHECK(child>=0);
+        if(child) {
+            int status=0;CHECK(waitpid(child,&status,0)==child);
+            return WIFEXITED(status)?WEXITSTATUS(status):1;
+        }
+        int deathsig=0;
+        CHECK(prctl(PR_SET_PDEATHSIG,SIGKILL)==0&&prctl(PR_GET_PDEATHSIG,&deathsig)==0&&deathsig==SIGKILL);
+        CHECK(setresuid(10004,10005,-1)==-1&&errno==EPERM);
+        CHECK(setresgid(10004,10004,10004)==0&&getgid()==10004&&getuid()==0);
+        CHECK(setresuid(10004,10004,10004)==0&&getuid()==10004&&geteuid()==10004);
+        CHECK(setresuid(10005,10005,10005)==-1&&errno==EPERM);
+        CHECK(setresgid(10005,10005,10005)==-1&&errno==EPERM&&getgid()==10004);
+        CHECK(setuid(0)==-1&&errno==EPERM);
+    }
     int fd=open("/dev/hwbinder",O_RDWR);CHECK(fd>=0);
     void* arena=mmap(0,65536,PROT_READ,MAP_PRIVATE,fd,0);CHECK(arena!=MAP_FAILED);
     uint8_t input[256],output[512];struct bf_binder_write_read wr;struct bf_binder_transaction tx={0};

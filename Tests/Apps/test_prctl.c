@@ -15,7 +15,7 @@
 //      inherit their creator's name, /proc/self/comm is the leader's and
 //      /proc/self/task/<tid>/comm reads and renames one thread; /proc/self/task
 //      lists the guest's own threads (not the emulator's host threads) and drops
-//      a thread once it has exited
+//      a thread once it has exited; /proc/self/stat and /proc/self/status count them
 //
 // Build: make cross SRC=Tests/Apps/test_prctl.c OUT=Tests/Apps/test_prctl.elf
 // Run:   ./bifrost-emu Tests/Apps/test_prctl.elf
@@ -79,6 +79,21 @@ static int list_tasks(long a, long b, int *found_a, int *found_b) {
     }
     closedir(dir);
     return count;
+}
+
+// num_threads (field 20) of /proc/self/stat and Threads: of /proc/self/status, or -1 when unreadable.
+static void thread_counts(long *stat_threads, long *status_threads) {
+    char text[1024];
+    *stat_threads = *status_threads = -1;
+    if (read_text("/proc/self/stat", text, sizeof(text)) == 0) {
+        char *field = strrchr(text, ')');
+        for (int index = 2; field && index < 20; index++) field = strchr(field + 1, ' ');
+        if (field) *stat_threads = strtol(field + 1, NULL, 10);
+    }
+    if (read_text("/proc/self/status", text, sizeof(text)) == 0) {
+        char *line = strstr(text, "\nThreads:");
+        if (line) *status_threads = strtol(line + 9, NULL, 10);
+    }
 }
 
 int main(void) {
@@ -160,6 +175,9 @@ int main(void) {
         int has_leader, has_worker;
         CHECK(list_tasks(leader_tid, worker_tid, &has_leader, &has_worker) == 2 && has_leader && has_worker,
               "/proc/self/task lists exactly the leader and the worker");
+        long stat_threads, status_threads;
+        thread_counts(&stat_threads, &status_threads);
+        CHECK(stat_threads == 2 && status_threads == 2, "/proc/self/stat and status count the guest's two threads");
         CHECK(strcmp(worker_self_comm, "worker\n") == 0, "/proc/thread-self/comm shows the caller");
         memset(name, 0, sizeof(name));
         prctl(PR_GET_NAME, name, 0, 0, 0);
@@ -177,6 +195,8 @@ int main(void) {
         CHECK(strcmp(worker_renamed, "renamed") == 0, "a task comm write renames that thread");
         CHECK(list_tasks(leader_tid, worker_tid, &has_leader, &has_worker) == 1 && has_leader && !has_worker,
               "/proc/self/task drops a joined thread");
+        thread_counts(&stat_threads, &status_threads);
+        CHECK(stat_threads == 1 && status_threads == 1, "a joined thread leaves the thread counts");
         errno = 0;
         CHECK(open("/proc/self/task/999999/comm", O_RDONLY) < 0 && errno == ENOENT,
               "an unknown task has no comm");

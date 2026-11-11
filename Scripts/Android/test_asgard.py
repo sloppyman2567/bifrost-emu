@@ -97,7 +97,11 @@ def main():
                 print(f'Asgard: Binder feature contracts {mode} passed', flush=True)
             for server_mode, client_mode, death in [('jit', 'jit', False), ('interp', 'jit', False),
                                                     ('jit', 'interp', False), ('interp', 'interp', False),
-                                                    ('jit', 'jit', True), ('jit', 'jit', 'notify'), ('interp', 'interp', 'notify')]:
+                                                    ('jit', 'jit', True), ('jit', 'jit', 'notify'), ('interp', 'interp', 'notify'),
+                                                    ('jit', 'jit', 'zygote'), ('jit', 'interp', 'zygote')]:
+                # A Zygote client starts as uid 0 and forks a child that becomes 10004 before it opens Binder.
+                zygote = death == 'zygote'
+                if zygote: death = False
                 with tempfile.TemporaryFile(mode='w+') as log, tempfile.TemporaryFile(mode='w+') as client_log:
                     server = subprocess.Popen(base + ([] if server_mode == 'jit' else ['--no-jit']) +
                                               ['--android-app-id', '10002', '/data/local/tmp/android_binder_process',
@@ -107,8 +111,9 @@ def main():
                     try:
                         wait_for(log, 'PROCESS_SERVER_READY', server)
                         client = subprocess.Popen(base + ([] if client_mode == 'jit' else ['--no-jit']) +
-                                                  ['--android-app-id', '10003', '/data/local/tmp/android_binder_process',
-                                                   'client'] + (['notify'] if death == 'notify' else ['death'] if death else []), env=env,
+                                                  (['--android-zygote'] if zygote else ['--android-app-id', '10003']) +
+                                                  ['/data/local/tmp/android_binder_process', 'client'] +
+                                                  (['zygote'] if zygote else ['notify'] if death == 'notify' else ['death'] if death else []), env=env,
                                                   stdout=client_log, stderr=subprocess.STDOUT)
                         if death:
                             if death == 'notify':
@@ -126,7 +131,7 @@ def main():
                         text = log.read()
                         if not death and (server_result or 'PROCESS_SERVER_OK' not in text):
                             raise RuntimeError(text)
-                        print(f'Asgard: {server_mode} server / {client_mode} client death={death} passed', flush=True)
+                        print(f'Asgard: {server_mode} server / {client_mode} client death={death} zygote={zygote} passed', flush=True)
                     finally:
                         for process in (client, server):
                             if process and process.poll() is None:

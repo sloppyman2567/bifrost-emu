@@ -220,6 +220,7 @@ static void print_help(bool all) {
            "    --android-window-plugin PATH  load a host window backend before --android or the ELF\n"
            "    --android-app-id N      user-0 app UID (10000..19999) or isolated UID (99000..99999)\n"
            "    --android-system-uid N  run as an Android system UID\n"
+           "    --android-zygote        start as uid 0; each fork child drops once to an app or isolated UID\n"
            "    --android-binder-broker SOCKET  join a shared guest Binder domain\n"
            "    --asgard-broker SOCKET  run Asgard's shared guest Binder broker\n"
            "    --asgard-service-parent PID  end with this parent process\n"
@@ -404,6 +405,7 @@ int main(int argc, char** argv) {
     bool android_services = false;
     uint32_t android_app_id = 10000;
     bool android_app_id_set = false;
+    bool android_zygote = false;
     std::string android_window_plugin;
     std::string android_binder_broker;
     std::string fb_dump_path;
@@ -522,6 +524,7 @@ int main(int argc, char** argv) {
         if (a == "--android-runtime")       { android_runtime = true; arg_i++; continue; }
         if (a == "--guest-ld")              { guest_ld = true; arg_i++; continue; }
         if (a == "--android-services")      { android_services = true; arg_i++; continue; }
+        if (a == "--android-zygote")        { android_zygote = true; arg_i++; continue; }
         if (a == "--asgard-service-parent") {
             if (arg_i + 1 >= argc) return 2;
             if (!bind_asgard_parent(argv[arg_i + 1])) return 2;
@@ -777,10 +780,14 @@ int main(int argc, char** argv) {
     if (android_app_id_set && !android_runtime) {
         fprintf(stderr, "bifrost-emu: --android-app-id requires --android-runtime\n"); return 2;
     }
+    if (android_zygote && (!android_runtime || android_app_id_set)) {
+        fprintf(stderr, "bifrost-emu: --android-zygote requires --android-runtime and no fixed app UID\n"); return 2;
+    }
     Emulator emu(android_binder_broker.empty() ? Memory::WINDOW_SIZE_MAX : Memory::BINDER_REALM_WINDOW_SIZE);
     emu.set_android_runtime(android_runtime);
     emu.set_guest_linker(guest_ld);
     if (android_runtime) emu.vfs().set_process_identity(android_app_id, android_app_id);
+    if (android_zygote) emu.vfs().set_zygote_identity();
     if (!android_binder_broker.empty()) {
         emu.vfs().set_binder_broker(android_binder_broker);
         emu.vfs().set_self_pid(::getpid());

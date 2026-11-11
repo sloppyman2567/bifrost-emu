@@ -32,6 +32,8 @@
 #include <cstdio>
 #include <cstring>
 #include <signal.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <syscall.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
@@ -240,6 +242,14 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 case PR_SET_PDEATHSIG:  // 1 — set parent-death signal
+                    // A host-fork child's guest parent is its host parent, so the host delivers it (a Zygote child
+                    // ends with its Zygote). Standard signals have the same numbers on both. Elsewhere it is ignored.
+                    if (emu.host_fork_child()) {
+                        if (a1 >= 32) { ret_err(EINVAL); return 0; }
+                        if (::syscall(SYS_prctl, PR_SET_PDEATHSIG, a1, 0, 0, 0)) { ret_errno(); return 0; }
+                    }
+                    ret_host(0);
+                    return 0;
                 case PR_SET_KEEPCAPS:   // 8
                 case PR_SET_TIMING:     // 14
                 case PR_SET_SECCOMP:    // 22 — we don't implement seccomp
@@ -256,9 +266,10 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(0);
                     return 0;
                 case PR_GET_PDEATHSIG: {  // 2 — return parent-death signal
-                    // Write 0 (no signal) to the guest pointer in a1.
+                    int signal = 0;
+                    if (emu.host_fork_child() && ::syscall(SYS_prctl, PR_GET_PDEATHSIG, &signal, 0, 0, 0)) signal = 0;
                     if (a1) {
-                        try { mem_.store<uint32_t>(a1, 0); }
+                        try { mem_.store<uint32_t>(a1, static_cast<uint32_t>(signal)); }
                         catch (...) { ret_err(EFAULT); return 0; }
                     }
                     ret_host(0);

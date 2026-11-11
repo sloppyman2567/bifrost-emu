@@ -52,6 +52,14 @@ names the library, and ASTC transcoding about four times faster in a real game.
   (2026-11-11): the first step towards an Android Zygote, whose children never exec. A child ran a warmed loop at the
   parent's speed (0.0051 s against 0.0050 s) where it used to take 0.57 s.
 
+### Added (a Zygote identity for guest processes)
+
+- `--android-zygote` starts an Android-runtime process as uid 0 that cannot open Binder; each fork child drops once to
+  an app or isolated identity, group first, as Android's Zygote does, and then opens Binder under that UID (2026-11-11).
+  A fork child's `PR_SET_PDEATHSIG` now reaches the host, so it ends with its parent. `num_threads` in `/proc/self/stat`
+  and `Threads:` in `/proc/self/status` count the guest's threads: the first was the host's (the JIT's ticker kept it
+  at 2 after the guest's worker ended, and ART's pre-fork wait gave up after 4 s) and the second was always 1.
+
 ### Fixed (/proc/self/task lists the guest's threads)
 
 - `/proc/self/task` was the host's directory, so a guest saw the emulator's own thread ids (including the JIT's

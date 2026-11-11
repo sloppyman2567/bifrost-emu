@@ -30,7 +30,11 @@
 - Credentials have one source, `Yggdrasil::process_uid()`/`process_gid()`: the host account in a plain run, the fixed
   Android identity under `--android-runtime`. `getuid`, `getresuid`, `AT_UID`, `/proc/self/status`, `getgroups` and
   `capget` must agree, and an unprivileged guest has no capabilities (`test_identity` in `test_compat_syscalls`, checked
-  against the kernel through QEMU). Binder's sender UID is separate: see the Binder guide.
+  against the kernel through QEMU). Binder's sender UID is separate: see the Binder guide. `--android-zygote` starts
+  at uid/gid 0 without capabilities; the set*id calls let it drop once, group first, to one app or isolated ID
+  (`Yggdrasil::zygote_unspecialized`), as `SpecializeCommon` does, and every other Android process keeps EPERM.
+  `PR_SET_PDEATHSIG` reaches the host in a real host-fork child (its guest parent is its host parent) and is ignored
+  elsewhere; `test_asgard.py` covers both in its Zygote cases.
 - Process identity comes from `Yggdrasil::process_ids()`: the PID-1 model of
   a plain run, or the host process's identity for fork children and
   Binder-broker apps. getpid/getppid/getpgid/getsid, `kill` and
