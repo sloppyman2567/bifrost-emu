@@ -411,6 +411,8 @@ UNIT_TESTS=(
     # fork() with live guest threads: the child must not inherit joinable
     # host std::threads for threads that no longer exist.
     "test_fork_threads|Tests/Unit/test_fork_threads.elf||20|ALL PASS"
+    # A fork child keeps the parent's JIT: JIT speed, an MT parent's child takes a signal in a chained loop, forks again.
+    "test_fork_jit|Tests/Unit/test_fork_jit.elf||60|ALL PASS"
     # fork() and fork()+execve() while other threads hold the memory, thread, descriptor and futex locks: the
     # child must not inherit one locked (or a read/write lock's queue of waiting writers).
     "test_fork_lock_contention|Tests/Unit/test_fork_lock_contention.elf||120|ALL PASS"

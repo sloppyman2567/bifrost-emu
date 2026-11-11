@@ -16,6 +16,30 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## A fork child keeps the JIT (2026-11-11)
+
+A fork child used to run interpreted: `fork_guest` abandoned the inherited JIT, whose block-table and compile locks
+another thread might hold, until an `execve` gave the new image a fresh one. That is right for `sh -c cmd`, but a
+Zygote child never execs, so every app or helper forked from a warm runtime would have run 100 times slower.
+
+- `fork_guest` adds every live instance's locks to the set it takes all or none before the host `fork()`
+  (`FrostJIT::try_lock_for_fork`: the block table's read/write lock, the compile and compile-invalidation locks, and
+  each Tier-2 trial's lock). Holding them, no other thread is translating, publishing or invalidating, so the child's
+  copy of the tables is consistent.
+- The child re-creates those locks (a read/write lock copies its count of waiting writers, which no thread there clears,
+  as `Memory::reset_mutex_in_fork_child` handles for guest memory) and restarts the preemption ticker when the JIT is
+  MT: MT chained code returns to the dispatcher only when the epoch moves, so without it a child spinning in a loop
+  never takes a signal. The code buffer is a private anonymous mapping, so parent and child extend and patch their own
+  copies.
+- The old path stays for what cannot be held: the 3 s lock deadline, and per-thread JITs (`BIFROST_NO_SHARED_JIT`),
+  which belong to threads the child does not have.
+
+`Tests/Unit/test_fork_jit.c`: a child runs its parent's warmed loop in 0.0051 s against the parent's 0.0050 s (HEAD's
+child: 0.57 s, interpreted, so the test's 4x bound fails there); a child of a multi-threaded parent takes SIGALRM in a
+tight loop (with the ticker restart removed it hangs), starts a thread and forks again. The fork, exec and pty
+regressions (`test_fork_threads`, `test_fork_lock_contention`, `test_exec_mt`, `test_forkpty`, `test_exec_jit.sh`,
+`test_fork_exec_memory.sh`, `test_fork_stuck_report.sh`) pass.
+
 ## Tier-2 exits that chain, exit-rate feedback and profiler costs (2026-11-11)
 
 A profile of the game-kernel set with `BIFROST_TIER2=1` found that a kept region could cost more than it saved.
@@ -1879,9 +1903,9 @@ generator in both modes, so the tax was MT's own.
   leave a stale callee address. The callee-completion guard after the call is shared with ST.
 
 Edge cases kept: the epoch is read before native code starts, so a tick during entry is seen at the next poll; a
-fork child runs interpreter-only until it execs and drops the inherited JIT without destroying it (its block-table and
-compile locks may be held by threads that no longer exist; the new image gets a fresh JIT, `Emulator::restart_jit_for_exec`,
-because `jit_wanted_` remembers that one was enabled),
+fork child keeps the JIT and restarts the ticker when the JIT is MT (see "A fork child keeps the JIT" above; it runs
+interpreted only when the JIT's locks could not be taken), an exec'd image gets a fresh JIT
+(`Emulator::restart_jit_for_exec`, because `jit_wanted_` remembers that one was enabled),
 and the ticker is forgotten in a fork child (`pthread_atfork`) so an exec'd multi-threaded program starts its own;
 `BIFROST_NO_CHAIN` and `BIFROST_NO_DIRECT_CALL` keep their meanings. Not changed: code blocks that never reach a backward edge, IBL probe or cell call (long straight-line
 chains) are bounded by their length, as before for ST.

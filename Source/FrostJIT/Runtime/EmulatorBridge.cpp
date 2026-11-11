@@ -126,6 +126,7 @@ std::vector<FrostJIT*> JitSet::all() const {
     for (const auto& jit : owned_) out.push_back(jit.get());
     return out;
 }
+bool jit_released(const FrostJIT* jit) { return jit->released(); }
 size_t JitSet::live_snapshot(FrostJIT** out) const {
     std::lock_guard<std::mutex> g(mu_);
     live_.erase(std::remove_if(live_.begin(), live_.end(), [](FrostJIT* jit) { return jit->released(); }),

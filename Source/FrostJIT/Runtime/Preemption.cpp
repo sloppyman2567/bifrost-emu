@@ -16,9 +16,8 @@ void* tick_main(void*) {
 }
 } // namespace
 // A fork child has none of the parent's threads, so a ticker the parent started is gone while
-// the flag still says it runs. Forget it: the child is interpreter-only until it execs, then
-// gets a fresh JIT (Emulator::restart_jit_for_exec), and if that program goes multi-threaded
-// it must start its own ticker.
+// the flag still says it runs. Forget it: a child that keeps an MT JIT starts its own
+// (FrostJIT::reset_after_fork_child), and a fresh JIT after execve starts one when it goes MT.
 void forget_ticker_in_child() { ticker_running.store(false, std::memory_order_relaxed); }
 
 void jit_start_preempt_ticker() {

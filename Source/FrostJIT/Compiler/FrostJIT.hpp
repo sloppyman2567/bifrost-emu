@@ -775,6 +775,13 @@ public:
     // the first call (sticky) and in per-thread-JIT mode.
     void enter_multithreaded();
     bool mt_active() const { return mt_active_.load(std::memory_order_relaxed); }
+    // Emulator::fork_guest keeps the JIT in a fork child (a Zygote child starts with its parent's translations):
+    // it takes every lock a translation, publication or invalidation holds, all or none, and forks only with
+    // them held; the child re-creates them, since their owner's peers do not exist there, and restarts the
+    // preemption ticker MT code relies on. The code buffer is private, so each process changes only its copy.
+    bool try_lock_for_fork();
+    void unlock_after_fork();
+    void reset_after_fork_child();
     size_t code_buf_used()  const { return code_buf_used_; }
     size_t code_buf_size()  const { return code_buf_limit_; }
     size_t cache_entries()  const { return blocks_.size(); }

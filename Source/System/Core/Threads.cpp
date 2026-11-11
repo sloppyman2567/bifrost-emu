@@ -902,7 +902,28 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     std::unique_lock<std::mutex> timers_lock(timers_.mutex_for_fork(), std::defer_lock);
     std::unique_lock<std::mutex> jit_list_lock(jit_.mutex_for_fork(), std::defer_lock);
     std::unique_lock<std::shared_mutex> memory_lock(mem_.mutex_for_fork(), std::defer_lock);
+    // The child keeps the JIT when every live instance's locks are held too (FrostJIT::try_lock_for_fork); a
+    // per-thread JIT (BIFROST_NO_SHARED_JIT) belongs to a thread the child will not have, so it never does.
+    std::vector<FrostJIT*> jits_locked;
+    bool keep_jit = false;
+    const auto unlock_jits = [&] {
+        for (FrostJIT* jit : jits_locked) jit->unlock_after_fork();
+        jits_locked.clear();
+    };
+    const auto lock_jits = [&] {
+        if (!jit_enabled_ || !jit_) return true;
+        for (auto& thread : threads_) if (thread->jit) return true;  // threads_mu_ is held
+        bool all = true;
+        jit_.for_each_live_held([&](FrostJIT* jit) {  // jit_list_lock is held
+            if (!all) return;
+            if (jit->try_lock_for_fork()) jits_locked.push_back(jit);
+            else all = false;
+        });
+        if (!all) unlock_jits();
+        return all;
+    };
     const auto release_all = [&] {
+        unlock_jits();
         for (auto* lock : {&memory_lock}) if (lock->owns_lock()) lock->unlock();
         for (auto* lock : {&jit_list_lock, &timers_lock, &descriptors_lock, &sdl_threads_lock, &threads_lock, &comm_lock})
             if (lock->owns_lock()) lock->unlock();
@@ -912,8 +933,9 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         bool held = comm_lock.try_lock();
         for (size_t i = 0; held && i < FUTEX_SHARDS; ++i) held = futex_locks[i].try_lock();
         held = held && threads_lock.try_lock() && sdl_threads_lock.try_lock() && descriptors_lock.try_lock() &&
-               timers_lock.try_lock() && jit_list_lock.try_lock() && memory_lock.try_lock();
+               timers_lock.try_lock() && jit_list_lock.try_lock() && memory_lock.try_lock() && lock_jits();
         if (!held) release_all();
+        keep_jit = held && !jits_locked.empty();
         return held;
     };
     {
@@ -960,6 +982,12 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         }
     }
     if (descriptors_lock.owns_lock()) descriptors_lock.unlock();
+    if (child_pid == 0 && keep_jit) {
+        for (FrostJIT* jit : jits_locked) jit->reset_after_fork_child();
+        jits_locked.clear();
+    } else {
+        unlock_jits();
+    }
     if (jit_list_lock.owns_lock()) jit_list_lock.unlock();
     if (child_pid == 0) {
         (void)timers_lock.release();  // after_fork_child makes a fresh lock
@@ -1017,30 +1045,16 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         if (flags & BIFROST_CLONE_CHILD_CLEARTID) {
             parent_cpu.clear_child_tid = ctid_ptr;
         }
-        // Disable the JIT in the child — the JIT code buffer's mprotect
-        // state may be inconsistent after fork, and the JIT cache is
-        // not thread/process-safe.
-        //
-        // CRITICAL: do NOT call jit_.reset() here! The child is currently
-        // executing INSIDE the JIT code buffer — the SVC instruction was
-        // JIT'd, and jit_interp_step() was called from JIT code. The
-        // return address on the host stack points into the code buffer.
-        // If we munmap() the code buffer now, the return from
-        // jit_interp_step will SIGSEGV (instruction fetch from unmapped
-        // page). This broke fork+exec under JIT: `sh -c '/path/cmd'`
-        // crashed with rc=139.
-        //
-        // Instead, just set jit_enabled_ = false. The run loop will
-        // switch to interpreter-only on the next block dispatch. The
-        // JIT code buffer stays mapped (as a CoW copy) so the return
-        // from jit_interp_step works, but is never executed again.
-        // The buffer is freed automatically when the child process exits.
-        jit_enabled_ = false;
-        // The inherited JIT's locks (the block table's read/write lock, the compile locks) can be held, or carry a
-        // queue of waiting writers, by threads that do not exist here, and this process's guest memory syscalls
-        // invalidate code through it. The child runs interpreted, so abandon the JIT without destroying it (as
-        // restart_jit_for_exec does: this thread is still inside its code buffer): invalidation then finds none.
-        jit_.abandon();
+        // The JIT goes on in the child when fork_guest held all of its locks (keep_jit): its tables are
+        // consistent, its locks were re-created above and its code buffer is this process's own copy, so the child
+        // starts with every translation the parent made (a Zygote child skips the runtime's warm-up). Otherwise
+        // (a lock could not be taken in time, per-thread JITs) the child runs interpreted: the JIT is abandoned,
+        // not destroyed, because this thread may still be inside its code buffer (as restart_jit_for_exec does),
+        // and invalidation then finds none.
+        if (!keep_jit) {
+            jit_enabled_ = false;
+            jit_.abandon();
+        }
         // After fork(), the child inherits g_active_emu_ from the parent,
         // which points to the PARENT's Emulator — a dangling pointer in
         // the child's address space. When SIGINT (Ctrl-C) arrives in the

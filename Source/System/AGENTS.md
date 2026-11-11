@@ -61,7 +61,8 @@ waiter objects must not be destroyed. `Emulator::fork_guest` must hold every loc
 runs, uses (comm table, futex shards, thread lists, guest descriptor table, POSIX timers, JIT list, guest memory index) across the host
 `fork()`, taken all-or-none so no lock is waited for while another is held. Plain mutexes are then unlocked in the
 child, but a read/write lock copies its queue of waiting writers and must be re-initialized there
-(`Memory::reset_mutex_in_fork_child`); the child also drops the inherited JIT. Add any new process-wide lock that
+(`Memory::reset_mutex_in_fork_child`); the JIT's locks join the set and the child keeps the JIT (see the FrostJIT
+guide), falling back to the interpreter when they cannot be taken. Add any new process-wide lock that
 guest syscalls take to that set. The exclusive monitor's bucket spinlocks are too many to take: the child clears any it
 copied held (`ExclusiveMonitor::unlock_all_in_fork_child`). `test_fork_lock_contention` and `test_fork_exec_memory` cover it. A real host-fork child's process-ending exit (`exit_group`, or `exit` from its only thread)
 uses kernel termination without host resource teardown; track that ownership

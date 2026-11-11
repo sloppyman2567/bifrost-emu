@@ -93,6 +93,7 @@ struct SimdDpFields;
 // Every FrostJIT an emulator has created. The last one added is current; earlier ones were
 // retired by Emulator::renew_jit (their code cache filled up) and live as long as the process,
 // because generated code still addresses their members (see FrostJIT/Runtime/Generations.hpp).
+bool jit_released(const FrostJIT* jit);  // FrostJIT::released(), for JitSet's templates
 class JitSet {
 public:
     JitSet() = default;
@@ -110,6 +111,10 @@ public:
         FrostJIT* live[kMaxLive];
         const size_t n = live_snapshot(live);
         for (size_t i = 0; i < n; ++i) fn(live[i]);
+    }
+    // for_each_live for a caller that already holds mutex_for_fork() (fork_guest): the lock is not recursive.
+    template <class Fn> void for_each_live_held(Fn&& fn) const {
+        for (FrostJIT* jit : live_) if (!jit_released(jit)) fn(jit);
     }
     std::vector<FrostJIT*> all() const;
     // Leaks every instance: the caller (a fork child, an exec) is still inside one's code.

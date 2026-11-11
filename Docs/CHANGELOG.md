@@ -46,6 +46,12 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (fork children keep the JIT)
+
+- A forked guest process now keeps its parent's JIT and translations instead of running interpreted until it execs
+  (2026-11-11): the first step towards an Android Zygote, whose children never exec. A child ran a warmed loop at the
+  parent's speed (0.0051 s against 0.0050 s) where it used to take 0.57 s.
+
 ### Fixed (the library card after an update)
 
 - Installing a new version over an installed app left its library card on the old version and install date (Battle Cats
