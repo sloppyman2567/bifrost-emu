@@ -131,6 +131,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   cross-process behavior explicit: another process's IntentSender is
   `START_CANCELED` (callers handle `SendIntentException`), never a silent
   success or an unsupported-call crash.
+- Once the launcher shuts `FrameworkServiceRuntime` down (window closed; it waits for its services, then exits), start,
+  bind, stop and peek answer as if nothing were there (null, 0, `bindService` false) and never throw: SDK threads keep
+  calling, and an exception on one ends the process as a crash. `MANAGED_SERVICES_AFTER_SHUTDOWN_OK` covers it.
 - Foreground services are `FrameworkServiceRuntime` state (`setForeground`, with child processes over
   `SERVICE_FOREGROUND*`); their notification lives in `FrameworkNotifications`' in-memory store, which only the
   session's foreground services share across processes. Keep `ActiveServices` order (permission, type, policy, then

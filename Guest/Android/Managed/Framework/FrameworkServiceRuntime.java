@@ -142,8 +142,7 @@ final class FrameworkServiceRuntime {
     }
 
     private void checkCaller(Caller identity, Object thread, String callingPackage, int user) {
-        if (application == null || shuttingDown)
-            throw new IllegalStateException("Service runtime is not accepting requests");
+        if (application == null) throw new IllegalStateException("Service runtime is not accepting requests");
         if (identity == null || identity.uid >= 99000) throw new SecurityException("Isolated processes cannot start or bind services");
         if (thread != identity.thread || !identity.packageName.equals(callingPackage)
                 || user != identity.uid / 100000)
@@ -210,7 +209,12 @@ final class FrameworkServiceRuntime {
         return start(new Object[] {applicationThread, intent, resolvedType, foreground, owner, null, 0});
     }
 
+    // While the process ends (its window closed, shutdown below), SDK threads may still start, bind, stop or peek
+    // services. Android serves a live process until it is gone; here nothing new starts, and each call gets the answer
+    // apps already handle (no service, Context.bindService false) rather than an exception that their background
+    // threads do not catch: Geometry Dash's Play services client died that way on a GoogleApiHandler thread.
     synchronized ComponentName start(Object[] a) throws Exception {
+        if (shuttingDown) return null;
         if (remote != null) {
             checkCaller(caller, a[0], (String) a[4], (Integer) a[6]);
             return remote.startService(a);
@@ -240,6 +244,7 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized int stop(Object[] a) throws Exception {
+        if (shuttingDown) return 0;
         if (remote != null) {
             checkCaller(caller, a[0], application.packageName, (Integer) a[3]);
             return remote.stopService(a);
@@ -401,6 +406,7 @@ final class FrameworkServiceRuntime {
             new ComponentName("com.android.vending", "com.android.vending.billing.InAppBillingService");
 
     synchronized int bind(Object[] a, boolean instance) throws Exception {
+        if (shuttingDown) return 0;
         if (remote != null) {
             checkCaller(caller, a[0], (String) a[instance ? 7 : 6], (Integer) a[instance ? 8 : 7]);
             return remote.bindService(a, instance);
@@ -485,6 +491,7 @@ final class FrameworkServiceRuntime {
     }
 
     synchronized IBinder peek(Intent intent, String callingPackage) throws Exception {
+        if (shuttingDown) return null;
         if (remote != null) {
             checkCaller(caller, applicationThread, callingPackage, application.uid / 100000);
             return remote.peekService(intent, callingPackage);

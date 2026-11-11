@@ -179,6 +179,24 @@ public final class ManagedServiceBatch {
         pkg.requestedPermissions = original; pkg.requestedPermissionsFlags = new int[original.length]; packages.install(system, pkg);
     }
 
+    // After the window closes the launcher shuts the service runtime down and waits for its services to end. An SDK
+    // thread that starts or binds a service then (Play services did, in Geometry Dash) gets a failed call, never an
+    // exception: one on a background thread ends the process as a crash. Runs last: nothing starts afterwards.
+    private static void servicesAfterShutdown(Context context) throws Exception {
+        FrameworkServiceRuntime runtime = (FrameworkServiceRuntime) launcherField("serviceRuntime");
+        CountDownLatch idle = new CountDownLatch(1);
+        runtime.shutdown(idle::countDown);
+        check(idle.await(10, TimeUnit.SECONDS), "service runtime did not become idle after shutdown");
+        Intent service = new Intent().setComponent(new ComponentName(NAME, ProbeService.class.getName()));
+        check(!context.bindService(service, new android.content.ServiceConnection() {
+            public void onServiceConnected(ComponentName name, IBinder binder) { }
+            public void onServiceDisconnected(ComponentName name) { }
+        }, Context.BIND_AUTO_CREATE), "a service was bound after shutdown");
+        check(context.startService(service) == null, "a service was started after shutdown");
+        check(!context.stopService(service), "a service was stopped after shutdown");
+        System.out.println("MANAGED_SERVICES_AFTER_SHUTDOWN_OK");
+    }
+
     private static void pendingIntents(Context context, Object thread, Object loaded, FrameworkPackages packages) throws Exception {
         FrameworkBroadcasts broadcasts = (FrameworkBroadcasts) launcherField("broadcasts");
         broadcasts.attach(thread, NAME);
@@ -2050,6 +2068,7 @@ public final class ManagedServiceBatch {
         denied(() -> invoke(vibrators, "cancelVibrate", -1, new Binder()));
         Object window = endpoint("window", "android.view.IWindowManager");
         denied(() -> invoke(window, "disableKeyguard", new Binder(), "denied", 0));
+        servicesAfterShutdown(context);
         System.out.println("MANAGED_SERVICE_BATCH_OK checks=" + checks);
         System.out.println("FRAMEWORK_OK");
         System.exit(0);

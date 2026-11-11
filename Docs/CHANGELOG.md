@@ -46,6 +46,14 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (a crash report after closing a game)
+
+- Closing a game window could end it as a crash (2026-11-11): Geometry Dash Lite, closed five seconds after it opened, died
+  with `IllegalStateException: Service runtime is not accepting requests` on Google Play services' `GoogleApiHandler`
+  thread, and the session reported status 137. While the launcher waits for the app's services to end, an SDK may still
+  bind or start one; those calls now fail quietly (`bindService` returns false), as apps expect, instead of throwing an
+  exception their background threads do not catch. Checked in `ManagedServiceBatch`; Geometry Dash itself not rerun.
+
 ### Changed (the first launch after an update starts sooner)
 
 - An app's parsed package cache now survives an update of Asgard (2026-11-11). Rebuilding an app's Android runtime emptied
