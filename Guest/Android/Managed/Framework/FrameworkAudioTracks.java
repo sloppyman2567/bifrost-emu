@@ -2,7 +2,8 @@
 // AudioTrack clients (Java AudioTrack, SoundPool, MediaPlayer). The track's shared
 // control block and sample ring are a memfd that the client maps; the native side
 // (Guest/Android/Adapters/audio_track.c) reads it and plays through the host audio
-// engine. Wire formats follow android-15.0.0_r1: IAudioFlingerService.aidl,
+// engine. A static track (MODE_STATIC, SoundPool) brings its own buffer, the request's
+// sharedBuffer, and its region holds only the control block. Wire formats follow android-15.0.0_r1: IAudioFlingerService.aidl,
 // IAudioTrack.aidl, CreateTrackRequest.aidl, CreateTrackResponse.aidl and the
 // android.media.audio.common types.
 import android.os.Binder;
@@ -18,7 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 final class FrameworkAudioTracks {
     static native int createRegion(long size);
-    static native long create(int fd, long regionSize, int frameCount, int channels, int format, int sampleRate);
+    static native long create(int fd, long regionSize, int frameCount, int channels, int format, int sampleRate,
+                              int sharedFd, long sharedOffset, long sharedSize);
     static native int start(long track);
     static native void stop(long track);
     static native void pause(long track);
@@ -56,12 +58,13 @@ final class FrameworkAudioTracks {
     private static final Map<Integer, WeakReference<Track>> LIVE = new ConcurrentHashMap<>();
 
     // The native server's counters for the live track of `sessionId` (frames consumed, time,
-    // underruns, peak levels of channels 0 and 1 in millionths), or null. For tests.
+    // underruns, peak levels of channels 0 and 1 in millionths, frames handed to the host
+    // stream), or null. For tests.
     static long[] snapshot(int sessionId) {
         WeakReference<Track> reference = LIVE.get(sessionId);
         Track track = reference == null ? null : reference.get();
         if (track == null) return null;
-        long[] out = new long[5];
+        long[] out = new long[6];
         return track.snapshot(out) == 0 ? out : null;
     }
 
@@ -141,81 +144,107 @@ final class FrameworkAudioTracks {
         data.readLong(); // AudioConfig.frameCount: the request's own is used
         data.setDataPosition(end);
         data.setDataPosition(begin(data)); // AudioClient
-        int sharedEnd = beginNullable(data);
-        final boolean sharedBuffer = sharedEnd >= 0;
-        if (sharedBuffer) data.setDataPosition(sharedEnd);
-        final int notificationsPerBuffer = data.readInt();
-        final float speed = data.readFloat();
-        data.readStrongBinder(); // IAudioTrackCallback
-        data.readString(); // opPackageName
-        final int flags = data.readInt();
-        final long requestedFrames = data.readLong();
-        final long requestedNotification = data.readLong();
-        final int selectedDevice = data.readInt();
-        int sessionId = data.readInt();
-        data.setDataPosition(requestEnd);
-
-        if (sharedBuffer) throw new Failure(INVALID_OPERATION, "static AudioTrack buffers are not supported");
-        if (formatType != 1 || encoding != null && encoding.length() > 0 || pcm < FMT_U8 || pcm > FMT_I24)
-            throw new Failure(BAD_VALUE, "only linear PCM tracks are supported");
-        final int channels = channelCount(layoutTag, layoutValue);
-        if (channels < 1 || channels > 8 || sampleRate < 1) throw new Failure(BAD_VALUE, "unsupported channel mask or rate");
-        final long afFrameCount = hostConfig[1];
-        final int afSampleRate = (int) hostConfig[0];
-        if (afSampleRate <= 0 || afFrameCount <= 0) throw new Failure(NO_INIT, "host audio unavailable");
-        final int bytesPerSample = pcm == FMT_U8 ? 1 : pcm == FMT_I16 ? 2 : pcm == FMT_I24 ? 3 : 4;
-
-        long frameCount = Math.max(requestedFrames, minFrameCount(afFrameCount, afSampleRate, sampleRate, speed > 0 ? speed : 1f));
-        // Notify at least twice (three times for a triple-buffered period) per buffer.
-        long maxNotification = frameCount / 2;
-        long notification = requestedNotification == 0 || requestedNotification > maxNotification ? maxNotification : requestedNotification;
-        if (frameCount > Integer.MAX_VALUE / 64 / Math.max(channels * bytesPerSample, 1)) throw new Failure(NO_MEMORY, "track too large");
-        if (sessionId <= 0) sessionId = newUniqueId();
-
-        // The ring is indexed modulo the next power of two (TrackBase allocates roundup(frameCount)).
-        final long ringFrames = Long.highestOneBit(frameCount) == frameCount ? frameCount : Long.highestOneBit(frameCount) << 1;
-        final long region = CBLK_SIZE + ringFrames * channels * bytesPerSample;
-        int fd = createRegion(region);
-        if (fd < 0) throw new Failure(NO_MEMORY, "memfd " + fd);
-        long handle = create(fd, region, (int) frameCount, channels, pcm, sampleRate);
-        if (handle <= 0) {
-            ParcelFileDescriptor.adoptFd(fd); // closed by garbage collection of the unused descriptor
-            throw new Failure(handle == -38 ? INVALID_OPERATION : NO_INIT, "native track " + handle);
+        int sharedEnd = beginNullable(data); // SharedFileRegion sharedBuffer: a static track's own buffer
+        ParcelFileDescriptor shared = null;
+        long sharedOffset = 0, sharedSize = 0;
+        if (sharedEnd >= 0) {
+            if (data.readInt() == 0) throw new Failure(BAD_VALUE, "shared buffer without a descriptor");
+            shared = ParcelFileDescriptor.CREATOR.createFromParcel(data);
+            sharedOffset = data.readLong();
+            sharedSize = data.readLong();
+            data.setDataPosition(sharedEnd); // writeable: the server only reads it
         }
-        ParcelFileDescriptor descriptor = ParcelFileDescriptor.adoptFd(fd);
-        Track track = new Track(handle, descriptor, region, sessionId);
-        LIVE.put(sessionId, new WeakReference<>(track));
-        final int latencyMs = (int) ((afFrameCount * 1000 + afSampleRate - 1) / afSampleRate);
+        try {
+            final int notificationsPerBuffer = data.readInt();
+            final float speed = data.readFloat();
+            data.readStrongBinder(); // IAudioTrackCallback
+            data.readString(); // opPackageName
+            final int flags = data.readInt();
+            final long requestedFrames = data.readLong();
+            final long requestedNotification = data.readLong();
+            final int selectedDevice = data.readInt();
+            int sessionId = data.readInt();
+            data.setDataPosition(requestEnd);
 
-        reply.writeNoException();
-        reply.writeInt(1); // non-null CreateTrackResponse
-        int start = reply.dataPosition();
-        reply.writeInt(0); // size, patched below
-        reply.writeInt(flags & ~0x4);                        // flags: fast tracks are not granted
-        reply.writeLong(frameCount);                         // frameCount
-        reply.writeLong(notification);                       // notificationFrameCount
-        reply.writeInt(selectedDevice);                      // selectedDeviceId
-        reply.writeInt(sessionId);                           // sessionId
-        reply.writeInt(sampleRate);                          // sampleRate
-        reply.writeInt(3);                                   // streamType: MUSIC
-        reply.writeLong(afFrameCount);                       // afFrameCount
-        reply.writeInt(afSampleRate);                        // afSampleRate
-        reply.writeInt(1);                                   // afChannelMask: non-null union
-        reply.writeInt(LAYOUT_LAYOUT_MASK);                  //   tag layoutMask
-        reply.writeInt(3);                                   //   LAYOUT_STEREO
-        reply.writeInt(1);                                   // afFormat: non-null AudioFormatDescription
-        int formatStart = reply.dataPosition();
-        reply.writeInt(0);
-        reply.writeInt(1);                                   //   type PCM
-        reply.writeInt(FMT_I16);                             //   pcm INT_16_BIT
-        reply.writeString("");                               //   encoding
-        patchSize(reply, formatStart);
-        reply.writeInt(latencyMs);                           // afLatencyMs
-        reply.writeInt(0);                                   // afTrackFlags
-        reply.writeInt(OUTPUT_ID);                           // outputId
-        reply.writeInt(newUniqueId());                       // portId
-        reply.writeStrongBinder(track);                      // audioTrack
-        patchSize(reply, start);
+            if (formatType != 1 || encoding != null && encoding.length() > 0 || pcm < FMT_U8 || pcm > FMT_I24)
+                throw new Failure(BAD_VALUE, "only linear PCM tracks are supported");
+            final int channels = channelCount(layoutTag, layoutValue);
+            if (channels < 1 || channels > 8 || sampleRate < 1) throw new Failure(BAD_VALUE, "unsupported channel mask or rate");
+            final long afFrameCount = hostConfig[1];
+            final int afSampleRate = (int) hostConfig[0];
+            if (afSampleRate <= 0 || afFrameCount <= 0) throw new Failure(NO_INIT, "host audio unavailable");
+            final int bytesPerSample = pcm == FMT_U8 ? 1 : pcm == FMT_I16 ? 2 : pcm == FMT_I24 ? 3 : 4;
+
+            final int frameSize = channels * bytesPerSample;
+            long frameCount, notification, region;
+            if (shared != null) {
+                // PlaybackThread::createTrack_l: the buffer's size sets the frame count, its address must
+                // be sample aligned (a frame of two samples for more than one channel; 24-bit packed only
+                // byte aligned), and the requested notification period is kept.
+                final int alignment = (bytesPerSample % 2 == 1 ? 1 : bytesPerSample) * (channels > 1 ? 2 : 1);
+                if (sharedOffset < 0 || sharedOffset % alignment != 0) throw new Failure(BAD_VALUE, "misaligned shared buffer");
+                frameCount = sharedSize / frameSize;
+                if (frameCount < 1 || frameCount > Integer.MAX_VALUE) throw new Failure(BAD_VALUE, "shared buffer size " + sharedSize);
+                notification = requestedNotification;
+                region = CBLK_SIZE;
+            } else {
+                frameCount = Math.max(requestedFrames, minFrameCount(afFrameCount, afSampleRate, sampleRate, speed > 0 ? speed : 1f));
+                // Notify at least twice (three times for a triple-buffered period) per buffer.
+                long maxNotification = frameCount / 2;
+                notification = requestedNotification == 0 || requestedNotification > maxNotification ? maxNotification : requestedNotification;
+                if (frameCount > Integer.MAX_VALUE / 64 / Math.max(frameSize, 1)) throw new Failure(NO_MEMORY, "track too large");
+                // The ring is indexed modulo the next power of two (TrackBase allocates roundup(frameCount)).
+                final long ringFrames = Long.highestOneBit(frameCount) == frameCount ? frameCount : Long.highestOneBit(frameCount) << 1;
+                region = CBLK_SIZE + ringFrames * frameSize;
+            }
+            if (sessionId <= 0) sessionId = newUniqueId();
+
+            int fd = createRegion(region);
+            if (fd < 0) throw new Failure(NO_MEMORY, "memfd " + fd);
+            long handle = create(fd, region, (int) frameCount, channels, pcm, sampleRate,
+                    shared == null ? -1 : shared.getFd(), sharedOffset, sharedSize);
+            if (handle <= 0) {
+                ParcelFileDescriptor.adoptFd(fd); // closed by garbage collection of the unused descriptor
+                throw new Failure(handle == -38 ? INVALID_OPERATION : handle == -22 ? BAD_VALUE : NO_INIT, "native track " + handle);
+            }
+            ParcelFileDescriptor descriptor = ParcelFileDescriptor.adoptFd(fd);
+            Track track = new Track(handle, descriptor, region, sessionId);
+            LIVE.put(sessionId, new WeakReference<>(track));
+            final int latencyMs = (int) ((afFrameCount * 1000 + afSampleRate - 1) / afSampleRate);
+
+            reply.writeNoException();
+            reply.writeInt(1); // non-null CreateTrackResponse
+            int start = reply.dataPosition();
+            reply.writeInt(0); // size, patched below
+            reply.writeInt(flags & ~0x4);                        // flags: fast tracks are not granted
+            reply.writeLong(frameCount);                         // frameCount
+            reply.writeLong(notification);                       // notificationFrameCount
+            reply.writeInt(selectedDevice);                      // selectedDeviceId
+            reply.writeInt(sessionId);                           // sessionId
+            reply.writeInt(sampleRate);                          // sampleRate
+            reply.writeInt(3);                                   // streamType: MUSIC
+            reply.writeLong(afFrameCount);                       // afFrameCount
+            reply.writeInt(afSampleRate);                        // afSampleRate
+            reply.writeInt(1);                                   // afChannelMask: non-null union
+            reply.writeInt(LAYOUT_LAYOUT_MASK);                  //   tag layoutMask
+            reply.writeInt(3);                                   //   LAYOUT_STEREO
+            reply.writeInt(1);                                   // afFormat: non-null AudioFormatDescription
+            int formatStart = reply.dataPosition();
+            reply.writeInt(0);
+            reply.writeInt(1);                                   //   type PCM
+            reply.writeInt(FMT_I16);                             //   pcm INT_16_BIT
+            reply.writeString("");                               //   encoding
+            patchSize(reply, formatStart);
+            reply.writeInt(latencyMs);                           // afLatencyMs
+            reply.writeInt(0);                                   // afTrackFlags
+            reply.writeInt(OUTPUT_ID);                           // outputId
+            reply.writeInt(newUniqueId());                       // portId
+            reply.writeStrongBinder(track);                      // audioTrack
+            patchSize(reply, start);
+        } finally {
+            // The native server maps the buffer; the descriptor is not needed after that.
+            if (shared != null) try { shared.close(); } catch (java.io.IOException ignored) { }
+        }
     }
 
     private static void patchSize(Parcel p, int start) {

@@ -46,6 +46,15 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (static AudioTracks and SoundPool sounds)
+
+- Android apps can play static AudioTracks (2026-11-11): `MODE_STATIC` tracks and SoundPool, which plays every sound through
+  one. Track creation was refused before, so those sounds were silent. The server plays the app's own buffer and follows its
+  loop points, position changes and end-of-buffer events like Android's AudioFlinger. Any AudioTrack whose sample rate the app
+  changes after creating it (SoundPool does when it reuses a track at another rate) is now resampled to that rate instead of
+  playing at the old one. Checked with real `MODE_STATIC` tracks (once, looped, at twice the rate) in both engines; SoundPool
+  itself and a game using it were not run.
+
 ### Fixed (an install made from a stale framework tree)
 
 - `install-asgard.py` no longer installs a framework tree that is older than the scripts copied with it (2026-11-11). A

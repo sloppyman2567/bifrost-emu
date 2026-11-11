@@ -2875,8 +2875,8 @@ android-15.0.0_r1 (`IAudioFlingerService.aidl`, `IAudioTrack.aidl`,
   (`1 3 3`: marker, `layoutMask`, `LAYOUT_STEREO`). Refusals are
   `EX_SERVICE_SPECIFIC` with a `status_t`. Frame count is the larger of the request and
   three output quanta (AOSP's `calculateMinFrameCount` plus slack for the emulator);
-  the notification period is half of it. Fast, offload, direct, static-buffer and
-  non-PCM tracks are refused.
+  the notification period is half of it. Fast, offload, direct and non-PCM tracks are
+  refused; a static track is described below.
 - **Shared region.** One memfd holds the 232-byte `audio_track_cblk_t` and a ring of
   `roundup(frameCount)` frames (the client indexes modulo the next power of two).
   `IAudioTrack.getCblk` returns it as a `SharedFileRegion` with `writeable` set; without
@@ -2901,15 +2901,38 @@ android-15.0.0_r1 (`IAudioFlingerService.aidl`, `IAudioTrack.aidl`,
   an I16 stream, so a producer writing wider samples cannot run off its mapping —
   that overflow was the SIGSEGV in `memcpy` one page past the bounce (2026-11-06).
 
+- **Static tracks** (`MODE_STATIC`, and SoundPool, whose `libsoundpool` plays every sound
+  through one) bring their own buffer: the request's `sharedBuffer`, a `SharedFileRegion`
+  over the client's `IMemory` heap (a memfd). As in `PlaybackThread::createTrack_l`, its
+  size sets the frame count, its offset must be sample aligned, and the requested
+  notification period is kept. The server maps it read-only (after checking that the file
+  holds `offset + size`, so a short heap cannot fault it) and the track's region holds only
+  the control block. The server is a port of `StaticAudioTrackServerProxy`: the client
+  pushes loop points and positions through the union's `SingleStateQueue` (applied in the
+  order the client made them, an invalid one shuts the track down), the server pushes the
+  position and loop count back, wraps at the loop end and sets `CBLK_LOOP_CYCLE`,
+  `CBLK_LOOP_FINAL` and `CBLK_BUFFER_END`. A static track is ready at start, ends at once
+  on stop, and at the buffer's end stops pulling but stays ACTIVE, as AudioFlinger's mixer
+  leaves it, until the client stops it. Flush and signal do not apply to it.
+- **Sample rate after creation.** `AudioTrack::setSampleRate` (SoundPool sets it when it
+  reuses a track for the same sound at another rate) writes the control block's
+  `mSampleRate`. The host stream keeps the rate the track was created with, and the server
+  resamples by linear interpolation from the current one, reading at most 256 client frames
+  per output frame (AudioFlinger's own limit, `AUDIO_RESAMPLER_DOWN_RATIO_MAX`).
+
 Checked: `ManagedServiceBatch.audioTracks` plays a stereo tone (left a quarter of full
 scale, right a half) through a real `AudioTrack` and asserts that the server consumed every
 frame, that the per-channel peaks match, and that stop/start/pause/flush work, in JIT
-and interpreter mode. Umamusume then logged no `AudioTrack` errors. Whether it is
-audible and in sync was not measured. Not implemented: static (shared-buffer) tracks, so
-SoundPool-style short sounds; kernel timestamps (`getTimestamp` reports would-block and
-`getPlaybackHeadPosition` follows the frames consumed); sample-rate and playback-rate
-changes after creation; volume shapers and effects; a track is freed when its Binder is
-garbage collected, not at the client's release.
+and interpreter mode. `staticAudioTracks` does the same with a `MODE_STATIC` track played
+once to its end, then with two loops (exactly three passes), then at twice its rate (half
+as many frames reach the host). A PCM dump (`BIFROST_AUDIO_DUMP`) of that run showed clean
+sines with seamless loop points. Umamusume then logged no `AudioTrack` errors. Whether it is
+audible and in sync was not measured. SoundPool itself was not run: it decodes through
+`media.extractor` and the codec services, which only an app session's broker provides, and
+no installed game's logs showed a static track being refused before. Not implemented:
+kernel timestamps (`getTimestamp` reports would-block and `getPlaybackHeadPosition`
+follows the frames consumed); playback-rate (speed and pitch) changes; volume shapers and
+effects; a track is freed when its Binder is garbage collected, not at the client's release.
 
 #### Managed OpenSL ES (2026-10-13)
 

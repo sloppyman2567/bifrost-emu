@@ -1915,6 +1915,62 @@ public final class ManagedServiceBatch {
         System.out.println("MANAGED_AUDIO_TRACK_OK");
     }
 
+    // Waits until the track's playback head reaches `frames`, then long enough to see it go past.
+    private static long settledHead(android.media.AudioTrack track, long frames) throws InterruptedException {
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        while (track.getPlaybackHeadPosition() < frames && System.nanoTime() < deadline) Thread.sleep(10);
+        Thread.sleep(150);
+        return track.getPlaybackHeadPosition();
+    }
+
+    // A MODE_STATIC AudioTrack (SoundPool's kind) plays the client's own shared buffer: once to its
+    // end, then from the start with two loops (three passes), then at twice its sample rate, which
+    // the server resamples to its stream's rate (half as many frames reach the host).
+    private static void staticAudioTracks() throws Exception {
+        final int rate = 48000, frames = 4800;
+        android.media.AudioFormat format = new android.media.AudioFormat.Builder()
+                .setSampleRate(rate).setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_STEREO).build();
+        android.media.AudioTrack track = new android.media.AudioTrack.Builder()
+                .setAudioAttributes(new android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_GAME).build())
+                .setAudioFormat(format).setTransferMode(android.media.AudioTrack.MODE_STATIC)
+                .setBufferSizeInBytes(frames * 4).build();
+        short[] pcm = new short[frames * 2];
+        for (int i = 0; i < frames; i++) {
+            double wave = Math.sin(2 * Math.PI * 440 * i / rate);
+            pcm[2 * i] = (short) (wave * 8192);
+            pcm[2 * i + 1] = (short) (wave * 16384);
+        }
+        check(track.write(pcm, 0, pcm.length) == pcm.length, "static write");
+        check(track.getState() == android.media.AudioTrack.STATE_INITIALIZED, "static AudioTrack state " + track.getState());
+        final int session = track.getAudioSessionId();
+        track.play();
+        long head = settledHead(track, frames);
+        check(head == frames, "static track played " + head + " of " + frames + " frames");
+        long[] seen = FrameworkAudioTracks.snapshot(session);
+        check(seen != null && seen[0] == frames && seen[5] == frames, "static server counters " + Arrays.toString(seen));
+        check(seen[3] > 240_000 && seen[3] <= 250_100 && seen[4] > 490_000 && seen[4] <= 500_100,
+                "static channel peaks " + seen[3] + "/" + seen[4] + " (expected about 250000/500000)");
+        track.stop();
+        check(track.setLoopPoints(0, frames, 2) == android.media.AudioTrack.SUCCESS, "setLoopPoints");
+        track.play();
+        head = settledHead(track, 3L * frames);
+        check(head == 3L * frames, "looped static track played " + head + " of " + 3 * frames + " frames");
+        track.stop();
+        check(track.setPlaybackRate(rate * 2) == android.media.AudioTrack.SUCCESS, "setPlaybackRate");
+        long before = FrameworkAudioTracks.snapshot(session)[5];
+        track.play();
+        head = settledHead(track, frames);
+        seen = FrameworkAudioTracks.snapshot(session);
+        check(head == frames && seen[0] == 5L * frames, "static track at twice its rate read " + head + " frames, "
+                + seen[0] + " in all");
+        check(Math.abs(seen[5] - before - frames / 2) <= 2, "static track at twice its rate gave the host "
+                + (seen[5] - before) + " frames (expected about " + frames / 2 + ")");
+        track.release();
+        System.out.println("MANAGED_AUDIO_STATIC_TRACK_OK");
+    }
+
     private static void run() throws Exception {
         Looper.prepareMainLooper();
         Class<?> threadType = Class.forName("android.app.ActivityThread");
@@ -1972,6 +2028,7 @@ public final class ManagedServiceBatch {
         audioMode(context);
         mediaSessions(context);
         audioTracks();
+        staticAudioTracks();
         audioEffects();
         notifications(context, packages); audio(context); nativeServices(); power(context); wifi(context);
         uiMode(context); permissions(context); appOps(context, packages); appWidgets(context); roles(context); shortcuts(context);
