@@ -49,7 +49,14 @@ which made a bytecode VM kernel 1.8x and a hash kernel 2.4x slower in cycles whi
 On the engine-shaped kernels of 2026-11-07 (one frame each, cycles per frame from a 350-frame minus a 50-frame run, pinned
 to one core, one run each, against the loop-pin build): audio mixing -16%, hash -9%, culling -6%, a bytecode VM -5%,
 collision -3%; skinning and particles unchanged within noise; matmul and anim are too short per frame to read. No game was
-measured. Following unconditional and compare branches in the dead-flag scan was measured first
+measured.
+
+`FP_CMP`'s branchy sequence (kept when the compare feeds `fcsel` or anything else that is not a branch or an integer select)
+read the `ucomiss` result through `pushfq; pop rax` and tested the bits in RAX. `pushfq` alone was 14.7% of the ops an IBS
+sample found in the audio-mixing kernel. It now jumps on PF, CF and ZF directly (`mov` leaves them intact): audio mixing -25%
+cycles per frame, particles -12%, the other kernels unchanged.
+
+Following unconditional and compare branches in the dead-flag scan was measured first
 and rejected: it would have removed 3-5% of the remaining packs. `jit_flags_exit_dead` section K faults on a successor's first
 load after CMP, ADDS and TST and checks the signal frame's NZCV (dropping the `cmc` fails it); `jit_msr_nzcv`, `jit_fcmp_flags`,
 `jit_ccmp` and `jit_branch_flags` cover the conversions and the memory tests.

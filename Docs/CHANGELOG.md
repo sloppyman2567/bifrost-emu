@@ -56,6 +56,8 @@ names the library.
   instructions instead of seven and reloading them three instead of fifteen. CoreMark runs 6.5% fewer host instructions,
   `bench_fib` 6.1%, `bench_sort` 3.6% (counts, not run time). Signal frames, ptrace, the GDB stub and the C API still see
   the architectural NZCV.
+- A floating-point compare feeding `fcsel` no longer reads the host flags through `pushfq`: an audio-mixing kernel runs 25%
+  fewer cycles per frame.
 - Host instructions executed fall by 11.9% on CoreMark, 12.2% on `bench_mips`, 5.8% on `bench_sort`, 5.2% on `bench_fib`
   and 3.5% on `bench_dispatch` (instruction counts, not run time; no game was measured). Details and what the sample
   still shows as waste are in [the JIT guide](JIT.md#pc-stores-behind-the-chain-slot-loop-pins-and-four-peepholes-2026-11-10).

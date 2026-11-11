@@ -950,65 +950,25 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 flags_from_sub_ = true;  // CF is in SUB convention
                 return true;
             }
-            // Build pstate in RDX using conditional moves.
-            // pushfq to get flags into RAX, then test bits.
-            emit_pushfq();
-            emit_byte(0x58);  // pop rax (flags in rax)
-            // RDX = 0 (default)
-            emit_xor_reg(RDX, RDX);
-            // Save rax (flags image) — we need it for multiple tests.
-            emit_byte(0x50);  // push rax
-            // Fixed flag conversion.
-            // x86 UCOMISD sets: unordered (PF=1,CF=1,ZF=1), less (CF=1),
-            //                    equal (ZF=1), greater (none).
-            // We use a priority chain: check PF first (unordered), then
-            // CF (less), then ZF (equal), else greater. Each cmovne only
-            // fires if RDX is still 0 (i.e., no higher-priority case matched).
-            // We use cmovne (ZF=0) because `test` sets ZF=0 when the bit
-            // IS set (i.e., the flag IS 1).
-            //
-            // But the old chain had a bug: if unordered (PF=1,CF=1,ZF=1),
-            // all three cmovne would fire, and the last one (equal=0x60000000)
-            // would overwrite the correct unordered value (0x30000000).
-            //
-            // Fix: use a priority chain where each cmov only fires if RDX
-            // is still 0. We do this by checking RDX after each set.
-            //
-            // Simpler approach: use conditional jumps (je/jne) to build
-            // a proper if-else chain. This is slightly more code but
-            // unambiguously correct.
-            // Default: RDX = 0x20000000 (greater → C=1)
-            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x20000000));
-            // Fixed flag conversion using clean if-else chain.
-            // After `test rax, bit`:
-            //   ZF=1 iff (rax & bit) == 0 (flag bit is 0)
-            //   ZF=0 iff (rax & bit) != 0 (flag bit is 1)
-            // JNZ (0x5) jumps when ZF=0, i.e., when the flag bit IS set.
-            // We use JNZ to jump OVER the value-set block when the condition
-            // is NOT met (flag bit is 0), so the default/previous value stays.
-            // if PF=1 (unordered): RDX = 0x30000000, then jmp done
-            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x04); // test rax, 4 (PF bit)
-            size_t jz_skip1 = emit_jcc_rel32_placeholder(0x4);  // JZ: PF=0, skip
-            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x30000000));
-            size_t jmp_done1 = emit_jmp_rel32_placeholder();
-            size_t after_pf = code_buf_used_;
-            patch_jcc_rel32(jz_skip1, static_cast<int32_t>(after_pf - (jz_skip1 + 6)));
-            // if CF=1 (less): RDX = 0x80000000 (N=1)
-            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x01); // test rax, 1 (CF)
-            size_t jz_skip2 = emit_jcc_rel32_placeholder(0x4);  // JZ: CF=0, skip
-            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x80000000));
-            size_t jmp_done2 = emit_jmp_rel32_placeholder();
-            size_t after_cf = code_buf_used_;
-            patch_jcc_rel32(jz_skip2, static_cast<int32_t>(after_cf - (jz_skip2 + 6)));
-            // if ZF=1 (equal): RDX = 0x60000000 (Z=1, C=1)
-            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x40); // test rax, 0x40 (ZF)
-            size_t jz_skip3 = emit_jcc_rel32_placeholder(0x4);  // JZ: ZF=0, skip
-            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x60000000));
-            size_t done_flags = code_buf_used_;
-            patch_jcc_rel32(jz_skip3, static_cast<int32_t>(done_flags - (jz_skip3 + 6)));
-            patch_jmp_rel32(jmp_done1, static_cast<int32_t>(done_flags - (jmp_done1 + 5)));
-            patch_jmp_rel32(jmp_done2, static_cast<int32_t>(done_flags - (jmp_done2 + 5)));
-            emit_byte(0x58);  // pop rax (discard)
+            // Branch on the compare's own flags (MOV leaves them intact):
+            // unordered sets PF, CF and ZF, so PF is tested first, then CF
+            // (less), then ZF (equal); none set is greater. The outcome is
+            // usually predictable, which made this beat a branchless select;
+            // reading the flags through pushfq was 15% of an audio mixer's ops.
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x20000000));     // greater: C
+            const size_t to_unordered = emit_jcc_rel32_placeholder(0xA);  // JP
+            const size_t to_less = emit_jcc_rel32_placeholder(0x2);       // JB
+            const size_t greater_done = emit_jcc_rel32_placeholder(0x5);  // JNE
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x60000000));     // equal: Z, C
+            const size_t equal_done = emit_jmp_rel32_placeholder();
+            patch_jcc_rel32(to_unordered, static_cast<int32_t>(code_buf_used_ - (to_unordered + 6)));
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x30000000));     // unordered: C, V
+            const size_t unordered_done = emit_jmp_rel32_placeholder();
+            patch_jcc_rel32(to_less, static_cast<int32_t>(code_buf_used_ - (to_less + 6)));
+            emit_mov_imm32_zext(RDX, host_from_arm_nzcv(0x80000000));     // less: N
+            patch_jcc_rel32(greater_done, static_cast<int32_t>(code_buf_used_ - (greater_done + 6)));
+            patch_jmp_rel32(equal_done, static_cast<int32_t>(code_buf_used_ - (equal_done + 5)));
+            patch_jmp_rel32(unordered_done, static_cast<int32_t>(code_buf_used_ - (unordered_done + 5)));
             emit_store32(CPU_REG, NZCV_OFF, RDX);  // RDX holds the whole nzcv_host image
             if (skip_compare) patch_jmp_rel32(skip_compare,
                 static_cast<int32_t>(code_buf_used_ - (skip_compare + 5)));
