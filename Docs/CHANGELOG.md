@@ -52,6 +52,14 @@ names the library, and ASTC transcoding about four times faster in a real game.
   (2026-11-11): the first step towards an Android Zygote, whose children never exec. A child ran a warmed loop at the
   parent's speed (0.0051 s against 0.0050 s) where it used to take 0.57 s.
 
+### Fixed (poll and select around signals)
+
+- `ppoll` and `pselect6` returned -1, which a guest reads as EPERM, when a host signal no guest handler takes (a
+  child's SIGCHLD) interrupted the wait; `timerfd_settime` and `timerfd_gettime` did the same on any failure
+  (2026-11-11). The waits now go on for the rest of their timeout, return EINTR only after a guest handler ran, and
+  every failure returns its errno. `pselect6` read its timeout's nanoseconds as microseconds, so a 0.4 s timeout
+  waited 400 s. Found when a session Zygote died of the EPERM in its own poll.
+
 ### Added (a Zygote identity for guest processes)
 
 - `--android-zygote` starts an Android-runtime process as uid 0 that cannot open Binder; each fork child drops once to

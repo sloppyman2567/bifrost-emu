@@ -7,7 +7,10 @@
   FdTable before a host call. Compare the concrete failing syscall with the native kernel or
   a trusted reference before adding compatibility behavior.
 - Preserve Linux fd/poll/epoll ownership and timeout semantics. A ready socket
-  must not lose readiness when translating guest event structures or masks.
+  must not lose readiness when translating guest event structures or masks. A failed host call returns `-errno`, never
+  its `-1` (the guest reads EPERM). A wait (`ppoll`, `pselect6`) interrupted by a signal that no guest handler takes
+  keeps waiting for the rest of its timeout; it returns EINTR only after a handler ran. `pselect6`'s timeout is a
+  timespec. `test_poll_signals` covers both waits.
 - `spawn_thread` writes `CLONE_PARENT_SETTID` and `CLONE_CHILD_SETTID` before the child can run, as the kernel does: a new
   thread reads its own tid at once (musl's `__tl_lock` misreads tid 0), and the word may lie in memory a later thread reuses.
 - Thread `exit` writes only `clear_child_tid`, as the kernel's `mm_release` does, and that is the last guest write of the

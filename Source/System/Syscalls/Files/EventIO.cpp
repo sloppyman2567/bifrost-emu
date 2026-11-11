@@ -122,9 +122,9 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int nfds = static_cast<int>(a0);
             struct timeval tv;
             struct timeval* tvp = nullptr;
-            if (a4) {
+            if (a4) {  // pselect6 takes a timespec (nanoseconds); host select a timeval (microseconds)
                 tv.tv_sec  = (time_t)mem_.load<uint64_t>(a4);
-                tv.tv_usec = (suseconds_t)mem_.load<uint64_t>(a4 + 8);
+                tv.tv_usec = (suseconds_t)(mem_.load<uint64_t>(a4 + 8) / 1000);
                 tvp = &tv;
             }
             int r;
@@ -155,8 +155,9 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (r >= 0 || errno != EINTR) break;
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
-                break;  // no signal delivered, return -EINTR
+                // No guest handler ran (a host-only signal): Linux keeps waiting; select left the time remaining in tv.
             }
+            const int wait_errno = errno;  // -1 is EPERM to the guest: a failure returns -errno
             if (r >= 0) {
                 auto write_back = [&](uint64_t addr, fd_set* set) {
                     std::vector<uint8_t> buf(128, 0);
@@ -171,7 +172,8 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (a2) write_back(a2, &wfds);
                 if (a3) write_back(a3, &efds);
             }
-            ret_host(r);
+            if (r < 0) ret_err(wait_errno);
+            else ret_host(r);
             return 0;
         }
         case 73: { // ppoll(fds, nfds, ts, sigmask) — aarch64 syscall 73
@@ -220,8 +222,9 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             int r;
             const auto poll_start = std::chrono::steady_clock::now();
+            int remaining_ms = timeout_ms;
             while (true) {
-                int wait_ms = timeout_ms;
+                int wait_ms = remaining_ms;
                 if (virtual_audio) {
                     bool ready = false;
                     for (int i = 0; i < nfds; ++i)
@@ -245,8 +248,15 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (r >= 0 || errno != EINTR) break;
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
-                break;  // no signal delivered, return -EINTR
+                // No guest handler ran (a host-only signal): Linux keeps waiting for the rest of the timeout.
+                if (timeout_ms > 0) {
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - poll_start).count();
+                    if (elapsed >= timeout_ms) { r = 0; break; }
+                    remaining_ms = static_cast<int>(timeout_ms - elapsed);
+                }
             }
+            const int wait_errno = errno;  // -1 is EPERM to the guest: a failure returns -errno
             for (int i = 0; i < nfds; i++) {
                 mem_.store<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 6, pfds[i].revents);
             }
@@ -267,7 +277,8 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                 }
             }
-            ret_host(r);
+            if (r < 0) ret_err(wait_errno);
+            else ret_host(r);
             return 0;
         }
         case 85: { // timerfd_create(clockid, flags) — aarch64 syscall 85
@@ -290,7 +301,8 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
             newv.it_value.tv_sec     = static_cast<time_t>(mem_.load<uint64_t>(a2 + 16));
             newv.it_value.tv_nsec    = static_cast<long>(mem_.load<uint64_t>(a2 + 24));
             int r = ::timerfd_settime(hfd, static_cast<int>(a1), &newv, a3 ? &oldv : nullptr);
-            if (r == 0 && a3) {
+            if (r < 0) { ret_errno(); return 0; }
+            if (a3) {
                 mem_.store<uint64_t>(a3, static_cast<uint64_t>(oldv.it_interval.tv_sec));
                 mem_.store<uint64_t>(a3 + 8, static_cast<uint64_t>(oldv.it_interval.tv_nsec));
                 mem_.store<uint64_t>(a3 + 16, static_cast<uint64_t>(oldv.it_value.tv_sec));
@@ -304,7 +316,8 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
             if (hfd < 0) { ret_err(EBADF); return 0; }
             struct itimerspec cur;
             int r = ::timerfd_gettime(hfd, &cur);
-            if (r == 0 && a1) {
+            if (r < 0) { ret_errno(); return 0; }
+            if (a1) {
                 mem_.store<uint64_t>(a1, static_cast<uint64_t>(cur.it_interval.tv_sec));
                 mem_.store<uint64_t>(a1 + 8, static_cast<uint64_t>(cur.it_interval.tv_nsec));
                 mem_.store<uint64_t>(a1 + 16, static_cast<uint64_t>(cur.it_value.tv_sec));
