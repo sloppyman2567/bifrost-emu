@@ -20,8 +20,8 @@ there (guided provisioning, update/reinstall) remain in progress. Changes made a
 under their own headings: game-window visibility, fullscreen and a remembered size, Activity relaunch on a resize, setting up
 from the library, built-in per-app settings, 4 GiB packages, a realm idle timeout, the AAudio write fix, NEON `LD2` to `LD4` and
 `ST2` to `ST4` in the block, the project site, ASTC textures through BC7 on hosts without ASTC (with a lowest-priority,
-cached transcoder), a swapchain acquire that no longer re-uploads the frame, a faster `/proc/self/pagemap` and a crash line that
-names the library.
+cached transcoder), a swapchain acquire that no longer re-uploads the frame, a faster `/proc/self/pagemap`, a crash line that
+names the library, and ASTC transcoding about four times faster in a real game.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
@@ -45,6 +45,20 @@ names the library.
   a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
+
+### Changed (ASTC textures load faster)
+
+- The ASTC-to-BC7 transcoder read the game's staging memory in place. That memory is usually a host-visible type without
+  `HOST_CACHED` (write-combined system memory, or VRAM through the BAR), where ordinary loads are uncached: hashing a texture
+  for the cache read 86 MB/s (7 MB/s from the BAR) on an RX 7600, and the decoder then read it all again. A live profile of
+  Zenless Zone Zero's loading screen had 44% of the process stalled on those two loads. Each upload is now copied once into
+  cached memory with streaming loads (SSE4.1 `MOVNTDQA` when the CPU has it), 5.1 GB/s from that memory (371 MB/s from the
+  BAR), and hashed and decoded from the copy. The cache key's hash runs four independent lanes.
+- The BC7 encoder runs 67% faster per thread (4.65 to 7.75 Mpix/s on six game screenshots) with output byte-identical to
+  before: distances to four palette entries per SSE2 `PMADDWD`, integer partition sums without branches, partitions whose
+  lower bound (trace minus the Frobenius norm) cannot place skipped, no libm rounding call and 64-bit block packing.
+- Zenless Zone Zero's first 150 s (unattended, about 3,100 uploads and 37 MiB of ASTC each run) spent 2.5 s transcoding
+  instead of 10.5 s. `BIFROST_ASTC_STATS` time now includes the copy.
 
 ### Changed (fewer host instructions per block in the JIT)
 

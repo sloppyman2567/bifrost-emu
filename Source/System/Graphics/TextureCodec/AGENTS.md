@@ -21,11 +21,15 @@ guest-memory types here; the Vulkan thunk calls these.
 - The encoder produces modes 0, 1, 2, 3, 6 and 7 from one mode table and one fitter. An opaque block never gains
   transparency (mode 6 forces its p-bits). A flat colour is within one level per channel, not exact: a p-bit is shared
   by all channels of an endpoint. `Bc7Options::accept_error` trades speed for quality; the defaults were chosen from a
-  sweep on game screenshots (about 4.5 to 5.5 Mpix/s per thread at 46 to 52 dB against the decoded source).
+  sweep on game screenshots (46 to 52 dB against the source; 7.75 Mpix/s per thread over six screenshots on a 5800X3D).
+- The SSE2 index search (`assign_indices_n`, four palette distances per `PMADDWD`), the integer partition moments and the
+  partition bound in `rank_partitions` (a partition is skipped only when trace minus the Frobenius norm already reaches the
+  last kept score) are exact: output was byte-identical to the scalar encoder on six game screenshots. Keep any further
+  speed change exact, or treat it as a quality change and measure it.
 - `transcode_astc_to_bc7` works in strips of lcm(4, block height) rows so temporary memory is a few hundred kilobytes
   per thread, and its helper threads run at nice 19 so they only take idle cycles; it repeats edge texels into partial
-  BC7 blocks. `Bc7Cache` keeps finished transcodes under a 128-bit hash of the blocks and the shape (size, footprint,
-  colour space), least recently used out first, never holding an entry above a quarter of its capacity. All functions
+  BC7 blocks. `Bc7Cache` keeps finished transcodes under a 128-bit hash of the blocks (four multiply-xorshift lanes) and the
+  shape (size, footprint, colour space), least recently used out first, never holding an entry above a quarter of its capacity. All functions
   are reentrant (static tables only).
 
 ## Work Guidance

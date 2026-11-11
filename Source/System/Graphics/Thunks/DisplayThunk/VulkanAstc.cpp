@@ -8,6 +8,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <immintrin.h>
+#include <memory>
 #include <thread>
 
 namespace arm64emu {
@@ -36,6 +39,45 @@ void note_once(const char* what) {
 
 constexpr size_t kBlockBytes = 32u << 20;   // scratch blocks are this big unless one upload needs more
 constexpr size_t kAlign = 256;
+
+// Staging memory is usually a host-visible type without HOST_CACHED (write-combined system memory, or VRAM through the
+// BAR), where every ordinary load is uncached: hashing a texture in place read 86 MB/s (7 MB/s from the BAR) on an
+// RX 7600, and the decoder then read it all again. Streaming loads (MOVNTDQA) fetch whole lines from such memory:
+// one copy into cached memory ran at 5.1 GB/s (371 MB/s from the BAR). On cached memory they are ordinary loads.
+__attribute__((target("sse4.1"))) void stream_copy_sse41(uint8_t* dst, const uint8_t* src, size_t n) {
+    size_t head = (16 - (reinterpret_cast<uintptr_t>(src) & 15)) & 15;
+    head = std::min(head, n);
+    std::memcpy(dst, src, head);
+    size_t i = head;
+    for (; i + 64 <= n; i += 64) {
+        const __m128i x0 = _mm_stream_load_si128(reinterpret_cast<__m128i*>(const_cast<uint8_t*>(src + i)));
+        const __m128i x1 = _mm_stream_load_si128(reinterpret_cast<__m128i*>(const_cast<uint8_t*>(src + i + 16)));
+        const __m128i x2 = _mm_stream_load_si128(reinterpret_cast<__m128i*>(const_cast<uint8_t*>(src + i + 32)));
+        const __m128i x3 = _mm_stream_load_si128(reinterpret_cast<__m128i*>(const_cast<uint8_t*>(src + i + 48)));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), x0);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i + 16), x1);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i + 32), x2);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i + 48), x3);
+    }
+    std::memcpy(dst + i, src + i, n - i);
+}
+
+void copy_from_mapping(uint8_t* dst, const uint8_t* src, size_t n) {
+    static const bool sse41 = __builtin_cpu_supports("sse4.1");
+    if (sse41) stream_copy_sse41(dst, src, n);
+    else std::memcpy(dst, src, n);
+}
+
+// The copy of one upload's ASTC blocks, kept per submitting thread so uploads do not allocate.
+struct SourceCopy {
+    std::unique_ptr<uint8_t[]> data;
+    size_t capacity = 0;
+    uint8_t* reserve(size_t n) {
+        if (n > capacity) { data.reset(new uint8_t[n]); capacity = n; }
+        return data.get();
+    }
+    void trim() { if (capacity > (64u << 20)) { data.reset(); capacity = 0; } }  // one huge upload is not kept
+};
 
 }  // namespace
 
@@ -291,14 +333,21 @@ struct VulkanAstc::State {
     void transcode(const Pending& p) {
         const size_t rows = (p.height + p.block_h - 1) / p.block_h;
         const size_t need = (p.layers - 1) * p.src_layer_pitch + rows * p.src_row_pitch;
-        const bool ok = with_source(p.src_buffer, p.src_offset, need, [&](const uint8_t* src) {
+        // Copied out first (see copy_from_mapping): the codec reads every block at least twice.
+        const auto t0 = std::chrono::steady_clock::now();
+        thread_local SourceCopy copy;
+        uint8_t* const src = copy.reserve(need);
+        const bool ok = with_source(p.src_buffer, p.src_offset, need, [&](const uint8_t* mapped) {
+            copy_from_mapping(src, mapped, need);
+        });
+        if (ok) {
             texcodec::Bc7Options options;
             for (uint32_t l = 0; l < p.layers; l++) {
                 const texcodec::AstcRegion region{src + l * p.src_layer_pitch, p.src_row_pitch, p.block_w, p.block_h, p.srgb,
                                                   static_cast<int>(p.width), static_cast<int>(p.height)};
-                const auto t0 = std::chrono::steady_clock::now();
                 texcodec::transcode_astc_to_bc7_cached(region, options, threads(), cache.get(), p.scratch->base + p.dst_offset + l * p.dst_layer_bytes);
-                busy_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+                if (l + 1 == p.layers)  // the copy and every layer
+                    busy_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
                 source_bytes += rows * p.src_row_pitch;
                 output_bytes += p.dst_layer_bytes;
                 if (dbg().astc_stats && transcodes++ % 64 == 63) {
@@ -309,7 +358,8 @@ struct VulkanAstc::State {
                                  static_cast<unsigned long long>(st.misses), st.bytes / 1048576.0);
                 }
             }
-        });
+        }
+        copy.trim();
         if (!ok) note_once("an ASTC upload's staging memory cannot be read on the host: the texture stays blank");
     }
 

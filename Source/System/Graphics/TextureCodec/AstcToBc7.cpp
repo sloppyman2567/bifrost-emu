@@ -101,23 +101,39 @@ struct CacheKey {
 };
 struct CacheKeyHash { size_t operator()(const CacheKey& k) const { return static_cast<size_t>(k.h1 ^ (k.h2 * 0x9E3779B97F4A7C15ull)); } };
 
-// Two independent multiply-xorshift lanes over the blocks of each row (the row padding is not part of the content).
+uint64_t fmix64(uint64_t x) {
+    x ^= x >> 33; x *= 0xFF51AFD7ED558CCDull;
+    x ^= x >> 33; x *= 0xC4CEB9FE1A85EC53ull;
+    return x ^ (x >> 33);
+}
+
+// Four multiply-xorshift lanes, word k of each row in lane k % 4 (the row padding is not part of the content). Every
+// step of a lane is invertible, so blocks that differ in one lane's words always give different keys. One lane over
+// every word was bound by its multiply chain at about 5 GB/s; four independent lanes are not.
 CacheKey make_key(const AstcRegion& s) {
     const int blocks_x = (s.width + s.block_w - 1) / s.block_w, rows = (s.height + s.block_h - 1) / s.block_h;
     CacheKey k;
     k.shape = (static_cast<uint64_t>(s.block_w) << 56) | (static_cast<uint64_t>(s.block_h) << 48) |
               (static_cast<uint64_t>(s.srgb) << 47) | (static_cast<uint64_t>(s.width) << 24) | static_cast<uint64_t>(s.height);
-    uint64_t a = 0x243F6A8885A308D3ull ^ k.shape, b = 0x13198A2E03707344ull + k.shape;
+    uint64_t lane[4] = {0x243F6A8885A308D3ull ^ k.shape, 0x13198A2E03707344ull, 0xA4093822299F31D0ull, 0x082EFA98EC4E6C89ull};
+    constexpr uint64_t kMul = 0x9E3779B97F4A7C15ull;
+    const size_t words = static_cast<size_t>(blocks_x) * 2;  // two per 16-byte block
     for (int r = 0; r < rows; r++) {
         const uint8_t* row = s.blocks + static_cast<size_t>(r) * s.row_pitch;
-        for (int w = 0; w < blocks_x * 2; w++) {
+        size_t w = 0;
+        for (; w + 4 <= words; w += 4) {
+            uint64_t v[4];
+            std::memcpy(v, row + w * 8, 32);
+            for (int l = 0; l < 4; l++) { lane[l] = (lane[l] ^ v[l]) * kMul; lane[l] ^= lane[l] >> 29; }
+        }
+        for (int l = 0; w < words; w++, l++) {  // a row of an odd number of blocks: its last block
             uint64_t v;
-            std::memcpy(&v, row + static_cast<size_t>(w) * 8, 8);
-            a = (a ^ v) * 0x9E3779B97F4A7C15ull; a ^= a >> 29;
-            b = (b + v) * 0xC2B2AE3D27D4EB4Full; b ^= b >> 31;
+            std::memcpy(&v, row + w * 8, 8);
+            lane[l] = (lane[l] ^ v) * kMul; lane[l] ^= lane[l] >> 29;
         }
     }
-    k.h1 = a; k.h2 = b;
+    k.h1 = fmix64(lane[0] ^ fmix64(lane[1] + k.shape));
+    k.h2 = fmix64(lane[2] ^ fmix64(lane[3] + static_cast<uint64_t>(rows)));
     return k;
 }
 

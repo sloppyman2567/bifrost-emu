@@ -154,13 +154,15 @@
   format and the image is recorded; `vkCmdCopyBufferToImage`(2) is redirected to a BC7 scratch buffer (a few 32 MiB
   host-visible blocks per device, one `VkBuffer` each) and the ASTC regions are transcoded at `vkQueueSubmit`(2),
   after `vk_sync_push_all`, from the staging memory's host mapping (the memory is mapped briefly when the guest
-  has already unmapped it). Scratch lives while the command buffer's pending list does: it ends at begin, reset,
+  has already unmapped it). Each upload is first copied into a per-thread cached buffer (`copy_from_mapping`, streaming
+  loads): staging is usually an uncached host-visible type, and the codec reads every block at least twice, so never
+  hand it the mapping itself. Scratch lives while the command buffer's pending list does: it ends at begin, reset,
   free, pool reset or destroy, device destroy; `vkCmdExecuteCommands` adopts a secondary's copies. Regions need
   4-texel alignment (or the mip edge) and are dropped with a once-only note otherwise. Not covered: reading back,
   copying or blitting an ASTC image, ASTC render targets, 3D/HDR ASTC, resubmitting an upload command buffer while the
   first submit still runs, and the GL/GLES path. `BIFROST_VK_NO_ASTC=1` turns it off, `BIFROST_ASTC_THREADS` sets the
   transcoder's threads, `BIFROST_ASTC_CACHE_MB` sizes the cache of finished transcodes (re-uploads skip the encoder)
-  and `BIFROST_ASTC_STATS=1` logs volume and hits. The hand arm for `vkGetPhysicalDevice*Properties2/Features2` takes only the two-argument
+  and `BIFROST_ASTC_STATS=1` logs volume, time (copy included) and hits. The hand arm for `vkGetPhysicalDevice*Properties2/Features2` takes only the two-argument
   shapes. Covered by `vulkan_astc` (guest, through the thunk) and `test-astc-bc7-transcode` (host).
 - GL/GLES and Vulkan mapping APIs return guest bounces, never raw host mapping
   pointers. Preserve mapping lifetime, explicit flush/invalidate, pre-submit

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <emmintrin.h>
 
 namespace arm64emu::texcodec {
 namespace {
@@ -62,7 +63,10 @@ Quant quantize_endpoint(const float* v, int channels, const Mode& m, int p) {
             continue;
         }
         const float scale = static_cast<float>((1 << bits) - 1) / 255.f;
-        int guess = static_cast<int>(std::lround((v[c] * scale - (p >= 0 ? p : 0)) / (p >= 0 ? 2.f : 1.f)));
+        // lround, then clamp. Truncating x + 0.5 (exact in double) is floor(x + 0.5) = lround(x) for x >= 0; below
+        // zero both clamp to 0. This avoided a libm call per channel.
+        const float x = (v[c] * scale - (p >= 0 ? p : 0)) / (p >= 0 ? 2.f : 1.f);
+        int guess = static_cast<int>(static_cast<double>(x) + 0.5);
         guess = std::clamp(guess, 0, maxq);
         int best_q = guess;
         float best_d = 1e30f;
@@ -111,27 +115,52 @@ Endpoints quantize_pair(const float* a, const float* b, int channels, const Mode
     return ep;
 }
 
-// Nearest palette entry for every pixel of a subset. Returns the squared error.
-int assign_indices(const int (*px)[4], const uint8_t* ids, int n, int channels, int ib, const uint8_t* e0,
-                   const uint8_t* e1, uint8_t* idx) {
-    const int count = 1 << ib;
-    const uint8_t* w = weights(ib);
-    int pal[16][4];
-    for (int k = 0; k < count; k++)
-        for (int c = 0; c < channels; c++) pal[k][c] = ((64 - w[k]) * e0[c] + w[k] * e1[c] + 32) >> 6;
+// Nearest palette entry for every pixel of a subset (the first of equal ones). Returns the squared error. The distances
+// to four entries come from two PMADDWD: one register holds the entries' (R, G) pairs, the other (B, A), as int16
+// differences; their squares fit int32 exactly. Alpha differences are zero when `channels` is 3.
+template <int Groups>
+int assign_indices_n(const int (*px)[4], const uint8_t* ids, int n, int channels, const uint8_t* w, const uint8_t* e0,
+                     const uint8_t* e1, uint8_t* idx) {
+    constexpr int count = Groups * 4;
+    alignas(16) int16_t rg[count][2], ba[count][2];
+    for (int k = 0; k < count; k++) {
+        int pal[4] = {0, 0, 0, 0};
+        for (int c = 0; c < channels; c++) pal[c] = ((64 - w[k]) * e0[c] + w[k] * e1[c] + 32) >> 6;
+        rg[k][0] = static_cast<int16_t>(pal[0]); rg[k][1] = static_cast<int16_t>(pal[1]);
+        ba[k][0] = static_cast<int16_t>(pal[2]); ba[k][1] = static_cast<int16_t>(pal[3]);
+    }
+    __m128i prg[Groups], pba[Groups];
+    for (int g = 0; g < Groups; g++) {
+        prg[g] = _mm_load_si128(reinterpret_cast<const __m128i*>(rg[4 * g]));
+        pba[g] = _mm_load_si128(reinterpret_cast<const __m128i*>(ba[4 * g]));
+    }
     int total = 0;
     for (int i = 0; i < n; i++) {
         const int* p = px[ids[i]];
-        int best = 1 << 30, best_k = 0;
-        for (int k = 0; k < count; k++) {
-            int d = 0;
-            for (int c = 0; c < channels; c++) { const int t = p[c] - pal[k][c]; d += t * t; }
-            if (d < best) { best = d; best_k = k; }
+        const int a = channels > 3 ? p[3] : 0;
+        const __m128i xrg = _mm_set1_epi32(static_cast<int>((static_cast<uint32_t>(p[1]) << 16) | static_cast<uint32_t>(p[0])));
+        const __m128i xba = _mm_set1_epi32(static_cast<int>((static_cast<uint32_t>(a) << 16) | static_cast<uint32_t>(p[2])));
+        alignas(16) int d[count];
+        for (int g = 0; g < Groups; g++) {
+            const __m128i drg = _mm_sub_epi16(xrg, prg[g]), dba = _mm_sub_epi16(xba, pba[g]);
+            _mm_store_si128(reinterpret_cast<__m128i*>(d + 4 * g),
+                            _mm_add_epi32(_mm_madd_epi16(drg, drg), _mm_madd_epi16(dba, dba)));
         }
+        int best = d[0], best_k = 0;
+        for (int k = 1; k < count; k++)
+            if (d[k] < best) { best = d[k]; best_k = k; }
         idx[i] = static_cast<uint8_t>(best_k);
         total += best;
     }
     return total;
+}
+
+int assign_indices(const int (*px)[4], const uint8_t* ids, int n, int channels, int ib, const uint8_t* e0,
+                   const uint8_t* e1, uint8_t* idx) {
+    const uint8_t* w = weights(ib);
+    if (ib == 2) return assign_indices_n<1>(px, ids, n, channels, w, e0, e1, idx);
+    if (ib == 3) return assign_indices_n<2>(px, ids, n, channels, w, e0, e1, idx);
+    return assign_indices_n<4>(px, ids, n, channels, w, e0, e1, idx);
 }
 
 // Least-squares endpoints for fixed indices; false when the indices do not span a line.
@@ -279,53 +308,105 @@ void try_mode(int mode, int partition, const int (*px)[4], int channels, int rou
     if (c.err < best.err) best = c;
 }
 
-// How well each subset of a partition fits one line, summed: the part of the colour variance off the principal axis.
-double partition_estimate(const int (*px)[4], int channels, const uint8_t* subset_of, int ns) {
-    double total = 0;
-    for (int s = 0; s < ns; s++) {
-        double sum[4] = {}, sq[4][4] = {};
-        int n = 0;
-        for (int i = 0; i < 16; i++) {
-            if (subset_of[i] != s) continue;
-            n++;
-            for (int c = 0; c < channels; c++) {
-                sum[c] += px[i][c];
-                for (int d = c; d < channels; d++) sq[c][d] += static_cast<double>(px[i][c]) * px[i][d];
-            }
+// Colour sums of a set of pixels, as 16 int32: the four channel sums, the ten channel products (upper triangle, see
+// kSq), the pixel count, and a zero. Pixels are summed four lanes at a time under a mask, with no branch on the subset.
+struct alignas(16) Moments { int v[16]; };
+constexpr int kSq[4][4] = {{4, 5, 6, 7}, {5, 8, 9, 10}, {6, 9, 11, 12}, {7, 10, 12, 13}};
+constexpr int kCount = 14;
+
+// A subset's colour covariance. The sums are integers, exactly the values the double accumulation they replaced
+// produced, so the estimate below is unchanged. False below two pixels (the estimate is then 0).
+struct Covariance { double c[4][4]; double trace = 0, frobenius = 0; };
+bool subset_covariance(const Moments& m, int channels, Covariance& out) {
+    const int n = m.v[kCount];
+    if (n < 2) return false;
+    double sq = 0;
+    for (int c = 0; c < channels; c++)
+        for (int d = c; d < channels; d++) {
+            const double v = static_cast<double>(m.v[kSq[c][d]]) -
+                             static_cast<double>(m.v[c]) * static_cast<double>(m.v[d]) / n;
+            out.c[c][d] = out.c[d][c] = v;
+            sq += c == d ? v * v : 2 * v * v;
         }
-        if (n < 2) continue;
-        double cov[4][4], trace = 0;
-        for (int c = 0; c < channels; c++)
-            for (int d = c; d < channels; d++) { cov[c][d] = cov[d][c] = sq[c][d] - sum[c] * sum[d] / n; }
-        for (int c = 0; c < channels; c++) trace += cov[c][c];
-        int best = 0;
-        for (int c = 1; c < channels; c++) if (cov[c][c] > cov[best][best]) best = c;
-        double v[4] = {};
-        for (int c = 0; c < channels; c++) v[c] = cov[c][best];
-        double lambda = 0;
-        for (int it = 0; it < 3; it++) {
-            double t[4] = {}, len = 0;
-            for (int c = 0; c < channels; c++) for (int d = 0; d < channels; d++) t[c] += cov[c][d] * v[d];
-            for (int c = 0; c < channels; c++) len += t[c] * t[c];
-            len = std::sqrt(len);
-            if (len < 1e-9) break;
-            for (int c = 0; c < channels; c++) v[c] = t[c] / len;
-            lambda = len;
-        }
-        total += std::max(trace - lambda, 0.0);
-    }
-    return total;
+    for (int c = 0; c < channels; c++) out.trace += out.c[c][c];
+    out.frobenius = std::sqrt(sq);
+    return true;
 }
 
-// The `keep` best partitions of `ns` subsets, best first.
+// How well a subset fits one line: the part of its colour variance off the principal axis (power iteration).
+double subset_estimate(const Covariance& k, int channels) {
+    const auto& cov = k.c;
+    int best = 0;
+    for (int c = 1; c < channels; c++) if (cov[c][c] > cov[best][best]) best = c;
+    double v[4] = {};
+    for (int c = 0; c < channels; c++) v[c] = cov[c][best];
+    double lambda = 0;
+    for (int it = 0; it < 3; it++) {
+        double t[4] = {}, len = 0;
+        for (int c = 0; c < channels; c++) for (int d = 0; d < channels; d++) t[c] += cov[c][d] * v[d];
+        for (int c = 0; c < channels; c++) len += t[c] * t[c];
+        len = std::sqrt(len);
+        if (len < 1e-9) break;
+        for (int c = 0; c < channels; c++) v[c] = t[c] / len;
+        lambda = len;
+    }
+    return std::max(k.trace - lambda, 0.0);
+}
+
+// The `keep` best partitions of `ns` subsets, best first. Each partition sums the pixels of all subsets but the last,
+// which is the block's total minus the others.
 int rank_partitions(const int (*px)[4], int channels, int ns, int keep, int* out) {
     struct Scored { double score; int partition; };
     Scored top[8];
     int have = 0;
     keep = std::min(keep, 8);
+    __m128i pm[16][4];
+    __m128i total[4] = {_mm_setzero_si128(), _mm_setzero_si128(), _mm_setzero_si128(), _mm_setzero_si128()};
+    for (int i = 0; i < 16; i++) {
+        Moments m{};
+        for (int c = 0; c < channels; c++) {
+            m.v[c] = px[i][c];
+            for (int d = c; d < channels; d++) m.v[kSq[c][d]] = px[i][c] * px[i][d];
+        }
+        m.v[kCount] = 1;
+        for (int q = 0; q < 4; q++) {
+            pm[i][q] = _mm_load_si128(reinterpret_cast<const __m128i*>(m.v + 4 * q));
+            total[q] = _mm_add_epi32(total[q], pm[i][q]);
+        }
+    }
     const int partitions = 1 << kModes[ns == 2 ? 1 : 2].pb;
     for (int p = 0; p < partitions; p++) {
-        const double score = partition_estimate(px, channels, ns == 2 ? kPartition2[p] : kPartition3[p], ns);
+        const uint8_t* subset_of = ns == 2 ? kPartition2[p] : kPartition3[p];
+        __m128i acc[2][4] = {};
+        for (int i = 0; i < 16; i++)
+            for (int s = 0; s < ns - 1; s++) {
+                const __m128i mask = _mm_set1_epi32(-static_cast<int>(subset_of[i] == s));
+                for (int q = 0; q < 4; q++) acc[s][q] = _mm_add_epi32(acc[s][q], _mm_and_si128(mask, pm[i][q]));
+            }
+        Moments m[3];
+        for (int q = 0; q < 4; q++) {
+            __m128i last = total[q];
+            for (int s = 0; s < ns - 1; s++) {
+                _mm_store_si128(reinterpret_cast<__m128i*>(m[s].v + 4 * q), acc[s][q]);
+                last = _mm_sub_epi32(last, acc[s][q]);
+            }
+            _mm_store_si128(reinterpret_cast<__m128i*>(m[ns - 1].v + 4 * q), last);
+        }
+        // The iteration's lambda is a Rayleigh quotient, at most the largest eigenvalue and so at most the Frobenius
+        // norm: trace - norm bounds a subset's estimate from below. A partition whose bound already reaches the
+        // current last place cannot enter the list, so its iterations are skipped; the margin covers rounding. (An
+        // iteration that stops at its second step keeps |C v0| for an unnormalized v0, but |C v1| >= |C v0| / |v0| for
+        // symmetric C, so that stop means lambda < 1e-9 |v0| <= 1e-9 norm.)
+        Covariance cov[3];
+        bool used[3];
+        double bound = 0, scale = 1;
+        for (int s = 0; s < ns; s++) {
+            used[s] = subset_covariance(m[s], channels, cov[s]);
+            if (used[s]) { bound += std::max(cov[s].trace - cov[s].frobenius, 0.0); scale += cov[s].trace; }
+        }
+        if (have == keep && bound - 1e-9 * scale >= top[have - 1].score) continue;
+        double score = 0;
+        for (int s = 0; s < ns; s++) if (used[s]) score += subset_estimate(cov[s], channels);
         if (have < keep || score < top[have - 1].score) {
             int at = have < keep ? have++ : have - 1;
             top[at] = {score, p};
@@ -336,12 +417,18 @@ int rank_partitions(const int (*px)[4], int channels, int ns, int keep, int* out
     return have;
 }
 
+// Fields are written LSB first into a little-endian 128-bit block; no field is wider than 8 bits.
 struct BitWriter {
-    uint8_t b[16] = {};
+    uint64_t w[2] = {};
     int pos = 0;
     void put(uint32_t v, int n) {
-        for (int i = 0; i < n; i++, pos++)
-            if ((v >> i) & 1) b[pos >> 3] |= static_cast<uint8_t>(1u << (pos & 7));
+        const uint64_t x = v & ((1u << n) - 1);
+        if (pos >= 64) w[1] |= x << (pos - 64);
+        else {
+            w[0] |= x << pos;
+            if (pos + n > 64) w[1] |= x >> (64 - pos);
+        }
+        pos += n;
     }
 };
 
@@ -363,7 +450,8 @@ void pack(const Candidate& c, uint8_t* out) {
         for (int s = 1; s < m.ns; s++) anchor |= i == anchor_of(m, c.partition, s);
         w.put(c.idx[i], m.ib - (anchor ? 1 : 0));
     }
-    std::memcpy(out, w.b, 16);
+    static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "BitWriter stores its words little-endian");
+    std::memcpy(out, w.w, 16);
 }
 
 }  // namespace
