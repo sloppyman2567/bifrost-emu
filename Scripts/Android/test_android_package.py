@@ -2737,9 +2737,13 @@ class MicrogDexoptTests(unittest.TestCase):
         self.assertEqual(vdex.read_bytes(), b"vdex with the dex GmsCore.odex")
         self.assertFalse(os.access(vdex, os.W_OK))
         self.assertEqual(list((first / "data/local/tmp").iterdir()), [], "the compile scratch directory stayed")
-        vdex.chmod(0o644); vdex.write_bytes(b"ART's own verifier-only vdex")
+        shared = first / "system/priv-app/GmsCore/oat/arm64/GmsCore.vdex"
+        self.assertEqual(vdex.stat().st_ino, shared.stat().st_ino, "the roots do not share the compiled files")
+        # A replaced file (a writer creates a new one; nothing writes into the shared file) is linked again.
+        vdex.unlink(); vdex.write_bytes(b"ART's own verifier-only vdex")
         self.run_dexopt(second)
         self.assertEqual(vdex.read_bytes(), b"vdex with the dex GmsCore.odex")
+        self.assertEqual(vdex.stat().st_ino, shared.stat().st_ino)
         self.assertEqual(len(self.compiles), 2)
 
     def test_a_failure_is_not_retried_and_new_inputs_compile_again(self):
@@ -3016,6 +3020,40 @@ class SettingsIdentityTests(unittest.TestCase):
             (root / managed.PARSE_CACHE / "entry.bin").write_bytes(b"x")
             dex.write_text("launcher version four")
             self.assertFalse((prepare() / managed.PARSE_CACHE).exists())
+
+    def test_app_runtimes_link_one_read_only_image_and_keep_their_own_settings(self):
+        import json
+        import android_managed as managed
+        from android_settings import save
+        with tempfile.TemporaryDirectory(prefix="bifrost-image-") as temporary, ExitStack() as patches:
+            work = Path(temporary)
+            app, framework, adapters, dex, metadata, code = managed_runtime_fixture(work)
+            other = work / "other"; other.mkdir()
+            managed_runtime_patches(patches)
+            prepare = lambda target, mask=15: managed.prepare_root(target, metadata, code, None, framework,
+                                                                   work / "art", adapters, dex, mask)[0]
+            save(app, {"property.ro.kernel.qemu": "0"})
+            first, second = prepare(app), prepare(other)
+            for shared in ("system/build.prop", "system/bin/am"):
+                a, b = (first / shared).stat(), (second / shared).stat()
+                self.assertEqual((a.st_dev, a.st_ino), (b.st_dev, b.st_ino), shared + " is not shared")
+                self.assertGreaterEqual(a.st_nlink, 3)  # the image and both roots
+                self.assertFalse(os.access(first / shared, os.W_OK), shared + " is writable")
+            props = "debug_ramdisk/adb_debug.prop"
+            self.assertNotEqual((first / props).stat().st_ino, (second / props).stat().st_ino)
+            self.assertIn("ro.kernel.qemu=0", (first / props).read_text())
+            self.assertNotIn("ro.kernel.qemu=0", (second / props).read_text())
+            images = work / ".runtime-images"
+            key = json.loads((app / "managed/runtime.json").read_text())["image"]
+            self.assertEqual(json.loads((other / "managed/runtime.json").read_text())["image"], key)
+            self.assertFalse(os.access(images / key / "rootfs/system", os.W_OK), "the image's directories are writable")
+            prepare(other, mask=1)                 # another media setup: its own image; the first app still uses the old one
+            other_key = json.loads((other / "managed/runtime.json").read_text())["image"]
+            self.assertNotEqual(other_key, key)
+            self.assertEqual({path.name for path in images.iterdir() if not path.name.startswith(".")}, {key, other_key})
+            prepare(app, mask=1)                   # nothing uses the first image now
+            self.assertEqual({path.name for path in images.iterdir() if not path.name.startswith(".")}, {other_key})
+            self.assertEqual((app / "managed/rootfs" / props).read_text().count("ro.kernel.qemu=0"), 1)
 
     def test_concurrent_first_launches_share_a_persistent_user_key(self):
         from android_managed import settings_user_key, install_settings_key

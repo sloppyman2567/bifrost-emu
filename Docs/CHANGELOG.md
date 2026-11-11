@@ -46,6 +46,21 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (games share one copy of Android)
+
+- Each game used to get a full private copy of Android's system files, about 750 MB (2026-11-11). Games now share one
+  read-only copy per Asgard version, linked into each game's folder, as every app on a phone shares one system
+  partition; per-game settings and data stay private. Subway Surfers' folder went from 1.6 GB to 677 MB of its own, the
+  shared image is 904 MB once, and preparing a game after an update took 2.1 s instead of 2.9 to 3.8 s. The first launch
+  after this update converts each game's folder. Checked with the runtime tests, the microG and parse-cache launches and
+  Subway Surfers past Unity's splash in the checkout; not yet run from an installed Asgard.
+- Android's system folders are now read-only inside the emulator for Android apps, as on a device: writing, changing
+  permissions, owner, times or attributes there fails with "Read-only file system" (EROFS), and a hard link out of them
+  with EXDEV. A guest can therefore never change a file other games share.
+- Fixed: the extended-attribute calls (`setxattr` and the rest) ignored the sandbox, acting on the host path named by
+  the guest and treating a guest descriptor number as a host one; `fchown` did the latter for unknown descriptors. They
+  now resolve like every other file call.
+
 ### Fixed (a crash report after closing a game)
 
 - Closing a game window could end it as a crash (2026-11-11): Geometry Dash Lite, closed five seconds after it opened, died

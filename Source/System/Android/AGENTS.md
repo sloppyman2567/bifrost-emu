@@ -295,6 +295,13 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   must drop `BIFROST_ROOT`. `Scripts/Testing/test_apk_launch.sh` checks it with
   a stub Asgard; keep its argument order and its search list (`asgard_candidates`)
   in step with `asgard.py` and `Scripts/Setup/install-asgard.py`.
+- App runtimes share one read-only image per input set (`runtime_image`: framework, microG, adapters, media mask) under
+  `<state>/.runtime-images`: `prepare_root` hardlinks the files of `READONLY_PARTITIONS` from it (a copy where the
+  filesystem refuses a link) and copies everything else; image files and directories have no write permission and every
+  managed emulator runs with `READONLY_ENVIRONMENT`, so the guest gets EROFS there. Host code never writes into a file
+  below those partitions in a root: a per-app change replaces the file (unlink, then write) or belongs in the image's
+  build. Per-app settings stay outside them (`debug_ramdisk/adb_debug.prop`, `/data`). An image no `runtime.json`
+  names is pruned after a rebuild. `test_app_runtimes_link_one_read_only_image_and_keep_their_own_settings` covers it.
 - `Scripts/Setup/install-asgard.py` copies exactly what Asgard reads under its root
   (its `FILES` list); when a script or module starts reading a new root-relative
   path at run time, add it there. An installed tree is not writable at run time:

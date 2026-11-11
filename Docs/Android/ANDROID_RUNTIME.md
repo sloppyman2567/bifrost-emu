@@ -3320,7 +3320,20 @@ ART roots must already be provisioned as described above.
 Each package owns `managed/rootfs`, `managed/last-run.log` and
 `managed/last-logd.log` under its installed package directory. The runtime is
 cached by code, framework, adapter and launcher hashes; immutable runtime files
-are checked before reuse. Replacement copies `data/user`, `data/user_de` and
+are checked before reuse. Android's read-only partitions (`system`, `system_ext`,
+`product`, `vendor`, `apex`) are not copied into each root: `runtime_image` builds
+the framework with microG, the media configuration and Bifrost's adapters once per
+set of inputs under `<state>/.runtime-images` (files and directories without write
+permission), and each root hardlinks those files from it, copying only the rest.
+The emulator runs every managed process with `BIFROST_ROOT_READONLY` naming them,
+so a write, mode, owner, time or attribute change there fails with EROFS as on a
+device, and a guest can never change a file other roots share. Per-app settings
+live outside them (`debug_ramdisk/adb_debug.prop`, `/data`). Measured on Subway
+Surfers (2026-11-11): the image is 904 MB once and the app's own root 677 MB
+instead of a 1.6 GB copy; a rebuild against an existing image took 2.1 s instead
+of 2.9 to 3.8 s, of which 1.7 s is hashing the inventory again (a new link changes
+the shared files' change time, so the digest cache rehashes them once per rebuild
+and once per other app's next launch). Replacement copies `data/user`, `data/user_de` and
 `storage` before publishing the new root, preserving saves across runs and
 runtime upgrades. The installed package's verified root is kept separate.
 Every launch recreates the package's CE/DE data directories

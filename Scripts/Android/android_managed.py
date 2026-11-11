@@ -690,6 +690,105 @@ def remove_runtime(root):
     shutil.rmtree(root)
 
 
+# Android's read-only partitions. Every app's runtime links their files from one shared image per set of inputs
+# instead of copying them (about 750 MB per app), and the emulator refuses every change below them with EROFS
+# (BIFROST_ROOT_READONLY), as Android's read-only mounts do, so no guest can change a file other roots share.
+READONLY_PARTITIONS = ("system", "system_ext", "product", "vendor", "apex")
+READONLY_ENVIRONMENT = {"BIFROST_ROOT_READONLY": ":".join("/" + name for name in READONLY_PARTITIONS)}
+IMAGE_SCHEMA = 1
+
+
+def make_writable_tree(path):
+    for directory, _, _ in os.walk(path, followlinks=False):
+        directory = Path(directory)
+        if not directory.is_symlink(): directory.chmod(stat.S_IMODE(directory.lstat().st_mode) | 0o700)
+
+
+def runtime_image(state, framework, adapters, media_mask, inputs):
+    """The shared runtime image for `inputs` under <state>/.runtime-images, built once: the framework with microG,
+    the media configuration and Bifrost's adapters applied, then made read-only (files and directories without write
+    permission; image.json keeps the directories' original modes for the roots). Returns (rootfs, key)."""
+    key = hashlib.sha256(json.dumps({"schema": IMAGE_SCHEMA, **inputs}, sort_keys=True).encode()).hexdigest()[:32]
+    images = Path(state) / ".runtime-images"
+    image = images / key
+    if (image / "image.json").is_file(): return image / "rootfs", key
+    images.mkdir(parents=True, exist_ok=True)
+    import fcntl
+    with (images / ".lock").open("a+b") as lock:  # two apps' first launches after an update
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if (image / "image.json").is_file(): return image / "rootfs", key
+        staging = Path(tempfile.mkdtemp(prefix=".building-", dir=images))
+        try:
+            root = staging / "rootfs"
+            shutil.copytree(framework, root, symlinks=True)
+            android_microg.install(root)
+            from asgard import configure_media
+            configure_media(root, media_mask)
+            shutil.copy2(adapters / "managed/am", root / "system/bin/am")
+            shutil.copy2(adapters / "managed/zygote", root / "system/bin/bifrost-zygote")
+            install_managed_graphics(root, adapters / "managed")
+            directories = {}
+            for directory, _, files in os.walk(root, followlinks=False):
+                directory = Path(directory)
+                directories[str(directory.relative_to(root))] = stat.S_IMODE(directory.lstat().st_mode)
+                for name in files:
+                    path = directory / name
+                    if not path.is_symlink(): path.chmod(stat.S_IMODE(path.lstat().st_mode) & ~0o222)
+            (staging / "image.json").write_text(json.dumps(
+                {"schema": IMAGE_SCHEMA, "inputs": inputs, "directories": directories}, sort_keys=True) + "\n")
+            for directory, _, _ in os.walk(root, topdown=False, followlinks=False):
+                Path(directory).chmod(directories[str(Path(directory).relative_to(root))] & ~0o222)
+            staging.rename(image)
+        finally:
+            if staging.exists():
+                make_writable_tree(staging)
+                shutil.rmtree(staging, ignore_errors=True)
+    return image / "rootfs", key
+
+
+def link_runtime_image(image, fresh):
+    """Populate a new root from a runtime image: the read-only partitions' files hardlinked to the image's (copied
+    where the filesystem refuses a link), everything else copied and writable by its owner, directories with the
+    image's original modes."""
+    directories = json.loads((image.parent / "image.json").read_text())["directories"]
+    for directory, subdirectories, files in os.walk(image, followlinks=False):
+        source = Path(directory)
+        relative = source.relative_to(image)
+        target = fresh / relative
+        target.mkdir(exist_ok=True)
+        shared = len(relative.parts) > 0 and relative.parts[0] in READONLY_PARTITIONS
+        for name in [*files, *(d for d in subdirectories if (source / d).is_symlink())]:
+            path, copy = source / name, target / name
+            if path.is_symlink():
+                copy.symlink_to(os.readlink(path))
+                continue
+            if shared:
+                try:
+                    os.link(path, copy)
+                    continue
+                except OSError:
+                    pass
+            shutil.copy2(path, copy)
+            if not shared: copy.chmod(stat.S_IMODE(copy.stat().st_mode) | 0o200)
+    for directory, _, _ in os.walk(fresh, topdown=False, followlinks=False):
+        relative = str(Path(directory).relative_to(fresh))
+        if relative in directories: Path(directory).chmod(directories[relative])
+
+
+def prune_runtime_images(state, keep):
+    """Remove shared images no app's runtime uses. Roots keep their linked files whatever happens here."""
+    images = Path(state) / ".runtime-images"
+    if not images.is_dir(): return
+    used = {keep}
+    for stamp in Path(state).glob("*/managed/runtime.json"):
+        try: used.add(json.loads(stamp.read_text()).get("image"))
+        except (OSError, ValueError): pass
+    for image in images.iterdir():
+        if image.name in used or image.name.startswith(".") or image.is_symlink() or not image.is_dir(): continue
+        make_writable_tree(image)
+        shutil.rmtree(image, ignore_errors=True)
+
+
 def ensure_app_data(root, package):
     # installd creates CE/DE app data at every start; ContextImpl only creates
     # subdirectories and fails with ENOENT when the package directory is gone.
@@ -715,7 +814,8 @@ def image_properties(root, names, prefixes=()):
 
 def run_guest_tool(root, emu, guest_env, no_jit, binary, *args, timeout):
     """Run one image command-line tool (profman, dex2oat64) in the app root."""
-    environment = dict(os.environ, BIFROST_GUEST_ENV=";".join(f"{k}={v}" for k, v in guest_env.items()))
+    environment = dict(os.environ, **READONLY_ENVIRONMENT,
+                       BIFROST_GUEST_ENV=";".join(f"{k}={v}" for k, v in guest_env.items()))
     environment.pop("BIFROST_ROOT", None)
     command = [str(emu), *(["--no-jit"] if no_jit else []), "--android-runtime",
                "--rootfs", str(root), binary, *args]
@@ -900,8 +1000,12 @@ def microg_dexopt(state, root, emu, guest_env, no_jit=False):
         target.mkdir(parents=True, exist_ok=True)
         for name in names:
             (target / name).unlink(missing_ok=True)
-            shutil.copyfile(cache / name, target / name)
-            (target / name).chmod(0o444)
+            (cache / name).chmod(0o444)  # read-only like the partition it is linked into
+            try:
+                os.link(cache / name, target / name)  # one copy for every root
+            except OSError:
+                shutil.copyfile(cache / name, target / name)
+                (target / name).chmod(0o444)
 
 
 def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
@@ -1131,10 +1235,10 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         saved_parse_code = None
     with tempfile.TemporaryDirectory(prefix=".prepare-", dir=managed) as temporary:
         fresh = Path(temporary) / "rootfs"
-        shutil.copytree(framework, fresh, symlinks=True)
-        android_microg.install(fresh)
-        from asgard import configure_media
-        configure_media(fresh, media_mask)
+        image, image_key = runtime_image(app.parent, framework, adapters, media_mask, {
+            "framework": identity["framework"], "microg": identity["microg"],
+            "adapters": identity["adapters"], "media_mask": media_mask})
+        link_runtime_image(image, fresh)
         android_settings.install_properties(fresh, property_overrides)
         local = fresh / "data/local/tmp"
         local.mkdir(parents=True, exist_ok=True)
@@ -1145,9 +1249,6 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         shutil.copy2(dex, local / "launcher.dex")
         (local / "launcher.dex").chmod(0o444)  # ART rejects writable DEX for ordinary app UIDs.
         shutil.copy2(adapters / "libbifrost-activity.so", local / "libbifrost-activity.so")
-        shutil.copy2(adapters / "managed/am", fresh / "system/bin/am")
-        shutil.copy2(adapters / "managed/zygote", fresh / "system/bin/bifrost-zygote")
-        install_managed_graphics(fresh, adapters / "managed")
         install_settings_key(fresh, settings_key)
         # A system app's code is already in the provisioned image.
         if installed_root is not None:
@@ -1187,12 +1288,13 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
             if backup.exists(): backup.rename(root)
             raise
         pending = managed / ".runtime.json"
-        pending.write_text(json.dumps({"identity": identity, "immutable": immutable, "parse_cache_code": parse_code},
-                                      sort_keys=True) + "\n")
+        pending.write_text(json.dumps({"identity": identity, "immutable": immutable, "parse_cache_code": parse_code,
+                                       "image": image_key}, sort_keys=True) + "\n")
         pending.replace(stamp)
         if retained_dexopt is not None:
             save_dexopt_stamp(managed, retained_dexopt[0], root, code, retained_dexopt[1])
         if backup.exists(): remove_runtime(backup)
+        prune_runtime_images(app.parent, image_key)
     return root, environment
 
 
@@ -1245,7 +1347,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     "/system/bin/app_process64", "-Xuse-stderr-logger", *trace_args,
                     "-Djava.class.path=/data/local/tmp/launcher.dex", "/system/bin",
                     "ManagedLauncher", *installed_arguments(metadata, code)]
-        environment = dict(os.environ)
+        environment = dict(os.environ, **READONLY_ENVIRONMENT)
         environment.pop("BIFROST_ROOT", None)
         # The persistent JIT cache (BIFROST_JIT_DISK_CACHE) keeps one directory and
         # budget per app, shared by the session's helper processes.
