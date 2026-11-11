@@ -39,6 +39,11 @@ static int access_guest_path(int hfd, const std::string& guest, int mode, int fl
         ScopedHostFd target(Yggdrasil::open_confined_path(
             hfd, guest, !(flags & AT_SYMLINK_NOFOLLOW)));
         if (target.fd < 0) return -errno;
+        // W_OK on a read-only mount is EROFS (fs/open.c do_faccessat) for files, directories and symlinks.
+        struct stat st {};
+        if ((mode & W_OK) && Yggdrasil::readonly_fd(target.fd) && ::fstat(target.fd, &st) == 0 &&
+            (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)))
+            return -EROFS;
         return ::faccessat(AT_FDCWD, Yggdrasil::proc_fd_path(target.fd).c_str(), mode,
                            flags & AT_EACCESS) < 0 ? -errno : 0;
     }
@@ -54,6 +59,18 @@ static int access_guest_path(int hfd, const std::string& guest, int mode, int fl
     // An absolute path ignores dirfd (POSIX).
     const int dir = !path.empty() && path[0] == '/' ? AT_FDCWD : hfd;
     return ::faccessat(dir, path.c_str(), mode, flags) < 0 ? -errno : 0;
+}
+// Read-only partitions (Yggdrasil::readonly_entry) answer as Linux does on a read-only mount (fs/namei.c):
+// creating a name there is EEXIST when it exists (looked up first), else EROFS; removing or renaming is EROFS.
+static int readonly_create_error(const Yggdrasil::ParentDir& pd) {
+    if (!Yggdrasil::readonly_entry(pd)) return 0;
+    struct stat st;
+    return ::fstatat(pd.fd, pd.base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 ? EEXIST : EROFS;
+}
+// A rename or link between a read-only partition and anything else crosses mounts on Android: EXDEV.
+static int readonly_rename_error(const Yggdrasil::ParentDir& from, const Yggdrasil::ParentDir& to) {
+    const bool a = Yggdrasil::readonly_entry(from), b = Yggdrasil::readonly_entry(to);
+    return a != b ? EXDEV : a ? EROFS : 0;
 }
 // After a successful chdir/fchdir the guest cwd is the directory it really is, symlinks resolved
 // (getcwd(2) never returns a symlink path), in the guest's view. Recording the argument text made
@@ -175,6 +192,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             auto pd = yggdrasil::Yggdrasil::open_parent(hfd, guest);
             if (!pd.valid()) { ret_errno(); return 0; }
             if (pd.trailing_slash) { ret_err(ENOENT); return 0; }  // cannot create a non-directory "x/"
+            if (int e = readonly_create_error(pd)) { ret_err(e); return 0; }
             int r = ::mknodat(pd.fd, pd.base.c_str(),
                               static_cast<mode_t>(a2), static_cast<dev_t>(a3));
             if (r < 0) { ret_errno(); return 0; }
@@ -193,6 +211,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             auto pd = yggdrasil::Yggdrasil::open_parent(hfd, guest);
             if (!pd.valid()) { ret_errno(); return 0; }
+            if (int e = readonly_create_error(pd)) { ret_err(e); return 0; }
             mode_t mode = static_cast<mode_t>(a2) & ~emu.guest_umask();
             int r = ::mkdirat(pd.fd, pd.base.c_str(), mode);
             if (r < 0) { ret_errno(); return 0; }
@@ -210,6 +229,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             auto pd = yggdrasil::Yggdrasil::open_parent(hfd, guest);
             if (!pd.valid()) { ret_errno(); return 0; }
             if (!(a2 & AT_REMOVEDIR) && slash_names_non_directory(pd)) { ret_err(ENOTDIR); return 0; }
+            if (Yggdrasil::readonly_entry(pd)) { ret_err(EROFS); return 0; }
             int r = ::unlinkat(pd.fd, pd.base.c_str(), static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
@@ -233,6 +253,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             auto new_pd = yggdrasil::Yggdrasil::open_parent(new_hfd, new_guest);
             if (!new_pd.valid()) { ret_errno(); return 0; }
             if (rename_slash_violation(old_pd, new_pd)) { ret_err(ENOTDIR); return 0; }
+            if (int e = readonly_rename_error(old_pd, new_pd)) { ret_err(e); return 0; }
             int r = ::renameat(old_pd.fd, old_pd.base.c_str(),
                                new_pd.fd, new_pd.base.c_str());
             if (r < 0) { ret_errno(); return 0; }
@@ -258,6 +279,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             auto new_pd = yggdrasil::Yggdrasil::open_parent(new_hfd, new_guest);
             if (!new_pd.valid()) { ret_errno(); return 0; }
             if (rename_slash_violation(old_pd, new_pd)) { ret_err(ENOTDIR); return 0; }
+            if (int e = readonly_rename_error(old_pd, new_pd)) { ret_err(e); return 0; }
 #ifdef SYS_renameat2
             int r = ::syscall(SYS_renameat2, old_pd.fd, old_pd.base.c_str(),
                               new_pd.fd, new_pd.base.c_str(),
@@ -297,6 +319,9 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!new_pd.valid()) { ret_errno(); return 0; }
             if (new_pd.trailing_slash) { ret_err(ENOENT); return 0; }  // a link is never a directory "x/"
             if (slash_names_non_directory(old_pd)) { ret_err(ENOTDIR); return 0; }
+            if (int e = readonly_create_error(new_pd)) { ret_err(e); return 0; }
+            // A new name for a read-only file elsewhere would let it change there: across mounts, EXDEV.
+            if (Yggdrasil::readonly_entry(old_pd)) { ret_err(EXDEV); return 0; }
             int r;
             if ((a4 & AT_SYMLINK_FOLLOW) &&
                 yggdrasil::Yggdrasil::path_confined(old_hfd, old_guest)) {
@@ -305,6 +330,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
                 // resolved file through its /proc magic link (linkat(2)).
                 if (a4 & ~uint64_t(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH)) { ret_err(EINVAL); return 0; }
                 ScopedHostFd source(yggdrasil::Yggdrasil::open_confined_path(old_hfd, old_guest, true));
+                if (source.fd >= 0 && Yggdrasil::readonly_fd(source.fd)) { ret_err(EXDEV); return 0; }
                 r = source.fd < 0 ? -1
                     : ::linkat(AT_FDCWD, yggdrasil::Yggdrasil::proc_fd_path(source.fd).c_str(),
                                new_pd.fd, new_pd.base.c_str(), AT_SYMLINK_FOLLOW);
@@ -340,6 +366,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             auto pd = yggdrasil::Yggdrasil::open_parent(hfd, new_guest);
             if (!pd.valid()) { ret_errno(); return 0; }
             if (pd.trailing_slash) { ret_err(ENOENT); return 0; }  // a symlink is never a directory "x/"
+            if (int e = readonly_create_error(pd)) { ret_err(e); return 0; }
             int r = ::symlinkat(oldp.c_str(), pd.fd, pd.base.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
@@ -577,6 +604,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             int r;
             if (yggdrasil::Yggdrasil::path_confined(AT_FDCWD, guest)) {
                 ScopedHostFd target(yggdrasil::Yggdrasil::open_confined_path(AT_FDCWD, guest, true));
+                if (target.fd >= 0 && Yggdrasil::readonly_fd(target.fd)) { ret_err(EROFS); return 0; }
                 r = target.fd < 0 ? -1
                     : ::truncate(yggdrasil::Yggdrasil::proc_fd_path(target.fd).c_str(), (off_t)a1);
             } else {

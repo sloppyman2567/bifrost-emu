@@ -25,6 +25,7 @@
 #include <sys/syscall.h>
 #include <termios.h>
 #include <unistd.h>
+#include <vector>
 #ifdef __linux__
 #include <linux/openat2.h>
 #include <linux/sync_file.h>
@@ -34,6 +35,7 @@ namespace arm64emu::yggdrasil {
 static std::string sandbox_root_str();
 static bool have_openat2();
 static bool dirfd_confined(int host_dirfd);
+static bool readonly_open(int host_dirfd, const std::string& path, int flags);
 // ── Sandboxed open (openat2 RESOLVE_IN_ROOT) ──────────────────────────
 // The lexical `..` normalization in map_guest_path stops "../.." walks,
 // but host openat() still FOLLOWS symlinks: a guest symlink inside
@@ -329,6 +331,7 @@ std::unique_ptr<Node> Yggdrasil::open_host(const std::string& guest_path,
 // Returns a host fd or -1 with errno set (O_DIRECT retry included).
 int Yggdrasil::open_host_fd(const std::string& guest_path, int flags,
                             mode_t mode) {
+    if (readonly_open(AT_FDCWD, guest_path, flags)) { errno = EROFS; return -1; }
     std::string root = sandbox_root_str();
     std::string host_path = map_guest_path(guest_path, root.c_str());
     if (host_path.empty()) { errno = ENOENT; return -1; }  // denied proc path
@@ -386,6 +389,7 @@ int Yggdrasil::open_host_at(int host_dirfd, const std::string& relpath,
     // Include AT_FDCWD once chdir has moved inside the root. Outside-root
     // cwd retains the existing host-relative game-asset behavior.
     if (host_dirfd == AT_FDCWD) return open_host_fd(relpath, flags, mode);
+    if (readonly_open(host_dirfd, relpath, flags)) { errno = EROFS; return -1; }
     if (dirfd_confined(host_dirfd) && have_openat2()) {
 #ifdef SYS_openat2
         struct open_how how {};
@@ -592,6 +596,94 @@ int Yggdrasil::open_confined_path(int host_dirfd, const std::string& guest_path,
     if (guest_path.empty() || guest_path[0] == '/' || host_dirfd == AT_FDCWD)
         return open_host_fd(guest_path, flags, 0);
     return open_host_at(host_dirfd, guest_path, flags, 0);
+}
+// ── Read-only partitions ──────────────────────────────────────────
+// BIFROST_ROOT_READONLY, parsed once per value (tests change it).
+static std::vector<std::string> readonly_partitions() {
+    static std::mutex mu;
+    static std::string cached_value;
+    static std::vector<std::string> cached;
+    const char* value = getenv("BIFROST_ROOT_READONLY");
+    std::string want = value ? value : "";
+    std::lock_guard<std::mutex> g(mu);
+    if (want != cached_value || (cached.empty() && !want.empty())) {
+        cached_value = want;
+        cached.clear();
+        size_t i = 0;
+        while (i <= want.size()) {
+            size_t j = want.find(':', i);
+            if (j == std::string::npos) j = want.size();
+            std::string dir = lexical_normalize(want.substr(i, j - i));
+            if (!dir.empty() && want[i] == '/') cached.push_back(dir);  // absolute, never "/" itself
+            i = j + 1;
+        }
+    }
+    return cached;
+}
+// True when the canonical host path `host` lies inside the sandbox root and its guest view is (under) a
+// read-only partition.
+static bool readonly_host_path(const std::string& host) {
+    const std::vector<std::string> dirs = readonly_partitions();
+    if (dirs.empty() || sandbox_root_str().empty() || !Yggdrasil::path_inside_root(host.c_str())) return false;
+    const std::string guest = Yggdrasil::guest_view_of_host_path(host);
+    for (const std::string& dir : dirs)
+        if (guest.compare(0, dir.size(), dir) == 0 && (guest.size() == dir.size() || guest[dir.size()] == '/'))
+            return true;
+    return false;
+}
+static bool host_path_of(int host_fd, std::string& out) {
+    char target[PATH_MAX + 1];
+    if (host_fd == AT_FDCWD) {
+        if (!::getcwd(target, sizeof(target))) return false;
+        out = target;
+        return true;
+    }
+    char proc[64];
+    snprintf(proc, sizeof(proc), "/proc/self/fd/%d", host_fd);
+    ssize_t n = ::readlink(proc, target, PATH_MAX);
+    if (n <= 0 || n == PATH_MAX) return false;
+    out.assign(target, static_cast<size_t>(n));
+    return out[0] == '/';  // not a pipe, socket or anonymous inode
+}
+bool Yggdrasil::readonly_fd(int host_fd) {
+    if (readonly_partitions().empty()) return false;
+    std::string host;
+    return host_path_of(host_fd, host) && readonly_host_path(host);
+}
+bool Yggdrasil::readonly_entry(const ParentDir& pd) {
+    if (readonly_partitions().empty() || !pd.valid()) return false;
+    std::string host;
+    if (!host_path_of(pd.fd, host)) return false;
+    if (host.back() != '/') host += '/';
+    return readonly_host_path(host + pd.base);
+}
+bool Yggdrasil::open_mutates(int flags) {
+    return (flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC)) || (flags & O_TMPFILE) == O_TMPFILE;
+}
+// An open that would change a read-only partition fails with EROFS before it reaches the host, as Linux
+// answers on a read-only mount (fs/namei.c): an existing file opened for writing or truncation, a new file
+// created there, an O_TMPFILE there. An existing file opened read-only with O_CREAT succeeds, O_CREAT|O_EXCL
+// on one is EEXIST and a directory opened for writing EISDIR, so those reach the host as usual. The shared
+// image's file and directory modes back this up should a symlink change between the check and the open.
+static bool readonly_open(int host_dirfd, const std::string& path, int flags) {
+    if (readonly_partitions().empty() || !Yggdrasil::open_mutates(flags)) return false;
+    const bool tmpfile = (flags & O_TMPFILE) == O_TMPFILE;
+    const int probe_flags = O_PATH | O_CLOEXEC | (flags & O_NOFOLLOW) | (tmpfile ? O_DIRECTORY : 0);
+    int probe = host_dirfd == AT_FDCWD || path.empty() || path[0] == '/'
+                    ? Yggdrasil::open_host_fd(path, probe_flags, 0)
+                    : Yggdrasil::open_host_at(host_dirfd, path, probe_flags, 0);
+    if (probe >= 0) {
+        struct stat st {};
+        const bool directory = ::fstat(probe, &st) == 0 && S_ISDIR(st.st_mode);
+        const bool writes = (flags & O_ACCMODE) != O_RDONLY || (flags & O_TRUNC);
+        const bool refused = (tmpfile || (writes && !directory)) && !((flags & O_CREAT) && (flags & O_EXCL))
+                             && Yggdrasil::readonly_fd(probe);
+        ::close(probe);
+        return refused;
+    }
+    if (errno != ENOENT || !(flags & O_CREAT) || tmpfile) return false;  // the real open reports its error
+    Yggdrasil::ParentDir pd = Yggdrasil::open_parent(host_dirfd, path);
+    return Yggdrasil::readonly_entry(pd);
 }
 std::string Yggdrasil::proc_fd_path(int host_fd) {
     return "/proc/self/fd/" + std::to_string(host_fd);

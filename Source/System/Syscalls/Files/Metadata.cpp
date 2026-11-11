@@ -385,6 +385,7 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!node) { ret_err(EBADF); return 0; }
             int hfd = node->host_fd();
             if (hfd < 0) { ret_err(EINVAL); return 0; }
+            if (Yggdrasil::readonly_fd(hfd)) { ret_err(EROFS); return 0; }  // a read-only partition
             int r = ::fchmod(hfd, (mode_t)a1);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
@@ -402,6 +403,7 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             int r;
             if (Yggdrasil::path_confined(hfd, guest)) {
                 ScopedHostFd target(Yggdrasil::open_confined_path(hfd, guest, true));
+                if (target.fd >= 0 && Yggdrasil::readonly_fd(target.fd)) { ret_err(EROFS); return 0; }
                 r = target.fd < 0 ? -1
                     : ::chmod(Yggdrasil::proc_fd_path(target.fd).c_str(), (mode_t)a2);
             } else {
@@ -443,6 +445,7 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
                 const bool follow = !(flags & AT_SYMLINK_NOFOLLOW);
                 ScopedHostFd target(Yggdrasil::open_confined_path(hfd, guest, follow));
                 if (target.fd < 0) { ret_errno(); return 0; }
+                if (Yggdrasil::readonly_fd(target.fd)) { ret_err(EROFS); return 0; }
                 struct stat st;
                 if (::fstatat(target.fd, "", &st, AT_EMPTY_PATH) < 0) { ret_errno(); return 0; }
                 if (!follow && S_ISLNK(st.st_mode)) {
@@ -455,6 +458,8 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
                                     times_ptr, 0);
                 }
             } else {
+                // A NULL path changes the times of the descriptor itself (futimens).
+                if (!a1 && Yggdrasil::readonly_fd(hfd)) { ret_err(EROFS); return 0; }
                 std::string path = a1 ? yggdrasil::Yggdrasil::remap_path(guest) : std::string();
                 r = ::utimensat(hfd, a1 ? path.c_str() : nullptr, times_ptr, flags);
             }
@@ -477,6 +482,7 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) { ret_err(EINVAL); return 0; }
                 ScopedHostFd target(Yggdrasil::open_confined_path(
                     hfd, guest, !(flags & AT_SYMLINK_NOFOLLOW)));
+                if (target.fd >= 0 && Yggdrasil::readonly_fd(target.fd)) { ret_err(EROFS); return 0; }
                 r = target.fd < 0 ? -1
                     : ::fchownat(target.fd, "", static_cast<uid_t>(a2),
                                  static_cast<gid_t>(a3), AT_EMPTY_PATH);
@@ -493,7 +499,11 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             // is at 439 (handled below). The real syscall at 55 is fchown.
             // Resolve via FdTable so virtual fds work.
             auto node = fds_.get(static_cast<int>(a0));
-            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            // An unknown descriptor is EBADF; a guest fd number never names a host fd.
+            if (!node) { ret_err(EBADF); return 0; }
+            int hfd = node->host_fd();
+            if (hfd < 0) { ret_err(EINVAL); return 0; }
+            if (Yggdrasil::readonly_fd(hfd)) { ret_err(EROFS); return 0; }
             int r = ::fchown(hfd, static_cast<uid_t>(a1), static_cast<gid_t>(a2));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;

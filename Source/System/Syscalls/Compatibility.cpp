@@ -42,6 +42,7 @@
 #include "System/Syscalls/Syscalls.hpp"
 #include "System/Syscalls/Files/SocketPolicy.hpp"
 #include "System/VFS/Nodes/HostNode.hpp"
+#include "System/VFS/VFS.hpp"
 #include "System/VFS/Nodes/UserfaultNode.hpp"
 #include <algorithm>
 #include <cstring>
@@ -52,6 +53,7 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/timex.h>
 #include <sys/types.h>
@@ -91,8 +93,43 @@ static std::string read_path(Memory& mem, uint64_t addr) {
 //   14 = removexattr(path, name)
 //   15 = lremovexattr(path, name)
 //   16 = fremovexattr(fd, name)
-static int64_t do_getxattr(Memory& mem, CPU& cpu, int kind) {
+//
+// A path resolves like the other metadata calls (VFS guide): confined under BIFROST_ROOT, the call acts on the
+// resolved file through its /proc magic link, and an l* call on a symlink names it under its confined parent.
+// A descriptor resolves through the FdTable. Setting or removing an attribute in a read-only partition is EROFS.
+template <class Call>
+static ssize_t xattr_on_path(const std::string& guest, bool follow, bool mutates, Call&& call) {
+    using yggdrasil::Yggdrasil;
+    if (guest.empty()) { errno = ENOENT; return -1; }
+    if (!Yggdrasil::path_confined(AT_FDCWD, guest)) {
+        const std::string path = Yggdrasil::remap_path(guest);
+        return call(path.c_str(), follow);
+    }
+    const int fd = Yggdrasil::open_confined_path(AT_FDCWD, guest, follow);
+    if (fd < 0) return -1;
+    struct Closer { int fd; ~Closer() { ::close(fd); } } closer{fd};
+    if (mutates && Yggdrasil::readonly_fd(fd)) { errno = EROFS; return -1; }
+    struct stat st {};
+    if (!follow && ::fstat(fd, &st) == 0 && S_ISLNK(st.st_mode)) {
+        Yggdrasil::ParentDir pd = Yggdrasil::open_parent(AT_FDCWD, guest);
+        if (!pd.valid()) return -1;
+        const std::string path = Yggdrasil::proc_fd_path(pd.fd) + "/" + pd.base;
+        return call(path.c_str(), false);
+    }
+    return call(Yggdrasil::proc_fd_path(fd).c_str(), true);
+}
+// The host fd behind a guest descriptor for an f*xattr call, or -1 with errno set.
+static int xattr_fd(Emulator& emu, uint64_t guest_fd, bool mutates) {
+    auto node = emu.fds().get(static_cast<int>(guest_fd));
+    if (!node) { errno = EBADF; return -1; }
+    const int hfd = node->host_fd();
+    if (hfd < 0) { errno = EOPNOTSUPP; return -1; }  // a virtual node keeps no attributes
+    if (mutates && yggdrasil::Yggdrasil::readonly_fd(hfd)) { errno = EROFS; return -1; }
+    return hfd;
+}
+static int64_t do_getxattr(Emulator& emu, CPU& cpu, int kind) {
     // kind: 0=getxattr, 1=lgetxattr, 2=fgetxattr
+    Memory& mem = emu.mem();
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2], a3 = cpu.regs[3];
     std::string name = read_path(mem, a1);
     if (name.empty()) { ret_host(static_cast<int64_t>(-EFAULT)); return 0; }
@@ -102,21 +139,22 @@ static int64_t do_getxattr(Memory& mem, CPU& cpu, int kind) {
         value.resize(a3);
     }
     ssize_t r;
-    if (kind == 0) {
-        std::string path = read_path(mem, a0);
-        r = ::getxattr(path.c_str(), name.c_str(), value.data(), a3);
-    } else if (kind == 1) {
-        std::string path = read_path(mem, a0);
-        r = ::lgetxattr(path.c_str(), name.c_str(), value.data(), a3);
+    if (kind == 2) {
+        const int hfd = xattr_fd(emu, a0, false);
+        r = hfd < 0 ? -1 : ::fgetxattr(hfd, name.c_str(), value.data(), a3);
     } else {
-        r = ::fgetxattr(static_cast<int>(a0), name.c_str(), value.data(), a3);
+        r = xattr_on_path(read_path(mem, a0), kind == 0, false, [&](const char* path, bool follow) {
+            return follow ? ::getxattr(path, name.c_str(), value.data(), a3)
+                          : ::lgetxattr(path, name.c_str(), value.data(), a3);
+        });
     }
     if (r < 0) { ret_errno(); return 0; }
     if (r > 0 && a2) mem.write(a2, value.data(), static_cast<size_t>(r));
     ret_host(static_cast<uint64_t>(r));
     return 0;
 }
-static int64_t do_setxattr(Memory& mem, CPU& cpu, int kind) {
+static int64_t do_setxattr(Emulator& emu, CPU& cpu, int kind) {
+    Memory& mem = emu.mem();
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2],
              a3 = cpu.regs[3], a4 = cpu.regs[4];
     std::string name = read_path(mem, a1);
@@ -124,21 +162,23 @@ static int64_t do_setxattr(Memory& mem, CPU& cpu, int kind) {
     if (a3 > 65536) a3 = 65536;
     std::vector<char> value(a3);
     if (a3) mem.read(a2, value.data(), a3);
+    const int flags = static_cast<int>(a4);
     ssize_t r;
-    if (kind == 0) {
-        std::string path = read_path(mem, a0);
-        r = ::setxattr(path.c_str(), name.c_str(), value.data(), a3, static_cast<int>(a4));
-    } else if (kind == 1) {
-        std::string path = read_path(mem, a0);
-        r = ::lsetxattr(path.c_str(), name.c_str(), value.data(), a3, static_cast<int>(a4));
+    if (kind == 2) {
+        const int hfd = xattr_fd(emu, a0, true);
+        r = hfd < 0 ? -1 : ::fsetxattr(hfd, name.c_str(), value.data(), a3, flags);
     } else {
-        r = ::fsetxattr(static_cast<int>(a0), name.c_str(), value.data(), a3, static_cast<int>(a4));
+        r = xattr_on_path(read_path(mem, a0), kind == 0, true, [&](const char* path, bool follow) {
+            return follow ? ::setxattr(path, name.c_str(), value.data(), a3, flags)
+                          : ::lsetxattr(path, name.c_str(), value.data(), a3, flags);
+        });
     }
     if (r < 0) { ret_errno(); return 0; }
     ret_host(0);
     return 0;
 }
-static int64_t do_listxattr(Memory& mem, CPU& cpu, int kind) {
+static int64_t do_listxattr(Emulator& emu, CPU& cpu, int kind) {
+    Memory& mem = emu.mem();
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     std::vector<char> list;
     if (a2 > 0) {
@@ -146,18 +186,34 @@ static int64_t do_listxattr(Memory& mem, CPU& cpu, int kind) {
         list.resize(a2);
     }
     ssize_t r;
-    if (kind == 0) {
-        std::string path = read_path(mem, a0);
-        r = ::listxattr(path.c_str(), list.data(), a2);
-    } else if (kind == 1) {
-        std::string path = read_path(mem, a0);
-        r = ::llistxattr(path.c_str(), list.data(), a2);
+    if (kind == 2) {
+        const int hfd = xattr_fd(emu, a0, false);
+        r = hfd < 0 ? -1 : ::flistxattr(hfd, list.data(), a2);
     } else {
-        r = ::flistxattr(static_cast<int>(a0), list.data(), a2);
+        r = xattr_on_path(read_path(mem, a0), kind == 0, false, [&](const char* path, bool follow) {
+            return follow ? ::listxattr(path, list.data(), a2) : ::llistxattr(path, list.data(), a2);
+        });
     }
     if (r < 0) { ret_errno(); return 0; }
     if (r > 0 && a1) mem.write(a1, list.data(), static_cast<size_t>(r));
     ret_host(static_cast<uint64_t>(r));
+    return 0;
+}
+static int64_t do_removexattr(Emulator& emu, CPU& cpu, int kind) {
+    Memory& mem = emu.mem();
+    std::string name = read_path(mem, cpu.regs[1]);
+    if (name.empty()) { ret_host(static_cast<int64_t>(-EFAULT)); return 0; }
+    ssize_t r;
+    if (kind == 2) {
+        const int hfd = xattr_fd(emu, cpu.regs[0], true);
+        r = hfd < 0 ? -1 : ::fremovexattr(hfd, name.c_str());
+    } else {
+        r = xattr_on_path(read_path(mem, cpu.regs[0]), kind == 0, true, [&](const char* path, bool follow) {
+            return follow ? ::removexattr(path, name.c_str()) : ::lremovexattr(path, name.c_str());
+        });
+    }
+    if (r < 0) { ret_errno(); return 0; }
+    ret_host(0);
     return 0;
 }
 // ── syscall_compatibility dispatcher ───────────────────────────────────────────
@@ -168,38 +224,18 @@ int64_t syscall_compatibility(Emulator& emu, CPU& cpu, uint64_t num) {
     (void)a5;
     switch (num) {
         // ── xattr family (5-16, per asm-generic/unistd.h) ─────────────
-        case 5:  return do_setxattr(mem_, cpu, 0);  // setxattr
-        case 6:  return do_setxattr(mem_, cpu, 1);  // lsetxattr
-        case 7:  return do_setxattr(mem_, cpu, 2);  // fsetxattr
-        case 8:  return do_getxattr(mem_, cpu, 0);  // getxattr
-        case 9:  return do_getxattr(mem_, cpu, 1);  // lgetxattr
-        case 10: return do_getxattr(mem_, cpu, 2);  // fgetxattr
-        case 11: return do_listxattr(mem_, cpu, 0); // listxattr
-        case 12: return do_listxattr(mem_, cpu, 1); // llistxattr
-        case 13: return do_listxattr(mem_, cpu, 2); // flistxattr
-        case 14: { // removexattr(path, name)
-            std::string path = read_path(mem_, a0);
-            std::string name = read_path(mem_, a1);
-            if (path.empty() || name.empty()) { ret_host(static_cast<int64_t>(-EFAULT)); return 0; }
-            int r = ::removexattr(path.c_str(), name.c_str());
-            if (r < 0) { ret_errno(); return 0; }
-            ret_host(0); return 0;
-        }
-        case 15: { // lremovexattr(path, name)
-            std::string path = read_path(mem_, a0);
-            std::string name = read_path(mem_, a1);
-            if (path.empty() || name.empty()) { ret_host(static_cast<int64_t>(-EFAULT)); return 0; }
-            int r = ::lremovexattr(path.c_str(), name.c_str());
-            if (r < 0) { ret_errno(); return 0; }
-            ret_host(0); return 0;
-        }
-        case 16: { // fremovexattr(fd, name)
-            std::string name = read_path(mem_, a1);
-            if (name.empty()) { ret_host(static_cast<int64_t>(-EFAULT)); return 0; }
-            int r = ::fremovexattr(static_cast<int>(a0), name.c_str());
-            if (r < 0) { ret_errno(); return 0; }
-            ret_host(0); return 0;
-        }
+        case 5:  return do_setxattr(emu, cpu, 0);  // setxattr
+        case 6:  return do_setxattr(emu, cpu, 1);  // lsetxattr
+        case 7:  return do_setxattr(emu, cpu, 2);  // fsetxattr
+        case 8:  return do_getxattr(emu, cpu, 0);  // getxattr
+        case 9:  return do_getxattr(emu, cpu, 1);  // lgetxattr
+        case 10: return do_getxattr(emu, cpu, 2);  // fgetxattr
+        case 11: return do_listxattr(emu, cpu, 0); // listxattr
+        case 12: return do_listxattr(emu, cpu, 1); // llistxattr
+        case 13: return do_listxattr(emu, cpu, 2); // flistxattr
+        case 14: return do_removexattr(emu, cpu, 0); // removexattr
+        case 15: return do_removexattr(emu, cpu, 1); // lremovexattr
+        case 16: return do_removexattr(emu, cpu, 2); // fremovexattr
         // ── Compatibility syscalls: no-op / permissive stubs ──────────
         // These are either privileged operations a user-mode guest cannot
         // perform, policy hooks meaningless for a single-user/single-node

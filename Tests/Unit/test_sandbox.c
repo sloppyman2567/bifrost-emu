@@ -14,6 +14,10 @@
 // /proc PID denial; in-root mkdir/unlink/rename; chdir confinement;
 // stat/access/readlink/chmod/chown/utimens/truncate/renameat2/linkat
 // through an escaping link fail while the same calls work in the root.
+// Read-only partition (BIFROST_ROOT_READONLY=/ro, $SBX/root/ro/file.txt "ro\n" mode 0644, $SBX/root/ro/dir,
+// $SBX/root/rw): every mutation there fails as on a read-only mount (EROFS, EEXIST for an existing name, EXDEV
+// across), directly and through a symlink from /rw, while reads and /rw work; run_tests.sh then checks on the
+// host that the file kept its content, mode and only link.
 // Results pattern: "checks passed" / "FAIL:" lines, exit 0/1.
 #define _GNU_SOURCE
 #include <errno.h>
@@ -24,6 +28,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 #ifndef RENAME_NOREPLACE
 #define RENAME_NOREPLACE 1
@@ -379,6 +384,67 @@ int main(int argc, char **argv) {
               syscall(SYS_faccessat2, dfd, "real.txt", R_OK, 0) == 0,
               "dirfd-relative fchownat/faccessat2 in root work");
         if (dfd >= 0) close(dfd);
+    }
+
+    // Read-only partition /ro.
+    {
+#define EXPECT(call, err, msg) do { errno = 0; long r_ = (long)(call); CHECK(r_ < 0 && errno == (err), msg); } while (0)
+        char buf[8] = {0};
+        int f = open("/ro/file.txt", O_RDONLY);
+        CHECK(f >= 0 && read(f, buf, sizeof(buf) - 1) == 3 && strcmp(buf, "ro\n") == 0, "read-only partition reads");
+        EXPECT(open("/ro/file.txt", O_WRONLY), EROFS, "ro: open for writing");
+        EXPECT(open("/ro/file.txt", O_RDWR), EROFS, "ro: open read-write");
+        EXPECT(open("/ro/file.txt", O_RDONLY | O_TRUNC), EROFS, "ro: open with O_TRUNC");
+        int c = open("/ro/file.txt", O_RDONLY | O_CREAT, 0644);
+        CHECK(c >= 0, "ro: O_RDONLY|O_CREAT of an existing file opens it");
+        if (c >= 0) close(c);
+        EXPECT(open("/ro/file.txt", O_WRONLY | O_CREAT | O_EXCL, 0644), EEXIST, "ro: O_EXCL on an existing name");
+        EXPECT(open("/ro/new", O_WRONLY | O_CREAT, 0644), EROFS, "ro: create");
+        EXPECT(open("/ro", O_RDWR | O_TMPFILE, 0600), EROFS, "ro: O_TMPFILE");
+        EXPECT(mkdir("/ro/d2", 0755), EROFS, "ro: mkdir");
+        EXPECT(mkdir("/ro/dir", 0755), EEXIST, "ro: mkdir of an existing name");
+        EXPECT(mknod("/ro/fifo", S_IFIFO | 0644, 0), EROFS, "ro: mknod");
+        EXPECT(symlink("x", "/ro/s"), EROFS, "ro: symlink");
+        EXPECT(unlink("/ro/file.txt"), EROFS, "ro: unlink");
+        EXPECT(rmdir("/ro/dir"), EROFS, "ro: rmdir");
+        EXPECT(rename("/ro/file.txt", "/ro/moved"), EROFS, "ro: rename within");
+        EXPECT(rename("/ro/file.txt", "/rw/moved"), EXDEV, "ro: rename out");
+        int w = open("/rw/file", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        CHECK(w >= 0, "rw: create beside the partition");
+        if (w >= 0) close(w);
+        EXPECT(rename("/rw/file", "/ro/file2"), EXDEV, "ro: rename in");
+        EXPECT(link("/ro/file.txt", "/rw/hard"), EXDEV, "ro: hard link out");
+        EXPECT(linkat(AT_FDCWD, "/ro/file.txt", AT_FDCWD, "/rw/hard", AT_SYMLINK_FOLLOW), EXDEV,
+               "ro: followed hard link out");
+        EXPECT(link("/rw/file", "/ro/hard"), EROFS, "ro: hard link in");
+        EXPECT(chmod("/ro/file.txt", 0666), EROFS, "ro: chmod");
+        EXPECT(chown("/ro/file.txt", (uid_t)-1, (gid_t)-1), EROFS, "ro: chown");
+        EXPECT(utimensat(AT_FDCWD, "/ro/file.txt", NULL, 0), EROFS, "ro: utimensat");
+        EXPECT(truncate("/ro/file.txt", 0), EROFS, "ro: truncate");
+        EXPECT(setxattr("/ro/file.txt", "user.bifrost", "1", 1, 0), EROFS, "ro: setxattr");
+        EXPECT(removexattr("/ro/file.txt", "user.bifrost"), EROFS, "ro: removexattr");
+        EXPECT(access("/ro/file.txt", W_OK), EROFS, "ro: access W_OK");
+        CHECK(access("/ro/file.txt", R_OK) == 0, "ro: access R_OK");
+        if (f >= 0) {
+            EXPECT(fchmod(f, 0666), EROFS, "ro: fchmod");
+            EXPECT(fchown(f, (uid_t)-1, (gid_t)-1), EROFS, "ro: fchown");
+            EXPECT(futimens(f, NULL), EROFS, "ro: futimens");
+            EXPECT(fsetxattr(f, "user.bifrost", "1", 1, 0), EROFS, "ro: fsetxattr");
+            EXPECT(fremovexattr(f, "user.bifrost"), EROFS, "ro: fremovexattr");
+            close(f);
+        }
+        // Through a symlink in a writable directory the target still decides.
+        CHECK(symlink("/ro/file.txt", "/rw/to_ro") == 0, "rw: symlink to the partition");
+        EXPECT(open("/rw/to_ro", O_WRONLY), EROFS, "ro: open for writing through a symlink");
+        EXPECT(chmod("/rw/to_ro", 0666), EROFS, "ro: chmod through a symlink");
+        // Only the partition: a sibling whose name starts the same is writable.
+        int x = open("/rox", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        CHECK(x >= 0, "a name sharing the prefix is not read-only");
+        if (x >= 0) close(x);
+        unlink("/rox");
+        unlink("/rw/to_ro");
+        unlink("/rw/file");
+#undef EXPECT
     }
 
     if (fails == 0) printf("checks passed: %d\n", checks);

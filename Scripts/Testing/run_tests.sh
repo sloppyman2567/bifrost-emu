@@ -1330,9 +1330,13 @@ if [ "$RUN_INTEGRATION" = "1" ] && { sandbox_selected test_sandbox || sandbox_se
                 printf 'CANARY-DO-NOT-READ\n' > "$SBX/outside/secret" && \
                 chmod 644 "$SBX/outside/secret" && \
                 ln -sf "$SBX/outside/secret" "$SBX/root/sub/evil" && \
-                ln -sf "$SBX/outside" "$SBX/root/sub/outlink"; then
+                ln -sf "$SBX/outside" "$SBX/root/sub/outlink" && \
+                mkdir -p "$SBX/root/ro/dir" "$SBX/root/rw" && \
+                printf 'ro\n' > "$SBX/root/ro/file.txt" && \
+                chmod 644 "$SBX/root/ro/file.txt"; then
             OLD_RUN_ENV=("${RUN_ENV[@]}")
-            RUN_ENV=("BIFROST_ROOT=$SBX/root" "${RUN_ENV[@]}")
+            # /ro is a read-only partition; its file keeps a writable mode so only the emulator protects it.
+            RUN_ENV=("BIFROST_ROOT=$SBX/root" "BIFROST_ROOT_READONLY=/ro" "${RUN_ENV[@]}")
             run_category "Sandbox" "test_sandbox|Tests/Unit/test_sandbox.elf||10|checks passed"
             # An executable inside the root starts with its cwd there: its
             # relative writes must not reach this (launch) directory. A
@@ -1352,6 +1356,11 @@ if [ "$RUN_INTEGRATION" = "1" ] && { sandbox_selected test_sandbox || sandbox_se
                     [ "$(stat -c '%a %h' "$SBX/outside/secret" 2>/dev/null)" != "644 1" ] ||
                     [ "$(ls -A "$SBX/outside")" != "secret" ]; then
                 record_failure "test_sandbox" "outside canary was modified through the sandbox"
+            fi
+            if [ "$(cat "$SBX/root/ro/file.txt" 2>/dev/null)" != "ro" ] ||
+                    [ "$(stat -c '%a %h' "$SBX/root/ro/file.txt" 2>/dev/null)" != "644 1" ] ||
+                    [ "$(ls -A "$SBX/root/ro" | tr '\n' ' ')" != "dir file.txt " ]; then
+                record_failure "test_sandbox" "the read-only partition was changed through the sandbox"
             fi
         else
             record_failure "test_sandbox" "could not provision sandbox fixtures"

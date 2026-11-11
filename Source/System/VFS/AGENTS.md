@@ -17,6 +17,16 @@
   and operate on the O_PATH fd (`AT_EMPTY_PATH`) or its `proc_fd_path`.
   Unsandboxed paths keep their direct host call. `test_sandbox` and the
   host-side canary check in `run_tests.sh` cover each call.
+- Read-only partitions (`BIFROST_ROOT_READONLY`, colon-separated guest directories; Asgard sets `/system`, `/system_ext`,
+  `/product`, `/vendor`, `/apex`): in a sandbox nothing below them may change, as on Android's read-only mounts. Every
+  mutating call checks the object it resolved, never the text of the path: `readonly_fd` on the resolved (O_PATH) fd or
+  the guest's descriptor, `readonly_entry` on the confined parent plus name, and `open_host_fd`/`open_host_at` before a
+  writing open. Errors follow Linux on a read-only mount: EROFS, EEXIST when a created name exists, EISDIR/EEXIST opens
+  reaching the host as usual, EXDEV for a rename across the boundary or a hard link of a read-only file elsewhere (the
+  link would make it changeable), W_OK access EROFS. A new mutating call (including an fd form) needs the same check;
+  `test_sandbox` covers each one with a file that only the emulator protects, and its host post-check.
+- The xattr family resolves like the other metadata calls: confined paths through `open_confined_path` (an l* call on
+  a symlink names it under its confined parent), descriptors through the FdTable; a guest fd number never names a host fd.
 - Library overlay (`open_overlay_path`, `overlay_target` in `HostPaths.cpp`): with no
   `BIFROST_ROOT`, a read-only open/stat/access/readlink of an absolute path under
   `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64` or `/etc/ld.so.cache` is answered by the

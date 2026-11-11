@@ -191,6 +191,15 @@ public:
     // (stat, access, readlink; open_host_fd for read-only opens) use it.
     static constexpr int NO_OVERLAY = -2;
     static int open_overlay_path(const std::string& guest_path, bool follow);
+    // Read-only partitions of the sandbox: BIFROST_ROOT_READONLY lists guest directories (colon-separated,
+    // "/system:/vendor"), and, as on Android's read-only mounts, nothing in them may change. Mutating calls
+    // check the object they resolved and fail with EROFS. Inactive without a sandbox root or the variable.
+    // True when the open host file `host_fd` (an O_PATH fd included) lies in a read-only partition.
+    static bool readonly_fd(int host_fd);
+    // True when the entry `pd.base` of the directory `pd.fd` lies in one, or is one (a partition's own name).
+    static bool readonly_entry(const ParentDir& pd);
+    // True when an open with these flags may change what it opens (write access, create, truncate, O_TMPFILE).
+    static bool open_mutates(int flags);
     // True when a BIFROST_ROOT sandbox is active.
     static bool sandbox_inside_root();
     // Canonical host path of the BIFROST_ROOT sandbox ("" when inactive).
