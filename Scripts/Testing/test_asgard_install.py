@@ -31,18 +31,17 @@ class AsgardInstallTests(unittest.TestCase):
         self.addCleanup(self.cleanup)
         self.checkout = self.work / "checkout"
         spec = {}
-        for name in ("Scripts/Android/asgard.py", "Scripts/Android/test_skip.py", "Tools/Android/android_art.py",
+        for name in ("Scripts/Android/asgard.py", "Scripts/Android/test_skip.py", "Tools/Android/android_old.py",
                      "Tools/Android/helper.cpp", "Tools/android-tools/aapt2", "Tools/android-tools/apksigner.jar",
                      "Tools/android-runtime/rootfs/a", "Guest/Android/Managed/Launcher.java",
-                     "Tests/Unit/android_bionic_start.S", "build/android-framework/rootfs/system/lib64/libc.so",
-                     "build/android-framework/rootfs/bifrost-framework.json",
+                     "Tests/Unit/android_bionic_start.S",
                      "build/android-art/rootfs/apex/x", "build/android-art/rootfs/bifrost-art.json",
                      "build/android-adapters/adapters.json", "build/android-managed-launcher/classes.dex"):
             path = self.checkout / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("v1 " + name)
             spec[name] = path
-        (self.checkout / "build/android-framework/rootfs/system/bin").mkdir(parents=True)
+        self.install_framework_tool()
         os.symlink("../lib64/libc.so", self.checkout / "build/android-framework/rootfs/system/bin/linker")
         (self.checkout / "build/android-art/rootfs/empty-dir").mkdir()
         # A read-only directory, as the framework image has.
@@ -74,6 +73,42 @@ class AsgardInstallTests(unittest.TestCase):
         self.tool.write_text(source)
         for name in ("android_media.py", "android_super.py", "download_progress.py"):
             shutil.copy2(REPOSITORY / "Tools/Android" / name, self.checkout / "Tools/Android" / name)
+
+    def install_framework_tool(self):
+        """The real android_framework.py and its imports, with a framework tree that is current for them: the
+        manifest pins this version's in-place additions, whose files are placeholders (the check reads no contents)."""
+        for name in ("android_framework.py", "android_art.py", "android_codecs.py", "android_guest_dependencies.py",
+                     "android_media.py", "android_super.py", "download_progress.py", "file_digests.py"):
+            shutil.copy2(REPOSITORY / "Tools/Android" / name, self.checkout / "Tools/Android" / name)
+        launchers = self.checkout / "Guest/Android/Launchers"
+        launchers.mkdir(parents=True)
+        for name in ("codec2_store.c", "codec2_store.S", "media_resource.c", "media_log.c"):
+            shutil.copy2(REPOSITORY / "Guest/Android/Launchers" / name, launchers / name)
+        self.pins = json.loads(self.framework_tool(
+            "print(json.dumps({'schema': f.SCHEMA, 'image': f.IMAGE_SHA256, 'codecs': c.fingerprint(), "
+            "'files': f.in_place_inventory()}))").stdout)
+        self.framework = self.checkout / "build/android-framework/rootfs"
+        for name, value in self.pins["files"].items():
+            path = self.framework / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if "link" in value:
+                os.symlink(value["link"], path)
+            else:
+                path.write_text("placeholder " + name)
+        self.write_framework_manifest(self.pins["files"])
+
+    def write_framework_manifest(self, files, fingerprint=None):
+        (self.framework / "bifrost-framework.json").write_text(json.dumps(
+            {"schema_version": self.pins["schema"], "image_sha256": self.pins["image"],
+             "codecs": {"adapter_fingerprint": fingerprint or self.pins["codecs"]}, "files": files}))
+
+    def framework_tool(self, code, root=None, expect=0):
+        """Run `code` with android_framework (f) and android_codecs (c) imported from a checkout or an install."""
+        result = subprocess.run([sys.executable, "-B", "-c", "import json, sys\nsys.path.insert(0, 'Tools/Android')\n"
+                                 "import android_framework as f, android_codecs as c\n" + code],
+                                cwd=root or self.checkout, capture_output=True, text=True)
+        self.assertEqual(result.returncode, expect, result.stdout + result.stderr)
+        return result
 
     def forbid_downloads(self):
         """Fail the run if the installer reaches archive() at all."""
@@ -116,7 +151,6 @@ class AsgardInstallTests(unittest.TestCase):
 
     def test_installed_files_are_readable_by_everyone_and_writable_only_by_the_owner(self):
         private = self.checkout / "build/android-framework/rootfs/bifrost-framework.json"
-        private.write_text("{}")
         private.chmod(0o600)                       # an inventory rewritten through a temporary file
         tool = self.checkout / "Tools/android-tools/aapt2"
         tool.chmod(0o700)
@@ -157,6 +191,7 @@ class AsgardInstallTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)  # not even __pycache__ from importing android_microg
 
     def test_dry_run_reports_missing_microg_without_downloading(self):
+        self.run_installer()                       # so the plan lists only microG (the listing is cut at 20)
         shutil.rmtree(self.microg)
         self.forbid_downloads()
         before = self.snapshot()
@@ -330,14 +365,14 @@ class AsgardInstallTests(unittest.TestCase):
         before = untouched.stat()
         (self.checkout / "Scripts/Android/asgard.py").write_text("v2 longer content")          # edited
         (self.checkout / "Scripts/Android/new_module.py").write_text("new")                      # added
-        (self.checkout / "Tools/Android/android_art.py").unlink()                                # deleted
+        (self.checkout / "Tools/Android/android_old.py").unlink()                                # deleted
         shutil.rmtree(self.checkout / "build/android-art/rootfs/empty-dir")
         output = self.run_installer()
         self.assertIn("2 to copy", output)
         self.assertIn("2 to remove", output)
         self.assertEqual((self.tree / "Scripts/Android/asgard.py").read_text(), "v2 longer content")
         self.assertEqual((self.tree / "Scripts/Android/new_module.py").read_text(), "new")
-        self.assertFalse((self.tree / "Tools/Android/android_art.py").exists())
+        self.assertFalse((self.tree / "Tools/Android/android_old.py").exists())
         self.assertFalse((self.tree / "build/android-art/rootfs/empty-dir").exists())
         after = untouched.stat()
         self.assertEqual((before.st_ino, before.st_mtime_ns), (after.st_ino, after.st_mtime_ns))
@@ -388,6 +423,37 @@ class AsgardInstallTests(unittest.TestCase):
         self.assertIn("make android-runtime-adapters", output)
         self.assertIn("make provision-asgard", output)
         self.assertFalse(self.tree.exists())
+
+    def test_a_framework_older_than_its_scripts_is_refused_before_anything_is_copied(self):
+        self.forbid_downloads()
+        extractor = self.framework / "system/bin/mediaextractor"
+        extractor.unlink()                         # provisioned before the scripts pinned this file
+        output = self.run_installer(expect=1)
+        self.assertIn("missing build/android-framework/rootfs/system/bin/mediaextractor", output)
+        self.assertIn("python3 Tools/Android/android_framework.py  (in place)", output)
+        extractor.write_text("placeholder")
+        files = dict(self.pins["files"])
+        del files["system/lib64/libsoundpool.so"]  # on disk but not yet in the inventory
+        self.write_framework_manifest(files)
+        self.assertIn("missing build/android-framework/rootfs/system/lib64/libsoundpool.so", self.run_installer(expect=1))
+        self.write_framework_manifest(self.pins["files"], fingerprint="0" * 64)
+        output = self.run_installer(expect=1)
+        self.assertIn("build/android-framework/rootfs is out of date (Codec adapters changed", output)
+        self.assertIn("rm -rf build/android-framework/rootfs, then python3 Tools/Android/android_framework.py", output)
+        self.assertFalse(self.tree.exists())
+
+    def test_an_installed_framework_is_never_upgraded_in_place(self):
+        self.run_installer()
+        (self.tree / "build/android-framework/rootfs/system/bin/mediaextractor").unlink()
+        for directory, _, _ in os.walk(self.tree):  # a system install's directories
+            os.chmod(directory, 0o555)
+        before = self.snapshot()
+        error = self.framework_tool("f.install(f.Path('build/android-framework/rootfs'), f.Path('build/android-art/rootfs'))",
+                                    root=self.tree, expect=1).stderr
+        self.assertIn("ValueError: This Asgard install's Android framework is older than its scripts "
+                      "(it lacks system/bin/mediaextractor)", error)
+        self.assertIn("sudo make install-asgard", error)
+        self.assertEqual(self.snapshot(), before)  # never reaches the image download below ROOT/build
 
     def test_uninstall_removes_the_install_and_refuses_foreign_directories(self):
         self.run_installer()

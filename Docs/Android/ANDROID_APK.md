@@ -150,7 +150,13 @@ Before it copies anything, it checks the checkout. The Android trees must exist,
 `adapters.json`, the launcher's `classes.dex` and the manifests that end a complete ART and framework build
 (`bifrost-art.json`, `bifrost-framework.json`) must be present and not empty. If not, it names each one and the command that
 creates it, and installs nothing. These checks look for the files; they do not compare a tree with its manifest. The ART and
-framework tools refuse a tree without a manifest, so the message says to remove it first.
+framework tools refuse a tree without a manifest, so the message says to remove it first. The framework tree must also be
+current for the checkout's scripts: newer scripts add pinned files to an existing framework in place (the shell, the shared
+library jars, the media extractor set), and an install cannot do that later, because its root is read-only. The installer
+asks the checkout's `android_framework.py` which of those files are missing on disk or from the manifest (paths only, no
+hashing) and names the command that adds them, `python3 Tools/Android/android_framework.py`; a framework built for other
+codec adapters or an older schema has to be removed and provisioned again. At run time an installed framework is verified
+but never changed: if it lacks a file, the launch fails with the same instructions.
 
 The two microG APKs pinned in `Tools/Android/android_microg.py` are checked by name and size. An install downloads any that
 are missing or the wrong size into `build/microg` and checks the SHA-256 of both, because an installed Asgard may be unable

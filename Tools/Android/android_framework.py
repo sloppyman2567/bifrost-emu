@@ -361,33 +361,78 @@ def framework_linker_configuration(apexes, paths):
     return config
 
 
+def in_place_inventory():
+    """Manifest entries of the files this version adds to an existing runtime after its image pin."""
+    return {**BIONIC_LINKS, "system/bin/sh": shell_inventory(), **shared_library_inventory(),
+            **media_extractor_inventory()}
+
+
+def existing_metadata(destination):
+    """The manifest of an existing runtime, checked for what only a fresh provision can fix. Reads no file contents."""
+    manifest = destination / "bifrost-framework.json"
+    if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 1024 * 1024:
+        raise ValueError("Invalid framework manifest")
+    metadata = json.loads(manifest.read_text())
+    if not isinstance(metadata, dict) or metadata.get("schema_version") != SCHEMA:
+        raise ValueError("Unknown framework manifest; provision a fresh directory")
+    if metadata.get("image_sha256") != IMAGE_SHA256 or not isinstance(metadata.get("files"), dict):
+        raise ValueError("Refusing modified framework runtime")
+    if metadata.get("codecs", {}).get("adapter_fingerprint") != android_codecs.fingerprint():
+        raise ValueError("Codec adapters changed; provision a fresh framework directory")
+    return metadata
+
+
+def missing_additions(destination, metadata=None):
+    """Paths of this version's in-place additions that an existing runtime lacks on disk or in its manifest, without
+    reading file contents or writing anything. `install` adds them; an installed Asgard tree cannot."""
+    if destination.is_symlink():
+        raise ValueError("Refusing redirected framework runtime")
+    metadata = metadata or existing_metadata(destination)
+    missing = []
+    for name, expected in in_place_inventory().items():
+        path = destination / name
+        present = path.is_symlink() if "link" in expected else path.exists() and not path.is_symlink()
+        if not present or metadata["files"].get(name) != expected:
+            missing.append(name)
+    return missing
+
+
+def installed_tree(destination):
+    """Whether `destination` lies in an installed Asgard tree (install-asgard.py), where nothing may be written."""
+    return (ROOT / ".asgard-install").is_file() and destination.is_relative_to(ROOT)
+
+
+def stale_install_error(detail):
+    return ValueError(f"This Asgard install's Android framework is older than its scripts ({detail}). In the "
+                      "bifrost-emu checkout it was installed from, run `python3 Tools/Android/android_framework.py` "
+                      "as your user, then install Asgard again (`sudo make install-asgard` for /usr/local).")
+
+
 def install(destination, art_root, archive=None):
     if destination.is_symlink():
         raise ValueError("Refusing redirected framework runtime")
     destination = destination.resolve()
     manifest = destination / "bifrost-framework.json"
+    read_only = installed_tree(destination)
     if destination.exists():
-        if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 1024 * 1024:
-            raise ValueError("Invalid framework manifest")
-        metadata = json.loads(manifest.read_text())
-        if not isinstance(metadata, dict) or metadata.get("schema_version") != SCHEMA:
-            raise ValueError("Unknown framework manifest; provision a fresh directory")
+        metadata = existing_metadata(destination)
+        missing = missing_additions(destination, metadata) if read_only else []
+        if missing:
+            more = f" and {len(missing) - 1} more" if len(missing) > 1 else ""
+            raise stale_install_error(f"it lacks {missing[0]}{more}")
         actual = android_art.inventory(destination)
         actual.pop("bifrost-framework.json", None)
-        if (metadata.get("image_sha256") != IMAGE_SHA256 or
-                not isinstance(metadata.get("files"), dict) or
-                without_shell(actual) != without_shell(metadata["files"])):
+        if without_shell(actual) != without_shell(metadata["files"]):
             raise ValueError("Refusing modified framework runtime")
-        if metadata.get("codecs", {}).get("adapter_fingerprint") != android_codecs.fingerprint():
-            raise ValueError("Codec adapters changed; provision a fresh framework directory")
+        if read_only:
+            return metadata
         install_bionic_links(destination)
         install_shell(destination, archive)
         install_shared_libraries(destination, archive)
         install_media_extractor(destination, archive)
-        return update_inventory(metadata, manifest, {**metadata["files"], **BIONIC_LINKS,
-                                                     "system/bin/sh": shell_inventory(),
-                                                     **shared_library_inventory(),
-                                                     **media_extractor_inventory()})
+        return update_inventory(metadata, manifest, {**metadata["files"], **in_place_inventory()})
+    if read_only:
+        raise stale_install_error("it has no framework runtime")
     android_art.install(art_root)  # verifies the pinned ART layer
     archive = image_archive(archive)
     destination.parent.mkdir(parents=True, exist_ok=True)

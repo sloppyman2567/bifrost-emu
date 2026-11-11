@@ -293,7 +293,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   (its `FILES` list); when a script or module starts reading a new root-relative
   path at run time, add it there. An installed tree is not writable at run time:
   nothing may write below `ROOT`, and state defaults come from
-  `Scripts/Android/android_paths.py`. `test_asgard_install.py` covers the installer.
+  `Scripts/Android/android_paths.py`. A runtime tool that upgrades a tree in place must refuse, naming the fix, in an
+  installed tree, and the installer must refuse a checkout tree that the tool would upgrade
+  (`android_framework.missing_additions`: a new in-place file goes into `in_place_inventory`). `test_asgard_install.py`
+  covers both.
 
 - The realm broker ends itself after `--asgard-idle SECONDS` without an app (`asgard_broker_main`; Asgard passes
   `ASGARD_REALM_IDLE_SECONDS`, default 600, 0 never). Only `OPEN` channels of peers that are not the broker's own children

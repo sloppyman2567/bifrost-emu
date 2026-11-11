@@ -272,28 +272,51 @@ def provisioning_hint(name):
     return ""
 
 
+def fresh_provisioning(name):
+    """The command that rebuilds a tree whose manifest guards it from being changed in place."""
+    tree = str(Path(name).parent)
+    return f"chmod -R u+w {tree} && rm -rf {tree}, then {provisioning_hint(name)}"
+
+
+def checkout_tool(name):
+    """A module of this checkout's Tools/Android (never an installed copy's)."""
+    tools = str(ROOT / "Tools/Android")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    return __import__(name)
+
+
+def stale_framework():
+    """[(problem, how to fix it)] when the framework tree is older than the scripts copied with it. The installed
+    scripts would add the missing files at the first launch, below a root that is read-only by then. Checks
+    paths and the manifest only, never file contents."""
+    tree = ROOT / "build/android-framework/rootfs"
+    try:
+        missing = checkout_tool("android_framework").missing_additions(tree)
+    except (OSError, ValueError) as error:
+        return [(f"{tree.relative_to(ROOT)} is out of date ({error})", fresh_provisioning(MANIFESTS[1]))]
+    if not missing:
+        return []
+    more = f" and {len(missing) - 1} more" if len(missing) > 1 else ""
+    return [(f"missing {tree.relative_to(ROOT)}/{missing[0]}{more}", "python3 Tools/Android/android_framework.py  (in place)")]
+
+
 def missing_provisioning():
-    """[(what, how to create it)]: trees that do not exist, then required files that are absent or empty."""
-    missing = [(name, PROVISIONING.get(name, "")) for name, _ in FILES
+    """[(problem, how to fix it)]: trees that do not exist, required files that are absent or empty, then a framework
+    tree that is older than the scripts."""
+    missing = [(f"missing {name}", PROVISIONING.get(name, "")) for name, _ in FILES
                if name != MICROG and not (ROOT / name).exists()]
     if missing:
         return missing
     for name in REQUIRED:
         path = ROOT / name
-        if path.is_file() and path.stat().st_size > 0:
-            continue
-        how = provisioning_hint(name)
-        if name in MANIFESTS:
-            tree = str(Path(name).parent)
-            how = f"chmod -R u+w {tree} && rm -rf {tree}, then {how}"
-        missing.append((name, how))
-    return missing
+        if not path.is_file() or path.stat().st_size == 0:
+            missing.append((f"missing {name}", fresh_provisioning(name) if name in MANIFESTS else provisioning_hint(name)))
+    return missing or stale_framework()
 
 
 def microg_tool():
-    sys.path.insert(0, str(ROOT / "Tools/Android"))
-    import android_microg
-    return android_microg
+    return checkout_tool("android_microg")
 
 
 def microg_problems(microg):
@@ -346,8 +369,8 @@ def install(prefix, verify, dry_run):
     missing = missing_provisioning()
     if missing:
         print("error: this checkout is not fully provisioned for Android:", file=sys.stderr)
-        for name, how in missing:
-            print(f"  missing {name}" + (f"  ->  {how}" if how else ""), file=sys.stderr)
+        for problem, how in missing:
+            print(f"  {problem}" + (f"  ->  {how}" if how else ""), file=sys.stderr)
         print("  (make provision-asgard runs every step)", file=sys.stderr)
         sys.exit(1)
     check_prefix(prefix, writing=not dry_run)

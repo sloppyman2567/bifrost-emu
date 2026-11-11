@@ -46,6 +46,15 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (an install made from a stale framework tree)
+
+- `install-asgard.py` no longer installs a framework tree that is older than the scripts copied with it (2026-11-11). A
+  checkout updated without re-provisioning lacked the files newer scripts add to the framework in place (the media
+  extractor set, for one); the install was marked complete, and the first launch tried to add them below the read-only
+  install root and failed with "Permission denied". The installer now names the missing file and the command that adds it
+  (`python3 Tools/Android/android_framework.py`), and installs nothing. An installed tree never upgrades itself: a launch
+  stops with the same instructions instead of downloading the Android image under its root.
+
 ### Changed (fork children keep the JIT)
 
 - A forked guest process now keeps its parent's JIT and translations instead of running interpreted until it execs
