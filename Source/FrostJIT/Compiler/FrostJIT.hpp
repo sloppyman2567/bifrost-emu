@@ -2074,13 +2074,16 @@ private:
     // zext32_fused_[i] = 1: op i (ADD/SUB/AND/OR/XOR/MUL, CSEL, SEXT 8/16) defines a
     // scratch vreg read only by op i+1, a ZEXT 32 of it. Op i is emitted in
     // its 32-bit x86 form (bits 63:32 cleared) and the ZEXT emits nothing
-    // when it keeps the same host register. Tier-1 only; empty elsewhere.
+    // when it keeps the same host register. Tier-1 blocks and Tier-2 regions
+    // (scan_w32_and_sext_loads); empty elsewhere.
     std::vector<uint8_t> zext32_fused_;
+    // Fills zext32_fused_ and sext_load_ for one compile unit; needs vreg_last_use_op_.
+    void scan_w32_and_sext_loads(const std::vector<IRInst>& insts);
     // sext_load_[i] = 1: op i is a LOAD_MEM whose only reader is the SEXT of
     // its own width at i + 1 (LDRSB/LDRSH/LDRSW), so the guarded load may
     // sign-extend itself. A request only: the SEXT skips its own extension
     // when sext_load_done_ names the op before it, which the load sets after
-    // emitting that form (the other load paths zero-extend). Tier-1 only.
+    // emitting that form (the other load paths zero-extend). Tier-1 and regions.
     std::vector<uint8_t> sext_load_;
     size_t sext_load_done_ = SIZE_MAX;
     // fp_load_[i] = 1: op i is a 4- or 8-byte LOAD_MEM whose only reader is the
@@ -2203,7 +2206,7 @@ private:
     // after the block that jumps to chain_entry_off_ (SIZE_MAX: not emitted).
     size_t  chain_entry_pc_off_ = 0;
     bool    block_calls_out_ = false;    // set by every call emitter
-    bool    defer_pc_store() const { return chain_skip_enabled() && !tier2_enabled(); }
+    bool    defer_pc_store() const { return chain_skip_enabled(); }
     // Fall-through pc a conditional branch left for the shared epilogue to
     // load (0: RAX already holds the next pc). The epilogue loads it after its
     // slot too, unless the slot reads RAX (an MT backward edge).

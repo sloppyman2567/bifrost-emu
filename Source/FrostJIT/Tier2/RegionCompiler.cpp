@@ -186,13 +186,15 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         // (emits the mov on mismatch, so a non-folding consumer still finds
         // the vreg mapped). The shift kind-2 fold has no extra guards.
         fold_ahead_kind_.assign(n, 0);
-        zext32_fused_.clear();  // Tier-1 only (BlockCompiler pre-scan)
-        sext_load_.clear();     // likewise, with their per-compile state: an
+        // W-form fusion and sign-extending loads read only op i, its reader
+        // at i + 1 and this region's last-use table, as in Tier-1. The other
+        // requests need Tier-1's per-op materializers: clear them, with their
+        // per-compile state, which an abandoned Tier-1 compile may have left.
+        scan_w32_and_sext_loads(region_ir);
         fp_load_.clear();
         fp_load_done_ = SIZE_MAX;
-        lazy_load_.clear();     // abandoned Tier-1 compile may have left it set
+        lazy_load_.clear();
         scaled_add_.clear();
-        sext_load_done_ = SIZE_MAX;
         lazy_load_vreg_ = -1;
         scaled_vreg_ = -1;
         for (size_t i = 0; i < n; i++) {
@@ -273,6 +275,13 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // rbp/rsp/rbx intact; everything from this point on (window load, pins,
     // preheader, body) re-runs per entry exactly like a chained block.
     const size_t region_chain_entry_off = code_buf_used_;
+    // A chain edge leaves cpu.pc stale (defer_pc_store) and region helpers may
+    // read it (slow memory paths raise guest signals with it). One store per
+    // entry, not per iteration: the back-edge jumps to body_start.
+    if (defer_pc_store()) {
+        emit_mov_imm_to_rax(trace.head_pc);
+        emit_store(CPU_REG, PC_OFF, RAX);
+    }
     // Direct-window base into R10 only if some region op touches the window.
     {
         bool uses_window = false;
@@ -555,32 +564,26 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     break;
                 }
                 case IROp::BRCOND_ZERO: {
+                    // As in Branch.cpp: test the operand where the allocator
+                    // holds it; the W form's 32-bit TEST ignores bits 63:32.
                     const BrCondZeroParams bp = inst.brcond_zero_params();
                     clobber_flags();
-                    if (reg_vreg_[RAX] >= 0) drop_vreg(reg_vreg_[RAX]);
-                    int s1 = ensure_vreg(inst.src1, RAX);
-                    if (s1 != RAX) emit_mov_reg(RAX, s1);
-                    if (reg_vreg_[RAX] >= 0) drop_vreg(reg_vreg_[RAX]);
-                    // W-form tests only the low 32 bits (see the matching
-                    // fix in Branch.cpp) — mask dirty uppers.
-                    if (!bp.sf) {
-                        emit_byte(0x89); emit_byte(0xC0);  // mov eax, eax
-                    }
-                    emit_test_reg(RAX, RAX);
+                    int s1 = ensure_vreg(inst.src1);
+                    if (const uint8_t prefix = rex(bp.sf, s1 >= 8, false, s1 >= 8); prefix != 0x40)
+                        emit_byte(prefix);
+                    emit_byte(0x85); emit_byte(modrm(3, s1 & 7, s1 & 7));
                     uint8_t cc = (bp.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
                     jcc = emit_jcc_rel32_placeholder(cc);
                     break;
                 }
                 case IROp::BRCOND_BIT: {
+                    // BT /4 reads the operand in place (BTS /5 would set the bit).
                     const BrCondBitParams bp = inst.brcond_bit_params();
                     clobber_flags();
-                    if (reg_vreg_[RAX] >= 0) drop_vreg(reg_vreg_[RAX]);
-                    int s1 = ensure_vreg(inst.src1, RAX);
-                    if (s1 != RAX) emit_mov_reg(RAX, s1);
-                    if (reg_vreg_[RAX] >= 0) drop_vreg(reg_vreg_[RAX]);
-                    emit_byte(rex(true, false, false, RAX >= 8));
+                    int s1 = ensure_vreg(inst.src1);
+                    emit_byte(rex(true, false, false, s1 >= 8));
                     emit_byte(0x0F); emit_byte(0xBA);
-                    emit_byte(modrm(3, 5, RAX & 7));
+                    emit_byte(modrm(3, 4, s1 & 7));
                     emit_byte(bp.bit);  // bit number
                     uint8_t cc = (bp.cond == 0) ? 3 /*JNC*/ : 2 /*JC*/;
                     jcc = emit_jcc_rel32_placeholder(cc);
@@ -734,8 +737,6 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     std::vector<size_t> cell_exit_patches;
     auto emit_chainout_exit = [&](uint64_t pc) -> bool {
         if (pc == trace.head_pc) emit_completion_credit();
-        emit_mov_imm_to_rax(pc);
-        emit_store(CPU_REG, PC_OFF, RAX);
         if (!mt_active()) {
             if (!exitchain_ok || dbg().no_chain || !lookup_only_locked(pc)) return false;
             MtEdge* edge = create_chain_edge(pc, true, code_buf_used_);

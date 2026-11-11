@@ -1056,43 +1056,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 c1 <= 1 && c2 <= 1 && c1 != c2)
                 fold_ahead_kind_[i] = 3;
         }
-        // W-form fusion: the translator follows each 32-bit ALU result with
-        // ZEXT 32. When that ZEXT is the result's only reader, the op can
-        // write the 32-bit x86 form instead (low 32 bits are identical for
-        // ADD/SUB/AND/OR/XOR/IMUL, and the 32-bit write clears bits 63:32).
-        zext32_fused_.assign(n, 0);
-        for (size_t i = 0; i + 1 < n; i++) {
-            const IRInst& op = ir_block.insts[i];
-            switch (op.op) {
-                case IROp::ADD: case IROp::SUB: case IROp::AND:
-                case IROp::OR:  case IROp::XOR: case IROp::MUL: break;
-                // CMOV r32 clears bits 63:32 even when it does not move; the
-                // CSET form's movzx always does.
-                case IROp::CSEL: break;
-                // MOVSX r32 sign-extends into the low 32 bits only.
-                case IROp::SEXT:
-                    if (op.sext_bits() != 8 && op.sext_bits() != 16) continue;
-                    break;
-                default: continue;
-            }
-            if (!(op.dest > 32 && op.dest < 4096)) continue;
-            if (vreg_last_use_op_[op.dest] != static_cast<int>(i + 1)) continue;
-            const IRInst& nx = ir_block.insts[i + 1];
-            if (nx.op == IROp::ZEXT && nx.src1 == op.dest && nx.zext_bits() == 32)
-                zext32_fused_[i] = 1;
-        }
     }
-    // Sign-extending loads and compares against a register's memory home
-    // (see sext_load_ and lazy_load_). Both read zext32_fused_ and the
-    // last-use table as they stand, and change neither.
+    scan_w32_and_sext_loads(ir_block.insts);
+    // Loads into cached XMMs and compares against a register's memory home
+    // (see fp_load_ and lazy_load_). They read the last-use table as it
+    // stands and change nothing; both need this compile loop's materializers.
     {
         const size_t n = ir_block.insts.size();
-        sext_load_.assign(n, 0);
         fp_load_.assign(n, 0);
         fp_load_done_ = SIZE_MAX;
         lazy_load_.assign(n, 0);
         scaled_add_.assign(n, 0);
-        sext_load_done_ = SIZE_MAX;
         lazy_load_vreg_ = -1;
         scaled_vreg_ = -1;
         for (size_t i = 0; i + 1 < n; i++) {
@@ -1112,15 +1086,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 continue;
             }
             if (vreg_last_use_op_[op.dest] != static_cast<int>(i + 1)) continue;
-            if (op.op == IROp::LOAD_MEM && nx.op == IROp::SEXT && nx.src1 == op.dest) {
-                // emit_load_mem's sign-extending forms: MOVSXD for 4 bytes
-                // (to 64 bits), MOVSX r32 for 1 and 2, which is the value
-                // only when the SEXT itself is the 32-bit fused form.
-                const int width = op.load_mem_params().width;
-                if (nx.sext_bits() != width * 8) continue;
-                if (width == 4 || ((width == 1 || width == 2) && zext32_fused_[i + 1]))
-                    sext_load_[i] = 1;
-            } else if (op.op == IROp::LOAD_MEM && nx.op == IROp::FMOV_G2F && nx.src1 == op.dest &&
+            if (op.op == IROp::LOAD_MEM && nx.op == IROp::FMOV_G2F && nx.src1 == op.dest &&
                        (op.load_mem_params().width == 4 || op.load_mem_params().width == 8)) {
                 fp_load_[i] = 1;  // the emitter checks the cache
             } else if (op.op == IROp::LOAD_REG && !op.is_fp_load() && op.src1 <= 30 &&
@@ -1585,5 +1551,52 @@ void FrostJIT::publish_or_stage(uint64_t pc, const BlockEntry& entry) {
     staged_entry_ = entry;
     staged_ = true;
     staged_linked_ = false;
+}
+// W-form fusion and sign-extending loads, for Tier-1 blocks and Tier-2 regions
+// alike: both are decided from op i and its only reader at i + 1, through the
+// last-use table of the unit being compiled, and need no materializer.
+void FrostJIT::scan_w32_and_sext_loads(const std::vector<IRInst>& insts) {
+    const size_t n = insts.size();
+    // W-form fusion: the translator follows each 32-bit ALU result with
+    // ZEXT 32. When that ZEXT is the result's only reader, the op can
+    // write the 32-bit x86 form instead (low 32 bits are identical for
+    // ADD/SUB/AND/OR/XOR/IMUL, and the 32-bit write clears bits 63:32).
+    zext32_fused_.assign(n, 0);
+    for (size_t i = 0; i + 1 < n; i++) {
+        const IRInst& op = insts[i];
+        switch (op.op) {
+            case IROp::ADD: case IROp::SUB: case IROp::AND:
+            case IROp::OR:  case IROp::XOR: case IROp::MUL: break;
+            // CMOV r32 clears bits 63:32 even when it does not move; the
+            // CSET form's movzx always does.
+            case IROp::CSEL: break;
+            // MOVSX r32 sign-extends into the low 32 bits only.
+            case IROp::SEXT:
+                if (op.sext_bits() != 8 && op.sext_bits() != 16) continue;
+                break;
+            default: continue;
+        }
+        if (!(op.dest > 32 && op.dest < 4096)) continue;
+        if (vreg_last_use_op_[op.dest] != static_cast<int>(i + 1)) continue;
+        const IRInst& nx = insts[i + 1];
+        if (nx.op == IROp::ZEXT && nx.src1 == op.dest && nx.zext_bits() == 32)
+            zext32_fused_[i] = 1;
+    }
+    // emit_load_mem's sign-extending forms: MOVSXD for 4 bytes (to 64 bits),
+    // MOVSX r32 for 1 and 2, which is the value only when the SEXT itself is
+    // the 32-bit fused form.
+    sext_load_.assign(n, 0);
+    sext_load_done_ = SIZE_MAX;
+    for (size_t i = 0; i + 1 < n; i++) {
+        const IRInst& op = insts[i];
+        const IRInst& nx = insts[i + 1];
+        if (op.op != IROp::LOAD_MEM || nx.op != IROp::SEXT || nx.src1 != op.dest) continue;
+        if (!(op.dest > 32 && op.dest < 4096)) continue;
+        if (vreg_last_use_op_[op.dest] != static_cast<int>(i + 1)) continue;
+        const int width = op.load_mem_params().width;
+        if (nx.sext_bits() != width * 8) continue;
+        if (width == 4 || ((width == 1 || width == 2) && zext32_fused_[i + 1]))
+            sext_load_[i] = 1;
+    }
 }
 } // namespace arm64emu

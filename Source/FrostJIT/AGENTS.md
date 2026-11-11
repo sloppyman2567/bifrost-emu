@@ -156,6 +156,8 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   `Memory::software_check_page`): scalar guards read the gate table, which is 0
   while they are on, and their checked path compares with the real bound before the
   page flags; other emitters test the flag. Read either at every access, never hoist.
+- A region compile disables the counters of every trace block; if no trial starts, all of them are settled
+  (`tier2_settle_locked`), not only the head, or they keep their profiles and PC-storing chain entries.
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation
   changes atomic target cells, not live instruction bytes; preserve compiler
   locking, invalidation generations and target revocation for Tier-1/Tier-2.
@@ -182,7 +184,7 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   captured before the access and finalize fault-site offsets before publication.
   Inline cold and slow paths that the hot path skips may reload XMMs at
   runtime but must leave compile-time vector validity and dirtiness unchanged.
-  Tier-2 keeps inline guards. W-form fusion is Tier-1-only and must scope its
+  Tier-2 keeps inline guards. W-form fusion (Tier-1 and regions, `scan_w32_and_sext_loads`) must scope its
   encoding width to the ALU operation, preserving operand setup and lazy NZCV.
 - Fault exits jump to a frame return already emitted in their compile unit
   (`emit_frame_return(true)`); block exits keep their own (a jump on the
@@ -224,22 +226,23 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   (the proof compile shifts PCs). Undeclared host addresses make blocks unrecordable (they are caught,
   not reused), so a missing declaration shows as `host-address` in `[JIT] disk cache unrecordable:`.
   A new per-block side table needs the install path to fill it too (`install_cached`).
-- `cpu.pc` is not maintained across a patched chain edge (`defer_pc_store`: chain-skip without Tier-2). A static exit
+- `cpu.pc` is not maintained across a patched chain edge (`defer_pc_store`: every chain-skip layout). A static exit
   stores it after its slot, so only the paths that leave generated code write it, and inside a chained block it holds an
   older block's PC. Code that needs it current must not assume the block start: an exit or helper call site sets it
   itself, and a block that calls out of generated code publishes a chain entry that stores its start PC first
   (`chain_entry_pc_off_`). `emit_call_abs` and `emit_call_rel32_placeholder` set `block_calls_out_`; a new way of
   calling out (a raw `call`, a tail jump to C++) must set it too. The op list at the chain entry only chooses between the
   inline store and the stub after the block. Anything emitted between an exit's `mov eax, pc` and its frame return must
-  keep RAX: it is the block function's return value. A new chain target that reads `cpu.pc` (as the Tier-2 trial wrapper
-  does) needs its own store or must switch `defer_pc_store` off, as Tier-2 does.
+  keep RAX: it is the block function's return value. A new chain target that reads `cpu.pc` stores its own PC first, as the
+  Tier-2 trial wrapper's tails and a region's chain entry do.
 - No self-loop back-edge (`BRCOND` through `flush_all_vregs_but_pins`, `BRCOND_ZERO`, `BRCOND_BIT`) stores the loop pins
   (R12-R15), so inside the body a pin can be ahead of `cpu.regs[]` although it is mapped clean. The body must read a pin
   through its mapping: the preload raises `max_vreg_`, because `load_vreg_to_reg` and `store_reg_to_vreg` trust
   `vreg_home_[v]` only for `v <= max_vreg_`. Exits taken before a pin's rewrite store every mapped architectural
   register, not only dirty ones (`emit_memory_fault_exit`, `emit_fp_interp_step`); keep that for any new mid-block exit.
   `jit_selfloop_pins` and `jit_fp_ldst_cache` cover both.
-- `sext_load_`, `fp_load_`, `lazy_load_` and `scaled_add_` are Tier-1 pre-scan requests, cleared for Tier-2. The guarded load reports
+- `fp_load_`, `lazy_load_` and `scaled_add_` are Tier-1 pre-scan requests, cleared for Tier-2 (its compile loop has no
+  materializers); `zext32_fused_` and `sext_load_` come from `scan_w32_and_sext_loads` in both. The guarded load reports
   what it emitted in `sext_load_done_` (other load paths zero-extend, so the `SEXT` must not trust the request). A lazy
   `LOAD_REG` and an unshifted `SHL` result exist for one op only: `ensure_vreg` and the compile loop materialize a lazy
   load for any reader but the `SUBS` it was left for, and the loop and the ALU emitter materialize the shift for anything

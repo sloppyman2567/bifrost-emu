@@ -131,9 +131,17 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
         tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
         // Every way out below but a started trial is the final answer for this
         // head. A trial settles its blocks when it decides (finish_tier2_trial).
+        // Constituents whose counters a compiled region disabled can never
+        // fire again: unless a trial takes them over, settle them too, or
+        // they keep their profiles and PC-storing entries for good.
         struct Settle {
             FrostJIT& jit; uint64_t pc; bool decided = true;
-            ~Settle() { if (decided) jit.tier2_settle_locked(pc); }
+            std::vector<uint64_t> constituents;
+            ~Settle() {
+                if (!decided) return;
+                jit.tier2_settle_locked(pc);
+                for (uint64_t block : constituents) jit.tier2_settle_locked(block);
+            }
         } settle{*this, pc};
         // Require a likely complete path and actual boundary savings. MT
         // self-loops cannot retain pins/LICM across iterations and fuse no edges.
@@ -227,6 +235,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                 if (baseline != blocks_.end()) {
                     tier2_counter_disable(baseline->second.tier2_counter_off, baseline->second.tier2_counter_len);
                     baseline->second.tier2_hot_logged = true;
+                    settle.constituents.push_back(block.pc);
                 }
             }
             const auto wrapper_start_clock = std::chrono::steady_clock::now();
@@ -300,8 +309,12 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
             const size_t quota = emit_jcc_rel32_placeholder(4);
             emit_load(R11, RDI, offsetof(CPU, jit_tier2_trial_fn));
             emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);
+            // The wrapper stands for the head: a chained entry (cold tail below)
+            // arrives with cpu.pc stale (defer_pc_store), so store the head.
             const size_t done = code_buf_used_;
-            emit_load(RAX, RDI, PC_OFF); emit_ret();
+            emit_mov_imm_to_rax(pc);
+            emit_store(RDI, PC_OFF, RAX);
+            emit_ret();
             patch_jcc_rel32(quota, static_cast<int32_t>(done - (quota + 6)));
             patch_jcc_rel32(outside_trial, static_cast<int32_t>(code_buf_used_ - (outside_trial + 6)));
             emit_byte(0x48); emit_byte(0x83); emit_byte(0xBF);
@@ -323,8 +336,11 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                 const size_t chain_quota = emit_jcc_rel32_placeholder(4);
                 emit_load(R11, CPU_REG, offsetof(CPU, jit_tier2_trial_chain_fn));
                 emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);
-                // The full entry below reads its arguments, as from the dispatcher.
+                // The full entry below reads its arguments and cpu.pc, as from
+                // the dispatcher; a chain edge left cpu.pc stale.
                 const size_t cold_chain_tail = code_buf_used_;
+                emit_mov_imm_to_rax(pc);
+                emit_store(CPU_REG, PC_OFF, RAX);
                 emit_mov_reg(RDI, CPU_REG);
                 emit_load_emu(RSI);
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
@@ -334,7 +350,8 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
                 patch_jmp_rel32(jump, static_cast<int32_t>(wrapper - (jump + 5)));
                 // Quota also needs the root-frame unwind; emit a separate tail.
                 const size_t quota_tail = code_buf_used_;
-                emit_load(RAX, CPU_REG, PC_OFF);  // before the pops restore RBX
+                emit_mov_imm_to_rax(pc);
+                emit_store(CPU_REG, PC_OFF, RAX);  // before the pops restore RBX
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);

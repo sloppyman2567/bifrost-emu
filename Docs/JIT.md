@@ -16,6 +16,37 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Tier-2 without a Tier-1 tax, and leaner region code (2026-11-11)
+
+`BIFROST_TIER2=1` made CoreMark slower although it kept no region: 219.37 G host instructions against 199.83 G (+9.8%),
+cycles +8.6%. An IBS sample put the difference in the PC store before every chain slot (6.5% of executed ops, plus its
+`mov eax, pc`): Tier-2 switched `defer_pc_store` off for all code because the trial wrapper's tails returned `cpu.pc`.
+
+- **The PC store follows the chain slot under Tier-2 too.** The wrapper stands for one head, so its three tails (quota,
+  nested trial, cold chain entry) store that head's PC instead of reading `cpu.pc`. A region's chain entry stores its head PC
+  once per entry (helpers in the region may read it); the back-edge jumps past it. `defer_pc_store()` is chain-skip alone.
+- **Every constituent of a region whose trial does not start is settled.** The fired path disables the counters of all trace
+  blocks, but a failure before the trial starts settled only the head, so the others kept their edge profiles and the
+  PC-storing chain entry their fire call needs, for the rest of the run. In CoreMark the trial for `0x401f80` never starts:
+  its sampling copy translates to one instruction (`0x401f84` became its own block meanwhile) instead of twelve.
+- **Region code.** W-form fusion and the one-instruction `LDRSB/LDRSH/LDRSW` run in regions as in Tier-1
+  (`scan_w32_and_sext_loads`, one pre-scan for both; `fp_load_`, `lazy_load_` and `scaled_add_` stay Tier-1-only because
+  they need its per-op materializers). `CBZ`/`CBNZ`/`TBZ`/`TBNZ` terminals test the operand where it is held: they copied it
+  into RAX first, and `TBZ` used `BTS` on the copy. Region exits store the PC once instead of twice.
+
+CoreMark, one pinned core, same build: Tier-2 now executes +0.6% host instructions (150.83 G against 149.94 G at 150,000
+iterations, scaling with the iteration count) and +2.6% cycles; Tier-1 is unchanged (199.83 G at 200,000). The remaining
+instructions are counters of lukewarm blocks and trial runs; the cycle gap was not resolved and is inside the placement range
+measured below. The list-search region (`0x400f58`, two blocks) went from about 21 to 18 host operations per iteration
+against Tier-1's 27, but its trials measured 0.90 to 1.04 across runs and are usually rejected (keeping needs six of eight
+pairs under 0.97). The loop chases a linked list, so it runs close to load latency and fewer operations buy little; that is
+an inference from these ratios, not a measured latency. CoreMark's other hot loops are outside Tier-2's reach: the matrix
+inner loop is a single block (trials need two), and `core_state_transition` ends in `ret`.
+
+Checked: the five `test_jit_tier2_*` scripts, the 45 `jit_` unit tests with and without `BIFROST_TIER2=1` (`jit_disk_cache`
+fails under Tier-2 by design: the persistent cache is off then), `make verify` (105 differential fixtures, 11 threaded
+oracle runs) and CoreMark's CRCs in both modes. No game was run with Tier-2.
+
 ## CCMP and CCMN leave their flags in the host (2026-11-10)
 
 `CCMP`/`CCMN` moved both operands into RAX and RCX (stack spills when other values lived there), flushed RDX, and on either path
@@ -147,8 +178,7 @@ cheap part of that list.
   (`defer_pc_store`): a patched slot jumps past both instructions, and every other way out of the slot (still unpatched, an
   empty or revoked MT cell, the backward-edge checks) falls into them. An MT backward edge keeps the `mov eax, pc` before its
   slot, which compares RAX with the stop sentinel. Indirect (`ret`/`br`/`blr`) and unchainable exits, the ordinary layout
-  (`BIFROST_NO_CHAIN_SKIP=1`) and `BIFROST_TIER2=1` keep the old order: a Tier-2 trial wrapper is a chain target that reads
-  `cpu.pc`.
+  (`BIFROST_NO_CHAIN_SKIP=1`) keep the old order. Tier-2 used to keep it as well, until 2026-11-11 (see that section).
 - **`cpu.pc` is stale inside a chained block, except where a helper may read it.** C++ helpers called from generated code can
   read `cpu.pc` (the slow memory paths raise a guest signal with it), and until now it held the block's start. A block that
   calls out of generated code therefore publishes a chain entry that stores its own start PC first. Every call emitter sets

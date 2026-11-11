@@ -46,6 +46,16 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (Tier-2 no longer slows Tier-1 code)
+
+- With `BIFROST_TIER2=1` every chained block edge stored the guest PC again, because the trial wrapper read it; CoreMark ran
+  9.8% more host instructions with no region kept. The wrapper and region entries now store their own PC, and the edge
+  skips it as without Tier-2: +0.6% instructions remain (2026-11-11).
+- A compiled region whose trial never started left every block but its head instrumented for the rest of the run; all of
+  them are settled now.
+- Region code uses Tier-1's W-form fusion and one-instruction sign-extending loads, and `cbz`/`tbz` terminals test their
+  register in place. Tier-2 stays opt-in: CoreMark's regions are still usually rejected, as their loops are latency-bound.
+
 ### Changed (ASTC textures load faster)
 
 - The ASTC-to-BC7 transcoder read the game's staging memory in place. That memory is usually a host-visible type without
