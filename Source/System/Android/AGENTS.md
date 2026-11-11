@@ -44,6 +44,10 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   never before a launch; it stages the profile, sets old artifacts aside and commits only after a successful
   compile, and a launch cancels it through `managed/optimizing.pid` (SIGUSR1) instead of failing on the package
   lock. `launcher.log` records each phase's duration. `DexoptCacheTests` and `test_file_digests.py` cover it.
+  microG's packages get a verify compile once per framework, microG version and property set
+  (`microg_dexopt`, cached in `<state>/.microg-dexopt`, copied into each root's `system/priv-app/*/oat/arm64`):
+  GmsCore's dex is compressed in its APK, and without the vdex every process loading it inflates 48 MB.
+  `MicrogDexoptTests` cover it.
 - Accounts: `FrameworkAccounts` is Android 15's AccountManagerService for one
   user, one instance per guest process over `FrameworkAccountStore`'s shared
   JSON file (`/data/system/users/0/bifrost-accounts.json`; lock, atomic replace,
@@ -300,7 +304,8 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - `ProcessHost` starts every service child with `--asgard-service-parent <its pid>` from its single long-lived thread (the parent-death signal follows the spawning thread); keep both, or a killed supervisor leaves orphaned service processes. `asgard.broker_clients` treats `--service-child` processes as clients and other parent-bound helpers as not.
 - An app session forks service children from its Zygote (`ManagedZygote`, `bifrost-zygote`; see the runtime guide's
   session Zygote). Preload there only what carries no process identity: anything that reads `Process.myUid()`, opens
-  Binder or starts a thread belongs in the child. A fork child dies with its Zygote, so the Zygote must survive signals
+  Binder or starts a thread belongs in the child. The Zygote initializes every `Framework*` class, so their static
+  initializers stay constants and reflection handles; `ManagedLauncher` is initialized only in children. A fork child dies with its Zygote, so the Zygote must survive signals
   (EINTR) and request errors; any failure retires it and children start as their own emulators again.
   `test_managed_play_services_available` checks that microG's process was forked (no runtime start in its log).
 - Managed HOME activates Asgard through ProcessHost, then changes task visibility on the guest main thread. Preserve Activity instances and pause/stop/restart/resume order; old window plugins must return ENOTSUP for missing visibility callbacks.

@@ -811,9 +811,9 @@ class OptimizationCancelled(Exception):
 DEXOPT_OUTPUTS = ("base.odex", "base.vdex", "base.art")
 
 
-def dex2oat_arguments(stamp, apk, oat, reference, profiled):
+def dex2oat_arguments(stamp, apk, oat, reference, profiled, odex="base.odex"):
     properties = stamp["properties"]
-    arguments = ["--dex-file=" + apk, "--dex-location=" + apk, "--oat-file=" + oat + "/base.odex",
+    arguments = ["--dex-file=" + apk, "--dex-location=" + apk, "--oat-file=" + oat + "/" + odex,
                  "--instruction-set=arm64",
                  "--instruction-set-variant=" + properties.get("dalvik.vm.isa.arm64.variant", "generic"),
                  "--instruction-set-features=" + properties.get("dalvik.vm.isa.arm64.features", "default"),
@@ -833,6 +833,75 @@ def dex2oat_arguments(stamp, apk, oat, reference, profiled):
             arguments.append("--resolve-startup-const-strings=" +
                              properties["dalvik.vm.dex2oat-resolve-startup-strings"])
     return arguments
+
+
+def microg_dexopt_key(identity, root, guest_env):
+    """Inputs of microG's compile: the same APKs, framework and properties in every app's root."""
+    return {"schema": 1, "framework": identity["framework"], "microg": identity["microg"], "filter": "verify",
+            "context": DEXOPT_CONTEXT,
+            "properties": image_properties(root, DEXOPT_PROPERTIES,
+                ("dalvik.vm.", "persist.sys.dalvik.vm.", "ro.dalvik.vm.", "ro.build.version.")),
+            "environment": {k: guest_env[k] for k in ("BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH", "ANDROID_ROOT",
+                            "ANDROID_DATA", "ANDROID_ART_ROOT", "ANDROID_I18N_ROOT", "ANDROID_TZDATA_ROOT")
+                            if k in guest_env}}
+
+
+def microg_dexopt(state, root, emu, guest_env, no_jit=False):
+    """The install dexopt of microG's system packages (verify), shared by every app's root.
+
+    GmsCore keeps 48 MB of dex compressed in its APK: without a vdex every process that loads its code (microG's own,
+    and an app's dynamite modules) inflates and verifies all of it, about 0.7 s each. A verify compile copies the dex
+    into the vdex, which processes map instead. It is compiled once per framework, microG version and property set
+    into <state>/.microg-dexopt and copied into each root as system/priv-app/<name>/oat/arm64/<name>.{odex,vdex}. A
+    failure is recorded and not retried until an input changes; ART then reads the APK as before.
+    """
+    identity = json.loads((root.parent / "runtime.json").read_text())["identity"]
+    key = microg_dexopt_key(identity, root, guest_env)
+    cache = Path(state) / ".microg-dexopt" / hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:32]
+    if not (cache / "dexopt.json").is_file():
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        print("Compiling microG (verify)", flush=True)
+        scratch = Path(tempfile.mkdtemp(prefix="microg-", dir=root / "data/local/tmp"))
+        staging = Path(tempfile.mkdtemp(prefix=".compiling-", dir=cache.parent))
+        failed = []
+        try:
+            guest = "/" + str(scratch.relative_to(root))
+            for package, (directory, *_rest) in sorted(android_microg.PACKAGES.items()):
+                apk = f"/system/priv-app/{directory}/{directory}.apk"
+                if not (root / apk.lstrip("/")).is_file(): continue
+                try:
+                    result = run_guest_tool(root, emu, guest_env, no_jit, "/apex/com.android.art/bin/dex2oat64",
+                                            *dex2oat_arguments(key, apk, guest, None, False, directory + ".odex"),
+                                            timeout=600)
+                    ok = result.returncode == 0
+                except subprocess.TimeoutExpired:
+                    result, ok = None, False
+                outputs = [scratch / (directory + suffix) for suffix in (".odex", ".vdex")]
+                if ok and all(path.is_file() for path in outputs):
+                    for path in outputs: shutil.move(path, staging / path.name)
+                else:
+                    failed.append(package)
+                    detail = result.stderr.decode(errors="replace")[-2000:] if result else "timed out"
+                    print(f"dex2oat failed for {package}; it loads from its APK:\n{detail}", file=sys.stderr)
+            (staging / "dexopt.json").write_text(json.dumps(dict(key, failed=failed), sort_keys=True) + "\n")
+            try:
+                staging.rename(cache)
+            except OSError:  # another launch finished first; its result is the same compile
+                pass
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+            shutil.rmtree(staging, ignore_errors=True)
+    for package, (directory, *_rest) in android_microg.PACKAGES.items():
+        names = [directory + suffix for suffix in (".odex", ".vdex")]
+        if not all((cache / name).is_file() for name in names): continue
+        target = root / "system/priv-app" / directory / "oat/arm64"
+        if all((target / name).is_file() and file_hash(target / name) == file_hash(cache / name) for name in names):
+            continue
+        target.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (target / name).unlink(missing_ok=True)
+            shutil.copyfile(cache / name, target / name)
+            (target / name).chmod(0o444)
 
 
 def dexopt(managed, root, metadata, code, emu, guest_env, no_jit=False):
@@ -1120,9 +1189,10 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
         guest_env = dict(guest_env, **network.result(), **window_mode_environment(os.environ))
         guest_env["PATH"] = "/system/bin:/apex/com.android.runtime/bin"
         session_preload = {"LD_PRELOAD": "/system/lib64/" + BINDER_ATTACH}
+    process_session.update(phase="Optimizing Android app code")
+    microg_dexopt(app.parent, root, emu, guest_env, no_jit)
     # A system app (microG) has no installed base.apk to compile; ART's JIT runs it.
     if not metadata.get("system"):
-        process_session.update(phase="Optimizing Android app code")
         dexopt(app / "managed", root, metadata, code, emu, guest_env, no_jit)
     process_session.update(phase="Starting Android app process")
     # The Google accounts signed in on this device, with microG's registration for them.

@@ -2689,6 +2689,69 @@ class HostNetworkTests(unittest.TestCase):
             self.assertFalse(host_network_validated())
 
 
+class MicrogDexoptTests(unittest.TestCase):
+    """microG's verify compile is made once per input set and copied into every app's root."""
+    def setUp(self):
+        import json
+        import android_managed as managed
+        self.managed, self.json = managed, json
+        self.temporary = tempfile.TemporaryDirectory(prefix="bifrost-microg-dexopt-")
+        self.work = Path(self.temporary.name)
+        self.state = self.work / "state"
+        self.env = {"BOOTCLASSPATH": "/system/framework/framework.jar"}
+        self.compiles, self.fail = [], False
+        def tool(root, emu, env, no_jit, binary, *args, timeout):
+            odex = next(a for a in args if a.startswith("--oat-file=")).split("=", 1)[1]
+            self.compiles.append(Path(odex).name)
+            if self.fail:
+                return subprocess.CompletedProcess([], 1, b"", b"dex2oat: no")
+            output = root / odex.lstrip("/")
+            output.write_bytes(b"odex " + output.name.encode())
+            output.with_suffix(".vdex").write_bytes(b"vdex with the dex " + output.name.encode())
+            return subprocess.CompletedProcess([], 0, b"", b"")
+        self.mock = patch.object(managed, "run_guest_tool", side_effect=tool)
+        self.mock.start()
+
+    def tearDown(self):
+        self.mock.stop(); self.temporary.cleanup()
+
+    def root(self, name, framework="verified framework"):
+        root = self.work / name / "managed/rootfs"
+        for directory in ("GmsCore", "Phonesky"):
+            (root / "system/priv-app" / directory).mkdir(parents=True)
+            (root / "system/priv-app" / directory / (directory + ".apk")).write_bytes(b"APK " + directory.encode())
+        (root / "data/local/tmp").mkdir(parents=True)
+        (root.parent / "runtime.json").write_text(self.json.dumps(
+            {"identity": {"framework": framework, "microg": {"com.google.android.gms": "gms"}}}))
+        return root
+
+    def run_dexopt(self, root):
+        self.managed.microg_dexopt(self.state, root, Path("/unused"), self.env)
+
+    def test_one_compile_serves_every_root_and_replaces_a_changed_artifact(self):
+        first, second = self.root("one"), self.root("two")
+        self.run_dexopt(first); self.run_dexopt(second)
+        self.assertEqual(sorted(self.compiles), ["GmsCore.odex", "Phonesky.odex"])
+        vdex = second / "system/priv-app/GmsCore/oat/arm64/GmsCore.vdex"
+        self.assertEqual(vdex.read_bytes(), b"vdex with the dex GmsCore.odex")
+        self.assertFalse(os.access(vdex, os.W_OK))
+        self.assertEqual(list((first / "data/local/tmp").iterdir()), [], "the compile scratch directory stayed")
+        vdex.chmod(0o644); vdex.write_bytes(b"ART's own verifier-only vdex")
+        self.run_dexopt(second)
+        self.assertEqual(vdex.read_bytes(), b"vdex with the dex GmsCore.odex")
+        self.assertEqual(len(self.compiles), 2)
+
+    def test_a_failure_is_not_retried_and_new_inputs_compile_again(self):
+        self.fail = True
+        root = self.root("one")
+        self.run_dexopt(root); self.run_dexopt(root)
+        self.assertEqual(len(self.compiles), 2, "a failed compile ran again")
+        self.assertFalse((root / "system/priv-app/GmsCore/oat").exists())
+        self.fail = False
+        self.run_dexopt(self.root("two", framework="new framework"))
+        self.assertEqual(len(self.compiles), 4)
+
+
 class DexoptCacheTests(unittest.TestCase):
     def setUp(self):
         import json

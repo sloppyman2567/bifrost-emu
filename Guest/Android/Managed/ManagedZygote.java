@@ -97,7 +97,7 @@ public final class ManagedZygote {
     }
 
     // ZygoteInit.preload's parts that hold no identity: the system fonts and resources, and the launcher's classes,
-    // loaded and verified (not initialized) so each child starts with them.
+    // loaded and verified so each child starts with them; ManagedLauncher itself is initialized only in a child.
     private static void preload() throws Exception {
         long start = System.nanoTime();
         Class.forName("android.graphics.Typeface").getMethod("loadPreinstalledSystemFontMap").invoke(null);
@@ -109,7 +109,11 @@ public final class ManagedZygote {
         Enumeration<String> names = new DexFile(System.getProperty("java.class.path")).entries();
         while (names.hasMoreElements()) {
             try {
-                Class.forName(names.nextElement(), false, loader);
+                // The Framework* classes are initialized too: their static initializers hold constants and reflection
+                // handles, never an identity, a thread or Binder (see the Android guide). Initializing them here
+                // saved each child about 130 ms of ManagedLauncher's class initialization.
+                String name = names.nextElement();
+                Class.forName(name, name.startsWith("Framework"), loader);
                 loaded++;
             } catch (ClassNotFoundException | LinkageError skipped) {
                 // A class whose dependencies are absent here loads, and fails, in the child that uses it.

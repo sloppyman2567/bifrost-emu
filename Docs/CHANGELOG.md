@@ -52,6 +52,13 @@ names the library, and ASTC transcoding about four times faster in a real game.
   (2026-11-11): the first step towards an Android Zygote, whose children never exec. A child ran a warmed loop at the
   parent's speed (0.0051 s against 0.0050 s) where it used to take 0.57 s.
 
+### Changed (microG starts in under a second)
+
+- microG's packages are compiled once (verify, about 4 s, shared by every app) and the session Zygote initializes the
+  launcher's framework classes (2026-11-11). GmsCore keeps 48 MB of dex compressed in its APK, which every microG
+  process inflated and verified again (about 0.7 s each); it now maps the compiled vdex. On Battle Cats microG's two
+  processes were ready in 0.65 and 0.93 s (1.7 and 2.2 s before) and the Play Store companion in 0.67 s (1.27 s).
+
 ### Added (a Zygote for an app's helper processes)
 
 - An app session now forks its helper processes (microG, the Play Store companion, WebView's service and renderers)

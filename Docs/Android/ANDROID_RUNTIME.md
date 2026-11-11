@@ -561,7 +561,8 @@ with the managed adapters) is `app_process` without Binder before the fork: the 
 with `-Xzygote`, whose `onStarted` calls the entry class without `ProcessState` and whose `onZygoteInit` starts the
 Binder thread pool. `app_process` itself cannot host it, because its RuntimeInit mode opens Binder before `main` and
 libbinder aborts a fork child that uses it (`ProcessState::childPostFork`). `ManagedZygote` runs as uid 0 without
-Binder, preloads the system fonts and resources and loads (does not initialize) `launcher.dex`'s classes, then connects
+Binder, preloads the system fonts and resources, loads `launcher.dex`'s classes and initializes its `Framework*` classes
+(never `ManagedLauncher`), then connects
 to `dev/socket/asgard_zygote` with a token. For each child `ProcessHost` sends the request with the child's log
 descriptor (`SCM_RIGHTS`); the Zygote forks as `Zygote.forkAndSpecialize` does (`ZygoteHooks.preFork`, a fork whose
 child takes the app UID group first, its process name and the log, `postForkChild`, `postForkCommon`), and the child
@@ -572,7 +573,11 @@ emulators while the Zygote is preloading, with APK tracing on, without pidfds an
 "Zygote retired" in `processes/zygote.log`). Measured on Battle Cats (2026-11-11): WebView's two processes ready in
 0.75-0.8 s after the request instead of about 3.4 s, the Play Store companion in 1.3 s instead of 3.9 s (the slower
 figures are the same build's own-emulator path); microG's two forked processes took 1.7-2.2 s, their own-emulator time
-was not measured.
+was not measured. Of microG's time about 0.7 s per process was its class loader: GmsCore keeps 48 MB of dex
+compressed in its APK, which ART inflated and verified in every process. A verify compile of microG's packages, made
+once and copied into each root (`microg_dexopt`), lets them map the dex from the vdex. With it and the `Framework*`
+classes initialized in the Zygote, microG's processes were ready in 0.65 s and 0.93 s and the Play Store companion in
+0.67 s (Battle Cats, a root whose package parse cache was warm; the first run after a root rebuild parses again).
 Broker restart creates a fresh registry; live clients must reopen their Binder
 connections. Staging pages are retained until the corresponding Binder open
 closes; the RPC size limit is not a lifetime memory quota.
