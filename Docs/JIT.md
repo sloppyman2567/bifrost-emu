@@ -16,6 +16,22 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Guest register traffic and flag windows: measured, not merged (2026-11-10)
+
+On the integer kernels guest register loads and stores are 20-27% of the ops executed in translated code. Most are block
+entry loads and live-out stores, which only cross-block allocation would remove. Two smaller sources were found:
+
+- An x86 ALU instruction (`and`, shifts, `xor`, register `sub`) between a compare and its `b.cond` writes EFLAGS, so codegen
+  packs the live flags (`push; lahf; seto; mov; pop`) and the branch tests memory. 337 of 4,938 setter-to-consumer pairs in the
+  game kernels and CoreMark have one. An IR pass that hoists such pure scratch computations above the setter (stashed, not
+  merged) removes it: the bytecode-VM kernel's hottest block went from 16 to 7 host instructions, -6% instructions overall,
+  but averaged over 16 code placements its cycles moved -1%, within noise.
+- `CCMP` forces its operands into RAX/RCX (three stack spills in the hash kernel) and packs its flags to memory for the
+  following branch. Not changed.
+
+Code placement alone moves these kernels' cycles by up to ±15% (the hash kernel: 398k to 527k cycles per frame for identical
+code at 16 offsets of the code buffer). Compare builds over several placements before trusting a single-digit cycle change.
+
 ## One 16-byte slot per vector register (2026-11-10)
 
 The CPU kept SIMD&FP registers as two arrays, `v_lo[32]` (bits 63:0) and `v_hi[32]` (bits 127:64), so moving a whole
