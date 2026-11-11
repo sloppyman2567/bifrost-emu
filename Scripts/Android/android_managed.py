@@ -32,7 +32,7 @@ from android_processes import ProcessHost
 
 PRIORITIES = "??VDIWEFS"
 LAUNCHER_DIR = ROOT / "Guest/Android/Managed"
-LAUNCHER_SOURCES = ("ManagedLauncher.java", "ActivityProbe.java", "Framework/FrameworkServices.java",
+LAUNCHER_SOURCES = ("ManagedLauncher.java", "ManagedZygote.java", "ActivityProbe.java", "Framework/FrameworkServices.java",
                     "Framework/FrameworkCompatibility.java",
                     "Framework/FrameworkPackages.java", "Framework/FrameworkConnectivity.java",
                     "Framework/FrameworkServiceRuntime.java", "Framework/FrameworkTrace.java",
@@ -987,7 +987,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
     """
     environment = android_framework.install(framework, art)["environment"]
     adapter_manifest = json.loads((adapters / "adapters.json").read_text())
-    adapter_names = ["libbifrost-activity.so", "managed/am"] + [
+    adapter_names = ["libbifrost-activity.so", "managed/am", "managed/zygote"] + [
         "managed/" + name for name in ("libandroid.so", "libEGL.so", "libGLESv1_CM.so", "libGLESv2.so",
                                       "libGLESv3.so", "libaaudio.so", "libOpenSLES.so",
                                       "mapper.bifrost.so", "vulkan.bifrost.so", BINDER_ATTACH)]
@@ -1051,6 +1051,7 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         (local / "launcher.dex").chmod(0o444)  # ART rejects writable DEX for ordinary app UIDs.
         shutil.copy2(adapters / "libbifrost-activity.so", local / "libbifrost-activity.so")
         shutil.copy2(adapters / "managed/am", fresh / "system/bin/am")
+        shutil.copy2(adapters / "managed/zygote", fresh / "system/bin/bifrost-zygote")
         install_managed_graphics(fresh, adapters / "managed")
         install_settings_key(fresh, settings_key)
         # A system app's code is already in the provisioned image.
@@ -1173,7 +1174,7 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     + (["--android-window-plugin", str(window_plugin)] if window_plugin else []),
                 environment, "/data/local/tmp/launcher.dex", log_path.parent / "processes", trace_args,
                 media_mask=media_mask, activities=relay, task_session=process_session, state=app.parent,
-                activity_finished=completion)))
+                activity_finished=completion, zygote=True)))
             process_session.task_control = process_host.task
             environment = process_host.environment
             command[1:1] = ["--android-binder-broker", process_host.socket]

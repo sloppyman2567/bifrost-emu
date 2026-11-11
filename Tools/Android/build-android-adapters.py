@@ -492,6 +492,24 @@ def build(runtime, output):
                                  str(ROOT / "Guest/Android/Launchers/am.c"), str(bionic / "libc.so"),
                                  "-Wl,--allow-shlib-undefined", "-o", str(staging / "managed/am")], check=True)
         names.append("managed/am")
+        # The Zygote launcher links the image's runtime libraries as app_process does, libsigchain first so ART's
+        # signal chaining wraps libc's. These link-time stand-ins carry only the sonames and the functions it calls
+        # (its __asm__ labels); the guest loads the image's real libraries.
+        launcher = ROOT / "Guest/Android/Launchers/zygote_launcher.c"
+        called = re.findall(r'__asm__\("(\w+)"\)', launcher.read_text())
+        zygote_libraries = []
+        for soname, functions in (("libsigchain.so", []), ("libandroid_runtime.so", called),
+                                  ("libbinder_ndk.so", ["ABinderProcess_startThreadPool"])):
+            source = staging / ("link-" + soname + ".S")
+            source.write_text("".join(f".global {f}\n.type {f},%function\n{f}:\nret\n" for f in functions))
+            subprocess.run(common + ["-fPIC", "-shared", "-Wl,-soname," + soname, str(source),
+                                     "-o", str(staging / ("link-" + soname))], check=True)
+            zygote_libraries.append(str(staging / ("link-" + soname)))
+        subprocess.run(common + ["-fPIE", "-pie", "-Wl,--dynamic-linker=/system/bin/linker64", "-Wl,--no-as-needed",
+                                 str(ROOT / "Tests/Unit/android_bionic_start.S"), zygote_libraries[0], str(launcher),
+                                 *zygote_libraries[1:], str(bionic / "libc.so"), str(bionic / "libdl.so"),
+                                 "-o", str(staging / "managed/zygote")], check=True)
+        names.append("managed/zygote")
         thunked_android = [n for n in groups["libandroid.so"]
                            if not n.startswith(("AConfiguration_", "ALooper_", "AChoreographer_"))]
         # Managed Java MessageQueue polls the image's libutils Looper. Native

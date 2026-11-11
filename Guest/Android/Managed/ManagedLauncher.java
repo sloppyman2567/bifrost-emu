@@ -1986,7 +1986,8 @@ public final class ManagedLauncher {
         // ActivityThread.handleBindApplication's fallback when no serialized
         // font map arrives (lazy Typeface initialization). This probe has
         // no bindApplication, and a TextView needs the default typefaces.
-        Class.forName("android.graphics.Typeface")
+        // A Zygote child has them already: the load has no guard and would parse fonts.xml again.
+        if (!ManagedZygote.fontsLoaded) Class.forName("android.graphics.Typeface")
                 .getMethod("loadPreinstalledSystemFontMap").invoke(null);
         System.out.println("ACTIVITY_FONTS_OK");
         if (serviceChild) {

@@ -298,4 +298,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   socket's inode so a retiring or stopping broker never removes a successor's socket. `RealmIdleTests` in
   `test_asgard_stale_broker.py` cover it with the real emulator; a realm with media services attached is not tested.
 - `ProcessHost` starts every service child with `--asgard-service-parent <its pid>` from its single long-lived thread (the parent-death signal follows the spawning thread); keep both, or a killed supervisor leaves orphaned service processes. `asgard.broker_clients` treats `--service-child` processes as clients and other parent-bound helpers as not.
+- An app session forks service children from its Zygote (`ManagedZygote`, `bifrost-zygote`; see the runtime guide's
+  session Zygote). Preload there only what carries no process identity: anything that reads `Process.myUid()`, opens
+  Binder or starts a thread belongs in the child. A fork child dies with its Zygote, so the Zygote must survive signals
+  (EINTR) and request errors; any failure retires it and children start as their own emulators again.
+  `test_managed_play_services_available` checks that microG's process was forked (no runtime start in its log).
 - Managed HOME activates Asgard through ProcessHost, then changes task visibility on the guest main thread. Preserve Activity instances and pause/stop/restart/resume order; old window plugins must return ENOTSUP for missing visibility callbacks.

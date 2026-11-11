@@ -4963,12 +4963,22 @@ class PackageTests(unittest.TestCase):
         # microG runs in its own process and UID; the app binds its service
         # by action and reaches its providers there.
         self.assertIn("ASGARD_PROCESS_READY pid=", text)
-        self.assertRegex(text, r"uid=19998 process=com\.google\.android\.gms\n")
+        self.assertRegex(text, r"uid=19998 process=com\.google\.android\.gms ms=\d+\n")
         self.assertIn("MANAGED_PLAY_SERVICES_CONNECTED com.google.android.gms/org.microg.gms.measurement."
                       "MeasurementService com.google.android.gms.common.internal.IGmsServiceBroker alive=true", text)
         self.assertRegex(text, r"MANAGED_PLAY_SERVICES_GSERVICES rows=0 uid=1\d{4}\n")
         self.assertIn("MANAGED_PLAY_SERVICES_CHIMERA com.google.android.gms/org.microg.gms.measurement."
                       "MeasurementService", text)
+        # The session's Zygote forked microG's process: no child booted its own runtime (ART logs this line once,
+        # when a runtime starts) and the Zygote was never retired for the spawn path.
+        processes = sorted((state / "org.bifrost.fixture/managed/sessions").glob("*/processes"))[-1]
+        zygote = (processes / "zygote.log").read_text(errors="replace")
+        self.assertIn("ZYGOTE_PRELOADED", zygote, zygote[-5000:])
+        self.assertNotIn("Zygote retired", zygote, zygote[-5000:])
+        children = [path for path in processes.glob("*.log") if path.name not in ("zygote.log", "broker.log")]
+        self.assertTrue(children, "microG's process left no log")
+        for child in children:
+            self.assertNotIn("Core platform API reporting", child.read_text(errors="replace"), child.name)
 
     def test_managed_accounts_service(self):
         # AccountManager against the account service: an authenticator in the

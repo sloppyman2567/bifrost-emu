@@ -1,9 +1,11 @@
-"""Supervise fresh Android service VMs in the calling app's Binder realm."""
+"""Supervise Android service VMs in the calling app's Binder realm: forked by a session Zygote, or fresh."""
+import array
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import secrets
 import signal
@@ -18,6 +20,8 @@ import time
 URL = re.compile(r'https?://[^\s\x00-\x1f\x7f]{1,2000}\Z')
 OPEN_INTERVAL = 1.0
 SAME_LINK_WINDOW = 30.0
+PROCESS_NAME = re.compile(r'[A-Za-z0-9_.:-]{1,63}\Z')
+TRACE_OPTION = '-Dbifrost.apk.trace.dir='
 
 
 def exit_description(code):
@@ -95,9 +99,52 @@ def open_url(url, last, opener=None, popen=subprocess.Popen, clock=time.monotoni
     return dict(opened=True)
 
 
+def receive_message(connection):
+    """One length-prefixed JSON object, as ProcessHost's clients and its Zygote send them."""
+    length = struct.unpack('!I', ProcessHost.receive(connection, 4))[0]
+    if not 0 < length <= 8192:
+        raise ValueError('Invalid message size')
+    return json.loads(ProcessHost.receive(connection, length))
+
+
+class ZygoteChild:
+    """A child the session Zygote forked, tracked like a Popen through a pidfd (Linux 5.3, Python 3.9). Its exit
+    status belongs to the Zygote, which reaps it; poll() reports only that it has ended."""
+    def __init__(self, pid, zygote):
+        self.pid, self.returncode = pid, None
+        self.pidfd = os.pidfd_open(pid)
+        try:  # the Zygote reaps its children, so a reused pid has another parent
+            with open(f'/proc/{pid}/stat') as stat:
+                if int(stat.read().rsplit(')', 1)[1].split()[1]) != zygote:
+                    raise ProcessLookupError('The Zygote child has already ended')
+        except BaseException:
+            os.close(self.pidfd)
+            raise
+
+    def poll(self):
+        if self.returncode is None and select.select([self.pidfd], [], [], 0)[0]:
+            self.returncode = 0
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is None and not select.select([self.pidfd], [], [], timeout)[0]:
+            raise subprocess.TimeoutExpired(['zygote child', str(self.pid)], timeout)
+        self.returncode = 0
+        return self.returncode
+
+    def kill(self):
+        try:
+            signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def close(self):
+        os.close(self.pidfd)
+
+
 class ProcessHost:
     def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=(), media_mask=None,
-                 activities=None, task_session=None, state=None, activity_finished=None):
+                 activities=None, task_session=None, state=None, activity_finished=None, zygote=False):
         self.root, self.emu = Path(root), str(emu)
         # Runs Activities of other apps' packages that the guest asks for (android_google.ActivityRelay).
         self.activities = activities
@@ -156,8 +203,86 @@ class ProcessHost:
         self.path.chmod(0o600)
         self.listener.listen(8)
         self.listener.settimeout(.2)
+        self.zygote = self.zygote_channel = None
+        if zygote and not any(option.startswith(TRACE_OPTION) for option in self.art_options):
+            self.start_zygote()
         self.thread = threading.Thread(target=self.loop, name='AsgardProcessHost', daemon=True)
         self.thread.start()
+
+    def child_environment(self):
+        """The supervisor's capability stays with the session process."""
+        environment = dict(self.environment)
+        environment['BIFROST_GUEST_ENV'] = ';'.join(
+            item for item in environment.get('BIFROST_GUEST_ENV', '').split(';')
+            if item and not item.startswith('ASGARD_PROCESS_TOKEN='))
+        return environment
+
+    def start_zygote(self):
+        """Start the session's Zygote (Guest/Android/Managed/ManagedZygote.java), which connects back once it has
+        preloaded. Children start as their own emulators until then, without pidfds, and after any Zygote failure."""
+        try:
+            os.close(os.pidfd_open(os.getpid()))
+        except (AttributeError, OSError):
+            return
+        self.zygote_token = secrets.token_hex(32)
+        path = self.root / 'dev/socket/asgard_zygote'
+        path.unlink(missing_ok=True)
+        self.zygote_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.zygote_listener.bind(str(path))
+        path.chmod(0o600)
+        self.zygote_listener.listen(1)
+        self.zygote_log = (self.logs / 'zygote.log').open('ab')
+        # Bound to this supervisor like the broker; its children end with it (zygote_launcher.c).
+        command = [self.emu, *self.emu_args, '--android-runtime', '--android-zygote',
+                   '--asgard-service-parent', str(os.getpid()), '--android-binder-broker', self.socket,
+                   '--rootfs', str(self.root), '/system/bin/bifrost-zygote', '-Xuse-stderr-logger', *self.art_options,
+                   '-Djava.class.path=' + self.dex, 'ManagedZygote', '/dev/socket/asgard_zygote', self.zygote_token]
+        self.zygote = subprocess.Popen(command, stdout=self.zygote_log, stderr=subprocess.STDOUT,
+                                       env=self.child_environment(), start_new_session=True)
+        threading.Thread(target=self.accept_zygote, name='AsgardZygote', daemon=True).start()
+
+    def accept_zygote(self):
+        self.zygote_listener.settimeout(120)
+        try:
+            connection, _ = self.zygote_listener.accept()
+        except OSError:
+            return
+        try:
+            connection.settimeout(10)
+            peer = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            hello = receive_message(connection)
+            if (peer[0] != self.zygote.pid or hello.get('pid') != self.zygote.pid or
+                    not secrets.compare_digest(str(hello.get('token', '')), self.zygote_token)):
+                raise PermissionError('Unexpected Zygote connection')
+        except (OSError, ValueError, EOFError):
+            connection.close()
+            return
+        with self.lock:
+            if self.stopped.is_set():
+                connection.close()
+            else:
+                self.zygote_channel = connection
+
+    def fork(self, key, controller, uid, name, log):
+        """The child, forked by the Zygote; None to start it as its own emulator. A failure retires the Zygote,
+        which ends when its channel closes. Called with the lock held."""
+        channel = self.zygote_channel
+        if channel is None:
+            return None
+        try:
+            data = json.dumps(dict(key=key, controller=controller, uid=uid, name=name)).encode()
+            channel.sendmsg([struct.pack('!I', len(data)) + data],
+                            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [log.fileno()]))])
+            reply = receive_message(channel)
+            if 'error' in reply:
+                raise RuntimeError(reply['error'])
+            return ZygoteChild(int(reply['pid']), self.zygote.pid)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError) as error:
+            self.zygote_log.write(f'Zygote retired: {error}\n'.encode())
+            self.zygote_log.flush()
+            self.zygote_channel = None
+            channel.close()
+            return None
 
     def task(self, visible):
         with self.lock:
@@ -210,6 +335,9 @@ class ProcessHost:
             uid = self.allocate_uid() if isolated else request['uid']
             if not isolated and (type(uid) is not int or not 10000 <= uid <= 19999):
                 raise ValueError('Invalid service UID')
+            name = request.get('name')
+            if type(name) is not str or not PROCESS_NAME.match(name):
+                name = 'app_process'
             log = (self.logs / (key + '.log')).open('ab')
             art_options = []
             for option in self.art_options:
@@ -227,13 +355,10 @@ class ProcessHost:
                        '/system/bin/app_process64', '-Xuse-stderr-logger', *art_options,
                        '-Djava.class.path=' + self.dex, '/system/bin', 'ManagedLauncher',
                        '--service-child', controller, key]
-            child_environment = dict(self.environment)
-            child_environment['BIFROST_GUEST_ENV'] = ';'.join(
-                item for item in child_environment.get('BIFROST_GUEST_ENV', '').split(';')
-                if item and not item.startswith('ASGARD_PROCESS_TOKEN='))
             try:
-                process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                                           env=child_environment, start_new_session=True)
+                process = self.fork(key, controller, uid, name, log) or subprocess.Popen(
+                    command, stdout=log, stderr=subprocess.STDOUT, env=self.child_environment(),
+                    start_new_session=True)
             except BaseException:
                 log.close()
                 if isolated:
@@ -246,10 +371,13 @@ class ProcessHost:
     def terminate(child):
         process = child['process']
         if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if isinstance(process, ZygoteChild):
+                process.kill()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         process.wait(timeout=5)
 
     def reap(self):
@@ -259,6 +387,8 @@ class ProcessHost:
                 if status is None:
                     continue
                 child['log'].close()
+                if isinstance(child['process'], ZygoteChild):
+                    child['process'].close()
                 if child['isolated']:
                     fcntl.lockf(self.leases, fcntl.LOCK_UN, 1, child['uid'] - 99000)
                 del self.children[key]
@@ -341,7 +471,21 @@ class ProcessHost:
             for child in self.children.values():
                 self.terminate(child)
                 child['log'].close()
+                if isinstance(child['process'], ZygoteChild):
+                    child['process'].close()
             self.children.clear()
+            channel, self.zygote_channel = getattr(self, 'zygote_channel', None), None
+        if channel is not None:
+            channel.close()
+        if getattr(self, 'zygote', None) is not None:
+            self.zygote_listener.close()
+            (self.root / 'dev/socket/asgard_zygote').unlink(missing_ok=True)
+            try:
+                os.killpg(self.zygote.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.zygote.wait()
+            self.zygote_log.close()
         if hasattr(self, 'leases'):
             os.close(self.leases)
         if hasattr(self, 'path'):

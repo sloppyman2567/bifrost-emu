@@ -46,6 +46,8 @@ final class FrameworkProcessRuntime {
         final ComponentInfo info;
         final List<Runnable> pending = new ArrayList<>();
         final String processName;
+        // When its start was requested (uptime ms): the ready line reports how long the start took.
+        final long requested = android.os.SystemClock.uptimeMillis();
         int pid, uid;
         Object applicationThread;
         volatile boolean dead;
@@ -159,7 +161,8 @@ final class FrameworkProcessRuntime {
                                 for (Runnable request : pending) request.run();
                             });
                             System.out.println("ASGARD_PROCESS_READY pid=" + child.pid + " uid=" + child.uid
-                                    + " process=" + child.processName);
+                                    + " process=" + child.processName + " ms="
+                                    + (android.os.SystemClock.uptimeMillis() - child.requested));
                             break;
                         }
                         case PUBLISH: services.publish(data.readStrongBinder(),
@@ -228,8 +231,11 @@ final class FrameworkProcessRuntime {
         Child child = new Child(info, process);
         children.put(child.key, child);
         try {
+            // A forked child takes the process name, as Zygote names its children (the supervisor checks it).
+            String name = process.length() > 63 ? process.substring(0, 63) : process;
             JSONObject result = host(new JSONObject().put("operation", "spawn").put("key", child.key)
-                    .put("controller", registryName).put("isolated", isolated).put("uid", info.applicationInfo.uid));
+                    .put("controller", registryName).put("isolated", isolated).put("uid", info.applicationInfo.uid)
+                    .put("name", name));
             child.pid = result.getInt("pid"); child.uid = result.getInt("uid");
             main.postDelayed(() -> {
                 synchronized (FrameworkProcessRuntime.this) {

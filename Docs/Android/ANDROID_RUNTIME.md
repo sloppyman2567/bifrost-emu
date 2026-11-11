@@ -549,8 +549,30 @@ behavior were compared with Android 15's
 and [Binder driver](https://android.googlesource.com/kernel/common/+/refs/heads/android15-6.6/drivers/android/binder.c).
 These tests establish native cross-process IPC, not complete Android application
 process management. Manifest remote/isolated service launch and Chromium renderer
-spawning now use fresh ART VMs; Zygote, process-wide framework service publication, arbitrary
-virtual-device descriptor transfer, and SELinux policy remain unsupported.
+spawning fork from the session's Zygote (below), or start fresh ART VMs while it is not ready;
+process-wide framework service publication, arbitrary virtual-device descriptor transfer, and
+SELinux policy remain unsupported.
+
+### Session Zygote
+
+An app session's `ProcessHost` starts one Zygote beside the app: `bifrost-emu --android-zygote ...
+/system/bin/bifrost-zygote ... ManagedZygote`. `bifrost-zygote` (`Guest/Android/Launchers/zygote_launcher.c`, built
+with the managed adapters) is `app_process` without Binder before the fork: the image's own `AndroidRuntime` started
+with `-Xzygote`, whose `onStarted` calls the entry class without `ProcessState` and whose `onZygoteInit` starts the
+Binder thread pool. `app_process` itself cannot host it, because its RuntimeInit mode opens Binder before `main` and
+libbinder aborts a fork child that uses it (`ProcessState::childPostFork`). `ManagedZygote` runs as uid 0 without
+Binder, preloads the system fonts and resources and loads (does not initialize) `launcher.dex`'s classes, then connects
+to `dev/socket/asgard_zygote` with a token. For each child `ProcessHost` sends the request with the child's log
+descriptor (`SCM_RIGHTS`); the Zygote forks as `Zygote.forkAndSpecialize` does (`ZygoteHooks.preFork`, a fork whose
+child takes the app UID group first, its process name and the log, `postForkChild`, `postForkCommon`), and the child
+opens Binder (`ZygoteInit.nativeZygoteInit`) and runs `ManagedLauncher --service-child`. `ManagedLauncher`'s statics
+ask for the caller's identity, so they are initialized only in children. `ProcessHost` follows each child through a
+pidfd (Linux 5.3, Python 3.9). A child ends with the Zygote, the Zygote with the supervisor. Children start as their own
+emulators while the Zygote is preloading, with APK tracing on, without pidfds and after any Zygote failure (logged as
+"Zygote retired" in `processes/zygote.log`). Measured on Battle Cats (2026-11-11): WebView's two processes ready in
+0.75-0.8 s after the request instead of about 3.4 s, the Play Store companion in 1.3 s instead of 3.9 s (the slower
+figures are the same build's own-emulator path); microG's two forked processes took 1.7-2.2 s, their own-emulator time
+was not measured.
 Broker restart creates a fresh registry; live clients must reopen their Binder
 connections. Staging pages are retained until the corresponding Binder open
 closes; the RPC size limit is not a lifetime memory quota.

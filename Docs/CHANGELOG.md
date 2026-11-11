@@ -52,6 +52,14 @@ names the library, and ASTC transcoding about four times faster in a real game.
   (2026-11-11): the first step towards an Android Zygote, whose children never exec. A child ran a warmed loop at the
   parent's speed (0.0051 s against 0.0050 s) where it used to take 0.57 s.
 
+### Added (a Zygote for an app's helper processes)
+
+- An app session now forks its helper processes (microG, the Play Store companion, WebView's service and renderers)
+  from a session Zygote instead of starting a new emulator and Android runtime for each (2026-11-11). On Battle Cats,
+  WebView's processes were ready about 0.8 s after the app asked for them instead of about 3.4 s, and the Play Store
+  companion in 1.3 s instead of 3.9 s (same build, old path); microG's forked processes took 1.7-2.2 s (no old-path
+  figure). Children start the old way while the Zygote is still preloading or after it fails.
+
 ### Fixed (poll and select around signals)
 
 - `ppoll` and `pselect6` returned -1, which a guest reads as EPERM, when a host signal no guest handler takes (a
