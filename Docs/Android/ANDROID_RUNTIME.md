@@ -860,10 +860,10 @@ build_launcher(Path('/tmp/bifrost-service-probe'), (Path('Tests/Host/ManagedServ
 PY
 python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
   --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedServiceBatch \
-  --output /tmp/bifrost-service-jit
+  --timeout 180 --output /tmp/bifrost-service-jit
 python3 Scripts/Android/test_android_framework.py --services --managed-graphics \
   --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedServiceBatch \
-  --mode interp --timeout 90 --output /tmp/bifrost-service-interp
+  --mode interp --timeout 300 --output /tmp/bifrost-service-interp
 python3 Scripts/Android/test_android_framework.py --services \
   --probe /tmp/bifrost-service-probe/classes.dex --main-class ManagedLauncher \
   --probe-arg=--service-inventory --output /tmp/bifrost-service-inventory

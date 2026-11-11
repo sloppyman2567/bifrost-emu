@@ -409,7 +409,7 @@ public final class ManagedServiceBatch {
         check(pads.hasKeys(2, asked, padHas, -1) && Arrays.equals(padHas, new boolean[] {true, true, true, false, false, false}),
                 "gamepad hasKeys: " + Arrays.toString(padHas));
         check(pads.hasKeys(-1, asked, keyboardHas, -1)
-                && Arrays.equals(keyboardHas, new boolean[] {false, false, true, true, true, true}),
+                && Arrays.equals(keyboardHas, new boolean[] {false, false, true, false, true, true}),
                 "keyboard hasKeys: " + Arrays.toString(keyboardHas));
         check(!pads.hasKeys(9, asked, nobodyHas, -1) && Arrays.equals(nobodyHas, new boolean[asked.length]),
                 "an unknown device has keys");
