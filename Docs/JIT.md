@@ -16,7 +16,7 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
-## PC stores behind the chain slot and four peepholes (2026-11-10)
+## PC stores behind the chain slot, loop pins and four peepholes (2026-11-10)
 
 A sample of the operations executed inside translated blocks (AMD IBS, `perf record -e ibs_op/cnt_ctl=1,swfilt=1/u` with
 `BIFROST_JIT_DUMP=1`, sample addresses mapped onto the dumped blocks and each instruction classified) on CoreMark, `bench_fib`,
@@ -39,9 +39,17 @@ cheap part of that list.
   decides where the store goes: inline before the plain entry when a call is expected, in a stub after the block (store, then
   a jump to the plain entry) when a call was emitted without being expected. Guarded accesses reach helpers only through exits
   that set the PC themselves, so integer blocks carry no entry store.
-- **Not done: loop pins are still stored on every iteration of a `cmp; b.cond` loop.** Leaving them dirty across the
-  `jcc` (they were `-12%` host instructions on `bench_mips`) miscompiled `jit_fp_ldst_cache`: the body start treats each pin as
-  clean, equal to `cpu.regs[]`. It was backed out; the figures below were taken with it in and are not re-measured.
+- **Loop pins are not stored on every iteration.** `BRCOND` flushed every cached register before its `jcc`, including the
+  loop-carried pins of a self-loop, so a `cmp; b.cond` loop stored up to four registers per iteration while a `cbz` loop stored
+  none. `flush_all_vregs_but_pins` leaves the pins mapped and dirty in R12-R15, which neither path's flag commit touches; the
+  exits write them back. The first attempt miscompiled `jit_fp_ldst_cache` and was backed out. The cause was older than it:
+  the pin preload set each pin's mapping without raising `max_vreg_`, and the allocator trusts a mapping only for
+  `v <= max_vreg_`, so an op that reads a pin before anything else is allocated (`scvtf s0, w1`, the first instruction of that
+  test's entity loop) read `cpu.regs[1]`, which the back-edge no longer kept current: every entity got the same position. A
+  `cbz` loop of that shape was already wrong (`jit_selfloop_pins`' sum of 1..1000 came out as 999,001: each iteration
+  reconverted the counter's stale value) and a pin in x0 escaped by
+  luck. The preload raises `max_vreg_` now. Exits before a pin's rewrite were already safe: fault exits and the FP cold step
+  store every mapped architectural register, clean or not.
 - **Four peepholes** (Tier-1; each is decided by a pre-scan and re-checked by the emitter):
   `LDRSB`/`LDRSH`/`LDRSW` are one sign-extending load instead of `movzx` + `movsx` (`sext_load_`); `sxtb`/`sxth`/`sxtw` through
   `SBFM` are one `movsx`/`movsxd` instead of a shift pair; a 64-bit `lsl #1..3` read only by the next `ADD` becomes that
@@ -66,6 +74,10 @@ change against the build with it):
 These are instruction counts, which repeat to four digits; run times were not compared (single-run cycle counts moved by less
 than their noise except CoreMark, about -4%). Emitted code is 43.8 bytes per guest instruction on CoreMark against 43.6. No
 game, multithreaded workload or FP kernel was measured.
+
+The pin part alone, re-measured after its fix against the build that had backed it out (same method): `bench_mips` 2.609 G to
+2.309 G (-11.5%), `bench_matrix` -4.2%, the 200,000-iteration CoreMark run -1.5% per iteration (its iterations per second did
+not move beyond noise), `bench_sort` and `bench_dispatch` unchanged.
 
 Still open from the same sample, largest first: flag packing at exits (the dead-flag scan stops at the first load, so a loop
 whose blocks each start with a load packs seven instructions on every edge), one bounds check per access even for runs of

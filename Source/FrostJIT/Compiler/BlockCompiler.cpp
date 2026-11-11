@@ -903,7 +903,10 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // but before block_body_start_off_ (the self-loop back-edge jumps there,
     // preserving the pins as loop-carried state). Register the mapping so
     // body reads of the pinned vreg (LOAD_REG/STORE_REG src1) reuse the pin
-    // directly. The value is CLEAN: it mirrors cpu.regs[a] exactly.
+    // directly. The value is CLEAN: it mirrors cpu.regs[a] exactly. Raise
+    // max_vreg_ too: readers trust vreg_home_[v] only for v <= max_vreg_,
+    // and a pin read before any allocation (scvtf of a counter as the first
+    // op) would otherwise load cpu.regs[a], which a back-edge leaves stale.
     for (int a = 0; a <= 30; a++) {
         if (arch_pin_[a] >= 0) {
             emit_load_arm(arch_pin_[a], a);
@@ -911,6 +914,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             reg_vreg_[arch_pin_[a]] = a;
             vreg_dirty_[a] = false;
             vreg_last_use_[a] = ++regalloc_lru_counter_;
+            if (a > max_vreg_) max_vreg_ = a;
         }
     }
     // Record the block body start offset (after prologue). Used for

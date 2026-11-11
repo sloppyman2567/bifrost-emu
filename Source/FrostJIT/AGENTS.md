@@ -215,9 +215,12 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   inline store and the stub after the block. Anything emitted between an exit's `mov eax, pc` and its frame return must
   keep RAX: it is the block function's return value. A new chain target that reads `cpu.pc` (as the Tier-2 trial wrapper
   does) needs its own store or must switch `defer_pc_store` off, as Tier-2 does.
-- `BRCOND` flushes every cached register, pins included, before its `jcc`: the self-loop body start treats each pin as
-  clean (equal to `cpu.regs[]`). Keeping pins dirty across the back-edge needs that contract changed first; a direct
-  attempt miscompiled `jit_fp_ldst_cache` (2026-11-10).
+- No self-loop back-edge (`BRCOND` through `flush_all_vregs_but_pins`, `BRCOND_ZERO`, `BRCOND_BIT`) stores the loop pins
+  (R12-R15), so inside the body a pin can be ahead of `cpu.regs[]` although it is mapped clean. The body must read a pin
+  through its mapping: the preload raises `max_vreg_`, because `load_vreg_to_reg` and `store_reg_to_vreg` trust
+  `vreg_home_[v]` only for `v <= max_vreg_`. Exits taken before a pin's rewrite store every mapped architectural
+  register, not only dirty ones (`emit_memory_fault_exit`, `emit_fp_interp_step`); keep that for any new mid-block exit.
+  `jit_selfloop_pins` and `jit_fp_ldst_cache` cover both.
 - `sext_load_`, `lazy_load_` and `scaled_add_` are Tier-1 pre-scan requests, cleared for Tier-2. The guarded load reports
   what it emitted in `sext_load_done_` (other load paths zero-extend, so the `SEXT` must not trust the request). A lazy
   `LOAD_REG` and an unshifted `SHL` result exist for one op only: `ensure_vreg` and the compile loop materialize a lazy

@@ -1779,6 +1779,7 @@ private:
     void flush_all_vregs_exit();
     void flush_arch_vregs_keep();
     void store_dirty_unpinned_arch_regs();  // self-loop back-edge writeback
+    void flush_all_vregs_but_pins();        // before a two-path conditional branch
     void invalidate_all_vregs();
     // ── Targeted flush/invalidate ───────────────────
     // Walk only the host regs whose bits are set in `mask`, spilling any
