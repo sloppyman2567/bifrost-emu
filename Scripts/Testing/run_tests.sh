@@ -313,7 +313,7 @@ UNIT_TESTS=(
     "window_stats|Scripts/Testing/test_window_stats.sh||150|window_stats regression: ALL PASS|HOST_JIT"
     "jit_tier2_mutex|Scripts/Testing/test_jit_tier2_mutex.sh||180|jit_tier2_mutex: 20 promotion-stress runs PASS|HOST_JIT"
     "jit_tier2_discovery|Scripts/Testing/test_jit_tier2_discovery.sh||180|jit_tier2_discovery: direct edges, capped bodies, exits and invalidation PASS|HOST_JIT"
-    "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries and concurrent phases PASS|HOST_JIT"
+    "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries, exit rates and concurrent phases PASS|HOST_JIT"
     "jit_tier2_measure|Scripts/Testing/test_jit_tier2_measure.sh||180|jit_tier2_measure: real timing keeps faster code, rejects slower code, decides uneven visits PASS|HOST_JIT"
     "jit_tier2_rate|Scripts/Testing/test_jit_tier2_rate.sh||90|jit_tier2_rate: a slow head settles, a fast one reaches a trial PASS|HOST_JIT"
     "jit_cache_invalidation|Tests/Unit/jit_cache_invalidation.elf||15|jit_cache_invalidation: ALL PASS"

@@ -66,7 +66,7 @@ int main() {
             prof_record_sample(other + 0x18);  // body of the other block
             prof_record_sample(other + 0x18);
         });
-        worker.join();  // its ring is resolved as the thread ends
+        worker.join();  // its ring is resolved by the next report, not as the thread ends
         ProfReport report = prof_collect(8);
         check(report.lost == 0);
         // base: entry 2 (0x00,0x0f), body 2 (0x10,0x3f), exit 2 (0x40,0x4f), cold 2 (0x50,0x5f); 0x60 is the block's end
@@ -93,6 +93,18 @@ int main() {
         for (unsigned i = 0; i < 40000; ++i) prof_record_sample(pa + 0x5000);
         report = prof_collect(0);
         check(report.lost >= 40000 - 16384 && report.total.shared == 3 + 16384);
+        // Ended threads keep their rings until a drain; once all 256 are taken a new thread's claim drains them, so more
+        // short threads than rings lose nothing.
+        const ProfReport before = prof_collect(0);
+        for (unsigned i = 0; i < 300; ++i) {
+            std::thread shortlived([&] {
+                b->sync_dispatch_cache();
+                prof_record_sample(pa + 0x5000);
+            });
+            shortlived.join();
+        }
+        report = prof_collect(0);
+        check(report.lost == before.lost && report.total.shared == before.total.shared + 300);
     }
     // The optional allocation profile must report real IR provenance and
     // executable ranges, including operations constructed by shared helpers.

@@ -148,6 +148,25 @@ static void test_fmov_4s_imm(void) {
           "fmov v.4s #20.0 → 0x41a00000");
 }
 
+static void test_fmov_2s_imm(void) {
+    // FMOV .2S (Q=0) replicates into the low half and zeroes the high half;
+    // #0.5 (imm8=0x60) takes the b=1 exponent form 0x3F000000. Repeated so
+    // the JIT compiles it (it used to fall back to the interpreter).
+    for (int i = 0; i < 64; i++) {
+        uint32_t out[4] = {0};
+        __asm__ volatile (
+            "movi v0.16b, #0xab\n"
+            "fmov v0.2s, #0.5\n"
+            "str  q0, [%[out]]\n"
+            :: [out]"r"(out) : "v0", "memory"
+        );
+        if (i == 63)
+            CHECK(out[0] == 0x3F000000u && out[1] == 0x3F000000u
+                  && out[2] == 0 && out[3] == 0,
+                  "fmov v.2s #0.5 → 0x3f000000, high half zero");
+    }
+}
+
 static void test_softfloat_mul(void) {
     // Force soft-float-style multiplies via volatile doubles so libc
     // printf/math paths exercise __muldf3 under the emulator.
@@ -185,6 +204,7 @@ int main(void) {
     test_fmov_2d_imm();
     test_fmov_2d_neg();
     test_fmov_4s_imm();
+    test_fmov_2s_imm();
     test_softfloat_mul();
     printf("=== Results: %d/%d checks passed, %d failures ===\n",
            checks - failures, checks, failures);

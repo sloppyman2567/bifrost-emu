@@ -38,7 +38,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
     //   110x op=0/1 → MOVI/MVNI 32-bit MSL #((cmode[0]+1)*8)
     //   1110 op=0   → MOVI 8-bit (replicate imm8 to every byte)
     //   1110 op=1   → MOVI 64-bit (each imm8 bit → 0x00/0xFF byte)
-    //   1111        → FMOV (handled elsewhere / reserved here)
+    //   1111 op=0   → FMOV single (.2S/.4S)
+    //   1111 op=1   → FMOV double (.2D; Q=0 is unallocated)
     // Use immh = bits[22:19] (not [23:20]): SSHLL/SHRN keep bit23=0
     // so bits[23:20] can look like "immh==0" while bits[22:19]!=0.
     // Real MOVI/MVNI/ORR/BIC always have bits[22:19]==0.
@@ -138,6 +139,8 @@ bool Emulator::exec_simd_imm(const SimdDpFields& f, CPU& cpu) {
             // constant.  AdvSIMDExpandImm; op bit picks precision:
             //   op=1 → 64-bit double, replicated to .2D (Q=1)
             //   op=0 → 32-bit single, replicated to .2S/.4S
+            // op=1 with Q=0 is the group's one unallocated encoding.
+            if (opbit && !Q) throw DecodeError(cpu.pc, op);
             if (opbit) {
                 uint64_t val = (static_cast<uint64_t>(imm8 & 0x3F)) << 48;
                 if (imm8 & 0x80) val |= 0x8000000000000000ULL;   // sign

@@ -101,7 +101,9 @@ struct Tier2TestAccess {
     static void change_phase(FrostJIT& j) {
         auto* monitor=j.blocks_.at(0x10000).tier2_monitor;
         CPU c;
-        for(unsigned k=0;k<64;++k) j.tier2_region_feedback(c,monitor);
+        // Exits with no completed iteration: every feedback window is bad, and the last strike retires.
+        for(unsigned k=0;k<FrostJIT::kTier2FeedbackWindowExits*FrostJIT::kTier2FeedbackStrikes;++k)
+            j.tier2_region_feedback(c,monitor);
     }
 };
 }

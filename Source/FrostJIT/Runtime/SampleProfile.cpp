@@ -27,6 +27,7 @@ struct Ring {
     uint32_t read = 0;
     int host_tid = 0;
     bool in_use = false;
+    bool orphaned = false;  // its thread ended: drained at the next report, code release or ring shortage, then freed
 };
 
 struct ThreadTotals {
@@ -46,13 +47,13 @@ struct StoredRange {
 struct State {
     std::mutex mutex;
     std::vector<StoredRange> ranges;
-    bool ranges_sorted = true;
+    size_t ranges_sorted = 0;  // leading entries known to be in address order
     uint64_t body_op[PROF_OP_KINDS] = {};
     uint64_t body_spill = 0;
     uint64_t ranges_dropped = 0;
     Ring rings[MAX_THREADS];  // static storage: a thread that exits leaves nothing dangling
     std::vector<ProfBlock> blocks;
-    bool sorted = true;
+    size_t blocks_sorted = 0;  // leading entries known to be in address order
     ProfSectionCounts total;
     uint64_t lost = 0;
     std::atomic<uint64_t> unclaimed{0};  // samples from a thread that has no ring
@@ -68,15 +69,27 @@ State& state() {
 thread_local int tls_slot = -1;  // a plain int: the signal handler reads it
 thread_local bool tls_claimed = false;
 
+// Sorts only what was appended since the last call and merges it in: a game registers hundreds of thousands of blocks
+// and millions of ranges, and re-sorting all of them whenever one arrived out of order cost about 5% of a run.
+template <class T>
+void sort_tail(std::vector<T>& v, size_t& sorted) {
+    if (sorted == v.size()) return;
+    const auto by_begin = [](const T& a, const T& b) { return a.begin < b.begin; };
+    const auto mid = v.begin() + static_cast<std::ptrdiff_t>(sorted);
+    std::sort(mid, v.end(), by_begin);
+    std::inplace_merge(v.begin(), mid, v.end(), by_begin);
+    sorted = v.size();
+}
+
+template <class T>
+void note_appended(const std::vector<T>& v, size_t& sorted) {
+    // v already holds the new entry; the sorted prefix grows only while every entry so far arrived in order.
+    if (sorted == v.size() - 1 && (sorted == 0 || v[sorted - 1].begin <= v.back().begin)) sorted = v.size();
+}
+
 void sort_blocks_locked(State& s) {
-    if (!s.sorted) {
-        std::sort(s.blocks.begin(), s.blocks.end(), [](const ProfBlock& a, const ProfBlock& b) { return a.begin < b.begin; });
-        s.sorted = true;
-    }
-    if (!s.ranges_sorted) {
-        std::sort(s.ranges.begin(), s.ranges.end(), [](const StoredRange& a, const StoredRange& b) { return a.begin < b.begin; });
-        s.ranges_sorted = true;
-    }
+    sort_tail(s.blocks, s.blocks_sorted);
+    sort_tail(s.ranges, s.ranges_sorted);
 }
 
 // A body sample: what the operation whose code it fell in does, or PROF_OTHER between operations.
@@ -124,21 +137,25 @@ void drain_locked(State& s, int slot) {
 }
 
 void drain_all_locked(State& s) {
-    for (int i = 0; i < MAX_THREADS; ++i)
-        if (s.rings[i].in_use) drain_locked(s, i);
+    for (int i = 0; i < MAX_THREADS; ++i) {
+        Ring& ring = s.rings[i];
+        if (!ring.in_use) continue;
+        drain_locked(s, i);
+        if (ring.orphaned) ring.in_use = ring.orphaned = false;
+    }
 }
 
-// Runs when a thread ends: its last samples are resolved, and the ring goes to the next thread.
+// Runs when a thread ends. Its samples stay in the ring until the next drain, so a game that starts and ends threads
+// all the time does not resolve (and sort the block table) once per thread.
 struct SlotOwner {
     ~SlotOwner() {
         const int slot = tls_slot;
         if (slot < 0) return;
-        tls_slot = -1;  // before draining: a late signal must not write to a ring that is being released
+        tls_slot = -1;  // a late signal goes to `unclaimed` instead of a ring that is about to be handed on
         State& s = state();
         std::lock_guard<std::mutex> lock(s.mutex);
-        drain_locked(s, slot);
         s.by_thread[s.rings[slot].host_tid].exited = true;
-        s.rings[slot].in_use = false;
+        s.rings[slot].orphaned = true;
     }
 };
 
@@ -155,8 +172,8 @@ void print_counts(std::FILE* out, const ProfSectionCounts& c) {
 void prof_note_block(const ProfBlock& block) {
     State& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    if (!s.blocks.empty() && block.begin < s.blocks.back().begin) s.sorted = false;
     s.blocks.push_back(block);
+    note_appended(s.blocks, s.blocks_sorted);
 }
 
 void prof_note_ranges(const ProfRange* ranges, size_t count) {
@@ -168,8 +185,8 @@ void prof_note_ranges(const ProfRange* ranges, size_t count) {
             return;
         }
         if (ranges[i].end <= ranges[i].begin) continue;
-        if (!s.ranges.empty() && ranges[i].begin < s.ranges.back().begin) s.ranges_sorted = false;
         s.ranges.push_back({ranges[i].begin, uint32_t(ranges[i].end - ranges[i].begin), ranges[i].op, ranges[i].spill});
+        note_appended(s.ranges, s.ranges_sorted);
     }
 }
 
@@ -177,6 +194,7 @@ void prof_release_code(const uint8_t* base, size_t size) {
     State& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     drain_all_locked(s);  // samples taken in this buffer are resolved while its blocks are still known
+    sort_blocks_locked(s);  // the erases below keep order, so both tables stay wholly sorted
     const uint64_t first = reinterpret_cast<uint64_t>(base), last = first + size;
     s.blocks.erase(std::remove_if(s.blocks.begin(), s.blocks.end(),
                                   [&](const ProfBlock& b) { return b.begin >= first && b.begin < last; }),
@@ -184,6 +202,8 @@ void prof_release_code(const uint8_t* base, size_t size) {
     s.ranges.erase(std::remove_if(s.ranges.begin(), s.ranges.end(),
                                   [&](const StoredRange& r) { return r.begin >= first && r.begin < last; }),
                    s.ranges.end());
+    s.blocks_sorted = s.blocks.size();
+    s.ranges_sorted = s.ranges.size();
 }
 
 void prof_claim_thread() {
@@ -193,15 +213,18 @@ void prof_claim_thread() {
     (void)owner;
     State& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    for (int i = 0; i < MAX_THREADS; ++i) {
-        Ring& ring = s.rings[i];
-        if (ring.in_use) continue;
-        ring.in_use = true;
-        ring.read = ring.head.load(std::memory_order_relaxed);
-        ring.host_tid = static_cast<int>(syscall(SYS_gettid));
-        s.by_thread.try_emplace(ring.host_tid);
-        tls_slot = i;
-        return;
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int i = 0; i < MAX_THREADS; ++i) {
+            Ring& ring = s.rings[i];
+            if (ring.in_use) continue;
+            ring.in_use = true;
+            ring.read = ring.head.load(std::memory_order_relaxed);
+            ring.host_tid = static_cast<int>(syscall(SYS_gettid));
+            s.by_thread.try_emplace(ring.host_tid);
+            tls_slot = i;
+            return;
+        }
+        drain_all_locked(s);  // every ring taken: resolving the ended threads' samples frees theirs
     }
 }
 

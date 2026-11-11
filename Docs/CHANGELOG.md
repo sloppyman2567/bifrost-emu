@@ -46,6 +46,22 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (Tier-2 region exits, FMOV immediates and profiler statistics)
+
+- A Tier-2 region's side exit whose target had no translation when the region was compiled went back to the dispatcher for
+  the region's whole life. A particle-update loop made 283,220 dispatches with Tier-2 against 2,012 without it; every exit
+  now gets a cell that is filled when its target is translated (8,946 dispatches), and that loop runs 7.7% fewer cycles per
+  frame than Tier-1 instead of breaking even (2026-11-11). Tier-2 stays opt-in.
+- A kept region is retired when its side exits outgrow, over windows of 32, the exit rate its trial measured (four times
+  that, and at least one in 16 iterations), so a new trial judges the new phase. The old rule only counted exits with no
+  completed iteration in between and never retired a loop that leaves on a steady fraction of its iterations.
+- Vector `FMOV` immediates (`.2s`, `.4s`, `.2d`) are compiled instead of interpreted; they were 7.6% of the CPU time in a
+  Unity game's profile. The unallocated `.2d` form without Q raises SIGILL, as in QEMU.
+- The `BIFROST_STATS_PERIOD` line printed wrapped values such as `18446744073709... new blocks translated` after a full code
+  cache was replaced: it counted only the newest JIT generation.
+- `BIFROST_PROF` re-sorted its table of translated blocks every time a guest thread ended, about 5% of a game's run with
+  `BIFROST_PC_HIST`; ended threads' samples are resolved at the next report, sorting only what is new.
+
 ### Added (Tier-2 through calls and returns)
 
 - Tier-2 regions can end in a `ret`, leaving through the indirect-branch table, and can follow a `bl` into its callee and

@@ -442,15 +442,18 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             }
         }
     }
-    // One CPU-local flag-neutral store per completed hot iteration. No
-    // shared atomic increment, register clobber, or per-entry flag save.
+    // One CPU-local increment per completed hot iteration: no shared atomic
+    // and no register. It clobbers the host flags, which are dead at every
+    // site: back-edges enter a body compiled with the flags in pstate (and
+    // materialize them first when the loop top reads them), and exits emit it
+    // after the flags are committed.
     auto emit_completion_credit = [&] {
         if (!tier2_current_monitor_) return;
         const size_t offset = offsetof(CPU, jit_tier2_feedback) +
             tier2_current_monitor_->slot * sizeof(CPU::Tier2FeedbackSlot) +
             offsetof(CPU::Tier2FeedbackSlot, credit);
-        emit_byte(0xC7); emit_byte(0x83); // mov dword [rbx+disp32],1
-        emit_u32(static_cast<uint32_t>(offset)); emit_u32(1);
+        emit_byte(0x83); emit_byte(0x83); // add dword [rbx+disp32],1
+        emit_u32(static_cast<uint32_t>(offset)); emit_byte(1);
     };
     auto emit_trial_backedge = [&] {
         if (!tier2_sampling_compile_) return;
@@ -758,7 +761,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     auto emit_chainout_exit = [&](uint64_t pc) -> bool {
         if (pc == trace.head_pc) emit_completion_credit();
         if (!mt_active()) {
-            if (!exitchain_ok || dbg().no_chain || !lookup_only_locked(pc)) return false;
+            // The cell is created even when the target has no translation yet: translating it fills the cell
+            // (chain_back_references), and an empty cell leaves to the dispatcher as an unchained exit would. Requiring
+            // a translation here made exits whose targets were being settled return to the dispatcher for good.
+            if (!exitchain_ok || dbg().no_chain) return false;
             MtEdge* edge = create_chain_edge(pc, true, code_buf_used_);
             emit_mov_imm_to_rax(pc);
             emit_store(CPU_REG, PC_OFF, RAX);
@@ -802,36 +808,59 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // exit returns to the C dispatcher (ret) with RAX = the side-exit PC.
     // Exit feedback stays in generated code: leaving through C++ and the
     // dispatcher on every side exit cost a short loop more than the region
-    // saved. Mirrors tier2_region_feedback; ZF clear asks for the C++ path,
-    // which takes a slot from another region and retrains at the threshold.
-    // Sampling copies skip it: feedback ignores a running trial.
+    // saved. Mirrors tier2_region_feedback: each exit counts towards a window
+    // of kTier2FeedbackWindowExits; a full window that completed fewer
+    // iterations than the monitor's minimum is a strike and resets, and the
+    // strike that reaches kTier2FeedbackStrikes asks for the C++ path (ZF
+    // clear), as does a slot owned by another region. Sampling copies only
+    // count their exits: the trial reads both counts.
     const bool native_feedback = tier2_current_monitor_ && !tier2_sampling_compile_;
+    const bool count_exits = tier2_current_monitor_ && tier2_sampling_compile_;
     size_t feedback_stub = 0;
+    uint32_t pressure_off = 0;
+    if (tier2_current_monitor_) {
+        const size_t slot = offsetof(CPU, jit_tier2_feedback) +
+            tier2_current_monitor_->slot * sizeof(CPU::Tier2FeedbackSlot);
+        pressure_off = static_cast<uint32_t>(slot + offsetof(CPU::Tier2FeedbackSlot, pressure));
+    }
     if (native_feedback) {
         const size_t slot = offsetof(CPU, jit_tier2_feedback) +
             tier2_current_monitor_->slot * sizeof(CPU::Tier2FeedbackSlot);
         const auto owner = static_cast<uint32_t>(slot + offsetof(CPU::Tier2FeedbackSlot, owner));
         const auto credit = static_cast<uint32_t>(slot + offsetof(CPU::Tier2FeedbackSlot, credit));
-        const auto pressure = static_cast<uint32_t>(slot + offsetof(CPU::Tier2FeedbackSlot, pressure));
+        const auto strikes = static_cast<uint32_t>(slot + offsetof(CPU::Tier2FeedbackSlot, strikes));
+        const uint32_t pressure = pressure_off;
         feedback_stub = code_buf_used_;
         emit_mov_imm64(RAX, tier2_current_monitor_->identity);
         emit_byte(0x48); emit_byte(0x39); emit_byte(0x83); emit_u32(owner);  // cmp [rbx+owner],rax
         const size_t foreign = emit_jcc_rel32_placeholder(5);
-        emit_byte(0x83); emit_byte(0xBB); emit_u32(credit); emit_byte(0);    // cmp dword [rbx+credit],0
-        const size_t no_credit = emit_jcc_rel32_placeholder(4);
+        emit_byte(0x8B); emit_byte(0x83); emit_u32(pressure);                // mov eax,[rbx+pressure]
+        emit_byte(0x83); emit_byte(0xC0); emit_byte(1);                      // add eax,1
+        emit_byte(0x83); emit_byte(0xF8);                                    // cmp eax,window
+        emit_byte(static_cast<uint8_t>(kTier2FeedbackWindowExits));
+        const size_t full = emit_jcc_rel32_placeholder(3);                   // jae
+        emit_byte(0x89); emit_byte(0x83); emit_u32(pressure);                // mov [rbx+pressure],eax
+        const size_t counted = emit_jmp_rel32_placeholder();
+        patch_jcc_rel32(full, static_cast<int32_t>(code_buf_used_ - (full + 6)));
+        emit_byte(0xC7); emit_byte(0x83); emit_u32(pressure); emit_u32(0);   // mov dword [rbx+pressure],0
+        emit_byte(0x8B); emit_byte(0x83); emit_u32(credit);                  // mov eax,[rbx+credit]
         emit_byte(0xC7); emit_byte(0x83); emit_u32(credit); emit_u32(0);     // mov dword [rbx+credit],0
-        emit_byte(0x83); emit_byte(0xBB); emit_u32(pressure); emit_byte(0);  // cmp dword [rbx+pressure],0
-        const size_t settled = emit_jcc_rel32_placeholder(4);
-        emit_byte(0x83); emit_byte(0xAB); emit_u32(pressure); emit_byte(1);  // sub dword [rbx+pressure],1
-        const size_t done = emit_jmp_rel32_placeholder();
-        patch_jcc_rel32(no_credit, static_cast<int32_t>(code_buf_used_ - (no_credit + 6)));
-        emit_byte(0x83); emit_byte(0xBB); emit_u32(pressure); emit_byte(63); // cmp dword [rbx+pressure],63
-        const size_t threshold = emit_jcc_rel32_placeholder(3);
-        emit_byte(0x83); emit_byte(0x83); emit_u32(pressure); emit_byte(1);  // add dword [rbx+pressure],1
-        patch_jcc_rel32(settled, static_cast<int32_t>(code_buf_used_ - (settled + 6)));
-        patch_jmp_rel32(done, static_cast<int32_t>(code_buf_used_ - (done + 5)));
+        emit_push(RCX);
+        emit_mov_imm64(RCX, reinterpret_cast<uint64_t>(&tier2_current_monitor_->min_window_iterations));
+        emit_byte(0x3B); emit_byte(0x01);                                    // cmp eax,[rcx]
+        emit_pop(RCX);
+        const size_t bad = emit_jcc_rel32_placeholder(2);                    // jb
+        emit_byte(0xC7); emit_byte(0x83); emit_u32(strikes); emit_u32(0);    // mov dword [rbx+strikes],0
+        const size_t good = emit_jmp_rel32_placeholder();
+        patch_jcc_rel32(bad, static_cast<int32_t>(code_buf_used_ - (bad + 6)));
+        emit_byte(0x83); emit_byte(0x83); emit_u32(strikes); emit_byte(1);   // add dword [rbx+strikes],1
+        emit_byte(0x83); emit_byte(0xBB); emit_u32(strikes);                 // cmp dword [rbx+strikes],strikes
+        emit_byte(static_cast<uint8_t>(kTier2FeedbackStrikes));
+        const size_t retire = emit_jcc_rel32_placeholder(3);                 // jae
+        for (size_t p : {counted, good})
+            patch_jmp_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 5)));
         emit_byte(0x31); emit_byte(0xC0); emit_ret();                        // xor eax,eax: ZF set
-        for (size_t p : {foreign, threshold})
+        for (size_t p : {foreign, retire})
             patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
         emit_mov_imm32_zext(RAX, 1);
         emit_byte(0x85); emit_byte(0xC0); emit_ret();                        // test eax,eax: ZF clear
@@ -861,6 +890,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             continue;
         }
         const bool feedback = native_feedback && c.side_pc != trace.head_pc;
+        if (count_exits && c.side_pc != trace.head_pc) {
+            emit_byte(0x83); emit_byte(0x83); emit_u32(pressure_off); emit_byte(1);  // add dword [rbx+pressure],1
+        }
         size_t needs_cpp = 0;
         if (feedback) {
             emit_byte(0xE8);  // call feedback_stub

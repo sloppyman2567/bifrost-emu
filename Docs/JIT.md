@@ -16,6 +16,43 @@ analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
 
+## Tier-2 exits that chain, exit-rate feedback and profiler costs (2026-11-11)
+
+A profile of the game-kernel set with `BIFROST_TIER2=1` found that a kept region could cost more than it saved.
+
+- **Region exits always get a cell.** A single-thread region created its exit cell only when the target already had a
+  translation, and left through the dispatcher otherwise, for the region's life. Targets on the declined trace next to it
+  were being settled (retired and rebuilt) when the region compiled, so the particles region's three side exits all
+  returned to C++: 283,220 dispatches over 303 frames against 2,012 on Tier-1. The cell is now created anyway; an empty one
+  leaves as before, and translating the target fills it (`chain_back_references`). MT regions always had cells. Particles
+  then ran 8,946 dispatches and, per frame at steady state (difference of 200 and 1,200 frames, one pinned core), 7.7% fewer
+  cycles and 2.6% fewer instructions than Tier-1, where it had been even in cycles and +4.7% in instructions.
+- **Feedback compares exit rates** (rule above, under Tier-2 loop discovery). The trial was right for particles' early
+  frames, where almost no particle bounced (16 exits in 128,000 iterations); the rule re-trials a region whose exit rate
+  outgrows its trial's. A floor of one exit in 64 retired particles once its bounce rate rose: the new trial picked the
+  other rotation of the loop (head `0x4020c8`), which loses, so one run ended in Tier-1. At one in 16, particles keeps
+  its region in every run. `jit_tier2_feedback` checks that a steady exit every fourth iteration retires (the old rule kept
+  it) and that one in forty does not.
+- **Statistics:** the `BIFROST_STATS_PERIOD` line summed only the current JIT generation, so replacing a full code cache made
+  its deltas wrap (`18446744073709... new blocks`); it sums every generation now, and a total that still falls (exec, an
+  exiting per-thread JIT) prints the new total instead of wrapping. `BIFROST_PROF` no longer re-sorts its block table at
+  every thread exit (see Where host time goes).
+
+Game kernels, steady state Tier-2 against Tier-1, all checksums equal to native: instructions per frame particles -1.4%,
+collide -7.4% (both keep a region), the other seven within 0.1%; cycles of those seven moved -22% to +31% with identical
+instruction counts, which is code placement. CoreMark 200,000: crcfinal 0x4983, Tier-2 keeps four or five regions and runs
+197.4-197.7 G host instructions against 199.8 G (-1.1 to -1.2%, as before this change), cycles -2.6% and -3.2% in two
+pairs. Checked: `make verify` (106 differential fixtures, 11 threaded oracle runs), the five `test_jit_tier2_*` scripts, the
+`jit_`/`tier2` unit entries with Tier-1 (48 pass) and Tier-2 (47 pass; `jit_disk_cache` fails by design). No game was run with
+Tier-2.
+
+Not done: loops whose iterations take different arms (cull, survival 0.16-0.37), loops with an inner loop (skinning) and
+dispatch loops (vm) are still declined. Admitting them needs regions with internal joins, not a longer linear trace: each
+join must be a commit point on both incoming edges, the planner's forwarding and LICM need a barrier there (cull's hot path
+sets `w12 = 1` before a join that the culled path reaches with 0), and off-path blocks need their own trial baselines.
+Raising the eight-block cap alone admits none of the measured kernels. Tier-2 still spends about 20 M cycles per run on
+compiles and trials before it pays.
+
 ## Tier-2 through calls and returns (2026-11-11)
 
 Under chain-skip a guest `BL` is a jump that sets X30 and `RET` an indirect exit, and Tier-2 stopped at both: a BL ended the
@@ -1222,8 +1259,10 @@ on spill cost: the operation's own work is in the same range, and I cannot separ
 indirect branch of `ret`, flag and register commits) is in the exit section, not the body. The operation table costs 16 bytes per
 IR operation translated while `BIFROST_PROF` is set (capped at 16 Mi operations; a note says when it is full).
 
-Samples go to a per-thread ring of 16,384 and are resolved into running totals whenever a report is printed, when a thread ends
-and when a code buffer is released. A thread that outlives 164 s of samples between two reports overwrites its oldest ones; those
+Samples go to a per-thread ring of 16,384 and are resolved into running totals whenever a report is printed, when a code buffer
+is released and when a new thread finds every ring taken; a thread that ends leaves its ring to the next of these. Resolving
+sorts only the blocks and operation ranges registered since the last time and merges them in: re-sorting the whole table at
+every thread exit cost about 5% of a game's run. A thread that outlives 164 s of samples between two reports overwrites its oldest ones; those
 are counted as *lost*, not folded into a bucket, so `BIFROST_STATS_PERIOD` keeps a long run complete. The numbers are time, not
 instruction counts: a 10 ms sample says where the host was, not how often a block ran. Sampling and section registration
 (`Runtime/SampleProfile.cpp`) run only when the variable is set; otherwise the translator tests one flag per compiled
@@ -1427,8 +1466,9 @@ polynomials instead of erroneous hand-copied entries. `jit_crc32` checks
 2,048 cases against a bitwise oracle, QEMU and differential verification.
 CRC32 retains the normal interpreter fallback in JIT mode.
 
-Vector FMOV immediates are native (inline, see
-[inline native SIMD kinds](archive/JIT-history.md#inline-native-simd-kinds-2026-10-13)). Scalar
+Vector FMOV immediates are native: the modified-immediate translation expands `.2S`/`.4S`/`.2D` constants into the
+`SIMD_MOVI` broadcast (it used to leave cmode 0xF to the interpreter, 7.6% of a game's CPU). `.2D` with Q=0 is
+unallocated and raises SIGILL in both engines, as in QEMU. Scalar
 DUP element reads now use native `SIMD_SCALAR_DUP`; their reference bugs affected both engines and
 can escape JIT-versus-interpreter verification. Two Doom 3 collision-code
 probes exposed this: `.2s #0.5` expanded with a wrong exponent, and
@@ -1948,20 +1988,22 @@ This is a profitability heuristic, not a measured speedup; multiplying
 marginal frequencies can underestimate correlated paths. MT single-block loops are declined
 because they fuse no boundaries and cannot retain loop state across entries.
 A profile whose block was promoted or invalidated is dropped from the lookup
-table and its counters go unread; storage outlives published code. Monitored regions deposit a recovery credit
-in a CPU-local slot on completed hot paths. This is one flag-neutral store,
-including ST internal backedges; MT performs no shared atomic increment per
-iteration. A cold exit calls a stub shared by the region after flushing guest
-state. It consumes a recovery credit and reduces pressure, or increases
-pressure if no completed path intervened, then the exit chains to its target
-like any other. Only a slot owned by another region, or pressure reaching 64,
-tears down the frame and tail-calls `tier2_region_feedback` in C++, which
-retrains at 64. The stub and that function implement one rule and change
-together: going through C++ and the dispatcher on every side exit cost a short
-loop more than the region saved. This is a conservative recovery/miss heuristic, not
-an estimate of a cold-exit probability. Sixteen CPU-local slots bound metadata;
-colliding regions can delay detection by depositing extra credits or changing
-the slot's owner, but cannot add pressure to another region.
+table and its counters go unread; storage outlives published code. A monitored region counts its completed
+iterations in a CPU-local slot (`credit`: one `add dword [rbx+disp32],1` on each back-edge and on exits that complete
+the path; the host flags are dead at all of them, and MT performs no shared atomic increment). A side exit calls a
+stub shared by the region after flushing guest state; it counts the exit (`pressure`), and every
+`kTier2FeedbackWindowExits` (32) exits it closes a window: a window that completed fewer iterations than the monitor's
+`min_window_iterations` is a strike, a good one clears the strikes, and `kTier2FeedbackStrikes` (4) strikes in a row
+retire the region. The minimum comes from the trial: its sampling copy counts the same iterations and exits, and a kept
+region may exit up to `kTier2ExitRateSlack` (4) times as often as its candidate did, and at least once in
+`kTier2ExitRateFloor` (16) iterations. A trial that saw no exits gets that floor (512 iterations per window). Then the
+exit chains to its target like any other. Only a slot owned by another region, or the retiring strike, tears down the
+frame and tail-calls `tier2_region_feedback` in C++. The stub and that function implement one rule and change
+together: going through C++ and the dispatcher on every side exit cost a short loop more than the region saved.
+A retirement is a request for a new trial at the current exit rate, not a measured loss: the old rule (64 exits with no
+completed iteration in between) never retired a loop that exits on a steady fraction of its iterations. Sixteen
+CPU-local slots bound metadata; colliding regions can delay detection by adding iterations or changing the slot's
+owner, but cannot add exits to another region.
 
 Retiring a region also forgets its blocks' predecessors, which nothing
 retranslates. `retire_tier2_region_locked` records both, and the next dispatch
@@ -2047,7 +2089,8 @@ below 0.97, with at least nine pairs below 0.97, to select the region. The arms
 run different live work, so a stretch of unusually cheap iterations can skew one
 pair: the median and the nine-pair rule limit that, they do not rule it out. Windows also
 leave out what happens after an exit, so a candidate that leaves badly can pass
-here and still lose over the whole program. Slower or noisy
+here and still lose over the whole program; every region exit has a revocable cell, so a published exit chains to its
+target once that is translated instead of returning to the dispatcher. Slower or noisy
 candidates restore Tier-1; a measured loss can schedule a smaller prefix after
 fresh profiling, following the bounded size search described above. A trial
 with insufficient evidence after 128 pools or 131072 visits also restores Tier-1. Version

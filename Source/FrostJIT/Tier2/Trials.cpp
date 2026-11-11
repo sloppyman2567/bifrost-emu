@@ -64,6 +64,7 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         : (trial.baseline_chain_sample ? trial.baseline_chain_sample : trial.baseline.chain_entry);
     cpu.jit_tier2_trial_remaining = trial.linear ? 1 : slot.sample_quota;
     cpu.jit_tier2_trial_work = 0;
+    slot.credit = slot.pressure = 0;  // the candidate's sampling copy counts iterations and side exits here
     const uint64_t start = trial_clock_ns();
     for (unsigned dispatches = 0; dispatches < 2048; ++dispatches) {
         jit_grant_lease(cpu);
@@ -88,6 +89,8 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
     const uint32_t work = cpu.jit_tier2_trial_work;
     const uint64_t exit = cpu.pc;
     const bool quota_spent = !cpu.jit_tier2_trial_remaining;
+    const uint32_t visit_iterations = slot.credit, visit_exits = slot.pressure;
+    slot.credit = slot.pressure = 0;
     cpu.jit_tier2_trial = nullptr;
     bool finish = false, keep = false;
     {
@@ -101,6 +104,10 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
         if (ns && work && cpu.running && monitor->enabled.load(std::memory_order_acquire)) {
             slot.window_ns += ns;
             slot.window_work += work;
+            if (candidate) {
+                trial.candidate_iterations += visit_iterations;
+                trial.candidate_exits += visit_exits;
+            }
         }
         if (!trial.linear && quota_spent && ns && ns < 10000 && slot.sample_quota < 4096)
             slot.sample_quota *= 2; // amortize timer cost on very fast loops
@@ -134,6 +141,21 @@ uint64_t FrostJIT::tier2_measure(CPU& cpu, Emulator& emu, void* opaque) {
             if (tier2_trace_enabled())
                 fprintf(stderr, "[tier2] undecided head=%llx pairs=%zu visits=%u\n",
                     (unsigned long long)monitor->head, trial.ratios.size(), trial.entries);
+        }
+        if (finish && keep) {
+            // The verdict holds for the exit rate the candidate showed: a feedback window may exit up to
+            // kTier2ExitRateSlack times as often (and at least 1 in kTier2ExitRateFloor iterations).
+            const uint64_t floor = uint64_t(kTier2FeedbackWindowExits) * kTier2ExitRateFloor;
+            const uint64_t scaled = trial.candidate_exits
+                ? trial.candidate_iterations * kTier2FeedbackWindowExits /
+                      (trial.candidate_exits * kTier2ExitRateSlack)
+                : floor;
+            monitor->min_window_iterations = static_cast<uint32_t>(std::max<uint64_t>(1, std::min(scaled, floor)));
+            if (tier2_trace_enabled())
+                fprintf(stderr, "[tier2] kept head=%llx: trial iterations=%llu side exits=%llu, retires below %u "
+                    "iterations per %u exits\n", (unsigned long long)monitor->head,
+                    (unsigned long long)trial.candidate_iterations, (unsigned long long)trial.candidate_exits,
+                    monitor->min_window_iterations, kTier2FeedbackWindowExits);
         }
         if (finish) trial.decision.store(keep ? 1 : 2, std::memory_order_release);
     }

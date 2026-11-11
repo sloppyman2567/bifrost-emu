@@ -168,6 +168,12 @@ The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
   `BIFROST_NO_CALLREGION=1` turns this reach off; single-head policy tests set it.
 - Trial policy constants are `kTier2TrialWindowNs` and `kTier2TrialPairs` (FrostJIT.hpp); `jit_tier2_measure` reads
   them and calibrates its burn loops to one closed window per visit, so change them there, not in the test.
+- Every region exit gets a revocable cell (`create_chain_edge`) whether or not its target is translated yet; translating
+  the target fills it. An exit without one returns to the dispatcher for the region's life.
+- Phase feedback (`kTier2FeedbackWindowExits`, `kTier2FeedbackStrikes`, `kTier2ExitRateSlack`, `kTier2ExitRateFloor`):
+  the region's exit stub (`RegionCompiler.cpp`) and `tier2_region_feedback` implement one windowed exit-rate rule and
+  change together; the trial sets `min_window_iterations` from its sampling copy's counts. The completion credit is an
+  `add` that clobbers the host flags: emit it only where they are dead (back-edges, committed exits).
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation
   changes atomic target cells, not live instruction bytes; preserve compiler
   locking, invalidation generations and target revocation for Tier-1/Tier-2.

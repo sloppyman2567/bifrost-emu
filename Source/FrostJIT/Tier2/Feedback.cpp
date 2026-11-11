@@ -1,4 +1,4 @@
-// Tier-2 phase feedback: cold-exit pressure and region retraining.
+// Tier-2 phase feedback: windowed side-exit rates and region retraining.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
@@ -27,18 +27,21 @@ void FrostJIT::tier2_region_feedback(CPU& cpu, void* opaque) {
     if (cpu.jit_tier2_trial || (monitor && monitor->trial &&
         monitor->trial->decision.load(std::memory_order_acquire) != 1)) return;
     if (!monitor || !monitor->enabled.load(std::memory_order_acquire)) return;
+    // The exit stub's rule (RegionCompiler.cpp): it comes here when the slot
+    // belongs to another region, or with the strike that retires.
     auto& sample = cpu.jit_tier2_feedback[monitor->slot];
     if (sample.owner != monitor->identity) {
         sample.owner = monitor->identity;
-        sample.pressure = 0;
+        sample.pressure = sample.credit = sample.strikes = 0;
     }
-    if (sample.credit) {
-        sample.credit = 0;
-        if (sample.pressure) --sample.pressure;
-        return;
+    if (sample.strikes < kTier2FeedbackStrikes) {
+        if (++sample.pressure < kTier2FeedbackWindowExits) return;
+        const bool bad = sample.credit < monitor->min_window_iterations;
+        sample.pressure = sample.credit = 0;
+        sample.strikes = bad ? sample.strikes + 1 : 0;
+        if (sample.strikes < kTier2FeedbackStrikes) return;
     }
-    if (++sample.pressure < 64) return;
-    sample.pressure = 0;
+    sample.strikes = 0;
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     auto head = blocks_.find(monitor->head);
     if (head == blocks_.end() || head->second.tier2_monitor != monitor ||

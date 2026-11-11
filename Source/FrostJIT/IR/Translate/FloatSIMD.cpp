@@ -990,10 +990,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // AdvSIMD modified immediate (MOVI/MVNI/ORR/BIC + MSL).
                 // Mirror of the interpreter's block in Dispatch.cpp
                 // (cmode = bits[15:12], imm8 = bits[18:16]:bits[9:5],
-                // op = bit29, Q = bit30). MOVI/MVNI write a broadcast
-                // constant; ORR/BIC read-modify-write the DESTINATION.
-                // cmode=0xF (FMOV) never reaches here (guard rejects it)
-                // and stays on the interpreter.
+                // op = bit29, Q = bit30). MOVI/MVNI and FMOV write a
+                // broadcast constant; ORR/BIC read-modify-write the
+                // DESTINATION. cmode=0xF with op=1 and Q=0 is the one
+                // unallocated form: the interpreter raises SIGILL for it.
                 uint8_t cmode = (op >> 12) & 0xF;
                 uint8_t imm8 = static_cast<uint8_t>(
                     (((op >> 16) & 0x7) << 5) | ((op >> 5) & 0x1F));
@@ -1041,8 +1041,21 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     for (int i = 0; i < 8; i++)
                         if (imm8 & (1u << i))
                             pattern |= 0xFFULL << (i * 8);
+                } else if (!opbit) {
+                    // FMOV .2S/.4S: AdvSIMDExpandImm's single-precision
+                    // constant (sign, NOT(b), b x5, cdefgh, zeros) per lane.
+                    uint32_t imm = (static_cast<uint32_t>(imm8 & 0x80) << 24) |
+                                   (static_cast<uint32_t>(imm8 & 0x3F) << 19) |
+                                   ((imm8 & 0x40) ? 0x3E000000u : 0x40000000u);
+                    pattern = (uint64_t)imm | ((uint64_t)imm << 32);
+                } else if (q) {
+                    // FMOV .2D: the double-precision constant in both lanes.
+                    pattern = (static_cast<uint64_t>(imm8 & 0x3F) << 48) |
+                              ((imm8 & 0x80) ? 0x8000000000000000ULL : 0) |
+                              ((imm8 & 0x40) ? 0x3FC0000000000000ULL
+                                             : 0x4000000000000000ULL);
                 } else {
-                    break;  // cmode=0xF FMOV → interpreter (matches guard)
+                    break;  // unallocated: the interpreter raises SIGILL
                 }
                 if (orr_bic) {
                     SimdOrrImmParams op;

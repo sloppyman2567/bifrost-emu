@@ -352,60 +352,52 @@ void Emulator::dump_periodic_stats(double dt) {
         dump_syscall_histogram(dt);
         return;
     }
-    uint64_t instr  = jit_->instructions_executed.load(std::memory_order_relaxed);
-    uint64_t blocks = jit_->blocks_executed.load(std::memory_order_relaxed);
-    uint64_t blocks_tr  = jit_->blocks_translated.load(std::memory_order_relaxed);
-    uint64_t chains = jit_->block_chains_patched.load(std::memory_order_relaxed);
-    // BlockProfile is only tracked on the main JIT in practice, but sum the
-    // per-thread JITs if present so the numbers are comparable to print_jit_stats.
-    uint64_t natural = jit_->block_profile.natural_branch.load(std::memory_order_relaxed);
-    uint64_t entry   = jit_->block_profile.entry_point.load(std::memory_order_relaxed);
-    uint64_t ci_cap  = jit_->block_profile.call_interp_cap.load(std::memory_order_relaxed);
-    uint64_t bl_cap  = jit_->block_profile.bl_call_cap.load(std::memory_order_relaxed);
-    uint64_t max_sz  = jit_->block_profile.max_size.load(std::memory_order_relaxed);
-    uint64_t decfail = jit_->block_profile.decode_fail.load(std::memory_order_relaxed);
-    uint64_t ionly   = jit_->block_profile.interp_only.load(std::memory_order_relaxed);
-    uint64_t hot_heads = jit_->tier2_hot_heads.load(std::memory_order_relaxed);
-    uint64_t t2_regions = jit_->tier2_regions.load(std::memory_order_relaxed);
-    uint64_t t2_rejections = jit_->tier2_profit_rejections.load(std::memory_order_relaxed);
-    uint64_t t2_retries = jit_->tier2_profile_retries.load(std::memory_order_relaxed);
-    uint64_t t2_retired = jit_->tier2_phase_retirements.load(std::memory_order_relaxed);
-    uint64_t t2_ns = jit_->tier2_compile_ns.load(std::memory_order_relaxed);
-    uint64_t t2_bytes = jit_->tier2_code_bytes.load(std::memory_order_relaxed);
+    // Totals over every JIT whose counters are still reachable: all generations of the main JIT
+    // (renew_jit replaces a full code cache with a fresh instance whose counters start at zero)
+    // and the per-thread JITs of BIFROST_NO_SHARED_JIT.
+    uint64_t instr = 0, blocks = 0, blocks_tr = 0, chains = 0;
+    uint64_t natural = 0, entry = 0, ci_cap = 0, bl_cap = 0, max_sz = 0, decfail = 0, ionly = 0;
+    uint64_t hot_heads = 0, t2_regions = 0, t2_rejections = 0, t2_retries = 0, t2_retired = 0;
+    uint64_t t2_ns = 0, t2_bytes = 0;
+    auto add = [&](const FrostJIT& j) {
+        constexpr auto r = std::memory_order_relaxed;
+        instr     += j.instructions_executed.load(r);
+        blocks    += j.blocks_executed.load(r);
+        blocks_tr += j.blocks_translated.load(r);
+        chains    += j.block_chains_patched.load(r);
+        natural   += j.block_profile.natural_branch.load(r);
+        entry     += j.block_profile.entry_point.load(r);
+        ci_cap    += j.block_profile.call_interp_cap.load(r);
+        bl_cap    += j.block_profile.bl_call_cap.load(r);
+        max_sz    += j.block_profile.max_size.load(r);
+        decfail   += j.block_profile.decode_fail.load(r);
+        ionly     += j.block_profile.interp_only.load(r);
+        hot_heads += j.tier2_hot_heads.load(r);
+        t2_regions += j.tier2_regions.load(r);
+        t2_rejections += j.tier2_profit_rejections.load(r);
+        t2_retries += j.tier2_profile_retries.load(r);
+        t2_retired += j.tier2_phase_retirements.load(r);
+        t2_ns += j.tier2_compile_ns.load(r);
+        t2_bytes += j.tier2_code_bytes.load(r);
+    };
+    for (FrostJIT* j : jit_.all()) add(*j);
     {
         std::lock_guard<std::mutex> g(threads_mu_);
-        for (auto& gt : threads_) {
-            if (gt->jit) {
-                instr     += gt->jit->instructions_executed.load(std::memory_order_relaxed);
-                blocks    += gt->jit->blocks_executed.load(std::memory_order_relaxed);
-                blocks_tr += gt->jit->blocks_translated.load(std::memory_order_relaxed);
-                chains    += gt->jit->block_chains_patched.load(std::memory_order_relaxed);
-                natural   += gt->jit->block_profile.natural_branch.load(std::memory_order_relaxed);
-                entry     += gt->jit->block_profile.entry_point.load(std::memory_order_relaxed);
-                ci_cap    += gt->jit->block_profile.call_interp_cap.load(std::memory_order_relaxed);
-                bl_cap    += gt->jit->block_profile.bl_call_cap.load(std::memory_order_relaxed);
-                max_sz    += gt->jit->block_profile.max_size.load(std::memory_order_relaxed);
-                decfail   += gt->jit->block_profile.decode_fail.load(std::memory_order_relaxed);
-                ionly     += gt->jit->block_profile.interp_only.load(std::memory_order_relaxed);
-                hot_heads += gt->jit->tier2_hot_heads.load(std::memory_order_relaxed);
-                t2_regions += gt->jit->tier2_regions.load(std::memory_order_relaxed);
-                t2_rejections += gt->jit->tier2_profit_rejections.load(std::memory_order_relaxed);
-                t2_retries += gt->jit->tier2_profile_retries.load(std::memory_order_relaxed);
-                t2_retired += gt->jit->tier2_phase_retirements.load(std::memory_order_relaxed);
-                t2_ns += gt->jit->tier2_compile_ns.load(std::memory_order_relaxed);
-                t2_bytes += gt->jit->tier2_code_bytes.load(std::memory_order_relaxed);
-            }
-        }
+        for (auto& gt : threads_)
+            if (gt->jit) add(*gt->jit);
     }
-    // deltas since the last dump
+    // deltas since the last dump. A total can still fall when counters leave the sum (exec starts
+    // a fresh JIT, a per-thread JIT exits with its thread); the delta is then the new total rather
+    // than an unsigned wrap.
+    auto delta = [](uint64_t now, uint64_t before) { return now >= before ? now - before : now; };
     static uint64_t last_instr_, last_blocks_, last_blocks_tr_, last_chains_;
     static uint64_t last_natural_, last_entry_, last_ci_cap_, last_bl_cap_,
                     last_max_sz_, last_decfail_, last_ionly_;
     static uint64_t last_hot_heads_, last_t2_regions_, last_t2_rejections_, last_t2_retries_;
-    uint64_t d_instr     = instr - last_instr_;
-    uint64_t d_blocks    = blocks - last_blocks_;
-    uint64_t d_blocks_tr = blocks_tr - last_blocks_tr_;
-    uint64_t d_chains    = chains - last_chains_;
+    uint64_t d_instr     = delta(instr, last_instr_);
+    uint64_t d_blocks    = delta(blocks, last_blocks_);
+    uint64_t d_blocks_tr = delta(blocks_tr, last_blocks_tr_);
+    uint64_t d_chains    = delta(chains, last_chains_);
     double mips = dt > 0 ? d_instr / 1e6 / dt : 0.0;
     fprintf(stderr,
             "[%s] guest: %.1f MIPS real (%.1f M blocks/s, avg %.1f instr/block, "
@@ -421,13 +413,13 @@ void Emulator::dump_periodic_stats(double dt) {
             "[%s] block-end: natural=%llu entry=%llu call_interp=%llu "
             "bl_call=%llu max_size=%llu decode_fail=%llu interp_only=%llu\n",
             CODENAME,
-            static_cast<unsigned long long>(natural - last_natural_),
-            static_cast<unsigned long long>(entry - last_entry_),
-            static_cast<unsigned long long>(ci_cap - last_ci_cap_),
-            static_cast<unsigned long long>(bl_cap - last_bl_cap_),
-            static_cast<unsigned long long>(max_sz - last_max_sz_),
-            static_cast<unsigned long long>(decfail - last_decfail_),
-            static_cast<unsigned long long>(ionly - last_ionly_));
+            static_cast<unsigned long long>(delta(natural, last_natural_)),
+            static_cast<unsigned long long>(delta(entry, last_entry_)),
+            static_cast<unsigned long long>(delta(ci_cap, last_ci_cap_)),
+            static_cast<unsigned long long>(delta(bl_cap, last_bl_cap_)),
+            static_cast<unsigned long long>(delta(max_sz, last_max_sz_)),
+            static_cast<unsigned long long>(delta(decfail, last_decfail_)),
+            static_cast<unsigned long long>(delta(ionly, last_ionly_)));
     if (t2_retired || t2_bytes)
         fprintf(stderr, "[%s] tier2 lifetime: retired=%llu compile_ms=%.3f code_bytes=%llu\n",
             CODENAME, (unsigned long long)t2_retired, t2_ns / 1e6,
@@ -436,10 +428,10 @@ void Emulator::dump_periodic_stats(double dt) {
     // BIFROST_TIER2_HITS threshold since the last dump. Inert (0) by default.
     fprintf(stderr,
             "[%s] tier2: hot_heads=%llu regions=%llu rejected=%llu retries=%llu\n", CODENAME,
-            static_cast<unsigned long long>(hot_heads - last_hot_heads_),
-            static_cast<unsigned long long>(t2_regions - last_t2_regions_),
-            static_cast<unsigned long long>(t2_rejections - last_t2_rejections_),
-            static_cast<unsigned long long>(t2_retries - last_t2_retries_));
+            static_cast<unsigned long long>(delta(hot_heads, last_hot_heads_)),
+            static_cast<unsigned long long>(delta(t2_regions, last_t2_regions_)),
+            static_cast<unsigned long long>(delta(t2_rejections, last_t2_rejections_)),
+            static_cast<unsigned long long>(delta(t2_retries, last_t2_retries_)));
     last_instr_     = instr;     last_blocks_     = blocks;
     last_blocks_tr_ = blocks_tr; last_chains_     = chains;
     last_natural_   = natural;   last_entry_      = entry;

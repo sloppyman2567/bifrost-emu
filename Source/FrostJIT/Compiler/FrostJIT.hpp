@@ -654,6 +654,9 @@ public:
         uint64_t head = 0, identity = 0;
         unsigned slot = 0;
         Tier2Trial* trial = nullptr;
+        // A feedback window (kTier2FeedbackWindowExits side exits) that completed fewer iterations than this
+        // exited too often for the trial's verdict; the exit stub reads it, a kept trial sets it.
+        uint32_t min_window_iterations = kTier2FeedbackWindowExits * kTier2ExitRateFloor;
     };
     std::vector<std::unique_ptr<Tier2RegionMonitor>> tier2_region_monitors_;
     Tier2RegionMonitor* tier2_current_monitor_ = nullptr;
@@ -1222,6 +1225,15 @@ private:
     // the candidate when their median is under 0.97 and three quarters of them are.
     static constexpr uint64_t kTier2TrialWindowNs = 100000;
     static constexpr size_t kTier2TrialPairs = 12;
+    // Phase feedback: a kept region's side exits are judged in windows of kTier2FeedbackWindowExits. A window
+    // is bad when its exit rate (exits per completed iteration) is above kTier2ExitRateSlack times the rate its
+    // trial measured, or above 1/kTier2ExitRateFloor when that is higher; kTier2FeedbackStrikes bad windows in
+    // a row retire the region, and a new trial judges the new phase. The exit stub and tier2_region_feedback
+    // implement one rule.
+    static constexpr uint32_t kTier2FeedbackWindowExits = 32;
+    static constexpr uint32_t kTier2FeedbackStrikes = 4;
+    static constexpr uint32_t kTier2ExitRateSlack = 4;
+    static constexpr uint32_t kTier2ExitRateFloor = 16;
     struct Tier2Trial {
         Tier2RegionMonitor* monitor = nullptr;
         BlockEntry baseline, candidate_entry;
@@ -1244,6 +1256,8 @@ private:
         bool sampling_cells = false;  // copies compiled in MT: data cells, no instruction slots
         unsigned attempts = 0;
         unsigned entries = 0;
+        // What the candidate's sampling copy did in its visits: completed iterations and side exits.
+        uint64_t candidate_iterations = 0, candidate_exits = 0;
         std::atomic<unsigned> decision{0}; // 0 trial, 1 keep, 2 reject
     };
     std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;

@@ -33,9 +33,10 @@ static bool scenario(bool mt, bool concurrent) {
     Tier2TestAccess::keep_candidates(*j);
     const auto neighbor=j->lookup_only(B);
     const auto retired=j->tier2_phase_retirements.load();
-    // Isolated cold exits separated by recoveries must not retire a region.
-    for(unsigned k=0;k<100;++k)
-        if(!run(*e,a,A,0,1)||!run(*e,a,A,1,4)) return false;
+    // Isolated cold exits, 1 per 40 completed iterations, stay under the exit rate a kept region tolerates
+    // (1 in kTier2ExitRateFloor with no trial counts) across several feedback windows.
+    for(unsigned k=0;k<200;++k)
+        if(!run(*e,a,A,0,1)||!run(*e,a,A,1,40)) return false;
     if(j->tier2_phase_retirements.load()!=retired) return false;
     const size_t prefix=j->code_buf_used();
     std::vector<uint8_t> bytes(j->code_buf(),j->code_buf()+prefix);
@@ -60,6 +61,25 @@ static bool scenario(bool mt, bool concurrent) {
     auto path=j->collect_tier2_trace(*e,A);
     if(!path.fully_profiled || path.blocks[0].follows_taken) return false;
     return run(*e,b,B,1) && run(*e,a,A,0);
+}
+// A steady exit rate above the tolerated one retires the region although every exit follows completed
+// iterations: the earlier rule only counted exits with no completion in between and kept such a region.
+static bool frequent_exits(bool mt) {
+    auto e=std::make_unique<Emulator>();
+    e->mem().map_range(A,4096); e->mem().mprotect_guest(A,4096,7);
+    std::vector<uint32_t> code(13,0xd503201f);
+    code[0]=0xf100005f; code[1]=0xb5000102; code[2]=0x91019021; code[3]=0x14000007;
+    code[9]=0x91000421; code[10]=0xd1000400; code[11]=0xb5fffea0; code[12]=0xd65f03c0;
+    e->mem().write(A,code.data(),code.size()*4);
+    e->enable_jit(); auto* j=e->jit(); if(mt) j->enter_multithreaded();
+    CPU a;
+    if(!run(*e,a,A,1)||!j->tier2_regions.load()) return false;
+    Tier2TestAccess::keep_candidates(*j);
+    const auto retired=j->tier2_phase_retirements.load();
+    // One exit per three completed iterations: four bad windows of 32 exits need 128 rounds.
+    for(unsigned k=0;k<200;++k)
+        if(!run(*e,a,A,0,1)||!run(*e,a,A,1,3)) return false;
+    return j->tier2_phase_retirements.load()>retired;
 }
 // A cached region's exit target lies on the next page. Rewriting that
 // target must preserve the region but change the executed result.
@@ -99,8 +119,9 @@ static bool rewritten_exit(bool mt, bool transition=false) {
 }
 int main(int argc,char**argv) {
     const bool mt=argc>1 && std::string(argv[1])=="mt";
-    if(!rewritten_exit(mt) || !rewritten_exit(false,true) || !scenario(mt,false) || (mt && !scenario(true,true))) {
+    if(!rewritten_exit(mt) || !rewritten_exit(false,true) || !scenario(mt,false) || (mt && !scenario(true,true)) ||
+       !frequent_exits(mt)) {
         std::fputs("tier2 feedback oracle failed\n",stderr); return 1;
     }
-    std::puts("jit_tier2_feedback: neighboring regions, recoveries and concurrent phases PASS");
+    std::puts("jit_tier2_feedback: neighboring regions, recoveries, exit rates and concurrent phases PASS");
 }
