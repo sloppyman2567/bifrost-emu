@@ -1086,16 +1086,16 @@ def build(state, application, settings=None, pads=None):
             self.app = app
             rule = card_state(app, pending)
             ratio = self.devicePixelRatioF()
-            self.meta_text = None
             art = (app.get("icon"), str(app.get("icon_layers")), app["label"], ratio, self.palette().cacheKey())
             if art != self.art:
                 self.art = art; self.icon.setPixmap(artwork(app, icon_size, ratio, self.palette()))
-            self.relabel()
             version = app.get("version_name") or app.get("version")
             moment = time.localtime(app["installed_at"]) if app.get("installed_at") else None
             installed = moment and "Installed " + time.strftime("%b %d" + ("" if moment.tm_year == time.localtime().tm_year
                                                                            else ", %Y"), moment)
+            # Before relabel, which draws it: an update installed over a listed app showed the old version and date.
             self.meta_text = " · ".join(str(x) for x in (version, installed) if x) or " "
+            self.relabel()
             text, tone = activity_line(app)
             self.line.setText(text); self.line.setProperty("tone", tone)
             # The red line says what went wrong; a click opens the drawer with what to do about it.

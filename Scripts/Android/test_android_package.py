@@ -1040,6 +1040,19 @@ class LauncherLibraryTests(unittest.TestCase):
         self.assertEqual((card.line.text(), card.line.property("tone")), ("Last run failed", "problem"))
         self.assertTrue(card.meta.text().startswith("1.7 · Installed"), card.meta.text())
 
+    def test_card_shows_an_updated_version(self):
+        # Installing 15.7.0 over 15.6.1 left the card at "15.6.1 · Installed Oct 24": the line was drawn before its text
+        # was rebuilt, so only a new card or a resize showed the update.
+        old = self.app(7, "Updated")
+        self.window.apps = [old]; self.window.render()
+        card = self.window.cards[old["package"]]
+        self.assertTrue(card.meta.text().startswith("1.7 · Installed"), card.meta.text())
+        self.window.apps = [dict(old, version_name="2.0", installed_at=1794383368)]; self.window.render()
+        self.assertIs(self.window.cards[old["package"]], card)
+        self.assertEqual(card.meta.text(), "2.0 · Installed " + time.strftime(
+            "%b %d" + ("" if time.localtime(1794383368).tm_year == time.localtime().tm_year else ", %Y"),
+            time.localtime(1794383368)))
+
     def test_every_red_line_fits_on_a_card(self):
         # "Closed itself: Google Play licence check" was cut off at both ends of the card (208 px for 220 px of text).
         card = next(iter(self.window.cards.values())) if self.window.cards else None

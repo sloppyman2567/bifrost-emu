@@ -46,6 +46,12 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (the library card after an update)
+
+- Installing a new version over an installed app left its library card on the old version and install date (Battle Cats
+  stayed "15.6.1 · Installed Oct 24" after 15.7.0 installed) until the library was reopened or resized: the card drew
+  that line before rebuilding its text (2026-11-11).
+
 ### Changed (Android apps start sooner)
 
 - Preparing a launch took about 5.5 s for Subway Surfers before the emulator even started: each launch re-hashed
