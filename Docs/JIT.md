@@ -674,6 +674,12 @@ statistics). `Runtime/CacheRecording.cpp` records and installs; `Runtime/Persist
   value of every `BIFROST_*` switch the JIT and `DebugFlags.hpp` read. The build lists those switches from
   the sources into `$(BUILD_DIR)/generated/JitCodegenSwitches.inc` (the Makefile's `JIT_SWITCHES` rule), so
   a new switch cannot be left out.
+- **Memory.** A process keeps `main.bin` mapped only to search its index in place; the record a lookup finds, in
+  `main.bin` or a segment, is read with `pread` into a buffer of the calling thread (valid until its next `find`), and
+  segments are unmapped once indexed. Mapped records stayed resident: every read faults in 64 KiB around it
+  (fault-around, which `MADV_RANDOM` does not stop), and the session Zygote's mappings went to each forked helper, so a
+  Battle Cats session with the cache on held about 1.7 GB more PSS than with it off (2026-11-11; 0 MiB of cache files
+  resident afterwards). `--verbose` prints `[JIT] disk cache files: mapped=… resident=…`, the index's Rss.
 - **Storage.** `$BIFROST_JIT_DISK_CACHE_DIR`, else `$XDG_CACHE_HOME/bifrost/jit`, else `~/.cache/bifrost/jit`.
   Each process appends checksummed records to its own `seg-<pid>-<n>.bin`, locked (`flock`) before its
   header is written; a header-less segment is treated as abandoned only after a minute. Once segments reach

@@ -50,7 +50,8 @@ public:
     static PersistentCache* open(uint64_t fingerprint_hi, uint64_t fingerprint_lo, const std::string& program);
     Mode mode() const { return mode_; }
     // The newest stored record for this code, or nullptr. Its checksum is
-    // checked by valid(), only for records that are actually used.
+    // checked by valid(), only for records that are actually used. The record
+    // is read into a buffer of the calling thread, valid until its next find.
     const CacheRecordHeader* find(uint64_t file_key, uint64_t file_offset, bool mt) const;
     static bool valid(const CacheRecordHeader* record);
     // Appends a record (header completed here: magic, size, checksum).
@@ -80,7 +81,7 @@ private:
     bool would_exceed_budget_locked(size_t bytes) const;
     static void after_fork_child();
     struct IndexEntry { uint64_t key; uint64_t offset; };            // main.bin's table
-    struct SegmentEntry { uint64_t key; const CacheRecordHeader* record; };
+    struct SegmentEntry { uint64_t key; uint32_t file; uint64_t offset; };  // file: an index into segment_fds_
     static uint64_t index_key(uint64_t file_key, uint64_t file_offset, bool mt);
     Mode mode_ = Mode::Off;
     uint64_t fp_hi_ = 0, fp_lo_ = 0;
@@ -89,14 +90,19 @@ private:
     // The application's bytes on disk besides this process's segment (mu_):
     // measured at open and again after each merge this process runs.
     uint64_t usage_base_ = 0;
-    // main.bin, mapped for the process's lifetime, and its index.
+    // main.bin, mapped for the process's lifetime so its index is searched in place, and its index. Records, here and
+    // in the segments, are read with pread and never mapped: every mapped read faults in 64 KiB around it (fault-around)
+    // and keeps it resident, in every fork child too, which held hundreds of MB of an app's cache in each process.
     const uint8_t* main_ = nullptr;
+    int main_fd_ = -1;
     size_t main_size_ = 0;
     const IndexEntry* main_index_ = nullptr;
     size_t main_count_ = 0;
     uint32_t main_generation_ = 0;
-    // Records in segments not yet merged, newest per key; they win over main.bin.
+    // Records in segments not yet merged, newest per key; they win over main.bin. The segments are mapped only while
+    // load_index reads their record headers; their descriptors stay open for pread.
     std::vector<SegmentEntry> segment_index_;
+    std::vector<std::pair<int, uint64_t>> segment_fds_;  // descriptor and size
     uint64_t segment_bytes_ = 0;
     // Writer: records queue here and a background thread appends them to
     // this process's segment, which it holds with a shared flock.

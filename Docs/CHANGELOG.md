@@ -46,6 +46,15 @@ names the library, and ASTC transcoding about four times faster in a real game.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (memory with the JIT disk cache on)
+
+- With the experimental JIT disk cache on, every process of a game kept hundreds of MB of the cache files in memory
+  (2026-11-11): the session's Zygote mapped them and each helper it forked inherited them, and every record read pulled
+  64 KiB around it into memory. A Battle Cats session used about 4.2 GB instead of 2.5 GB with the cache off; Subway
+  Surfers showed the same at 6.2 GB. Records are now read rather than mapped, and the cache files' share is about 0 MB
+  in every process. Startup from the cache is unchanged (the game's surface 2.9 s after the runtime started, against
+  4.7 s with the cache off).
+
 ### Changed (games share one copy of Android)
 
 - Each game used to get a full private copy of Android's system files, about 750 MB (2026-11-11). Games now share one

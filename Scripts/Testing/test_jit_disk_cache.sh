@@ -30,6 +30,8 @@ run() {  # run LOG [ENV...]: the fixture with the cache in $work/cache
 run record
 run reuse
 run verify BIFROST_JIT_DISK_CACHE=verify
+# Records are read, not mapped: a process using main.bin keeps only (part of) its index resident.
+run resident
 # Damage: flip bytes inside main.bin's records and cut a segment short.
 python3 - "$work/cache" <<'PY'
 import pathlib,sys
@@ -87,6 +89,15 @@ assert record['recorded']>1000 and record['hits']==0,record
 assert reuse['hits']>0.9*(reuse['hits']+reuse['misses']),reuse
 assert verify['verify_mismatches']==0 and verify['hits']>1000,verify
 print(f"record {record['recorded']}, reuse {reuse['hits']} hits / {reuse['misses']} misses, verify {verify['hits']} equal")
+def files(name):
+    found=re.findall(r'\[JIT\] disk cache files: mapped=([\d.]+) MiB resident=([\d.]+) MiB',(work/f'{name}.log').read_text())
+    assert found,(name,'no mapped-file statistics')
+    return float(found[-1][0]),float(found[-1][1])
+used=stats('resident')
+mapped,resident=files('resident')
+assert used['indexed']>1000 and used['hits']>0.9*(used['hits']+used['misses']),used  # indexed: main.bin's records
+assert mapped>0.5 and resident<0.25*mapped,(mapped,resident)
+print(f"records read, not mapped: {used['hits']} hits from main.bin, {resident:.2f} of its {mapped:.1f} MiB resident")
 damaged=stats('damaged')
 assert damaged['rejected']+damaged['misses']>0,damaged
 print(f"damaged files: {damaged['rejected']} rejected, {damaged['hits']} reused, results correct")

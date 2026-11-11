@@ -1,7 +1,9 @@
 // PersistentCache.cpp — storage of the experimental cross-launch JIT cache.
 //
 // <cache>/<app>/<fingerprint>/main.bin holds compacted records followed by a
-// key-sorted index that lookups binary-search in place. Each process appends
+// key-sorted index that lookups binary-search in place; the record found is
+// read with pread, never mapped (fault-around would keep 64 KiB around every
+// read resident in the process and its fork children). Each process appends
 // what it records (and batched touches of records it used) to its own
 // seg-<pid>-<n>.bin, holding a shared flock on it while it lives. A starting
 // process scans only the segments; once they reach kCompactBytes or an
@@ -314,31 +316,37 @@ bool PersistentCache::init(uint64_t fp_hi, uint64_t fp_lo, const std::string& pr
 
 void PersistentCache::load_index() {
     Mapped main = map_readonly(dir_ + "/main.bin", 0);
-    if (main.data) ::close(main.fd);
     if (main.data && header_matches(main.data, main.size, fp_hi_, fp_lo_)) {
         const auto* h = reinterpret_cast<const CacheFileHeader*>(main.data);
         if (h->index_offset >= sizeof(CacheFileHeader) && h->index_offset <= main.size &&
             h->index_count <= (main.size - h->index_offset) / sizeof(IndexEntry)) {
             main_ = main.data;
             main_size_ = main.size;
+            main_fd_ = main.fd;
             main_index_ = reinterpret_cast<const IndexEntry*>(main.data + h->index_offset);
             main_count_ = h->index_count;
             main_generation_ = h->generation;
         }
-    } else if (main.data) {
-        munmap(const_cast<uint8_t*>(main.data), main.size);
     }
+    if (main.data && !main_) { munmap(const_cast<uint8_t*>(main.data), main.size); ::close(main.fd); }
     std::vector<std::pair<SegmentEntry, size_t>> entries;  // with arrival order: later wins
     for (const auto& s : segments_by_age(dir_)) {
         Mapped m = map_readonly(dir_ + "/" + s.second, 0);
         if (!m.data) continue;
-        ::close(m.fd);
-        if (!header_matches(m.data, m.size, fp_hi_, fp_lo_)) { munmap(const_cast<uint8_t*>(m.data), m.size); continue; }
-        segment_bytes_ += m.size;  // stays mapped: the index points into it
-        for_each_record(m.data, sizeof(CacheFileHeader), m.size, false, [&](const CacheRecordHeader* r) {
-            if (r->kind == kRecordNative)
-                entries.push_back({{index_key(r->file_key, r->file_offset, r->mt != 0), r}, entries.size()});
-        });
+        if (header_matches(m.data, m.size, fp_hi_, fp_lo_)) {
+            const auto file = static_cast<uint32_t>(segment_fds_.size());
+            segment_fds_.push_back({m.fd, m.size});  // kept open: records are read with pread
+            segment_bytes_ += m.size;
+            for_each_record(m.data, sizeof(CacheFileHeader), m.size, false, [&](const CacheRecordHeader* r) {
+                if (r->kind == kRecordNative)
+                    entries.push_back({{index_key(r->file_key, r->file_offset, r->mt != 0), file,
+                                        static_cast<uint64_t>(reinterpret_cast<const uint8_t*>(r) - m.data)},
+                                       entries.size()});
+            });
+        } else {
+            ::close(m.fd);
+        }
+        munmap(const_cast<uint8_t*>(m.data), m.size);
     }
     std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
         return a.first.key != b.first.key ? a.first.key < b.first.key : a.second < b.second;
@@ -348,21 +356,36 @@ void PersistentCache::load_index() {
             segment_index_.push_back(entries[i].first);
 }
 
+// Reads the record at `offset` of a cache file of `size` bytes into the calling thread's buffer, or nullptr when no
+// whole record is there.
+static const CacheRecordHeader* read_record(int fd, uint64_t offset, uint64_t size) {
+    thread_local std::vector<uint8_t> buffer;
+    CacheRecordHeader h;
+    if (fd < 0 || offset > size || size - offset < sizeof h) return nullptr;
+    if (pread(fd, &h, sizeof h, static_cast<off_t>(offset)) != static_cast<ssize_t>(sizeof h)) return nullptr;
+    if (h.magic != CacheRecordHeader::kMagic || h.size < sizeof h || h.size % 8 || h.size > size - offset) return nullptr;
+    buffer.resize(h.size);
+    for (size_t done = 0; done < h.size;) {
+        const ssize_t n = pread(fd, buffer.data() + done, h.size - done, static_cast<off_t>(offset + done));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return nullptr;
+        done += static_cast<size_t>(n);
+    }
+    return reinterpret_cast<const CacheRecordHeader*>(buffer.data());
+}
+
 const CacheRecordHeader* PersistentCache::find(uint64_t file_key, uint64_t file_offset, bool mt) const {
     const uint64_t key = index_key(file_key, file_offset, mt);
     const CacheRecordHeader* r = nullptr;
     auto seg = std::lower_bound(segment_index_.begin(), segment_index_.end(), key,
                                 [](const SegmentEntry& e, uint64_t k) { return e.key < k; });
-    if (seg != segment_index_.end() && seg->key == key) r = seg->record;
-    else if (main_count_) {
+    if (seg != segment_index_.end() && seg->key == key) {
+        r = read_record(segment_fds_[seg->file].first, seg->offset, segment_fds_[seg->file].second);
+    } else if (main_count_) {
         const IndexEntry* e = std::lower_bound(main_index_, main_index_ + main_count_, key,
                                                [](const IndexEntry& x, uint64_t k) { return x.key < k; });
-        if (e != main_index_ + main_count_ && e->key == key &&
-            e->offset >= sizeof(CacheFileHeader) && e->offset + sizeof(CacheRecordHeader) <= main_size_) {
-            const auto* candidate = reinterpret_cast<const CacheRecordHeader*>(main_ + e->offset);
-            if (candidate->size >= sizeof(CacheRecordHeader) && candidate->size <= main_size_ - e->offset)
-                r = candidate;
-        }
+        if (e != main_index_ + main_count_ && e->key == key && e->offset >= sizeof(CacheFileHeader))
+            r = read_record(main_fd_, e->offset, main_size_);
     }
     if (!r || r->file_key != file_key || r->file_offset != file_offset || (r->mt != 0) != mt) return nullptr;
     return r;
@@ -607,6 +630,24 @@ void PersistentCache::dump_stats() const {
         if (const uint64_t n = unrecordable_by[i].load(std::memory_order_relaxed))
             why += std::string(why.empty() ? "" : " ") + kinds[i] + "=" + std::to_string(n);
     if (!why.empty()) fprintf(stderr, "[JIT] disk cache unrecordable: %s\n", why.c_str());
+    // How much of the cache files this process holds resident: the Rss of main.bin's mapping (the index; records are
+    // read, not mapped) in /proc/self/smaps. mincore would report the page cache instead.
+    uint64_t mapped = main_ ? main_size_ : 0, resident = 0;
+    if (FILE* smaps = fopen("/proc/self/smaps", "re")) {
+        char line[512];
+        bool ours = false;
+        while (fgets(line, sizeof line, smaps)) {
+            unsigned long long start = 0, end = 0;
+            if (sscanf(line, "%llx-%llx ", &start, &end) == 2) {  // a mapping's header; fields are "Name: value"
+                ours = main_ && reinterpret_cast<uintptr_t>(main_) == start;
+            } else if (ours && !strncmp(line, "Rss:", 4)) {
+                resident += strtoull(line + 4, nullptr, 10) << 10;
+            }
+        }
+        fclose(smaps);
+    }
+    fprintf(stderr, "[JIT] disk cache files: mapped=%.1f MiB resident=%.1f MiB\n",
+            double(mapped) / (1024.0 * 1024.0), double(resident) / (1024.0 * 1024.0));
     fprintf(stderr, "[JIT] disk cache: hits=%llu misses=%llu rejected=%llu recorded=%llu (%.1f MiB) "
                     "unrecordable=%llu verify_mismatches=%llu verify_other_shape=%llu over_budget=%llu "
                     "indexed=%zu+%zu dir=%s\n",
