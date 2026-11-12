@@ -297,7 +297,7 @@ Goal: keep guest registers, vectors and NZCV in host registers across hot paths,
 boundaries ([design](JIT.md#planned-codegen-retaining-guest-state-across-regions)).
 
 Done: experimental Tier-2 regions (opt-in); a cheaper Tier-1 (CoreMark 13,156 iterations/s on October 27 and 14,874 on November 8, over the 10,000
-target; [method](JIT.md#coremark-re-measurement-2026-11-08)); compact scalar memory guards; shared cold stubs; native scalar and vector FP by element and LD1R; loop bodies up
+target; [method](archive/JIT-history.md#coremark-re-measurement-2026-11-08)); compact scalar memory guards; shared cold stubs; native scalar and vector FP by element and LD1R; loop bodies up
 to twice the block cap; lighter Q-register accesses. On a set of engine-shaped kernels the JIT went from 5.8× to 4.2× the
 time of a native AVX2 build ([details](JIT.md)).
 
@@ -309,7 +309,7 @@ executed code spans 29% fewer cache lines); `fcmp` feeding a branch or integer s
 instructions over native instructions (the compiler: cull's AArch64 loop has 4.5 times the x86 build's instructions) times
 host instructions per guest instruction (the JIT: 5 to 15 here); only the second is the JIT's to fix. L1 miss counters did
 not move beyond noise, and CoreMark's last-level misses are fixed startup and translation costs
-([details](JIT.md#fp-compares-in-the-host-flags-and-where-last-level-misses-come-from-2026-11-07)).
+([details](archive/JIT-history.md#fp-compares-in-the-host-flags-and-where-last-level-misses-come-from-2026-11-07)).
 
 Also done on 2026-11-10 and 11-11 (instruction and cycle counts on CoreMark, the `bench_*` programs and the kernel set; no
 game measured): NZCV stored as the `lahf` image, PC stores behind the chain slot, `b.cond` loop pins kept in registers,
@@ -324,11 +324,11 @@ Open, in priority order:
    traffic, `pxor` zeroing and NaN checks. Dropping NaN checks exactly fits 3 of 277 checked ops; more would need relaxed
    NaN semantics, which is the maintainer's decision. A plain `v_hi` zero store (cull and collide about 30% slower) and
    `insertps` result writes were slower, so measure each change on a branchy and a predictable kernel, over several code
-   placements ([details](JIT.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
+   placements ([details](archive/JIT-history.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
 2. **Guest-register traffic across blocks.** Guest register loads and stores are 20-27% of executed ops in the integer
    kernels, mostly block-entry loads and live-out stores that only cross-block allocation removes; a pass that hoists
    scratch work above a flag setter is measured but not merged (cycles within placement noise,
-   [details](JIT.md#guest-register-traffic-and-flag-windows-measured-not-merged-2026-11-10)).
+   [details](archive/JIT-history.md#guest-register-traffic-and-flag-windows-measured-not-merged-2026-11-10)).
 3. **Paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics.
 4. **Model guest state explicitly**, define recovery and helper contracts, then hand values between two regions and choose
    layouts by measured benefit (the five-stage plan in [the snapshot](archive/roadmap-2026-11-03.md#jit-codegen-retain-guest-state-across-hot-regions)).
@@ -338,13 +338,13 @@ Open, in priority order:
    which Tier-1 already keeps in registers. Loops whose iterations take different arms (culling), loops with an inner loop
    (skinning) and dispatch loops (a bytecode VM) are declined, because promotion judges a linear trace; raising the 8-block
    cap alone admits none of them. Next: regions with internal joins, then real Android titles. It stays opt-in until then
-   ([details](JIT.md#tier-2-exits-that-chain-exit-rate-feedback-and-profiler-costs-2026-11-11)).
+   ([details](archive/JIT-history.md#tier-2-exits-that-chain-exit-rate-feedback-and-profiler-costs-2026-11-11)).
 6. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the
 5800X3D on November 7, native CoreMark v1.01 built with gcc 16.2.1 `-O2` ran 37,950 iterations/s on one core and the JIT 14,785,
 about 39%; the Ryzen 5 9600X at 5.68 GHz that measured about 24,000 on November 4 is also at roughly 40%; both with the CPU
-governor on `performance`; see [the checkpoint](JIT.md#coremark-native-reference-2026-11-07)); game kernels toward 2× native
+governor on `performance`; see [the checkpoint](archive/JIT-history.md#coremark-native-reference-2026-11-07)); game kernels toward 2× native
 where the guest code allows it.
 
 Acceptance: each stage passes architectural regressions, reference checks and real applications, and reduces spills and

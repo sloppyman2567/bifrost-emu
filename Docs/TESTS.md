@@ -51,7 +51,7 @@ switch (separate fingerprint), `Tests/Unit/jit_disk_cache_relocated.elf` mapping
 the previous distance-based immediate rule failed this), a fourth build whose budget holds about two of the three existing directories
 (older ones pruned, nothing it records dropped) and a group-writable cache directory (cache off, program
 unaffected). It passed 10 runs in a row. It does not cover Android apps, code-cache renewals in a game or
-network filesystems; [JIT.md](JIT.md#persistent-translation-cache-2026-10-26-experimental-off-by-default)
+network filesystems; [JIT.md](JIT.md#persistent-translation-cache)
 records the manual checks.
 
 ### Thread memory and the guest's RAM view (2026-10-25)

@@ -2,6 +2,9 @@
 
 Read [the JIT guide](../../Docs/JIT.md) before implementation, debugging or review.
 The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
+Document a JIT change by updating the guide's section for that mechanism (no dated sections in the guide); put its dated
+write-up, measurements and rejected attempts at the top of [the JIT history](../../Docs/archive/JIT-history.md) and list
+it under the guide's Recorded changes.
 
 - `Compiler/BlockAnalysis.*` owns fallback prediction, leaf eligibility and the
   dead-NZCV successor scan (`nzcv_dead_in`);

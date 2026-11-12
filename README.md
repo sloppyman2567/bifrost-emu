@@ -294,7 +294,7 @@ interpreter, `--window-stats` shows FPS and load statistics in the title and, fo
 apps, an in-window overlay (see [window stats](Docs/window-stats.md); `--window-stats-mode`
 picks the layout), `BIFROST_TIER2=1` enables experimental Tier-2 region compilation, and the
 experimental `--jit-disk-cache` keeps translations in `~/.cache/bifrost/jit` so later launches start
-faster (the first launch compiles more slowly; see [the JIT guide](Docs/JIT.md#persistent-translation-cache-2026-10-26-experimental-off-by-default)).
+faster (the first launch compiles more slowly; see [the JIT guide](Docs/JIT.md#persistent-translation-cache)).
 
 ## Running programs
 
@@ -472,7 +472,7 @@ iterations, one warmup and three interleaved measured runs per binary, every CRC
 QEMU reports) and no CoreMark validity error. The bifrost-emu builds come from `git archive` of the tree at `ecbd7dd1` and of
 the 2.0.0-alpha.2 release commit. At this count the current build runs about 10.8 s, just over CoreMark's ten-second minimum,
 so a build faster than about 16,000 iterations/s needs a higher count. See [the method and
-limits](Docs/JIT.md#coremark-re-measurement-2026-11-08).
+limits](Docs/archive/JIT-history.md#coremark-re-measurement-2026-11-08).
 
 | Build | Median iterations/s |
 |---|---|

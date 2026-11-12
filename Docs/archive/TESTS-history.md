@@ -169,7 +169,7 @@ cd Scripts/Android && QT_QPA_PLATFORM=offscreen python3 test_android_package.py 
 
 Tested on a Ryzen 7 5800X3D at `f5b67318` plus the working tree; no game was run. Overhead numbers are from
 `mtbench` (a throwaway guest fixture of eleven kernels kept outside the repository), median of five, ST vs the same
-kernel with an idle second vCPU, against a clean `e7ed1b3c` build; they are in [JIT.md](../JIT.md#mt-preemption-epoch-forward-edges-and-cell-calls-2026-10-23).
+kernel with an idle second vCPU, against a clean `e7ed1b3c` build; they are in [JIT.md](JIT-history.md#mt-preemption-epoch-forward-edges-and-cell-calls-2026-10-23).
 
 Passed: `test_jit_mt` (all five modes), `test_jit_mt_publication` (default and `BIFROST_NO_CHAIN_SKIP=1`),
 `test_jit_tier2_discovery/feedback/measure/mutex` (20 promotion-stress runs), `test_jit_cache`,

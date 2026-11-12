@@ -41,7 +41,7 @@ shared read-only copy of Android for every game, and a JIT disk cache that no lo
   games badge now says 16 playable.
 - The README's performance tables are re-measured (2026-11-08): CoreMark 14,874 iterations/s (shipped build) and 14,753
   (headless) against 12,711 for alpha.2 and 7,992 for QEMU 11.1.1, every CRC valid, and the `bench_*` speedups are 55x to 97x.
-  Method, limits and the near-limit 160,000 iteration count are in [JIT.md](JIT.md#coremark-re-measurement-2026-11-08).
+  Method, limits and the near-limit 160,000 iteration count are in [JIT.md](archive/JIT-history.md#coremark-re-measurement-2026-11-08).
 - The benchmark runner's CoreMark count is 200,000 iterations (`crcfinal` 0x4983, the value QEMU 11.1.1 prints): 160,000
   finished in 9.7 s on 2026-11-10, under CoreMark's ten-second minimum, so every run was reported invalid.
 - The site's Screenshots page showed no images: its relative `images/...` paths resolved below `/screenshots/`, so every request was
@@ -245,7 +245,7 @@ shared read-only copy of Android for every game, and a JIT disk cache that no lo
   with the AL or NV condition now always compares (it used the immediate flags whenever Z was clear).
 - Host instructions executed fall by 11.9% on CoreMark, 12.2% on `bench_mips`, 5.8% on `bench_sort`, 5.2% on `bench_fib`
   and 3.5% on `bench_dispatch` (instruction counts, not run time; no game was measured). Details and what the sample
-  still shows as waste are in [the JIT guide](JIT.md#pc-stores-behind-the-chain-slot-loop-pins-and-four-peepholes-2026-11-10).
+  still shows as waste are in [the JIT guide](archive/JIT-history.md#pc-stores-behind-the-chain-slot-loop-pins-and-four-peepholes-2026-11-10).
 
 ### Fixed (a loop's first read of its counter)
 
@@ -531,14 +531,14 @@ shared read-only copy of Android for every game, and a JIT disk cache that no lo
   On a reconstructed kernel set cull went from 33.9 to 27.1 times native, collide from 11.4 to 8.1 and particles from 3.4 to 3.0; a
   frame of all nine kernels took 7.3% less time and mispredicted 12.6% fewer branches. Other consumers (`fcsel`, `mrs`) keep the
   old sequence, which is faster when the outcome is predictable. `jit_fcmp_flags` is new (2328 checks, also run under QEMU).
-  [Details](JIT.md#fp-compares-in-the-host-flags-and-where-last-level-misses-come-from-2026-11-07).
+  [Details](archive/JIT-history.md#fp-compares-in-the-host-flags-and-where-last-level-misses-come-from-2026-11-07).
 
 ### Changed (scalar FP cold steps after the block)
 
 - The ARM-semantic NaN step of every scalar FP operation is emitted after the block, as the vector guards already were, so the hot
   path no longer jumps over a few hundred bytes of cold code per operation. In a profiled loop the executed code spans 29% fewer
   cache lines, and L1 instruction misses fell 20% on a multi-kernel frame; run time did not change on any workload measured here, and
-  total emitted bytes are unchanged. [Details](JIT.md#scalar-fp-cold-steps-after-the-block-2026-11-07).
+  total emitted bytes are unchanged. [Details](archive/JIT-history.md#scalar-fp-cold-steps-after-the-block-2026-11-07).
 
 ### Added (NEON structure loads and stores in the block)
 
@@ -548,7 +548,7 @@ shared read-only copy of Android for every game, and a JIT disk cache that no lo
   22.7 to 4.2 times a native AVX2 build and 4-bone skinning from 45.8 to 11.2; the other seven kernels did not move. `LD3`/`ST3`
   use a correct but untuned gather. Lane and replicate forms, `.1D` and register lists past V31 keep the helper; Tier-2 stops at
   the op. Checked by `jit_neon_struct` (1699 checks against a reference model, which also passes under QEMU), `--no-jit`,
-  `BIFROST_JIT_VERIFY` and `make verify`; measured on this machine only, with a game running. [Details](JIT.md#ld2-ld4-and-st2-st4-inside-the-block-2026-11-07).
+  `BIFROST_JIT_VERIFY` and `make verify`; measured on this machine only, with a game running. [Details](archive/JIT-history.md#ld2-ld4-and-st2-st4-inside-the-block-2026-11-07).
 
 ### Fixed (post-index by X30)
 
@@ -920,7 +920,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   per-thread rings and the block lookup are replaced by `Runtime/SampleProfile.cpp`: a ring per thread that survives the thread, and
   a registry of where each translated block's entry, body, exit and cold code are. The report now gives the JIT samples split into
   those parts and the shared stubs, per thread and for the hottest guest blocks, and counts lost samples instead of hiding them
-  (details in [JIT.md](JIT.md#where-host-time-goes-bifrost_prof-2026-11-04)). On `bench_dispatch` 56.5% of the samples fell in block
+  (details in [JIT.md](JIT.md#where-host-time-goes-bifrost_prof)). On `bench_dispatch` 56.5% of the samples fell in block
   exits and 43.5% in bodies (85 samples, one run): a first reading, not a measurement of a game.
 - **`BIFROST_REGALLOC_PROFILE` is capped** at `BIFROST_REGALLOC_PROFILE_MB` (default 256 MiB). An Android game had written 3.3 GB to
   it in 15 seconds, enough to fill a tmpfs `/tmp` before it reached steady state.
@@ -962,7 +962,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   and single-register `ld1r` no longer call out of translated code; loop bodies of 33 to 64 instructions stay one block instead of
   splitting every iteration; and Q-register loads and stores use the same light bounds check as scalar ones. Skinning went from
   2.72 to 0.71 ms per frame and particles from 0.40 to 0.26; the nine kernels average 4.2 times native, from 5.8 at the start of
-  the day ([details](JIT.md#vector-fmla-by-element-ld1r-loop-bodies-and-q-accesses-2026-11-03)).
+  the day ([details](archive/JIT-history.md#vector-fmla-by-element-ld1r-loop-bodies-and-q-accesses-2026-11-03)).
 - New `jit_ld1r` test; `jit_simd_fp_indexed` and `jit_guard_stubs` cover the new paths, including 16-byte accesses crossing into
   a missing page. Not checked against QEMU, and no game or CoreMark measurement yet.
 
@@ -971,7 +971,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
 - **`fmul`, `fmulx`, `fmla` and `fmls` on a scalar and a vector element no longer run in the interpreter.** clang emits them for
   matrix-times-vector code, and Unity's engine library holds about 2,000 to 3,000 of them. A test kernel doing 4-bone skinning
   got 3 times faster (8.25 to 2.72 ms per frame); the vector forms that then dominated it are in the entry above
-  ([details](JIT.md#scalar-fp-by-element-2026-11-03)).
+  ([details](archive/JIT-history.md#scalar-fp-by-element-2026-11-03)).
 - `jit_fp_pw_elem` now sweeps every form and element over special values, register aliasing and both register caches. It was
   checked against C references and the interpreter, not QEMU.
 
@@ -981,7 +981,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   their target to a dead stack slot. A conditional branch that finds its flags only in memory tests HI/LS/GE/LT/GT/LE there, as it
   already did for one-flag conditions, instead of rebuilding them in 14 instructions. `cset` is `setcc` + `movzx`, from five
   instructions. Flag commits skip a needless RAX save, small negative constants take 7 bytes instead of 10, and fault exits drop
-  dead stores ([details](JIT.md#exit-spills-cset-and-two-flag-branches-2026-11-03)).
+  dead stores ([details](archive/JIT-history.md#exit-spills-cset-and-two-flag-branches-2026-11-03)).
 - On that workload code is 6.6% smaller and a run about 3% faster, on one desktop. CoreMark and games were not measured.
   `jit_csel` and `jit_imm_flags_zext` gain exact checks for the new forms.
 
@@ -990,7 +990,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
 - **A 4,096-entry indirect-branch table missed constantly in Unity.** Every miss cost a trip through `run_block`, 11.9% of cycles in a
   Subway Surfers profile. Each thread's table now starts at 1,024 entries and quadruples up to 65,536 as targets replace each other. In
   its lobby dispatches fell 47% (64.6M to 34.1M per minute), `run_block` to 2.5% of cycles and cycles about 4.7% (one run against two
-  baselines, which repeated within 1.3%). Dispatch tables took up to about 56 MB more ([details](JIT.md#growing-indirect-branch-tables-and-shared-block-exits-2026-11-03)).
+  baselines, which repeated within 1.3%). Dispatch tables took up to about 56 MB more ([details](archive/JIT-history.md#growing-indirect-branch-tables-and-shared-block-exits-2026-11-03)).
 - **Generated code is about 5% smaller.** Frame exits are a shared stub and the indirect-branch probe uses short jumps: 64.5 to 61.0 bytes per
   guest instruction in that lobby, with no measurable change in its CPU time. Pinned benchmarks moved under 1%, except `bench_dispatch`,
   2.6% slower. A shared probe reached 57.8 bytes but made `bench_dispatch` 44% slower, so it was dropped.
@@ -1045,7 +1045,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
 
 - **A third less generated code on a mixed test workload.** Each Tier-1 guarded memory access carried its own page checks and
   fault exit, which normally never run. One copy per JIT now serves them all
-  ([details and limits](JIT.md#shared-cold-stubs-and-smaller-encodings-2026-11-02)). Battle Cats launches measured 103.5 bytes per
+  ([details and limits](archive/JIT-history.md#shared-cold-stubs-and-smaller-encodings-2026-11-02)). Battle Cats launches measured 103.5 bytes per
   guest instruction before and 70.6 after, in runs of different lengths; frame rates were not measured. Accesses are slower
   while an ART compaction has software checks on (2.5 to 4.3 ns per four accesses in a loop).
 - **Smaller encodings and less hot work.** No bare REX prefixes or zero displacements, no RAX save around the flag commit
@@ -1532,7 +1532,7 @@ milestone is not complete. Older version labels below are historical records.
   160,000 iterations with `crcfinal` 0xa14c, the value QEMU 11.1.1 prints for that count.
 - Measured medians (three interleaved runs, all CRCs valid): 13,156 iterations/s for the shipped build, 12,981
   for the same source built headless, 12,332 for the alpha.2 release commit built headless, 7,710 for QEMU 11.1.1.
-  Method and limits: [JIT.md](JIT.md#coremark-checkpoint-2026-10-27). The `bench_*` table in the README was
+  Method and limits: [JIT.md](archive/JIT-history.md#coremark-checkpoint-2026-10-27). The `bench_*` table in the README was
   rerun the same day.
 - `run_tests.sh --strict`: 375/375 with the JIT, 360/360 with `--no-jit` (15 JIT-only tests are not selected
   there). `make verify`: 100 differential fixtures and 10 threaded oracle runs. `make generated-check` passed.
@@ -1835,7 +1835,7 @@ milestone is not complete. Older version labels below are historical records.
   earlier session, the JIT was replaced twice and both old copies were released; not a controlled comparison,
   and hitching was not recorded. `[JIT] generations:` (with `--verbose` or `BIFROST_STATS_PERIOD`) shows whether
   generations are released and how many threads delay it. Details in
-  [JIT.md](JIT.md#code-cache-generations-and-syscall-exits-2026-10-25). New `jit_generations` test.
+  [JIT.md](archive/JIT-history.md#code-cache-generations-and-syscall-exits-2026-10-25). New `jit_generations` test.
 
 ### Wheel, trackpad pinch and middle-drag zoom and pan touch apps (2026-10-25)
 
