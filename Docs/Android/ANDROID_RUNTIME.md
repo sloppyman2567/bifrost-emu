@@ -904,6 +904,39 @@ The property area's serial must not be 0: `CachedProperty` starts there and only
 cached property in Bionic read as empty. `make test-host-timezone` covers each layout and the serial. A zone missing from the
 image's tzdata reads as GMT; this is not checked at start.
 
+### Saved pictures (MediaStore images, 2026-11-11)
+
+An app that saves a picture to the gallery inserts it into MediaStore's images collection
+(`content://media/external_primary/images/media`); Umamusume's photo save does, and failed with "Failed to find
+provider info for media" before. `FrameworkMediaStore` serves the `media` authority in every app process, as Android
+15's MediaProvider answers such an app:
+
+- `insert` creates the file under `DCIM/` or `Pictures/` of `/storage/emulated/0` (`Pictures/` without
+  `RELATIVE_PATH`; any other folder or a non-`image/*` type is refused with MediaProvider's own message). The name is
+  `DISPLAY_NAME` with the type's extension appended unless its own extension matches the type, and a taken name becomes
+  `name (1).ext` up to `(31)`, as MediaProvider's `FileUtils.splitFileName` and `buildUniqueFile` do. Descriptive
+  `MediaColumns`/`ImageColumns` values are kept; provider-owned ones (`_id`, `_size`, dates) are recomputed.
+- The app writes through `openOutputStream`/`openFileDescriptor`. `query`, `update` (`IS_PENDING`, `DATE_EXPIRES`,
+  descriptive columns), `delete` and `getType` answer for the items this process inserted.
+- An item is finished when its `IS_PENDING` is cleared, or, inserted without it, when a writable descriptor closes (a
+  wrapping `ParcelFileDescriptor`, so this happens before the app's own `close` returns). A finished, non-empty item is
+  sent to the supervisor (`publish_media`), which copies it to `~/Pictures/Bifrost/<app label>/` (the desktop's
+  `XDG_PICTURES_DIR`, else `~/Pictures`) and logs `APP_MEDIA_PUBLISHED <name>`; a failed copy logs
+  `APP_MEDIA_PUBLISH_FAILED` and leaves the app's item as it is. The guest keeps its own file.
+- The copy treats the app as untrusted: only regular files below `DCIM/` or `Pictures/` of its shared storage, opened
+  one folder at a time without following a symlink, at most 256 MiB, written under a temporary name and linked to the
+  first free `name.ext`, `name (1).ext`, ..., so it never replaces a file already there.
+- Everything else (video, audio, downloads and files collections, collection queries and selections, extras, unknown
+  columns, renames, `call`, batch operations) is answered exactly as `ContentResolver` answers when no provider exists
+  (`query` and `getType` return null, an open throws "No content provider", `insert`/`update`/`delete` "Unknown URL"),
+  which is what apps saw before, and logs `SERVICE_CALL_UNSUPPORTED media <call>`. Ad SDKs in Battle Cats, Hungry Shark
+  World and other games ask the provider for something else and survive its absence.
+
+Rows live as long as the process: a later launch does not see earlier items (their files remain), pending items do not
+expire, and other apps' items are not visible. `ManagedServiceBatch` (`MANAGED_MEDIA_STORE_OK`, both engines) drives
+the whole path through `ContentResolver`, and `test_android_framework.py` checks the published copies;
+`Scripts/Android/test_media_publish.py` covers the host copy's refusals. Not yet run in Umamusume.
+
 ### MediaPlayer and SoundPool (2026-11-04)
 
 The broker runs the image's real `/system/bin/mediaserver` as UID 1013 in the slot that ran `bifrost-media-resource`

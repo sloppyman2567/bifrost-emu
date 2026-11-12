@@ -978,6 +978,17 @@ public final class ManagedLauncher {
         Object holder = holderType.getConstructor(ProviderInfo.class).newInstance(providerInfo);
         holderType.getField("provider").set(holder, provider);
         holderType.getField("noReleaseNeeded").setBoolean(holder, true);
+        // MediaStore's images collection, served in this process (FrameworkMediaStore).
+        ProviderInfo mediaInfo = new ProviderInfo();
+        mediaInfo.authority = FrameworkMediaStore.AUTHORITY;
+        mediaInfo.name = "BifrostMediaStore";
+        mediaInfo.packageName = "android";
+        mediaInfo.applicationInfo = new ApplicationInfo();
+        mediaInfo.applicationInfo.packageName = "android";
+        Object mediaHolder = holderType.getConstructor(ProviderInfo.class).newInstance(mediaInfo);
+        holderType.getField("provider").set(mediaHolder,
+                services.local("bifrost.media", "android.content.IContentProvider", new FrameworkMediaStore()));
+        holderType.getField("noReleaseNeeded").setBoolean(mediaHolder, true);
         services.register("activity", "android.app.IActivityManager", (method, a) -> {
             if (pendingIntents.handles(method)) return pendingIntents.invoke(method, a);
             switch (method) {
@@ -1045,6 +1056,8 @@ public final class ManagedLauncher {
                 return packages.checkPermission((String) a[0], (Integer) a[2], Context.DEVICE_ID_DEFAULT);
             if (method.equals("getContentProvider") && Arrays.asList(a).contains("settings"))
                 return holder;
+            if (method.equals("getContentProvider") && FrameworkMediaStore.AUTHORITY.equals(a[2]))
+                return mediaHolder;
             if (method.equals("getContentProvider")) {
                 String authority = (String) a[2];
                 Object local = content.publishedProvider(authority, (String) a[1], (Integer) a[3]);

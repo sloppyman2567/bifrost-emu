@@ -28,7 +28,7 @@ import android_framework
 import android_google
 import android_microg
 import android_paths
-from android_processes import ProcessHost
+from android_processes import ProcessHost, media_folder, pictures_directory
 
 PRIORITIES = "??VDIWEFS"
 LAUNCHER_DIR = ROOT / "Guest/Android/Managed"
@@ -45,6 +45,7 @@ LAUNCHER_SOURCES = ("ManagedLauncher.java", "ManagedZygote.java", "ActivityProbe
                     "Framework/FrameworkAppOps.java", "Framework/FrameworkSurfaces.java",
                     "Framework/FrameworkAudio.java", "Framework/FrameworkNotifications.java",
                     "Framework/FrameworkPower.java", "Framework/FrameworkWifi.java", "Framework/FrameworkNsd.java", "Framework/FrameworkAudioTracks.java", "Framework/FrameworkToasts.java",
+                    "Framework/FrameworkMediaStore.java",
                     "Framework/FrameworkPermissions.java", "Framework/FrameworkUiMode.java",
                     "Framework/FrameworkBattery.java", "Framework/FrameworkVibrator.java",
                     "Framework/FrameworkKeyguard.java", "Framework/FrameworkClipboard.java",
@@ -1373,7 +1374,9 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                     + (["--android-window-plugin", str(window_plugin)] if window_plugin else []),
                 environment, "/data/local/tmp/launcher.dex", log_path.parent / "processes", trace_args,
                 media_mask=media_mask, activities=relay, task_session=process_session, state=app.parent,
-                activity_finished=completion, zygote=True)))
+                activity_finished=completion, zygote=True,
+                media_destination=pictures_directory() / "Bifrost"
+                    / media_folder(metadata.get("label"), metadata["package"]))))
             process_session.task_control = process_host.task
             environment = process_host.environment
             command[1:1] = ["--android-binder-broker", process_host.socket]

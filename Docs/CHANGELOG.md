@@ -49,6 +49,16 @@ shared read-only copy of Android for every game, and a JIT disk cache that no lo
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (saved pictures reach the host)
+
+- A picture an Android app saves to the gallery now appears in `~/Pictures/Bifrost/<app>/` (2026-11-11), for example
+  Umamusume's photo save, which failed with "Unknown URL content://media/external_primary/images/media" before. Bifrost
+  answers MediaStore's images collection as Android 15's MediaProvider does (folders, names, `IS_PENDING`) and copies
+  each finished picture to the desktop's Pictures folder without ever replacing a file there or following a link the
+  app could plant. Other MediaStore requests are answered as they were before, so ad SDKs that ask for them keep
+  working. Checked with a fixture through the real `ContentResolver` in both engines and host-side tests; not yet in
+  Umamusume itself.
+
 ### Added (a JIT page on the project site)
 
 - The site has a JIT page (2026-11-11): how FrostJIT turns ARM64 code into x86_64 code, what makes it fast, how it is

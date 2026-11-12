@@ -10,6 +10,7 @@ import shutil
 import secrets
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import tempfile
@@ -22,6 +23,10 @@ OPEN_INTERVAL = 1.0
 SAME_LINK_WINDOW = 30.0
 PROCESS_NAME = re.compile(r'[A-Za-z0-9_.:-]{1,63}\Z')
 TRACE_OPTION = '-Dbifrost.apk.trace.dir='
+# Shared storage inside an app's root, and the folders MediaStore keeps images in (FrameworkMediaStore).
+MEDIA_STORAGE = ('storage', 'emulated', '0')
+MEDIA_DIRECTORIES = ('DCIM', 'Pictures')
+MAX_MEDIA_FILE = 256 * 1024 * 1024
 
 
 def exit_description(code):
@@ -99,6 +104,93 @@ def open_url(url, last, opener=None, popen=subprocess.Popen, clock=time.monotoni
     return dict(opened=True)
 
 
+def pictures_directory(environ=None, home=None):
+    """The desktop's Pictures folder: XDG_PICTURES_DIR in $XDG_CONFIG_HOME/user-dirs.dirs, read as xdg-user-dir reads it
+    ("$HOME/..." or an absolute path; a folder set to $HOME itself is disabled), else ~/Pictures."""
+    environ = os.environ if environ is None else environ
+    home = Path(home or environ.get('HOME') or Path.home())
+    config = Path(environ.get('XDG_CONFIG_HOME') or home / '.config') / 'user-dirs.dirs'
+    try:
+        lines = config.read_text(errors='replace').splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        match = re.fullmatch(r'\s*XDG_PICTURES_DIR\s*=\s*"(.*)"\s*', line)
+        if not match:
+            continue
+        value = match.group(1)
+        path = home / value[len('$HOME/'):] if value.startswith('$HOME/') else Path(value) if value.startswith('/') else None
+        if path is not None and path != home:
+            return path
+    return home / 'Pictures'
+
+
+def media_folder(label, package):
+    """The app's folder under Pictures/Bifrost: its label as one safe path component, else its package."""
+    name = re.sub(r'[\x00-\x1f/\\]+', ' ', label or '').strip().lstrip('.').strip()[:100]
+    return name or package
+
+
+def _open_guest_file(root, parts):
+    """Open root/parts... for reading, refusing a symlink or special file at every step: the app owns every folder
+    below its root and could swap one for a link to a host file."""
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    finally:
+        os.close(directory)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_MEDIA_FILE:
+        os.close(descriptor)
+        raise ValueError('Not a regular media file of at most 256 MiB')
+    return os.fdopen(descriptor, 'rb')
+
+
+def publish_media(root, guest_path, destination):
+    """Copy a finished MediaStore image out of an app's shared storage into `destination` (~/Pictures/Bifrost/<app>).
+
+    The app is untrusted: only /storage/emulated/0/DCIM/... and /storage/emulated/0/Pictures/... regular files are read,
+    never through a symlink, and the copy never replaces a host file: it is written under a temporary name and linked
+    as "name.ext", "name (1).ext", ... (the first free one). Returns the response for the guest."""
+    if not isinstance(guest_path, str) or len(guest_path) > 4096 or '\x00' in guest_path:
+        raise ValueError('Invalid media path')
+    parts = guest_path.split('/')
+    if parts[:4] != ['', *MEDIA_STORAGE] or len(parts) < 6 or parts[4] not in MEDIA_DIRECTORIES \
+            or any(part in ('', '.', '..') for part in parts[4:]):
+        raise ValueError('Only images in DCIM/ or Pictures/ of shared storage are published')
+    name = parts[-1]
+    if name.startswith('.') or len(name.encode()) > 200:
+        raise ValueError('Invalid media file name')
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    with _open_guest_file(root, [*MEDIA_STORAGE, *parts[4:]]) as source:
+        handle, temporary = tempfile.mkstemp(prefix='.bifrost-media-', dir=destination)
+        try:
+            with os.fdopen(handle, 'wb') as target:
+                copied = 0
+                while chunk := source.read(1 << 20):
+                    copied += len(chunk)
+                    if copied > MAX_MEDIA_FILE:
+                        raise ValueError('Media file grew past 256 MiB')
+                    target.write(chunk)
+            os.chmod(temporary, 0o644)
+            base, dot, extension = name.rpartition('.') if '.' in name else (name, '', '')
+            for index in range(1000):
+                candidate = name if index == 0 else f'{base} ({index}){dot}{extension}'
+                try:
+                    os.link(temporary, destination / candidate)
+                except FileExistsError:
+                    continue
+                return dict(name=candidate)
+            raise RuntimeError('No free name for the published media file')
+        finally:
+            os.unlink(temporary)
+
+
 def receive_message(connection):
     """One length-prefixed JSON object, as ProcessHost's clients and its Zygote send them."""
     length = struct.unpack('!I', ProcessHost.receive(connection, 4))[0]
@@ -144,8 +236,11 @@ class ZygoteChild:
 
 class ProcessHost:
     def __init__(self, root, emu, emu_args, environment, dex, logs, art_options=(), media_mask=None,
-                 activities=None, task_session=None, state=None, activity_finished=None, zygote=False):
+                 activities=None, task_session=None, state=None, activity_finished=None, zygote=False,
+                 media_destination=None):
         self.root, self.emu = Path(root), str(emu)
+        # Where finished MediaStore images go on the host (~/Pictures/Bifrost/<app>); None refuses publish_media.
+        self.media_destination = media_destination
         # Runs Activities of other apps' packages that the guest asks for (android_google.ActivityRelay).
         self.activities = activities
         self.activity_finished = activity_finished
@@ -417,6 +512,10 @@ class ProcessHost:
                 response = self.activity_finished()
             elif request['operation'] == 'open_url':
                 response = open_url(request['url'], self.last_url)
+            elif request['operation'] == 'publish_media':
+                if self.media_destination is None:
+                    raise ValueError('Saving pictures to the host is unavailable')
+                response = publish_media(self.root, request['path'], self.media_destination)
             elif request['operation'] == 'home':
                 response = self.home()
             elif request['operation'] == 'am':

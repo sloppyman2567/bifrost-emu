@@ -98,6 +98,13 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `onConfigurationChanged`; a stopped Activity waits for its restart. A relaunch replaces `Record.activity` and keeps the
   token, results and caller, so never hold an `Activity` across a resize (`activities.root()`, `ManagedLauncher.activityReplaced`).
   `Tests/Host/ManagedRelaunch.java` covers both outcomes.
+- The `media` provider (`FrameworkMediaStore`, in every app process) models MediaStore's images collection only: an
+  inserted, finished picture goes to the supervisor (`publish_media`), which copies it to `~/Pictures/Bifrost/<app>/`.
+  Keep the copy as untrusted as the app: below `DCIM/` or `Pictures/` of its shared storage, every folder opened with
+  `O_NOFOLLOW` from the root, regular files only, bounded size, linked to a free name so no host file is ever replaced.
+  Anything it does not model must keep answering as a missing provider does (null query and type, "Unknown URL",
+  "No content provider"), never an exception apps did not get before: ad SDKs ask it for other collections.
+  `MANAGED_MEDIA_STORE_OK` (`ManagedServiceBatch`, both engines) and `test_media_publish.py` cover it.
 - `media_session` (`FrameworkMediaSessions`) has no sessions and accepts only
   `dispatchMediaKeyEvent`; WebView forwards unhandled keys to it.
 - App processes register their code and profile paths with ART

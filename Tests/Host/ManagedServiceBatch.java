@@ -681,6 +681,67 @@ public final class ManagedServiceBatch {
                 && found.activeSince > 0 && found.lastActivityTime >= found.activeSince, "running service not reported");
         check(manager.getRunningServices(0).isEmpty(), "maxNum 0 returned services");
     }
+    // MediaStore's images collection (FrameworkMediaStore), driven through ContentResolver as Umamusume's
+    // SavePictureFile drives it: a pending insert, written through openOutputStream and published by clearing
+    // IS_PENDING. A second insert of the same name becomes "name (1).png" and is published when its stream closes;
+    // a name whose extension does not match the type gets the type's; other folders and types are refused as
+    // MediaProvider refuses them; other collections answer as they did with no media provider (ad SDKs rely on it).
+    // test_android_framework.py checks the published copies in its pictures folder.
+    static final byte[] PICTURE = {(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 'b', 'i', 'f', 'r', 'o', 's', 't'};
+    private static void mediaStore(Context context) throws Exception {
+        android.content.ContentResolver resolver = context.getContentResolver();
+        Uri images = android.provider.MediaStore.Images.Media.getContentUri(
+                android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY);
+        android.content.ContentValues values = new android.content.ContentValues();
+        values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "bifrost-probe");
+        values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/png");
+        values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/BifrostProbe");
+        values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1);
+        Uri first = resolver.insert(images, values);
+        check(first != null && first.toString().startsWith(images + "/"), "insert returned " + first);
+        try (java.io.OutputStream out = resolver.openOutputStream(first)) { out.write(PICTURE); }
+        android.content.ContentValues done = new android.content.ContentValues();
+        done.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0);
+        check(resolver.update(first, done, null, null) == 1, "clearing IS_PENDING updated nothing");
+        String[] columns = {android.provider.MediaStore.MediaColumns.DISPLAY_NAME,
+                android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.provider.MediaStore.MediaColumns.IS_PENDING,
+                android.provider.MediaStore.MediaColumns.SIZE};
+        try (android.database.Cursor row = resolver.query(first, columns, null, null, null)) {
+            check(row.moveToFirst() && "bifrost-probe.png".equals(row.getString(0))
+                    && "Pictures/BifrostProbe/".equals(row.getString(1)) && row.getInt(2) == 0
+                    && row.getLong(3) == PICTURE.length, "the published item reads back wrong");
+        }
+        check(new File("/storage/emulated/0/Pictures/BifrostProbe/bifrost-probe.png").length() == PICTURE.length,
+                "the picture is not in shared storage");
+        check("image/png".equals(resolver.getType(first)), "getType " + resolver.getType(first));
+        values.remove(android.provider.MediaStore.MediaColumns.IS_PENDING);
+        values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "bifrost-probe.png");
+        Uri second = resolver.insert(images, values);
+        try (java.io.OutputStream out = resolver.openOutputStream(second)) { out.write(PICTURE); }
+        try (android.database.Cursor row = resolver.query(second, columns, null, null, null)) {
+            check(row.moveToFirst() && "bifrost-probe (1).png".equals(row.getString(0)), "a duplicate name was reused");
+        }
+        android.content.ContentValues photo = new android.content.ContentValues();
+        photo.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "photo.png");
+        photo.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+        Uri third = resolver.insert(images, photo);
+        try (android.database.Cursor row = resolver.query(third, columns, null, null, null)) {
+            check(row.moveToFirst() && "photo.png.jpg".equals(row.getString(0)) && "Pictures/".equals(row.getString(1)),
+                    "the type's extension or the default folder is wrong");
+        }
+        check(resolver.delete(third, null, null) == 1 && !new File("/storage/emulated/0/Pictures/photo.png.jpg").exists(),
+                "delete left the file");
+        android.content.ContentValues music = new android.content.ContentValues(values);
+        music.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Music/");
+        invalid(() -> resolver.insert(images, music));
+        android.content.ContentValues audio = new android.content.ContentValues(values);
+        audio.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "audio/mpeg");
+        invalid(() -> resolver.insert(images, audio));
+        check(resolver.query(android.provider.MediaStore.Video.Media.getContentUri("external"), null, null, null, null)
+                == null, "another collection no longer answers as a missing provider");
+        invalid(() -> resolver.insert(android.provider.MediaStore.Downloads.getContentUri("external"), values));
+        System.out.println("MANAGED_MEDIA_STORE_OK");
+    }
     private static void check(boolean value, String message) {
         if (!value) throw new AssertionError(message);
         checks++;
@@ -2038,6 +2099,7 @@ public final class ManagedServiceBatch {
         new Thread(() -> {
         try {
         usersAndIdle(context);
+        mediaStore(context);
         cursors(context);
         gamepads();
         receivers(context);

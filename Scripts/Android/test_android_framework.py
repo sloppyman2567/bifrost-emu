@@ -113,10 +113,12 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         timed_out = False
         with log_path.open("wb") as log, (output / (mode + ".logd")).open("wb") as logd_sink, ExitStack() as hosts:
             if services and mode != "qemu" and binder_mode == "broker":
+                shutil.rmtree(output / (mode + "-pictures"), ignore_errors=True)
                 process_host = hosts.enter_context(closing(ProcessHost(root, emu,
                     (["--no-jit"] if mode == "interp" else []) +
                     (["--android-binder-broker", str(binder_broker)] if binder_broker else []), environment,
-                    "/data/local/tmp/probe.dex", output / "processes", trace_args)))
+                    "/data/local/tmp/probe.dex", output / "processes", trace_args,
+                    media_destination=output / (mode + "-pictures"))))
                 environment = process_host.environment
                 arguments[1:1] = ["--android-binder-broker", process_host.socket]
             logd = LogdReceiver(root, logd_sink)
@@ -144,7 +146,7 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
         if services and main_class == "ActivityProbe$InputMethodProbe":
             markers += ("INPUT_METHOD_PROTOCOL_OK", "INPUT_METHOD_HOST_TEXT_OK")
         if main_class == "ManagedServiceBatch":
-            markers += ("MANAGED_KEYSTORE_OK", "MANAGED_GAMEPADS_OK", "MANAGED_SERVICE_BATCH_OK")
+            markers += ("MANAGED_MEDIA_STORE_OK", "MANAGED_KEYSTORE_OK", "MANAGED_GAMEPADS_OK", "MANAGED_SERVICE_BATCH_OK")
         if main_class == "ActivityProbe$NativeLooperProbe":
             markers += ("ANDROID_JAVA_NATIVE_LOOPER_OK",)
         if main_class == "ActivityProbe$NativeChoreographerProbe":
@@ -185,6 +187,14 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
                                        r"F app_process64: .*?(?:Runtime aborting|Failed to abort)", diagnostic_text))
         frames = max((int(n) for n in re.findall(r"\[frame\] eglSwapBuffers: (\d+) frames", text)),
                      default=0)
+        if main_class == "ManagedServiceBatch" and services and binder_mode == "broker" and mode != "qemu":
+            # FrameworkMediaStore published both of the batch's pictures to the host, byte for byte.
+            pictures = output / (mode + "-pictures")
+            picture = bytes([0x89]) + b"PNG\r\n\x1a\nbifrost"
+            markers += ("HOST_MEDIA_PUBLISHED",)
+            if pictures.is_dir() and sorted(path.name for path in pictures.iterdir()) == ["bifrost-probe (1).png", "bifrost-probe.png"] \
+                    and all(path.read_bytes() == picture for path in pictures.iterdir()):
+                text += "\nHOST_MEDIA_PUBLISHED"
         finished = child.returncode == 0 or (play and timed_out)
         passed = finished and not guest_failure and (play or not timed_out) \
             and all(marker in text for marker in markers) and (not play or frames >= 5)
