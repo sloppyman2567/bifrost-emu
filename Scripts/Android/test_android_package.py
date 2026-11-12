@@ -169,7 +169,9 @@ class BionicCompatibilityTests(unittest.TestCase):
             root = Path(directory)
             self.make_root(root)
             (root / "apex/com.android.runtime/lib64/bionic/libc.so").write_bytes(b"changed")
-            with self.assertRaisesRegex(ValueError, "modified framework"):
+            # The manifest's codec fingerprint matches, as in a real tree; only the file was changed.
+            with patch("android_codecs.fingerprint", return_value="fixture"), \
+                    self.assertRaisesRegex(ValueError, "modified framework"):
                 android_framework.install(root, root / "unused")
             self.assertFalse((root / "system").exists())
 
@@ -4010,7 +4012,7 @@ class PackageTests(unittest.TestCase):
             str(cls.media / "lib64/libmediandk.so"),
             str(bionic / "libc.so"), "-o", str(cls.native),
         ], check=True, capture_output=True)
-        # ManagedNativeActivity's native half (lib_name "nativewindow").
+        # ManagedNativeActivity's native half (lib_name "nativewindow"), packed into that fixture's base APK.
         cls.native_window = cls.work / "libnativewindow.so"
         subprocess.run(compiler + [
             "-Wl,-soname,libnativewindow.so", str(ROOT / "Tests/Host/android_native_window_fixture.c"),
@@ -4187,11 +4189,13 @@ class PackageTests(unittest.TestCase):
                            check=True, capture_output=True)
             with zipfile.ZipFile(apk, "a") as archive:
                 archive.write(dex / "classes.dex", "classes.dex")
+                # ManagedNativeActivity's native half travels in its own base APK, not in the shared split.
+                if managed == "ManagedNativeActivity":
+                    archive.write(cls.native_window, "lib/arm64-v8a/libnativewindow.so")
         if native:
             with zipfile.ZipFile(apk, "a") as archive:
                 archive.write(cls.native, "lib/arm64-v8a/libfixture.so")
                 archive.write(cls.dependency, "lib/arm64-v8a/libfixture_dependency.so")
-                archive.write(cls.native_window, "lib/arm64-v8a/libnativewindow.so")
                 archive.writestr("assets/split.txt", "APK split asset\n")
         cls.sign(apk, key)
         return apk
