@@ -136,6 +136,7 @@ public final class ManagedLauncher {
     private static final FrameworkUsers users = new FrameworkUsers(packages);
     private static final FrameworkDeviceIdle deviceIdle = new FrameworkDeviceIdle(packages);
     private static final FrameworkCursors cursors = new FrameworkCursors(ManagedLauncher::setCursor);
+    static { windows.hoverIcons(cursors::hover); }
     // Guest/Android/Adapters/activity_window.c: Bifrost syscall 0x100E ops 2 and 3.
     private static native int openWindow(int width, int height);
     private static native int setWindowIdentity(byte[] titleUtf8, int[] argb, int width, int height);
@@ -1657,7 +1658,7 @@ public final class ManagedLauncher {
                 if (!windows.dispatchPointer(event)) {
                     activity.dispatchTouchEvent(event);
                     if (event.getActionMasked() == MotionEvent.ACTION_HOVER_MOVE)
-                        cursors.hover(() -> activity.getWindow().peekDecorView(), event);
+                        cursors.hover(activity.getWindow().peekDecorView(), event);
                 }
             } else if (!windows.dispatchMotion(event)) {
                 activity.dispatchGenericMotionEvent(event);

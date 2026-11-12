@@ -237,15 +237,16 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `Tools/Android/generate-key-layout.py`; regenerate `FrameworkKeyLayout.java`,
   never edit it, or text fields stop honoring Backspace. Run
   `ActivityProbe$InputMethodProbe` and `test_managed_text_input`.
-- Pointer icons: host input bypasses `ViewRootImpl`'s input stages, so after each mouse hover the launcher asks the
-  Activity's view tree (`View.onResolvePointerIcon`, as `ViewRootImpl.updatePointerIcon` does) and `FrameworkCursors`
+- Pointer icons: host pointer events are touchscreen events, which `ViewRootImpl` resolves no icon for, so after each
+  hover `FrameworkWindows` asks the hovered window's view tree on that window's thread (`View.onResolvePointerIcon`, as
+  `ViewRootImpl.updatePointerIcon` does; the Activity's decor for a hover no window takes) and `FrameworkCursors`
   sends the nearest `BIFROST_WINDOW_CURSOR_*` shape (op 24) only when it changes. Hover is the trigger because a
   touchscreen never hovers; a button-held drag keeps the last shape. `set_cursor` is an append-only optional plugin
   field (`-ENOTSUP` without it); the SDL3 backend maps shapes to SDL system cursors, frees them before SDL quits and
   shows a hidden pointer again on close. A failure stops the feature and logs `APP_CURSOR_UNAVAILABLE` once; it must
   never break input delivery. An app's own bitmap cursor is not carried. Keep `FrameworkCursors`, the C enum and
-  the SDL mapping together; `MANAGED_CURSORS_OK` (`ManagedServiceBatch`), `make test-android-sdl-backend` and
-  `make test-android-window-plugin` cover it.
+  the SDL mapping together; `MANAGED_CURSORS_OK` (`ManagedServiceBatch`), `test_managed_dialog_and_popup_windows`,
+  `make test-android-sdl-backend` and `make test-android-window-plugin` cover it.
 - Shared libraries: the jars come from the pinned image (`SHARED_LIBRARIES` digests in `android_framework.py`, added in
   place to an existing runtime like the shell) and must stay read-only in every managed root, or ART refuses them. An
   app's `<uses-library>` is resolved in `FrameworkSharedLibraries` into `sharedLibraryInfos`; setting `sharedLibraryFiles`

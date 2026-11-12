@@ -362,24 +362,24 @@ public final class ManagedServiceBatch {
         FrameworkCursors shown = new FrameworkCursors(shape -> { sent.add(shape); return 0; });
         View view = new View(context);
         MotionEvent hover = MotionEvent.obtain(0, 0, MotionEvent.ACTION_HOVER_MOVE, 5f, 5f, 0);
-        shown.hover(() -> view, hover);
+        shown.hover(view, hover);
         check(sent.isEmpty(), "a view with no pointer icon changed the host's arrow");
         view.setPointerIcon(PointerIcon.getSystemIcon(context, PointerIcon.TYPE_HAND));
-        shown.hover(() -> view, hover); shown.hover(() -> view, hover);
+        shown.hover(view, hover); shown.hover(view, hover);
         check(sent.equals(Arrays.asList(FrameworkCursors.POINTER)), "hand was not sent exactly once: " + sent);
         view.setPointerIcon(PointerIcon.getSystemIcon(context, PointerIcon.TYPE_NULL));
-        shown.hover(() -> view, hover);
+        shown.hover(view, hover);
         check(sent.equals(Arrays.asList(FrameworkCursors.POINTER, FrameworkCursors.HIDDEN)), "hidden pointer was not sent: " + sent);
         view.setPointerIcon(null);
-        shown.hover(() -> view, hover);
+        shown.hover(view, hover);
         check(sent.equals(Arrays.asList(FrameworkCursors.POINTER, FrameworkCursors.HIDDEN, FrameworkCursors.DEFAULT)),
                 "clearing the icon did not restore the arrow: " + sent);
-        shown.hover(() -> null, hover);  // no decor view yet
+        shown.hover(null, hover);  // no decor view yet
         // A host that refuses a shape turns the feature off for good, without throwing into input delivery.
         List<Integer> refused = new ArrayList<>();
         FrameworkCursors refusing = new FrameworkCursors(shape -> { refused.add(shape); return -95; });
         view.setPointerIcon(PointerIcon.getSystemIcon(context, PointerIcon.TYPE_HAND));
-        refusing.hover(() -> view, hover); refusing.hover(() -> view, hover);
+        refusing.hover(view, hover); refusing.hover(view, hover);
         check(refused.size() == 1, "a refused cursor was retried: " + refused);
         hover.recycle();
         System.out.println("MANAGED_CURSORS_OK");

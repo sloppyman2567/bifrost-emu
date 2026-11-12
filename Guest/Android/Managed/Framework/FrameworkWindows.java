@@ -929,7 +929,10 @@ final class FrameworkWindows {
         if (action == MotionEvent.ACTION_HOVER_MOVE || action == MotionEvent.ACTION_HOVER_ENTER
                 || action == MotionEvent.ACTION_HOVER_EXIT) {
             Popup top = hit(event);
-            return top != null && deliver(top, event);
+            if (top == null) return false;
+            deliver(top, event);
+            if (action != MotionEvent.ACTION_HOVER_EXIT) hovered(top, event);
+            return true;
         }
         if (action == MotionEvent.ACTION_DOWN) {
             touchTarget = null;
@@ -966,6 +969,26 @@ final class FrameworkWindows {
             }
         }
         return null;
+    }
+
+    // Pointer icons (FrameworkCursors): resolved by the hovered window's view tree on its own thread, as
+    // ViewRootImpl.updatePointerIcon does for a mouse.
+    private volatile java.util.function.BiConsumer<View, MotionEvent> hoverIcons;
+
+    void hoverIcons(java.util.function.BiConsumer<View, MotionEvent> resolve) {
+        hoverIcons = resolve;
+    }
+
+    private void hovered(Popup popup, MotionEvent event) throws Exception {
+        java.util.function.BiConsumer<View, MotionEvent> resolve = hoverIcons;
+        Object viewRoot = viewRoot(popup);
+        View root = root(popup);
+        if (resolve == null || viewRoot == null || root == null) return;
+        MotionEvent local = MotionEvent.obtain(event);
+        local.offsetLocation(-popup.frame.left, -popup.frame.top);
+        onOwner(viewRoot, () -> {
+            try { resolve.accept(root, local); } finally { local.recycle(); }
+        });
     }
 
     // Touch, hover and ACTION_OUTSIDE for one window: a copy in its own coordinates goes into its input channel.

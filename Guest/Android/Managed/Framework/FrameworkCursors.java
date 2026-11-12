@@ -1,15 +1,15 @@
 // Pointer icons for a mouse-driven window. Android resolves the icon in ViewRootImpl's input stages
 // (ViewPostImeInputStage.maybeUpdatePointerIcon, then updatePointerIcon: View.onResolvePointerIcon, the
-// default arrow when it returns null, reported only when the icon changes). Host input here bypasses
-// those stages, so the play loop asks the Activity's view tree after each mouse hover and shows the
-// nearest host system cursor. An app's own bitmap cursor (TYPE_CUSTOM) is not carried: it shows the arrow.
+// default arrow when it returns null, reported only when the icon changes), but only for mouse-source events,
+// and the host's pointer reaches apps as a touchscreen. So after each hover FrameworkWindows asks the hovered
+// window's view tree, on that window's thread, at the window's coordinates, and the nearest host system cursor
+// is shown. An app's own bitmap cursor (TYPE_CUSTOM) is not carried: it shows the arrow.
 import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
 import android.view.View;
 import java.lang.reflect.Method;
 import java.util.function.IntUnaryOperator;
-import java.util.function.Supplier;
 
 final class FrameworkCursors {
     // BIFROST_WINDOW_CURSOR_* (Include/Bifrost/AndroidWindowPlugin.h).
@@ -46,11 +46,12 @@ final class FrameworkCursors {
         }
     }
 
-    /** After a mouse hover over the Activity: show the pointer icon its view tree resolves there. */
-    void hover(Supplier<View> decorView, MotionEvent event) {
+    /** After a mouse hover over a window: show the pointer icon its view tree (`root`, null before it has one)
+     *  resolves at the event, given in that window's coordinates. Called on the window's own thread. */
+    synchronized void hover(View root, MotionEvent event) {
         if (unavailable) return;
         try {
-            final View decor = decorView.get();  // null until the Activity's window has a decor view
+            final View decor = root;
             if (decor == null) return;
             // A touchscreen never hovers, so a hover is the mouse; views resolve icons for mouse events.
             MotionEvent mouse = MotionEvent.obtain(event);
@@ -66,6 +67,7 @@ final class FrameworkCursors {
             final int error = show.applyAsInt(cursor);
             if (error != 0) throw new IllegalStateException("the window refused cursor " + cursor + ": " + error);
             shown = cursor;
+            System.out.println("APP_CURSOR " + cursor);
         } catch (Throwable problem) {
             // Pointer icons are cosmetic: never let one break input delivery.
             unavailable = true;

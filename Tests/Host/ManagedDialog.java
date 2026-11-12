@@ -65,13 +65,15 @@ public final class ManagedDialog extends Activity {
             if (!dialog.getWindow().getDecorView().isAttachedToWindow()
                     || dialog.getWindow().getDecorView().getWidth() == 0)
                 throw new IllegalStateException("dialog window was not laid out");
-            tap(this, dialog.getButton(DialogInterface.BUTTON_POSITIVE));
+            View ok = dialog.getButton(DialogInterface.BUTTON_POSITIVE);
+            ok.setPointerIcon(android.view.PointerIcon.getSystemIcon(this, android.view.PointerIcon.TYPE_HAND));
+            tap(this, ok);
         }, 1500);
     }
 
-    // A host tap at the middle of a view, through the launcher's own entry point (ManagedLauncher.dispatch, with the
-    // records a window backend reports) on the play loop's thread: it reaches the view's window through that window's
-    // input channel, and the click runs on the window's own thread.
+    // A host hover, then a tap, at the middle of a view, through the launcher's own entry point (ManagedLauncher.dispatch,
+    // with the records a window backend reports) on the play loop's thread: they reach the view's window through that
+    // window's input channel, the click runs on the window's own thread, and the hover shows the view's pointer icon.
     static void tap(Activity activity, View view) {
         int[] at = new int[2];
         view.getLocationOnScreen(at);
@@ -81,12 +83,12 @@ public final class ManagedDialog extends Activity {
                 java.lang.reflect.Method dispatch = ClassLoader.getSystemClassLoader().loadClass("ManagedLauncher")
                         .getDeclaredMethod("dispatch", Activity.class, long[].class);
                 dispatch.setAccessible(true);
-                for (int action : new int[] {0, 1}) {  // ACTION_DOWN, ACTION_UP
+                for (int action : new int[] {7, 0, 1}) {  // ACTION_HOVER_MOVE, ACTION_DOWN, ACTION_UP
                     long[] e = new long[55];
                     long now = SystemClock.uptimeMillis() * 1000000L;
                     e[0] = 2; e[4] = action; e[5] = InputDevice.SOURCE_TOUCHSCREEN; e[6] = 1; e[13] = 1;
                     e[14] = Float.floatToIntBits(x) & 0xffffffffL; e[15] = Float.floatToIntBits(y) & 0xffffffffL;
-                    e[16] = Float.floatToIntBits(1f) & 0xffffffffL;
+                    e[16] = Float.floatToIntBits(action == 7 ? 0f : 1f) & 0xffffffffL;
                     e[11] = now; e[12] = now;
                     dispatch.invoke(null, activity, e);
                 }
@@ -172,7 +174,12 @@ public final class ManagedDialog extends Activity {
                 // bounds at the next draw, which invalidates it from that draw.
                 engine.postDelayed(() -> dialog.getButton(DialogInterface.BUTTON_POSITIVE)
                         .setText("Continue with the engine"), 800);
-                engine.postDelayed(() -> tap(this, dialog.getButton(DialogInterface.BUTTON_POSITIVE)), 1800);
+                engine.postDelayed(() -> {
+                    View ok = dialog.getButton(DialogInterface.BUTTON_POSITIVE);
+                    ok.setPointerIcon(android.view.PointerIcon.getSystemIcon(this,
+                            android.view.PointerIcon.TYPE_CROSSHAIR));
+                    tap(this, ok);
+                }, 1800);
             });
         }
 

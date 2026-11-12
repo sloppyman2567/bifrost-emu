@@ -26,7 +26,7 @@ regions through calls and returns, fork children that keep the JIT, a session Zy
 in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and SoundPool, one
 shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every process,
 NativeActivity games on the managed path that get their window and input, input delivered through each window's input
-channel, a controller cursor that hides the desktop pointer, and odd-sized YUV buffers.
+channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffers and an app's pointer icons.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
@@ -50,6 +50,14 @@ channel, a controller cursor that hides the desktop pointer, and odd-sized YUV b
   a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
+
+### Fixed (an app's pointer icons show)
+
+- The desktop pointer now takes the shape an app asks for over its windows (2026-11-12): the hand over a link or button
+  that sets one, the text cursor over editable text, a crosshair, a hidden pointer. The shapes were mapped on 2026-10-28
+  but were only looked up for hovers that no window took, and the Activity's own window always takes them, so they never
+  showed. Each hovered window's own views now decide, on that window's thread. Checked with host hovers over two dialogs'
+  buttons (one owned by an engine thread); not yet seen in a game.
 
 ### Fixed (odd-sized YUV buffers)
 

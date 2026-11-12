@@ -4856,6 +4856,10 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions), text[-30000:])
         self.assertNotIn("CalledFromWrongThreadException", text)
         self.assertEqual(text.count("MANAGED_DIALOG_ENGINE_SURFACE_DESTROYED"), 2, text[-30000:])
+        # The host hover before each tap shows the button's pointer icon, resolved by that dialog's own view tree (one
+        # owned by an engine thread): the hand (host cursor 3), then the crosshair (5).
+        self.assertLess(text.index("APP_CURSOR 3"), text.index("APP_CURSOR 5"), text[-30000:])
+        self.assertNotIn("APP_CURSOR_UNAVAILABLE", text)
         # The dialog shown from onResume holds focus before the Activity's
         # window exists, so the Activity first gains focus when the dialog
         # goes, and, its decor being invisible by then, when it is visible again;

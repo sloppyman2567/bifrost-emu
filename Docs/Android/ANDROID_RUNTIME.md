@@ -1555,20 +1555,24 @@ property store (3.0, 196608).
 On Android, `ViewRootImpl` resolves the pointer icon for mouse events
 (`ViewPostImeInputStage.maybeUpdatePointerIcon`, then `updatePointerIcon`: `mView.onResolvePointerIcon(event,
 pointerIndex)`, the default arrow when that returns null, reported only when the icon changes; read from
-`android-15.0.0_r1`). Host input here bypasses those stages, so after each `ACTION_HOVER_MOVE` that no popup window
-took, the launcher resolves the icon against the Activity's decor view itself (`FrameworkCursors.hover`, on a copy
-of the event with `SOURCE_MOUSE`, the source `ViewRootImpl` requires) and shows the nearest host system cursor (syscall 0x100E op 24,
+`android-15.0.0_r1`). Host pointer events reach apps as a touchscreen, so those stages never resolve one; after each
+hover (`ACTION_HOVER_ENTER` or `_MOVE`) `FrameworkWindows` asks the hovered window's own view tree, on the window's
+thread and at its coordinates (`FrameworkCursors.hover`, on a copy of the event with `SOURCE_MOUSE`, the source views
+resolve icons for); a hover no window takes asks the Activity's decor. The nearest host system cursor is shown (syscall 0x100E op 24,
 [plugin `set_cursor`](ANDROID_WINDOW_PLUGINS.md#pointer-shapes-2026-10-28)). `TYPE_NULL` hides the pointer; hand,
 text, wait, crosshair, cell, grab and scroll, no-drop and the resize arrows map to their SDL counterparts; the
-rest (context menu, help, alias, copy, zoom) and an unmapped type show the arrow.
+rest (context menu, help, alias, copy, zoom) and an unmapped type show the arrow. Each change logs `APP_CURSOR <shape>`.
+Until 2026-11-12 only hovers that no window took were resolved, and since the Activity's own window is one, an app's
+icons never showed.
 
 Limits: only hover updates the shape, because a touchscreen never hovers while the mouse can (a mouse drag keeps the
 shape from before the button went down); an app's own bitmap cursor (`TYPE_CUSTOM`) shows the arrow; the shape is not
 reset when the pointer leaves the window or another Activity opens. The first failure (a host without the callback, a
 refused shape, a framework error) turns the feature off and logs `APP_CURSOR_UNAVAILABLE` once. `ManagedServiceBatch`
 checks the mapping and the send-on-change behaviour through a real `View` and `PointerIcon`s
-(`MANAGED_CURSORS_OK`); the SDL3 backend is checked against a fake SDL3 that logs each cursor call. Not checked: a
-game that sets a pointer icon, or a live window.
+(`MANAGED_CURSORS_OK`); the SDL3 backend is checked against a fake SDL3 that logs each cursor call;
+`test_managed_dialog_and_popup_windows` hovers two dialogs' buttons through `ManagedLauncher.dispatch` (one window owned
+by an engine thread) and sees their hand and crosshair. Not checked: a game that sets a pointer icon.
 
 ### Gamepads (2026-11-06)
 
@@ -2440,11 +2444,10 @@ had focus (`dispatchKey` reported every key handled).
 The launcher compiles against the public SDK, so `Guest/Android/Managed/Stubs/` declares the two hidden classes it names
 (`InputChannel`, `InputEventSender`); they are a source path only (`javac -implicit:none`) and never in the dex.
 Limits: the Activity still gets an event directly when no window takes it (no window focused, or a gesture whose
-`ACTION_DOWN` hit no window), where `InputDispatcher` would drop it. Pointer icons are still resolved by
-`FrameworkCursors` only for hovers no window takes: the host's pointer events are touchscreen events, so `ViewRootImpl`'s
-own `updatePointerIcon` (mouse only) does not run, and an app's icon over its window is not shown (seen in the code, not
-in an app). `test_managed_dialog_and_popup_windows` taps dialog buttons through `ManagedLauncher.dispatch` (one on an
-engine thread, whose click runs there).
+`ACTION_DOWN` hit no window), where `InputDispatcher` would drop it. The host's pointer events are touchscreen
+events, so `ViewRootImpl`'s own `updatePointerIcon` (mouse only) does not run; `FrameworkWindows` resolves the icon
+after each hover instead (see [pointer icons](#pointer-icons-2026-10-28)). `test_managed_dialog_and_popup_windows` taps
+dialog buttons through `ManagedLauncher.dispatch` (one on an engine thread, whose click runs there).
 
 ### YUV conversion kernel (2026-10-31)
 
