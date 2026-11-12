@@ -52,6 +52,12 @@ On November 8: Vulkan apps get ASTC LDR textures on hosts that have BC7 but no A
 Unity stopped decompressing them itself), a swapchain acquire no longer re-uploads the frame, `/proc/self/pagemap` is read without
 rebuilding every mapping, and the crash line names the library. Each is checked as its changelog entry says; none is yet measured
 across a long game session.
+On November 10 and 11: an app's helper processes fork from a session Zygote, microG maps a compiled vdex, games link one shared
+read-only copy of Android, launch preparation reuses file hashes and compiles after the session, the package parse cache
+survives updates, static AudioTracks and SoundPool play, the JIT disk cache reads its records instead of mapping them, and
+Tier-1 and Tier-2 got the changes listed under [the JIT workstream](#jit-codegen-retain-guest-state-across-hot-regions).
+Measured on Battle Cats and Subway Surfers launches and kernels; the shared copy has not run from an installed Asgard and no
+game was timed for the JIT changes.
 
 **Games:** 19 recorded, 16 of them playable (12 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
 [What runs](../README.md#what-runs) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says
@@ -134,6 +140,7 @@ app exit leaves the library and the other apps usable.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested
   with the real emulator, not with media services attached; the retired broker leaves its 750 MB service root until the next
   sweep). Open: every service child (WebView service and renderers, microG) is a whole emulated runtime of 350 to 450 MiB
+  (forked from the session Zygote since 2026-11-11; their memory has not been re-measured since)
   that idle-stops after 60 s only without a service record or provider reference; in Battle Cats the WebView service stays
   alive for an untraced reason. Trace that service; remove the retired realm's service root when it ends.
 
@@ -304,24 +311,34 @@ host instructions per guest instruction (the JIT: 5 to 15 here); only the second
 not move beyond noise, and CoreMark's last-level misses are fixed startup and translation costs
 ([details](JIT.md#fp-compares-in-the-host-flags-and-where-last-level-misses-come-from-2026-11-07)).
 
+Also done on 2026-11-10 and 11-11 (instruction and cycle counts on CoreMark, the `bench_*` programs and the kernel set; no
+game measured): NZCV stored as the `lahf` image, PC stores behind the chain slot, `b.cond` loop pins kept in registers,
+`fcsel` without `pushfq`, `ldr s`/`ldr d` straight into the cached XMM, one 16-byte slot per vector register, and `ccmp`/`ccmn`
+flags left in the host. CoreMark runs 11.9% fewer host instructions; skinning and animation blending 35-42% fewer cycles.
+A fork child keeps its parent's JIT ([details](JIT.md)).
+
 Open, in priority order:
 
-1. **Per-instruction overhead in scalar FP loops** (an audio mixer kernel is still 9.9× native): one-instruction scalar FP
-   result writes, `v_hi` zeroing once per block instead of per op, and the register copies and preloads around each block.
-   Sampled hot blocks spend their time on `pxor`, `movsd`, `mov` and the NaN-check branch, not on the arithmetic (`vfmadd`
-   is 2%); one guest `fmadd` is about 8 host instructions. `insertps` for the result write was slower on cull (rejected),
-   and a lazy-flag `fcmp` feeding `fcsel` was slower on a clamp loop, so measure each change on a branchy and a predictable
-   kernel.
-2. **Deferred guest-register stores within a block**, so temporaries are not written to `cpu.regs` and read back.
+1. **Per-instruction overhead in scalar FP loops.** The cheap part is done (loads into the cached XMM, one-instruction
+   result writes). Sampled FP kernels still spend 2-6% of ops on arithmetic and most of the rest on XMM copies, `v_hi`
+   traffic, `pxor` zeroing and NaN checks. Dropping NaN checks exactly fits 3 of 277 checked ops; more would need relaxed
+   NaN semantics, which is the maintainer's decision. A plain `v_hi` zero store (cull and collide about 30% slower) and
+   `insertps` result writes were slower, so measure each change on a branchy and a predictable kernel, over several code
+   placements ([details](JIT.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
+2. **Guest-register traffic across blocks.** Guest register loads and stores are 20-27% of executed ops in the integer
+   kernels, mostly block-entry loads and live-out stores that only cross-block allocation removes; a pass that hoists
+   scratch work above a flag setter is measured but not merged (cycles within placement noise,
+   [details](JIT.md#guest-register-traffic-and-flag-windows-measured-not-merged-2026-11-10)).
 3. **Paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics.
 4. **Model guest state explicitly**, define recovery and helper contracts, then hand values between two regions and choose
    layouts by measured benefit (the five-stage plan in [the snapshot](archive/roadmap-2026-11-03.md#jit-codegen-retain-guest-state-across-hot-regions)).
-5. **Tier-2**: level with Tier-1 on CoreMark and about 1.5 times faster on a clean multi-block loop, now that its trial
-   measures correctly. It does not take single-block loops, which Tier-1 already keeps in registers. Loops with early-out
-   branches (a culling loop: nine blocks, a linear trace that survives 33% of the time) are declined, because promotion
-   judges the linear fall-through trace and the loop graph is only a diagnostic; the superblock limit is 8 blocks. Next:
-   measure real Android titles, then regions with internal branches (`BIFROST_TIER2_GRAPH` surveys them). It stays opt-in
-   until then.
+5. **Tier-2**: regions now follow calls and returns, every side exit chains, a kept region retires when its exit rate
+   outgrows its trial, and enabling it no longer slows Tier-1 code (2026-11-11). CoreMark runs 1.2% fewer host instructions
+   than Tier-1 (run time within placement noise) and a particle loop 7.7% fewer cycles. It does not take single-block loops,
+   which Tier-1 already keeps in registers. Loops whose iterations take different arms (culling), loops with an inner loop
+   (skinning) and dispatch loops (a bytecode VM) are declined, because promotion judges a linear trace; raising the 8-block
+   cap alone admits none of them. Next: regions with internal joins, then real Android titles. It stays opt-in until then
+   ([details](JIT.md#tier-2-exits-that-chain-exit-rate-feedback-and-profiler-costs-2026-11-11)).
 6. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the

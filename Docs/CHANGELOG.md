@@ -21,7 +21,10 @@ under their own headings: game-window visibility, fullscreen and a remembered si
 from the library, built-in per-app settings, 4 GiB packages, a realm idle timeout, the AAudio write fix, NEON `LD2` to `LD4` and
 `ST2` to `ST4` in the block, the project site, ASTC textures through BC7 on hosts without ASTC (with a lowest-priority,
 cached transcoder), a swapchain acquire that no longer re-uploads the frame, a faster `/proc/self/pagemap`, a crash line that
-names the library, and ASTC transcoding about four times faster in a real game.
+names the library, ASTC transcoding about four times faster in a real game, fewer host instructions per JIT block, Tier-2
+regions through calls and returns, fork children that keep the JIT, a session Zygote for an app's helper processes, microG
+in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and SoundPool, one
+shared read-only copy of Android for every game, and a JIT disk cache that no longer holds its files in every process.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app

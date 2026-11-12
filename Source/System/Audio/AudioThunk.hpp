@@ -34,9 +34,8 @@
 // (the Audio class) — AudioThunk is for guests that explicitly use ALSA/
 // PulseAudio/SDL2/OpenAL APIs.
 //
-// The thunk is opt-in: set BIFROST_THUNK_AUDIO=1 (or [thunk] audio = true
-// in the config file). Without it, resolve() returns 0 and dispatch() is
-// a no-op.
+// The thunk is on by default; BIFROST_NO_THUNK_AUDIO=1 disables it, and
+// then resolve() returns 0 and dispatch() is a no-op.
 #pragma once
 #include <cstdint>
 #include <functional>

@@ -14,7 +14,7 @@ In the environment, `BIFROST_WINDOW_STATS=1` turns the statistics on and `BIFROS
 (`1`, `2`, `3`, `minimal`, `normal`, `overlay`) picks the layout; a mode alone does not turn them on there.
 Android apps keep both choices per app (`window_stats` and `window_stats_mode`, see
 [per-app settings](Android/ANDROID_APK.md#per-app-settings)). The emulator name and version come from
-`bifrost/version.hpp`.
+`Include/Bifrost/Version.hpp`.
 
 The display includes the presentation backend, FPS, window size in physical
 pixels and total presented frames. On a scaled (HiDPI) display this is the

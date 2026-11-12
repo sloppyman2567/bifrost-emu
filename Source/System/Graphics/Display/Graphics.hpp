@@ -187,10 +187,10 @@ public:
     //   - Pointer arguments that are guest addresses (e.g. vertex
     //     arrays, shader source strings) are translated via the
     //     emulator's Memory — the thunk needs an Emulator& to do this.
-    //   - The thunk is opt-in: set BIFROST_THUNK_GRAPHICS=1 in the
-    //     environment to enable. Without it, the thunk returns
-    //     nullptr for every dlsym, so the guest falls back to its
-    //     own software rendering (or fails gracefully).
+    //   - The thunk is on by default; BIFROST_NO_THUNK_GRAPHICS=1
+    //     disables it. Disabled, the thunk returns nullptr for every
+    //     dlsym, so the guest falls back to its own software
+    //     rendering (or fails gracefully).
     //
     // See Source/System/Graphics/Thunks/GraphicThunk/ for the implementation and the
     // list of supported entry points.
@@ -199,12 +199,12 @@ public:
     // Returns the AudioThunk instance owned by this FrostGraphics.
     // The thunk intercepts guest dlsym calls for libasound/libpulse/
     // libSDL2 (audio)/libopenal and forwards them to the host.
-    // Opt-in via BIFROST_THUNK_AUDIO=1 or [thunk] audio = true.
+    // On by default; BIFROST_NO_THUNK_AUDIO=1 disables it.
     AudioThunk* audio_thunk();
     // ── EXPERIMENTAL: Display API thunking ───────────
     // Returns the DisplayThunk instance. Intercepts guest dlsym calls
     // for libvulkan/libwayland-client/libX11/libgbm.
-    // Opt-in via BIFROST_THUNK_DISPLAY=1 or [thunk] display = true.
+    // On by default; BIFROST_NO_THUNK_DISPLAY=1 disables it.
     DisplayThunk* display_thunk();
     // ── Input events ──────────────────────
     // Returns the FrostInput instance owned by this FrostGraphics.

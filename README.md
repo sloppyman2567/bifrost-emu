@@ -163,7 +163,16 @@ progress table and the known blockers; everything that changed is in the
   install, a realm with no app ends after 10 minutes, built-in per-app settings let Doki Doki Literature Club open with its
   window mode that avoids a resize corruption, and an AAudio write fix removed clicks in its music.
 - **JIT (in the tree):** native NEON `LD2` to `LD4` and `ST2` to `ST4`, FP compares kept in the host flags, and scalar FP
-  special cases moved out of the hot path.
+  special cases moved out of the hot path. On November 10 and 11: guest flags stored as the host leaves them, block edges
+  without PC stores, loop registers kept across iterations, one 16-byte slot per vector register and `ccmp` flags left in
+  the host (CoreMark 11.9% fewer host instructions, vector-heavy kernels 35-42% fewer cycles; no game measured), a fork
+  child that keeps its parent's JIT, and opt-in Tier-2 regions that follow calls and returns.
+- **Android launches (November 11, in the tree):** an app's helper processes fork from a session Zygote (WebView ready in
+  about 0.8 s instead of 3.4 s on Battle Cats) and microG maps a compiled vdex (under a second); games link one shared
+  read-only copy of Android (Subway Surfers' own folder 677 MB instead of 1.6 GB); launch preparation reuses file hashes
+  and moves dexopt after the session (0.3-0.65 s instead of about 5.5 s); the package parse cache survives an update;
+  static AudioTracks and SoundPool play; and the experimental JIT disk cache no longer keeps its files in every process's
+  memory. The shared copy has not yet run from an installed Asgard.
 - **Open:** measured frame times, zero-copy frames, WebView interaction, window behaviour on real compositors,
   Zenless Zone Zero's very low-resolution models, and sustained play. A passing build or a launch is not gameplay.
 

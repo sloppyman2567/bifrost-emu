@@ -34,7 +34,7 @@
 //     structs with pointers to other stack structs may break.
 //   - GBM/DMA-BUF require DRM fd translation — currently stubbed.
 //
-// Opt-in: BIFROST_THUNK_DISPLAY=1 or [thunk] display = true in config.
+// On by default; BIFROST_NO_THUNK_DISPLAY=1 disables it.
 #pragma once
 #include <cstdint>
 #include <functional>

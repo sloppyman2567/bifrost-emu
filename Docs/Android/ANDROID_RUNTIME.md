@@ -582,18 +582,6 @@ Broker restart creates a fresh registry; live clients must reopen their Binder
 connections. Staging pages are retained until the corresponding Binder open
 closes; the RPC size limit is not a lifetime memory quota.
 
-Game validation: a normal-chaining, host-GPU SpongeBob run completed its
-600-second bound without the previous ART abort/monitor-ownership exception.
-A subsequent broker-connected run reached Activity resume, SurfaceView creation
-and WebView loading, then hit an ART `art_method.cc` virtual-method-index
-assertion during GC. That managed-app failure remains under investigation;
-passing native IPC tests does not establish working multi-process WebView or
-playable SpongeBob.
-After repairing the separately reproduced process-leader PID/TID mismatch,
-a fresh broker-connected run reached its 120-second timeout without that
-assertion. This shorter run does not establish the mismatch as the assertion's
-cause or prove long-term stability.
-
 ## Android native runtime bootstrap
 
 Checkpoint: October 6, 2026. Bifrost can enter a real guest ARM64 Android
