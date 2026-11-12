@@ -88,6 +88,32 @@ cleanup:
         if (result) return result;
 #undef CHECK
     }
+    // An odd size: flexible YUV rounds its chroma planes up (17 x 10 here, V then U, every byte inside the sealed
+    // allocation, which a write past would fault on); YV12 is defined for even sizes only.
+    {
+        AHardwareBuffer_Desc odd = {.width = 33, .height = 19, .layers = 1, .format = 35, .usage = usage};
+        AHardwareBuffer *buffer = NULL;
+        AHardwareBuffer_Planes planes = {0};
+        if (AHardwareBuffer_isSupported(&odd) != 1 || AHardwareBuffer_allocate(&odd, &buffer) != 0 || !buffer) return __LINE__;
+        int locked = AHardwareBuffer_lockPlanes(buffer, usage, -1, NULL, &planes);
+        int good = locked == 0 && planes.planeCount == 3 && planes.planes[0].rowStride >= 33
+                && planes.planes[1].rowStride >= 17 && planes.planes[1].rowStride == planes.planes[2].rowStride
+                && (unsigned char *)planes.planes[2].data == (unsigned char *)planes.planes[0].data
+                        + planes.planes[0].rowStride * 19
+                && (unsigned char *)planes.planes[1].data == (unsigned char *)planes.planes[2].data
+                        + planes.planes[2].rowStride * 10;
+        if (good) {
+            memset(planes.planes[0].data, 0x10, planes.planes[0].rowStride * 19);
+            memset(planes.planes[2].data, 0x72, planes.planes[2].rowStride * 10);
+            memset(planes.planes[1].data, 0x61, planes.planes[1].rowStride * 10);
+        }
+        if (locked == 0 && AHardwareBuffer_unlock(buffer, NULL) != 0) good = 0;
+        AHardwareBuffer_release(buffer);
+        if (!good) return __LINE__;
+        AHardwareBuffer_Desc odd_yv12 = odd;
+        odd_yv12.format = 0x32315659;
+        if (AHardwareBuffer_isSupported(&odd_yv12) != 0) return __LINE__;
+    }
     AHardwareBuffer_Desc rejected = {.width = 32, .height = 32, .layers = 1, .format = 1,
         .usage = AHARDWAREBUFFER_USAGE_PROTECTED_CONTENT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE};
     if (AHardwareBuffer_isSupported(&rejected) != 0) return __LINE__;

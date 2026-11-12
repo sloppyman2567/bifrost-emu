@@ -422,16 +422,17 @@ void AndroidBufferImages::convert(Buffer& b, std::vector<uint32_t>& scratch) {
     const int w = b.width, h = b.height, stride = b.stride;
     scratch.resize(size_t(w) * h);
     uint8_t* out = reinterpret_cast<uint8_t*>(scratch.data());
-    if (b.format == 35 || b.format == 0x32315659) {
+    if (bf_gralloc_is_yuv420(b.format)) {
         const int32_t space = dataspace(b.mapping);
         const int standard = (space >> 16) & 63;
         const android::YuvMatrix matrix = standard == 1 ? android::YuvMatrix::Bt709
                                           : (standard == 6 || standard == 7) ? android::YuvMatrix::Bt2020
                                                                              : android::YuvMatrix::Bt601;
         const bool full = ((space >> 27) & 7) == 1;
-        const int64_t cstride = ((stride / 2) + 15) & ~15;
+        const bf_gralloc_yuv420 planes = bf_gralloc_yuv420_planes(stride, w, h);
+        const int64_t cstride = planes.chroma_stride;
         const size_t available = b.size > BF_GRALLOC_OFFSET ? b.size - BF_GRALLOC_OFFSET : 0;
-        const size_t v_offset = size_t(stride) * h, u_offset = v_offset + size_t(cstride) * (h / 2);
+        const size_t v_offset = size_t(planes.v_offset), u_offset = size_t(planes.u_offset);
         android::Yuv420Source source;
         source.y = {pixels, std::min(available, v_offset), stride, 1};
         source.v = {pixels + std::min(available, v_offset), available - std::min(available, v_offset), cstride, 1};

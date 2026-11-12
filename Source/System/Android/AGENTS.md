@@ -178,7 +178,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
   libui caches its Binder, which must survive other apps exiting. Preserve the
   sealed-size memfd ABI, independent imports, bounded metadata snapshots and fd
-  ownership. Run `ActivityProbe$GrallocProbe` in both engines and with distinct
+  ownership. YUV plane offsets come only from `bf_gralloc_yuv420_planes`
+  (`AndroidGralloc.h`; chroma rounded up for odd sizes); never recompute them.
+  Run `ActivityProbe$GrallocProbe` in both engines and with distinct
   UIDs sharing a broker; this does not establish EGL image import or decoding.
 - Media decoding (`Media/`) uses the real Codec2 stack. The Binder broker
   owns the codec services, never an app. Treat Goldfish `user_priv` as

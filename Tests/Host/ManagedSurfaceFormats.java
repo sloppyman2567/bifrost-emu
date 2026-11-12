@@ -36,7 +36,9 @@ public final class ManagedSurfaceFormats extends Activity {
             @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {}
             @Override public void surfaceDestroyed(SurfaceHolder holder) {}
         });
-        setContentView(view);
+        // A fixed even size, whatever the host window is: Android's ImageWriter maps YUV_420_888 planes only for even
+        // sizes (android_media_Utils.cpp getLockedImageInfo), so a window-sized view failed on an odd-width window.
+        setContentView(view, new android.view.ViewGroup.LayoutParams(640, 360));
     }
 
     private void produce(Surface surface) {

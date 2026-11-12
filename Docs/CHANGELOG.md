@@ -26,7 +26,7 @@ regions through calls and returns, fork children that keep the JIT, a session Zy
 in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and SoundPool, one
 shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every process,
 NativeActivity games on the managed path that get their window and input, input delivered through each window's input
-channel, and a controller cursor that hides the desktop pointer.
+channel, a controller cursor that hides the desktop pointer, and odd-sized YUV buffers.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
@@ -50,6 +50,15 @@ channel, and a controller cursor that hides the desktop pointer.
   a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
+
+### Fixed (odd-sized YUV buffers)
+
+- Bifrost's buffer allocator now gives out flexible YUV 4:2:0 buffers with an odd width or height (2026-11-12), rounding
+  the chroma planes up as Android's reference allocator (minigbm) does; it refused them before. YV12 stays even-only, as
+  Android defines it. The allocator, the guest mapper and EGL import read one shared plane layout. The SurfaceView format
+  test failed on a window 1845 pixels wide: its YUV writer was sized to the window, and Android's own `ImageWriter` only
+  maps even-sized YUV planes, so the fixture now uses a fixed even size. Checked with the gralloc probe (a 33x19 buffer,
+  both engines) and the SurfaceView tests.
 
 ### Changed (input reaches windows through their input channels)
 

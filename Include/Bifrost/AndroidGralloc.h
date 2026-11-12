@@ -49,6 +49,25 @@ static inline int bf_gralloc_bpp(int format) {
     default: return 0;
     }
 }
+// Planar YUV 4:2:0, flexible YCbCr_420_888 (35) and YV12: Y at the luma stride, then V, then U, each chroma plane
+// ceil(width/2) x ceil(height/2) at ALIGN(stride/2, 16) (system/graphics.h's YV12 plane layout). An odd size rounds the
+// chroma plane up, as minigbm's YVU420_ANDROID does (drv_helpers.c: DIV_ROUND_UP of the plane height and width).
+// The allocator, the guest mapper and EGL import all read the layout from here.
+struct bf_gralloc_yuv420 {
+    int chroma_stride, chroma_width, chroma_height;
+    uint64_t v_offset, u_offset, size;  // from the start of the pixels
+};
+static inline int bf_gralloc_is_yuv420(int format) { return format == 35 || format == 0x32315659; }
+static inline struct bf_gralloc_yuv420 bf_gralloc_yuv420_planes(int stride, int width, int height) {
+    struct bf_gralloc_yuv420 planes;
+    planes.chroma_stride = ((stride / 2) + 15) & ~15;
+    planes.chroma_width = (width + 1) / 2;
+    planes.chroma_height = (height + 1) / 2;
+    planes.v_offset = (uint64_t)stride * height;
+    planes.u_offset = planes.v_offset + (uint64_t)planes.chroma_stride * planes.chroma_height;
+    planes.size = planes.u_offset + (uint64_t)planes.chroma_stride * planes.chroma_height;
+    return planes;
+}
 // A CPU-backed, one-layer allocation. GPU import is handled separately by EGL.
 // Reject protected, tiled, cube/mipmap, front-buffer and vendor-only requests.
 static inline int bf_gralloc_layout(int width, int height, int layers, int format,
@@ -63,11 +82,11 @@ static inline int bf_gralloc_layout(int width, int height, int layers, int forma
     int actual = format == 34 ? 1 : format; // IMPLEMENTATION_DEFINED -> linear RGBA
     int bpp = bf_gralloc_bpp(actual), stride = width;
     uint64_t size;
-    if (actual == 35 || actual == 0x32315659) { // flexible YUV420 and YV12: planar Y,V,U
-        if ((width | height) & 1) return 0;
+    if (bf_gralloc_is_yuv420(actual)) {
+        // system/graphics.h defines YV12 for even sizes only; the flexible format has no such rule.
+        if (actual == 0x32315659 && ((width | height) & 1)) return 0;
         stride = (width + 15) & ~15;
-        int chroma_stride = ((stride / 2) + 15) & ~15;
-        size = (uint64_t)stride * height + (uint64_t)chroma_stride * height;
+        size = bf_gralloc_yuv420_planes(stride, width, height).size;
     } else {
         if (!bpp || (actual == 33 && height != 1)) return 0;
         size = (uint64_t)stride * height * bpp;

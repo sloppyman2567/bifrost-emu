@@ -1347,7 +1347,13 @@ shared transport is defined in `Include/Bifrost/AndroidGralloc.h`.
 
 Supported one-layer formats are RGBA/RGBX/BGRA 8888, RGB 888, RGB 565, RGBA FP16,
 RGBA 1010102, R8, BLOB (height 1), flexible YUV420 and YV12 (planar Y,V,U with
-aligned chroma strides). IMPLEMENTATION_DEFINED selects RGBA 8888. Dimensions,
+aligned chroma strides; `bf_gralloc_yuv420_planes` is the one layout the allocator,
+mapper and EGL import share). Flexible YUV420 takes odd sizes, its chroma planes
+rounded up to ceil(w/2) x ceil(h/2) as minigbm's YVU420_ANDROID does; YV12 stays
+even-only, as `system/graphics.h` defines it. Android's own `ImageWriter`/`ImageReader`
+still map YUV_420_888 planes only for even sizes (`getLockedImageInfo`), so an odd
+size matters to codecs, EGL and `AHardwareBuffer` users, not to those. The gralloc
+probe checks a 33x19 buffer. IMPLEMENTATION_DEFINED selects RGBA 8888. Dimensions,
 per-buffer bytes, batch count and reserved bytes are bounded. Protected buffers,
 front-buffer rendering, cube/mipmap layouts and vendor options/usages are
 rejected. This software allocation support does not imply native host-GPU import.

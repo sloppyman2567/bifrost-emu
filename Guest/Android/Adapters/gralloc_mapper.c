@@ -193,15 +193,16 @@ static void plane(struct encoding *e, int count, const int64_t *types, const int
 }
 static void planes(struct encoding *e, const int32_t *info) {
     int format = info[BF_FORMAT], w = info[BF_WIDTH], h = info[BF_HEIGHT], stride = info[BF_STRIDE];
-    if (format == 35 || format == 0x32315659) {
-        int cstride = ((stride / 2) + 15) & ~15;
+    if (bf_gralloc_is_yuv420(format)) {
+        struct bf_gralloc_yuv420 yuv = bf_gralloc_yuv420_planes(stride, w, h);
         int64_t y = 1, cr = 4, cb = 2;
         int zero = 0, eight = 8;
         i64(e, 3);
         plane(e, 1, &y, &zero, &eight, 0, 8, stride, w, h, 1);
-        plane(e, 1, &cr, &zero, &eight, (int64_t)stride*h, 8, cstride, w/2, h/2, 2);
-        plane(e, 1, &cb, &zero, &eight, (int64_t)stride*h + (int64_t)cstride*h/2,
-                8, cstride, w/2, h/2, 2);
+        plane(e, 1, &cr, &zero, &eight, (int64_t)yuv.v_offset, 8, yuv.chroma_stride, yuv.chroma_width,
+                yuv.chroma_height, 2);
+        plane(e, 1, &cb, &zero, &eight, (int64_t)yuv.u_offset, 8, yuv.chroma_stride, yuv.chroma_width,
+                yuv.chroma_height, 2);
     } else {
         int bpp = bf_gralloc_bpp(format), count = format == 33 || format == 56 ? 1 : 3;
         int64_t types[] = {1024, 2048, 4096, 1LL<<30};

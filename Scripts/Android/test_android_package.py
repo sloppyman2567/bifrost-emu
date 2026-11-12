@@ -4955,6 +4955,9 @@ class PackageTests(unittest.TestCase):
         # RGBA_8888 (0x1), then both again.
         formats = re.findall(r"APP_SURFACE_FRAME_FORMAT 0x([0-9a-f]+) \d+x\d+", text)
         self.assertEqual(formats[:4], ["23", "1", "23", "1"], text[-30000:])
+        # The view has a fixed even size, so the YUV writer works on any host window (its planes need an even size).
+        self.assertIn("APP_SURFACE android.view.SurfaceView 640x360", text)
+        self.assertIn("APP_SURFACE_FRAME_FORMAT 0x23 640x360", text)
 
     def launch_relaunch_fixture(self, name):
         state = self.work / (name + "-state")
