@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build the project site (GitHub Pages: home, install, games and screenshots pages) from files in the repository.
+"""Build the project site (GitHub Pages: home, install, games, screenshots and JIT pages) from files in the repository.
 
 The pages take the version from Include/Bifrost/Version.hpp and, from README.md, the "What
-runs" summary and table and the screenshots; the plain-language copy of each page is its own file here
-(home.html, install.html, games.html, screenshots.html) and layout.html holds the sidebar.
+runs" summary and table, the screenshots and the Performance tables; the plain-language copy of each page is its own
+file here (home.html, install.html, games.html, screenshots.html, jit.html) and layout.html holds the sidebar.
 Each table row's status is checked against Scripts/Android/compatibility.json, and the build fails
 rather than publish a page that disagrees with it. Writes one index.html per page, sitemap.xml
 (submitted in Search Console: a project page's robots.txt is not read, only the domain root's) and
@@ -127,6 +127,32 @@ def games(readme, compat):
     return summary, inline(text), "\n".join(rows), playable
 
 
+def performance(readme):
+    """The README's CoreMark and bench_* tables for the JIT page; the build fails rather than show figures it misread."""
+    body = section(readme, "Performance")
+    when = re.search(r"CoreMark \(([A-Z][a-z]+ \d{1,2}, \d{4})\), measured on (an? [^,]+?) with", body)
+    def table(header):
+        match = re.search(rf"^{re.escape(header)}\n\|[-|]+\|\n((?:\|.*\|\n)+)", body, re.M)
+        return [[cell.strip() for cell in line.strip("|").split(" | ")] for line in match.group(1).splitlines()] if match else []
+    coremark = table("| Build | Median iterations/s |")
+    bench = table("| Benchmark | Interpreter | JIT | Speedup |")
+    if not when or len(coremark) < 2 or not bench or not all(re.fullmatch(r"[\d,]+", value) for _, value in coremark):
+        raise SystemExit("README 'Performance' CoreMark or bench_* table not understood")
+    values = [int(value.replace(",", "")) for _, value in coremark]
+    qemu = [value for (build, _), value in zip(coremark, values) if "QEMU" in build]
+    if len(qemu) != 1:
+        raise SystemExit("README 'Performance' CoreMark table needs exactly one QEMU row")
+    top = max(values)
+    # One series: Bifrost builds in the accent, the QEMU reference in neutral gray; every value is printed.
+    rows = "\n".join(
+        f'        <tr class="{"ref" if "QEMU" in build else ""}"><th scope="row">{inline(build)}</th><td><span class="track">'
+        f'<span class="bar" style="width: {value / top * 100:.1f}%"></span></span><span class="value">{shown}</span></td></tr>'
+        for (build, shown), value in zip(coremark, values))
+    bench_rows = "\n".join("      <tr>" + "".join(f"<td>{inline(cell)}</td>" for cell in row) + "</tr>" for row in bench)
+    return {"host": html.escape(when.group(2)), "measured": html.escape(when.group(1)),
+            "vs_qemu": f"{values[0] / qemu[0]:.1f}", "coremark_rows": rows, "bench_rows": bench_rows}
+
+
 def screenshots(readme, output, url):
     """The README's screenshots as WebP at most 960 px wide (twice their width on the page)."""
     try:
@@ -197,7 +223,7 @@ def main():
     panel = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
              'stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/>'
              '<path d="M9.5 4v16"/></svg>')
-    pages = (("", "Home"), ("install/", "Install"), ("games/", "Games"), ("screenshots/", "Screenshots"))
+    pages = (("", "Home"), ("install/", "Install"), ("games/", "Games"), ("screenshots/", "Screenshots"), ("jit/", "JIT"))
 
     def render(name, title, path, description, structured, **values):
         nav = "".join(f'<a href="{url}{target}"{" aria-current=\"page\"" if target == path else ""}>{label}</a>'
@@ -222,6 +248,10 @@ def main():
                          "x86_64 Linux, captured from real sessions.")
     render("screenshots.html", "bifrost-emu Screenshots: Android Games on Linux", "screenshots/", shots_description,
            page_ld("CollectionPage", "bifrost-emu screenshots", "screenshots/", shots_description), shots=shots)
+    jit_description = ("How FrostJIT, the bifrost-emu compiler, turns ARM64 Android and Linux code into native x86_64 code, "
+                       "how fast it runs against QEMU and how it stays correct.")
+    render("jit.html", "FrostJIT: How bifrost-emu Runs ARM64 Code on x86_64", "jit/", jit_description,
+           page_ld("TechArticle", "FrostJIT, the bifrost-emu JIT compiler", "jit/", jit_description), **performance(readme))
     # As many playable names as fit the ~160 characters a search result shows.
     lead = (f"Android games that run on Linux with bifrost-emu: {summary.group(3)} of {summary.group(1)} playable, "
             f"including ")

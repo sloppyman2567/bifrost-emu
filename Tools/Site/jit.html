@@ -1,0 +1,87 @@
+<div class="page-head">
+  <h1>FrostJIT: how bifrost-emu runs ARM64 code on an x86_64 PC</h1>
+  <p class="lead">A phone game is machine code for ARM64 processors, which a PC's x86_64 processor cannot run. FrostJIT,
+  bifrost-emu's just-in-time compiler, translates that code into native x86_64 code while the game runs, keeps the
+  translation and reuses it. Your PC then runs mostly its own code, instead of interpreting the game one ARM instruction at a
+  time.</p>
+</div>
+
+<section id="pipeline" aria-labelledby="pipeline-title">
+  <h2 id="pipeline-title">From ARM64 to x86_64</h2>
+  <p class="lead">The first time a piece of code runs, it goes through these steps once. After that, the translated code
+  runs directly.</p>
+  <ol class="flow">
+    <li><strong>ARM64 code</strong><span>The game's own machine code, read from its files.</span></li>
+    <li><strong>Decode</strong><span>Each instruction is read by the decoder the interpreter also uses.</span></li>
+    <li><strong>IR and SSA</strong><span>A typed intermediate form where values are tracked and simplified.</span></li>
+    <li><strong>x86_64 code</strong><span>Registers are assigned and native PC instructions written.</span></li>
+    <li><strong>Chained blocks</strong><span>Translated blocks jump straight to each other.</span></li>
+  </ol>
+  <p class="small">An interpreter runs anything the JIT does not translate, and it is the reference the JIT is checked
+  against. The <a href="$repo/blob/main/Docs/JIT.md#translation-path">JIT guide</a> maps each step to its source.</p>
+</section>
+
+<section id="fast" aria-labelledby="fast-title">
+  <h2 id="fast-title">What makes it fast</h2>
+  <div class="features">
+    <div><h3>Translated once, run many times</h3><p>Code is compiled in blocks of up to 32 instructions (a loop body up
+    to 64) the first time it runs, and kept in a code cache.</p></div>
+    <div><h3>Blocks jump to each other</h3><p>A translated block jumps straight into the next one. Returns and other
+    computed jumps go through a per-thread lookup table, not back through the emulator.</p></div>
+    <div><h3>Values stay in registers</h3><p>Loop counters and hot values stay in the PC's registers across loop
+    iterations, and ARM condition flags stay in the PC's own flags wherever the next instruction can use them.</p></div>
+    <div><h3>Native vector and float math</h3><p>ARM NEON and floating-point instructions become SSE and AVX
+    instructions. The JIT uses AVX2, FMA3, BMI2 and the other extensions your CPU has, with fallbacks.</p></div>
+    <div><h3>One cache for every thread</h3><p>A game's threads share one JIT. A full code cache (512 MiB by default) is
+    replaced as a whole and the old code freed once no thread can still be running it.</p></div>
+    <div><h3>Warm helper processes</h3><p>Android starts an app's helper processes by forking a prepared process. Each
+    child keeps the parent's translations, so it starts out running native code.</p></div>
+  </div>
+  <p class="small" style="margin-top: 24px">Experimental and off by default: Tier-2 regions, which fuse a hot path of
+  several blocks and keep it only if a timed trial shows it faster, and a disk cache that reuses translations from an
+  earlier launch.</p>
+</section>
+
+<section id="performance" aria-labelledby="performance-title">
+  <h2 id="performance-title">How fast</h2>
+  <p class="lead">CoreMark, an integer and control-flow benchmark, measured on $host ($measured): the current build runs
+  <strong>$vs_qemu times</strong> as many iterations per second as QEMU's user-mode emulator.</p>
+  <figure class="chart">
+    <figcaption id="coremark-title">CoreMark iterations per second (higher is better)</figcaption>
+    <table class="bars" aria-labelledby="coremark-title">
+      <thead><tr><th>Build</th><th>Iterations per second</th></tr></thead>
+      <tbody>
+$coremark_rows
+      </tbody>
+    </table>
+  </figure>
+  <h3 class="table-title">The same programs with and without the JIT</h3>
+  <table class="table bench">
+    <thead><tr><th>Benchmark</th><th>Interpreter</th><th>JIT</th><th>Speedup</th></tr></thead>
+    <tbody>
+$bench_rows
+    </tbody>
+  </table>
+  <p class="small">From the README's performance section, where the method and its limits are written down. Neither
+  benchmark predicts a game's frame rate, and differences of a few percent are within the noise of these runs. Run them
+  yourself with <code>Scripts/Bench/run_benchmarks.py</code>.</p>
+</section>
+
+<section id="correct" aria-labelledby="correct-title">
+  <h2 id="correct-title">Correct first, then fast</h2>
+  <div class="features">
+    <div><h3>Checked against a reference</h3><p>A verification mode runs each translated block next to the interpreter
+    and compares the results, and many of the tests' expected results were checked under QEMU.</p></div>
+    <div><h3>Exact faults</h3><p>When guest code touches memory it must not, the game's own crash handler sees exactly
+    the state an ARM CPU would show at that instruction. Android's runtime relies on it.</p></div>
+    <div><h3>ARM floating-point rules</h3><p>NaN results, signed zeros and fused multiply-adds follow ARM's rules, not
+    x86's, so math gives the same answers as on a phone.</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="more-title">
+  <h2 id="more-title">Read more</h2>
+  <p class="lead">The <a href="$repo/blob/main/Docs/JIT.md">JIT guide</a> describes every mechanism for contributors,
+  and <a href="$repo/blob/main/Docs/archive/JIT-history.md">its history</a> records each change with its measurements.
+  The JIT needs an x86_64 CPU with SSE4.1 and FMA3; see the <a href="${url}install/">install page</a>.</p>
+</section>

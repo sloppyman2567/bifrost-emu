@@ -49,6 +49,14 @@ shared read-only copy of Android for every game, and a JIT disk cache that no lo
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (a JIT page on the project site)
+
+- The site has a JIT page (2026-11-11): how FrostJIT turns ARM64 code into x86_64 code, what makes it fast, how it is
+  checked, and the CoreMark and `bench_*` figures, read from the README's Performance section when the site is built so
+  they cannot drift (the build fails if it cannot read them). The home page links to it.
+- `Docs/JIT.md` describes the JIT as it works now, organised by mechanism; the dated write-ups it opened with moved to
+  `Docs/archive/JIT-history.md`.
+
 ### Fixed (memory with the JIT disk cache on)
 
 - With the experimental JIT disk cache on, every process of a game kept hundreds of MB of the cache files in memory
