@@ -6,6 +6,9 @@
 // surface is created when that becomes true, reported again when its size or
 // format changes, and destroyed when it becomes false or its window goes.
 // Callbacks run in SurfaceView's order: surfaceCreated, then surfaceChanged.
+// A window whose ViewRootImpl took its surface (Window.takeSurface: NativeActivity) gets one the same way, sized to the
+// window, with ViewRootImpl's callbacks: surfaceCreated, surfaceChanged with the window's format, then
+// surfaceRedrawNeeded (updateTaken).
 //
 // Each window's surfaces are updated and destroyed on the thread that owns
 // the window (ViewRootImpl.mThread), where Android delivers SurfaceHolder
@@ -44,7 +47,8 @@ final class FrameworkSurfaces {
     }
 
     private static final class Entry {
-        final SurfaceView view;
+        final SurfaceView view;  // null for a window's taken surface
+        final SurfaceHolder holder;  // the view's holder, or ViewRootImpl's TakenSurfaceHolder
         final Object owner;  // the framework window holding the view
         final Handler thread;  // the window's ViewRootImpl handler, kept past detach
         final long window;
@@ -58,10 +62,11 @@ final class FrameworkSurfaces {
         boolean gpu;  // producer's buffers are not CPU-lockable: nothing can be shown
         int frameFormat;  // the HAL format of the last frame shown, to log a change once
         boolean closed;
-        Entry(SurfaceView view, Object owner, long window, ImageReader reader) {
-            this.view = view; this.owner = owner; this.window = window; this.reader = reader;
-            this.thread = view.getHandler();
+        Entry(SurfaceView view, SurfaceHolder holder, Handler thread, Object owner, long window, ImageReader reader) {
+            this.view = view; this.holder = holder; this.thread = thread; this.owner = owner; this.window = window;
+            this.reader = reader;
         }
+        Object key() { return view != null ? view : holder; }
     }
 
     private static final Field CALLBACKS = field("mCallbacks");
@@ -73,7 +78,7 @@ final class FrameworkSurfaces {
     private static final Field DRAW_LISTENER = field("mDrawListener");
 
     private final Host host;
-    private final Map<SurfaceView, Entry> entries = new IdentityHashMap<>();
+    private final Map<Object, Entry> entries = new IdentityHashMap<>();  // keyed by SurfaceView or taken holder
     private boolean stopped;  // ViewRootImpl.setWindowStopped: no surface is created again
     private static native int present(long window, int x, int y, int width, int height, int[] argb);
     // Locks an acquired Image's HardwareBuffer for CPU reads and describes its planes in `planes` (surface_buffers.c):
@@ -199,7 +204,7 @@ final class FrameworkSurfaces {
         synchronized (this) {
             if (stopped) visible.clear();
             for (Entry entry : entries.values())
-                if (entry.owner == owner && !visible.contains(entry.view)) gone.add(entry);
+                if (entry.owner == owner && entry.view != null && !visible.contains(entry.view)) gone.add(entry);
         }
         for (Entry entry : gone) destroy(entry, true);
         for (SurfaceView view : visible) {
@@ -244,7 +249,7 @@ final class FrameworkSurfaces {
                 } catch (Exception error) {
                     reader.close(); target.release(); throw error;
                 }
-                entry = new Entry(view, owner, window, reader);
+                entry = new Entry(view, view.getHolder(), view.getHandler(), owner, window, reader);
                 synchronized (this) {
                     if (stopped) {  // stopped while this one was prepared
                         reader.close(); host.release(window); target.release();
@@ -278,6 +283,110 @@ final class FrameworkSurfaces {
                     + (clip[0] == 0 && clip[1] == 0 && clip[2] == width && clip[3] == height
                             ? "" : " clip=" + clip[0] + "," + clip[1] + "," + clip[2] + "," + clip[3]));
         }
+    }
+
+    // A window's taken surface (ViewRootImpl.mSurfaceHolder), on the thread that owns the window: while it is shown, a
+    // host surface sized to the window at its position, delivered as ViewRootImpl.performTraversals delivers it
+    // (holder.mSurface, setSurfaceFrameSize, surfaceCreated, then surfaceChanged with the window's format), followed
+    // by surfaceRedrawNeeded as performDraw asks for the first frame and after every change. Destroyed when the window
+    // stops showing. Returns whether the window has a surface now.
+    boolean updateTaken(Object owner, SurfaceHolder holder, Handler thread, int x, int y, int width, int height,
+            int format, boolean shown) throws Exception {
+        Entry entry;
+        synchronized (this) {
+            entry = entries.get(holder);
+            if (stopped) shown = false;
+        }
+        if (!shown || width <= 0 || height <= 0) {
+            if (entry != null) destroy(entry, true);
+            return false;
+        }
+        boolean created = entry == null;
+        boolean changed;
+        synchronized (this) {
+            changed = created || entry.width != width || entry.height != height || entry.format != format;
+            if (!changed && entry.x == x && entry.y == y) return true;
+        }
+        if (created) {
+            ImageReader reader = newReader(width, height);
+            Surface target = emptySurface();
+            long window;
+            try {
+                Surface.class.getMethod("transferFrom", Surface.class).invoke(target, reader.getSurface());
+                window = host.prepare(target, !PixelFormat.formatHasAlpha(format));
+                if (window <= 0) throw new IllegalStateException("taken surface preparation: " + window);
+            } catch (Exception error) {
+                reader.close(); target.release(); throw error;
+            }
+            entry = new Entry(null, holder, thread, owner, window, reader);
+            synchronized (this) {
+                if (stopped) {
+                    reader.close(); host.release(window); target.release();
+                    return false;
+                }
+                entries.put(holder, entry);
+            }
+            final Entry consumer = entry;
+            reader.setOnImageAvailableListener(available -> consume(consumer), frames());
+            setTakenSurface(holder, target);
+        }
+        synchronized (this) {
+            entry.width = width; entry.height = height; entry.format = format;
+            entry.x = x; entry.y = y;
+            entry.clipLeft = 0; entry.clipTop = 0; entry.clipRight = width; entry.clipBottom = height;
+            int positioned = entry.cpu ? placeVisible(entry) : geometry(entry.window, x, y, width, height);
+            if (positioned != 0) throw new IllegalStateException("taken surface geometry: " + positioned);
+        }
+        if (!changed) return true;
+        TAKEN_FRAME_SIZE.invoke(holder, width, height);
+        SurfaceHolder.Callback[] callbacks = takenCallbacks(holder);
+        if (callbacks != null) {
+            if (created) for (SurfaceHolder.Callback callback : callbacks) callback.surfaceCreated(holder);
+            for (SurfaceHolder.Callback callback : callbacks) callback.surfaceChanged(holder, format, width, height);
+            for (SurfaceHolder.Callback callback : callbacks)
+                if (callback instanceof SurfaceHolder.Callback2)
+                    ((SurfaceHolder.Callback2) callback).surfaceRedrawNeeded(holder);
+        }
+        System.out.println("APP_SURFACE_TAKEN " + width + "x" + height + " at " + x + "," + y + " format=" + format);
+        return true;
+    }
+
+    // BaseSurfaceHolder (hidden): ViewRootImpl sets mSurface under mSurfaceLock and reads the callbacks after
+    // ungetCallbacks, so a callback added since is seen.
+    private static final Method TAKEN_FRAME_SIZE, TAKEN_UNGET, TAKEN_CALLBACKS;
+    private static final Field TAKEN_SURFACE, TAKEN_LOCK;
+    static {
+        try {
+            Class<?> type = Class.forName("com.android.internal.view.BaseSurfaceHolder");
+            TAKEN_FRAME_SIZE = type.getMethod("setSurfaceFrameSize", int.class, int.class);
+            TAKEN_UNGET = type.getMethod("ungetCallbacks");
+            TAKEN_CALLBACKS = type.getMethod("getCallbacks");
+            TAKEN_SURFACE = type.getField("mSurface");
+            TAKEN_LOCK = type.getField("mSurfaceLock");
+        } catch (ReflectiveOperationException error) {
+            throw new ExceptionInInitializerError(error);
+        }
+    }
+
+    // new Surface(): the empty Surface ViewRootImpl uses (its constructor is hidden).
+    private static Surface emptySurface() throws Exception {
+        return Surface.class.getConstructor().newInstance();
+    }
+
+    private static SurfaceHolder.Callback[] takenCallbacks(SurfaceHolder holder) throws Exception {
+        TAKEN_UNGET.invoke(holder);
+        return (SurfaceHolder.Callback[]) TAKEN_CALLBACKS.invoke(holder);
+    }
+
+    private static void setTakenSurface(SurfaceHolder holder, Surface surface) throws Exception {
+        java.util.concurrent.locks.Lock lock = (java.util.concurrent.locks.Lock) TAKEN_LOCK.get(holder);
+        lock.lock();
+        try { TAKEN_SURFACE.set(holder, surface); } finally { lock.unlock(); }
+    }
+
+    synchronized boolean hasTaken(Object owner) {
+        for (Entry entry : entries.values()) if (entry.owner == owner && entry.view == null && !entry.closed) return true;
+        return false;
     }
 
     // The visible part of a SurfaceView in its own pixels: all of it when nothing clips it, none when it is scrolled out
@@ -471,13 +580,16 @@ final class FrameworkSurfaces {
     // app may read it back (Unity copies its last frame).
     private void destroy(Entry entry, boolean callbacks) throws Exception {
         synchronized (this) {
-            if (entries.remove(entry.view) != entry) return;  // destroyed by another path
+            if (entries.remove(entry.key()) != entry) return;  // destroyed by another path
         }
-        if (callbacks) DRAW_FINISHED.setBoolean(entry.view, false);
+        if (callbacks && entry.view != null) DRAW_FINISHED.setBoolean(entry.view, false);
         try {
-            if (callbacks)
-                for (SurfaceHolder.Callback callback : callbacks(entry.view))
-                    callback.surfaceDestroyed(entry.view.getHolder());
+            if (callbacks && entry.view != null) {
+                for (SurfaceHolder.Callback callback : callbacks(entry.view)) callback.surfaceDestroyed(entry.holder);
+            } else if (callbacks) {  // ViewRootImpl.notifyHolderSurfaceDestroyed
+                SurfaceHolder.Callback[] all = takenCallbacks(entry.holder);
+                if (all != null) for (SurfaceHolder.Callback callback : all) callback.surfaceDestroyed(entry.holder);
+            }
         } finally {
             synchronized (this) {
                 entry.closed = true;
@@ -485,8 +597,9 @@ final class FrameworkSurfaces {
                 entry.reader.close();
                 host.release(entry.window);
             }
-            entry.view.getHolder().getSurface().release();
+            entry.holder.getSurface().release();
+            if (entry.view == null) setTakenSurface(entry.holder, emptySurface());  // as ViewRootImpl leaves it
         }
-        System.out.println("APP_SURFACE_DESTROYED " + entry.view.getClass().getName());
+        System.out.println("APP_SURFACE_DESTROYED " + (entry.view != null ? entry.view.getClass().getName() : "taken"));
     }
 }

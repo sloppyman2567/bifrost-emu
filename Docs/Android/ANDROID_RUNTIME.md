@@ -2372,6 +2372,40 @@ Measured on this machine (scalar, one thread): 15.7 ms for 2408x1355 unscaled, 1
 reference (planar and semi-planar chroma, padded rows, crop scaling, regions, matrices, ranges, refusals); the end-to-end
 CPU video path has no fixture and was checked on YouTube only.
 
+### Taken window surfaces and input queues (2026-11-11)
+
+A managed Activity that extends `android.app.NativeActivity` (Defold's `DefoldActivity` in Family Island, UE4's
+`GameActivity`) calls `getWindow().takeSurface()` and `takeInputQueue()` in `onCreate`, so its `ViewRootImpl` gets
+`mSurfaceHolder` and `mInputQueue` and never draws its views. Before this, Bifrost drew that window like any other
+and never handed the surface over: Family Island stayed blank with `glfw-android: iconified: YES (window: no)`.
+
+- Surface (`FrameworkSurfaces.updateTaken`, called by `FrameworkWindows` on the window's own thread): while the window
+  is shown, the taken holder gets an `ImageReader`-backed host surface sized to the window frame at its position.
+  It is set as the holder's `mSurface` (under `mSurfaceLock`) and the frame size is set; then the holder's callbacks get
+  `surfaceCreated`, `surfaceChanged(lp.format, w, h)` and `surfaceRedrawNeeded`, Android 15's
+  `ViewRootImpl.performTraversals` order. A size or format change repeats `surfaceChanged` and
+  `surfaceRedrawNeeded`. When the window stops showing, the callbacks get `surfaceDestroyed`, and the holder is left
+  with a fresh empty `Surface` as ViewRootImpl leaves it. Bifrost draws nothing for such a window (no software layer).
+  The taken surface stacks as the window's layer. The log records
+  `APP_SURFACE_TAKEN <w>x<h> at <x>,<y> format=<f>` and `APP_SURFACE_DESTROYED taken`.
+- Input (`FrameworkWindows.deliver` and `dispatchKey`): when the target window's `ViewRootImpl` has `mInputQueue`,
+  touches, hover and keys go to `InputQueue.sendInputEvent(event, token, false, callback)` first. They reach the views
+  only when the native code finishes them unhandled, as `ViewRootImpl.NativePostImeInputStage` does. The finished
+  callback runs on the queue's Looper (the window's thread).
+- The managed `libandroid.so` adapter forwards `AInputQueue_*`, `AInputEvent_*`, `AKeyEvent_*` and `AMotionEvent_*`
+  to the image's real library (`build-android-adapters.py`), as it already did for `ALooper_*`, `AConfiguration_*`
+  and `AChoreographer_*`. Every queue and event in a managed process is the framework's own (NativeActivity's
+  `android::InputQueue`, `AMotionEvent_fromJava`). The host thunks for those functions take the native-only path's
+  shim handles, so they misread real events; the native-only adapter keeps them.
+
+Limits: joystick and other non-pointer motion (gamepad axes) still goes straight to `activity.dispatchGenericMotionEvent`
+and does not reach the native queue. Gamepad buttons go to the queue like other keys. Touches from a gesture whose
+`ACTION_DOWN` found no window still fall back to `activity.dispatchTouchEvent`, bypassing the queue. A taken surface
+is shown whole: it is not clipped like a SurfaceView video layer. `test_managed_native_activity_gets_its_window_and_input`
+(`ManagedNativeActivity` with `android_native_window_fixture.c`) checks the callback order, a frame drawn with ES2
+and read back, the teardown order, and that native code gets every key and touch while the views get only the
+key it leaves unhandled.
+
 ### YUV conversion kernel (2026-10-31)
 
 A TextureView's YUV frames converted through a second, scalar copy of this maths in `AndroidBufferImages::convert`, on

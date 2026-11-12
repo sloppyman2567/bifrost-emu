@@ -511,11 +511,15 @@ def build(runtime, output):
                                  "-o", str(staging / "managed/zygote")], check=True)
         names.append("managed/zygote")
         thunked_android = [n for n in groups["libandroid.so"]
-                           if not n.startswith(("AConfiguration_", "ALooper_", "AChoreographer_"))]
+                           if not n.startswith(("AConfiguration_", "ALooper_", "AChoreographer_", "AInputQueue_",
+                                                "AInputEvent_", "AKeyEvent_", "AMotionEvent_"))]
         # Managed Java MessageQueue polls the image's libutils Looper. Native
         # consumers (including Chromium's MessagePumpAndroid) must register
         # their event/timer fds with that SAME looper via re_android.so. A host
         # thunk looper here silently strands native work while Java keeps polling.
+        # Input queues and events in a managed process are the framework's own
+        # (NativeActivity's android::InputQueue, AMotionEvent_fromJava), never
+        # the native-only path's shim handles, so they go to the real library.
         # Share the AudioThunk export registry. Managed AAudio streams must
         # stay on the host backend, rather than fall back to Android AudioTrack.
         aa_exports = re.findall(r"REG\(aa_libs,\s*(\w+)\)",

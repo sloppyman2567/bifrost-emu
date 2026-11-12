@@ -5,6 +5,9 @@
 // (activity_window.c op 9). A fully transparent window, such as an Activity
 // whose SurfaceView punches a hole through all of it, needs no host layer.
 // SurfaceViews in these windows get host surfaces from FrameworkSurfaces.
+// A window whose ViewRootImpl took its surface and input queue (Window.takeSurface and takeInputQueue: NativeActivity)
+// is not drawn here: its app owns the surface, which FrameworkSurfaces.updateTaken provides, and its input goes to that
+// InputQueue first, reaching the views only when the native code leaves it unhandled (ViewRootImpl's native stages).
 // Input goes to the topmost window the way InputDispatcher would deliver it.
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -14,7 +17,9 @@ import android.os.IBinder;
 import android.os.IInterface;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.InputEvent;
 import android.view.MotionEvent;
+import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.WindowManager;
 import java.lang.ref.WeakReference;
@@ -505,6 +510,8 @@ final class FrameworkWindows {
             int w = popup.frame.width(), h = popup.frame.height();
             boolean showing = visible(popup) && root != null && w > 0 && h > 0
                     && root.getWidth() > 0 && root.getHeight() > 0;
+            SurfaceHolder taken = viewRoot == null ? null : (SurfaceHolder) hiddenField(viewRoot, "mSurfaceHolder");
+            if (!showing && taken != null) updateTaken(popup, viewRoot, taken, false);
             if (!showing) {
                 if (viewRoot == null || owned(viewRoot)) surfaces.update(popup, null, false);
                 else if (!popup.updating && surfaces.has(popup)) updateSurfaces(popup, viewRoot, null, false);
@@ -542,6 +549,13 @@ final class FrameworkWindows {
                 popup.traversed = false;
                 updateSurfaces(popup, viewRoot, root, true);
             }
+            if (taken != null) {
+                // The app owns the surface, we won't draw (ViewRootImpl.draw).
+                releaseLayer(popup);
+                if (popup.onHost) { removePopup(popup.id); popup.onHost = false; }
+                updateTaken(popup, viewRoot, taken, true);
+                continue;
+            }
             if (!owned(viewRoot)) {
                 synchronized (this) {
                     if (popup.removed) continue;
@@ -577,9 +591,10 @@ final class FrameworkWindows {
         // Host layers otherwise stack in creation order.
         List<Long> order = new ArrayList<>();
         for (Popup popup : stack) {
-            if (popup.layer == null) continue;
+            // A window with a taken surface has no layer of its own: that surface is the window.
+            if (popup.layer == null && !surfaces.hasTaken(popup)) continue;
             order.addAll(surfaces.windows(popup));
-            order.add(popup.layer.window);
+            if (popup.layer != null) order.add(popup.layer.window);
         }
         if (!order.equals(stacked)) {
             surfaces.restack(order);
@@ -658,6 +673,31 @@ final class FrameworkWindows {
             try {
                 synchronized (this) { if (popup.removed) return; }  // remove() ran on this thread first
                 surfaces.update(popup, root, shown);
+            } catch (Exception error) {
+                popup.failure = error;
+            } finally {
+                popup.updating = false;
+            }
+        });
+    }
+
+    // A taken surface follows the window on its own thread, where Android delivers SurfaceHolder callbacks; one
+    // update per window is in flight, as for SurfaceViews.
+    private void updateTaken(Popup popup, Object viewRoot, SurfaceHolder holder, boolean shown) throws Exception {
+        android.os.Handler handler = (android.os.Handler) hiddenField(viewRoot, "mHandler");
+        Rect frame = new Rect(popup.frame);
+        int format = popup.attrs.format;
+        if (owned(viewRoot)) {
+            surfaces.updateTaken(popup, holder, handler, frame.left, frame.top, frame.width(), frame.height(), format, shown);
+            return;
+        }
+        if (popup.updating) return;
+        popup.updating = true;
+        handler.post(() -> {
+            try {
+                synchronized (this) { if (popup.removed) return; }  // remove() ran on this thread first
+                surfaces.updateTaken(popup, holder, handler, frame.left, frame.top, frame.width(), frame.height(),
+                        format, shown);
             } catch (Exception error) {
                 popup.failure = error;
             } finally {
@@ -922,6 +962,17 @@ final class FrameworkWindows {
         local.offsetLocation(-popup.frame.left, -popup.frame.top);
         onOwner(viewRoot, () -> {
             try {
+                // The queue copies the event; the views, if it comes back unhandled, get a copy of their own.
+                MotionEvent later = MotionEvent.obtain(local);
+                if (toInputQueue(viewRoot, local, () -> {
+                    try {
+                        if (generic) root.dispatchGenericMotionEvent(later);
+                        else root.dispatchTouchEvent(later);
+                    } finally {
+                        later.recycle();
+                    }
+                })) return;
+                later.recycle();
                 if (generic) root.dispatchGenericMotionEvent(local);
                 else root.dispatchTouchEvent(local);
             } finally {
@@ -931,6 +982,41 @@ final class FrameworkWindows {
         return true;
     }
 
+    // ViewRootImpl's NativePostImeInputStage: a window that took its InputQueue gets the event there first
+    // (sendInputEvent, not pre-dispatched), and the next stage, the views, only when the native code finishes it
+    // unhandled. The callback arrives on the queue's Looper, the window's own thread. Returns false without a queue.
+    private static boolean toInputQueue(Object viewRoot, InputEvent event, Runnable unhandled) {
+        Object queue;
+        try { queue = hiddenField(viewRoot, "mInputQueue"); }
+        catch (Exception error) { throw new IllegalStateException(error); }
+        if (queue == null) return false;
+        Object finished = java.lang.reflect.Proxy.newProxyInstance(FINISHED_CALLBACK.getClassLoader(),
+                new Class<?>[] {FINISHED_CALLBACK}, (self, method, arguments) -> {
+                    if (method.getName().equals("onFinishedInputEvent")) {
+                        if (!(Boolean) arguments[1]) unhandled.run();
+                        return null;
+                    }
+                    if (method.getName().equals("hashCode")) return System.identityHashCode(self);
+                    if (method.getName().equals("equals")) return self == arguments[0];
+                    return "BifrostInputQueueCallback";
+                });
+        try { SEND_INPUT_EVENT.invoke(queue, event, event, false, finished); }
+        catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
+        return true;
+    }
+
+    private static final Class<?> FINISHED_CALLBACK;
+    private static final Method SEND_INPUT_EVENT;
+    static {
+        try {
+            FINISHED_CALLBACK = Class.forName("android.view.InputQueue$FinishedInputEventCallback");
+            SEND_INPUT_EVENT = Class.forName("android.view.InputQueue").getMethod("sendInputEvent",
+                    InputEvent.class, Object.class, boolean.class, FINISHED_CALLBACK);
+        } catch (ReflectiveOperationException error) {
+            throw new ExceptionInInitializerError(error);
+        }
+    }
+
     // Key delivery to the focused popup. Returns false for the Activity.
     boolean dispatchKey(KeyEvent event) throws Exception {
         Popup top;
@@ -938,7 +1024,9 @@ final class FrameworkWindows {
         if (top == null) return false;
         Object viewRoot = viewRoot(top);
         View root = root(top);
-        if (viewRoot != null && root != null) onOwner(viewRoot, () -> root.dispatchKeyEvent(event));
+        if (viewRoot != null && root != null) onOwner(viewRoot, () -> {
+            if (!toInputQueue(viewRoot, event, () -> root.dispatchKeyEvent(event))) root.dispatchKeyEvent(event);
+        });
         return true;
     }
 

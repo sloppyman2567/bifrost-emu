@@ -24,7 +24,8 @@ cached transcoder), a swapchain acquire that no longer re-uploads the frame, a f
 names the library, ASTC transcoding about four times faster in a real game, fewer host instructions per JIT block, Tier-2
 regions through calls and returns, fork children that keep the JIT, a session Zygote for an app's helper processes, microG
 in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and SoundPool, one
-shared read-only copy of Android for every game, and a JIT disk cache that no longer holds its files in every process.
+shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every process, and
+NativeActivity games on the managed path that get their window and input.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
@@ -48,6 +49,18 @@ shared read-only copy of Android for every game, and a JIT disk cache that no lo
   a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
+
+### Fixed (NativeActivity games on the managed path get their window and input)
+
+- A managed Activity built on `android.app.NativeActivity` now gets the surface and input queue it takes from its window
+  (2026-11-11). Family Island (Defold) stayed blank before, because Bifrost drew the window itself and never handed the
+  surface over. The taken surface is delivered in Android 15's `ViewRootImpl` order (created, changed, redraw needed;
+  destroyed when the window goes). Touches, hover and keys go to the app's native input queue first and reach its views
+  only when the native code leaves them unhandled. The managed `libandroid.so` now forwards the `AInputQueue`, `AInputEvent`,
+  `AKeyEvent` and `AMotionEvent` functions to Android's own library: the host thunks it used misread real events,
+  including those from `AMotionEvent_fromJava`. Gamepad axes do not reach the native queue yet. Checked with a
+  NativeActivity fixture that draws and reads back a frame and logs its input. SpongeBob BfBB (UE4) still starts and
+  reaches its game Activity, but Family Island itself has not been retried.
 
 ### Added (saved pictures reach the host)
 

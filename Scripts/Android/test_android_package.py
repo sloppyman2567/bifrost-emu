@@ -4010,6 +4010,13 @@ class PackageTests(unittest.TestCase):
             str(cls.media / "lib64/libmediandk.so"),
             str(bionic / "libc.so"), "-o", str(cls.native),
         ], check=True, capture_output=True)
+        # ManagedNativeActivity's native half (lib_name "nativewindow").
+        cls.native_window = cls.work / "libnativewindow.so"
+        subprocess.run(compiler + [
+            "-Wl,-soname,libnativewindow.so", str(ROOT / "Tests/Host/android_native_window_fixture.c"),
+            str(cls.adapters / "libandroid.so"), str(cls.adapters / "libEGL.so"), str(cls.adapters / "libGLESv2.so"),
+            str(bionic / "libc.so"), "-o", str(cls.native_window),
+        ], check=True, capture_output=True)
         cls.base = cls.apk("base", split="", native=False)
         cls.split = cls.apk("arm64", split="config.arm64_v8a", native=True)
         cls.bundle = cls.work / "fixture.apkm"
@@ -4115,6 +4122,8 @@ class PackageTests(unittest.TestCase):
             activity_attributes = ' android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"'
             component = component.replace(f'<activity android:name="{activity}"',
                                           f'<activity android:name="{activity}"{activity_attributes}')
+        if managed == "ManagedNativeActivity" and not split:
+            component = component.replace('android:value="fixture"', 'android:value="nativewindow"')
         if managed == "ManagedSplash" and not split:
             component += f'<activity android:name="{activity}$Main" android:exported="false"/>'
         if managed == "ManagedActivities" and not split:
@@ -4182,6 +4191,7 @@ class PackageTests(unittest.TestCase):
             with zipfile.ZipFile(apk, "a") as archive:
                 archive.write(cls.native, "lib/arm64-v8a/libfixture.so")
                 archive.write(cls.dependency, "lib/arm64-v8a/libfixture_dependency.so")
+                archive.write(cls.native_window, "lib/arm64-v8a/libnativewindow.so")
                 archive.writestr("assets/split.txt", "APK split asset\n")
         cls.sign(apk, key)
         return apk
@@ -4981,6 +4991,45 @@ class PackageTests(unittest.TestCase):
         # The turn changed the orientation the new instance was created with.
         first, second = (int(n) for n in re.findall(r"RELAUNCH_CREATE gen=\d .*? orientation=(\d)", text))
         self.assertNotEqual(first, second)
+
+    def test_managed_native_activity_gets_its_window_and_input(self):
+        # A NativeActivity subclass (Defold's DefoldActivity in Family Island) runs on the managed path. Its window's
+        # surface and input queue are taken (Window.takeSurface, takeInputQueue): the native code must get the surface
+        # as ViewRootImpl hands it over (created, changed, redraw needed; destroyed when the window goes) and every
+        # host event first, the views only what it leaves unhandled. Before, it never got a window and stayed blank.
+        state = self.work / "native-window-state"
+        bundle = self.work / "native-window.apkm"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.write(self.apk("native-window", managed="ManagedNativeActivity"), "base.apk")
+            archive.write(self.split, "split.apk")
+        self.install(bundle, state)
+        status = package.launch("org.bifrost.fixture", state, ARGS.emu.resolve(), timeout=90)
+        text = (state / "org.bifrost.fixture/managed/last-run.log").read_text()
+        self.assertEqual(status, 0, text[-30000:])
+        self.assertNotRegex(text, r"FATAL EXCEPTION|NATIVE_EGL_FAILED|NATIVE_JAVA_INPUT_FAILED")
+        native = "\n".join(line for line in text.splitlines() if "NATIVE_" in line or "APP_SURFACE" in line)
+        position = 0
+        for marker in ("NATIVE_ON_CREATE java=1", "NATIVE_START", "NATIVE_RESUME", "NATIVE_INPUT_QUEUE_CREATED",
+                       "NATIVE_WINDOW_CREATED", "NATIVE_REDRAW 1 pixel=", "APP_SURFACE_TAKEN",
+                       "NATIVE_JAVA_INPUT_SENT", "NATIVE_WINDOW_DESTROYED", "NATIVE_DESTROY"):
+            found = native.find(marker, position)
+            self.assertNotEqual(found, -1, f"{marker!r} is missing or out of order:\n{native}")
+            position = found + len(marker)
+        # The frame drawn into the taken surface reads back as (64, 128, 191), within rounding, and was presented.
+        pixel = re.search(r"NATIVE_REDRAW 1 pixel=(\d+),(\d+),(\d+) swap=(\d)", native)
+        for value, expected in zip(map(int, pixel.groups()[:3]), (64, 128, 191)):
+            self.assertLessEqual(abs(value - expected), 2, native)
+        self.assertEqual(pixel.group(4), "1", native)
+        size = re.search(r"NATIVE_WINDOW_CREATED (\d+)x(\d+)", native)
+        self.assertGreater(int(size.group(1)), 0)
+        self.assertGreater(int(size.group(2)), 0)
+        # Native code got every event; the views got only the key it left unhandled (B). Only the fixture's own touch
+        # is checked: the window opens under the host pointer, and real hover or drags reach it too.
+        for event in ("NATIVE_KEY 29 0", "NATIVE_KEY 29 1", "NATIVE_KEY 30 0", "NATIVE_KEY 30 1",
+                      "NATIVE_TOUCH 0 40,50", "NATIVE_TOUCH 1 40,50", "NATIVE_JAVA_KEY 30 0", "NATIVE_JAVA_KEY 30 1"):
+            self.assertIn(event, native)
+        self.assertNotIn("NATIVE_JAVA_KEY 29", native)
+        self.assertNotRegex(native, r"NATIVE_JAVA_TOUCH [01] 40,50")
 
     def test_managed_activity_that_handles_the_change_is_not_relaunched(self):
         text = self.launch_relaunch_fixture("relaunch-handled")
