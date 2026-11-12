@@ -32,6 +32,9 @@ from android_processes import ProcessHost, media_folder, pictures_directory
 
 PRIORITIES = "??VDIWEFS"
 LAUNCHER_DIR = ROOT / "Guest/Android/Managed"
+# Compile-time declarations of hidden framework classes the launcher subclasses or names (InputEventSender): read as a
+# source path and never compiled into the dex, so the device's own classes run.
+LAUNCHER_STUBS = LAUNCHER_DIR / "Stubs"
 LAUNCHER_SOURCES = ("ManagedLauncher.java", "ManagedZygote.java", "ActivityProbe.java", "Framework/FrameworkServices.java",
                     "Framework/FrameworkCompatibility.java",
                     "Framework/FrameworkPackages.java", "Framework/FrameworkConnectivity.java",
@@ -646,14 +649,19 @@ def build_launcher(output=ROOT / "build/android-managed-launcher", extra_sources
         work = Path(temporary)
         classes = work / "classes"
         classes.mkdir()
-        subprocess.run([compiler, "--release", "8", "-cp", str(jar), "-d", str(classes),
-                        *map(str, sources)], check=True)
+        subprocess.run([compiler, "--release", "8", "-cp", str(jar), "-sourcepath", str(LAUNCHER_STUBS),
+                        "-implicit:none", "-d", str(classes), *map(str, sources)], check=True)
         subprocess.run(["java", "-cp", str(ROOT / "Tools/android-tools/d8.jar"),
                         "com.android.tools.r8.D8", "--min-api", "26", "--lib", str(jar),
                         "--output", str(work), *map(str, sorted(classes.glob("*.class")))], check=True)
         (work / "classes.dex").replace(output / "classes.dex")
         (output / "sources.json").write_text(json.dumps(
-            {"sources": {p.name: file_hash(p) for p in sources}, "dex": file_hash(output / "classes.dex")}, sort_keys=True) + "\n")
+            {"sources": {p.name: file_hash(p) for p in sources}, "stubs": launcher_stub_hashes(),
+             "dex": file_hash(output / "classes.dex")}, sort_keys=True) + "\n")
+
+
+def launcher_stub_hashes():
+    return {path.relative_to(LAUNCHER_STUBS).as_posix(): file_hash(path) for path in sorted(LAUNCHER_STUBS.rglob("*.java"))}
 
 
 def launcher_dex(directory):
@@ -662,7 +670,8 @@ def launcher_dex(directory):
                for name in LAUNCHER_SOURCES}
     manifest = directory / "sources.json"
     saved = json.loads(manifest.read_text()) if manifest.is_file() else {}
-    if not dex.is_file() or saved.get("sources") != sources or saved.get("dex") != file_hash(dex):
+    if (not dex.is_file() or saved.get("sources") != sources or saved.get("stubs") != launcher_stub_hashes()
+            or saved.get("dex") != file_hash(dex)):
         raise ValueError("Managed launcher is missing or stale; run make android-managed-launcher")
     return dex
 

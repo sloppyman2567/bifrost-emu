@@ -1,8 +1,9 @@
 // The native half of ManagedNativeActivity: a NativeActivity subclass with Java around it, as Defold and other engines
 // ship their games, which runs on the managed path. Its window surface and input queue come from the framework
 // (ViewRootImpl's taken surface and InputQueue), so every callback prints a marker the test checks in order. The
-// window is drawn a known colour with EGL and read back; key A and touches are handled, key B is left unhandled so
-// the views (the Java Activity) must receive it.
+// window is drawn a known colour with EGL and read back. Keys A and BACK and touches are handled; every other key and
+// joystick motion is left unhandled, so the views (the Java Activity) must receive it, a gamepad button's fallback
+// follows and unhandled joystick motion comes back as ViewRootImpl's synthetic d-pad keys.
 #include <android/native_activity.h>
 #include <stdio.h>
 extern void *eglGetDisplay(void *);
@@ -96,8 +97,12 @@ static int input(int fd, int events, void *data) {
         int handled = 1;
         if (AInputEvent_getType(event) == AINPUT_EVENT_TYPE_KEY) {
             int code = AKeyEvent_getKeyCode(event);
-            printf("NATIVE_KEY %d %d\n", code, AKeyEvent_getAction(event));
-            handled = code == AKEYCODE_A;
+            printf("NATIVE_KEY %d %d%s\n", code, AKeyEvent_getAction(event),
+                   AKeyEvent_getFlags(event) & AKEY_EVENT_FLAG_FALLBACK ? " fallback" : "");
+            handled = code == AKEYCODE_A || code == AKEYCODE_BACK;
+        } else if (AInputEvent_getSource(event) & AINPUT_SOURCE_CLASS_JOYSTICK) {
+            printf("NATIVE_JOYSTICK %.0f\n", AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_HAT_X, 0));
+            handled = 0;
         } else {
             printf("NATIVE_TOUCH %d %.0f,%.0f\n", AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK,
                    AMotionEvent_getX(event, 0), AMotionEvent_getY(event, 0));

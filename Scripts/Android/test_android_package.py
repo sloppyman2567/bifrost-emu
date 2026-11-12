@@ -4996,7 +4996,8 @@ class PackageTests(unittest.TestCase):
         # A NativeActivity subclass (Defold's DefoldActivity in Family Island) runs on the managed path. Its window's
         # surface and input queue are taken (Window.takeSurface, takeInputQueue): the native code must get the surface
         # as ViewRootImpl hands it over (created, changed, redraw needed; destroyed when the window goes) and every
-        # host event first, the views only what it leaves unhandled. Before, it never got a window and stayed blank.
+        # host event first, the views only what it leaves unhandled, through ViewRootImpl's own input stages (gamepad
+        # fallbacks and synthetic d-pad keys included). Before, it never got a window and stayed blank.
         state = self.work / "native-window-state"
         bundle = self.work / "native-window.apkm"
         with zipfile.ZipFile(bundle, "w") as archive:
@@ -5023,13 +5024,27 @@ class PackageTests(unittest.TestCase):
         size = re.search(r"NATIVE_WINDOW_CREATED (\d+)x(\d+)", native)
         self.assertGreater(int(size.group(1)), 0)
         self.assertGreater(int(size.group(2)), 0)
-        # Native code got every event; the views got only the key it left unhandled (B). Only the fixture's own touch
-        # is checked: the window opens under the host pointer, and real hover or drags reach it too.
+        # Native code got every event; the views got only what it left unhandled. Only the fixture's own touch is
+        # checked: the window opens under the host pointer, and real hover or drags reach it too.
         for event in ("NATIVE_KEY 29 0", "NATIVE_KEY 29 1", "NATIVE_KEY 30 0", "NATIVE_KEY 30 1",
                       "NATIVE_TOUCH 0 40,50", "NATIVE_TOUCH 1 40,50", "NATIVE_JAVA_KEY 30 0", "NATIVE_JAVA_KEY 30 1"):
             self.assertIn(event, native)
         self.assertNotIn("NATIVE_JAVA_KEY 29", native)
         self.assertNotRegex(native, r"NATIVE_JAVA_TOUCH [01] 40,50")
+        # Everything went through the window's input channel and ViewRootImpl's own stages. The pad's B button (97),
+        # left unhandled everywhere, falls back to BACK (4) once it has finished, ahead of its own up, as InputDispatcher
+        # does. The d-pad (hat X) motion nothing handled comes back as ViewRootImpl's synthetic DPAD_LEFT (21), which
+        # starts the stages again, so native code sees it too. Each key reaches native code once (its pre-IME copy is
+        # handed back by AInputQueue_preDispatchEvent).
+        pad = [line for line in native.splitlines()
+               if re.match(r"NATIVE_(KEY (97|4|21)|JOYSTICK|JAVA_KEY (97|4|21)) ", line)]
+        native_pad = [line for line in pad if not line.startswith("NATIVE_JAVA")]
+        self.assertEqual(native_pad, ["NATIVE_KEY 97 0", "NATIVE_KEY 4 0 fallback", "NATIVE_KEY 97 1",
+                                      "NATIVE_KEY 4 1 fallback", "NATIVE_JOYSTICK -1", "NATIVE_KEY 21 0 fallback",
+                                      "NATIVE_JOYSTICK 0", "NATIVE_KEY 21 1 fallback"], native)
+        views = [line for line in pad if line.startswith("NATIVE_JAVA")]
+        self.assertEqual(views, ["NATIVE_JAVA_KEY 97 0", "NATIVE_JAVA_KEY 97 1", "NATIVE_JAVA_KEY 21 0",
+                                 "NATIVE_JAVA_KEY 21 1"], native)
 
     def test_managed_activity_that_handles_the_change_is_not_relaunched(self):
         text = self.launch_relaunch_fixture("relaunch-handled")

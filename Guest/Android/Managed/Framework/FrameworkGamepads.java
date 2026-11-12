@@ -1,11 +1,12 @@
 // Host gamepads as Android 15 input devices (android-15.0.0_r1). The host reports each one like an
 // Xbox 360 pad (Vendor_045e_Product_028e.kl): KEYCODE_BUTTON_* keys, sticks X/Y and Z/RZ, triggers
 // and the d-pad as hat axes. This class is the device side InputManagerService and InputDispatcher
-// keep on a device, because host input reaches the Activity without ViewRootImpl's input stages:
+// keep on a device:
 //  - InputManager's device list and its change listener (IInputDevicesChangedListener pairs),
 //  - an InputDevice per pad (KEYBOARD|GAMEPAD|JOYSTICK, Generic.kcm, the pad's motion ranges),
-//  - key repeat and Generic.kcm fallbacks for buttons the app leaves unhandled (B is BACK),
-//  - ViewRootImpl.SyntheticJoystickHandler: unhandled stick and hat motion as d-pad keys.
+//  - key repeat and Generic.kcm fallbacks for buttons the app leaves unhandled (B is BACK).
+// Axis motion goes to the focused window's input channel (FrameworkWindows), whose ViewRootImpl turns motion
+// nothing handled into d-pad keys itself (SyntheticJoystickHandler).
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -21,7 +22,10 @@ import java.util.Map;
 import java.util.TreeMap;
 
 final class FrameworkGamepads {
-    interface KeyTarget { boolean dispatch(KeyEvent event) throws Exception; }
+    // Where a key goes: the focused window or the Activity. `finished` learns whether it was handled, at once or later
+    // (a window answers through its input channel).
+    interface KeyTarget { void dispatch(KeyEvent event, java.util.function.Consumer<Boolean> finished) throws Exception; }
+    private static final java.util.function.Consumer<Boolean> IGNORED = handled -> {};
 
     // InputReader's sources for a pad: keys from KEYBOARD|GAMEPAD, axes from JOYSTICK.
     static final int SOURCES = InputDevice.SOURCE_KEYBOARD | InputDevice.SOURCE_GAMEPAD | InputDevice.SOURCE_JOYSTICK;
@@ -126,8 +130,8 @@ final class FrameworkGamepads {
         for (Object listener : targets) changed.invoke(listener, (Object) pairs);
     }
 
-    // A pad's button: the app first, then its Generic.kcm fallback when the press went unhandled
-    // (InputDispatcher::afterKeyEventLockedInterruptable); held buttons repeat like InputDispatcher's.
+    // A pad's button: the app first, then its Generic.kcm fallback once the app has finished the key unhandled;
+    // held buttons repeat like InputDispatcher's.
     void key(KeyEvent event, KeyTarget target) throws Exception {
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) startRepeat(event, target);
         if (event.getAction() == KeyEvent.ACTION_UP) stopRepeat();
@@ -135,27 +139,52 @@ final class FrameworkGamepads {
     }
 
     private void deliver(KeyEvent event, KeyTarget target) throws Exception {
+        target.dispatch(event, handled -> {
+            try { afterKey(event, handled, target); }
+            catch (Exception error) { throw new RuntimeException(error); }
+        });
+    }
+
+    // InputDispatcher::afterKeyEventLockedInterruptable (android-15.0.0_r1): the fallback is latched on the initial
+    // down; a key the app handles cancels a fallback in progress; an unhandled one sends its fallback with the same
+    // action and repeat count, and its up releases it.
+    private void afterKey(KeyEvent event, boolean handled, KeyTarget target) throws Exception {
         int code = event.getKeyCode();
-        boolean handled = target.dispatch(event);
+        boolean up = event.getAction() == KeyEvent.ACTION_UP;
         Integer fallback = fallbacks.get(code);
-        if (event.getAction() == KeyEvent.ACTION_UP) {
-            if (fallback == null) return;
-            fallbacks.remove(code);
-            target.dispatch(new KeyEvent(event.getDownTime(), event.getEventTime(), KeyEvent.ACTION_UP, fallback, 0,
-                    event.getMetaState(), event.getDeviceId(), 0, event.getFlags() | KeyEvent.FLAG_FALLBACK,
-                    event.getSource()));
+        if (up) fallbacks.remove(code);
+        if (handled) {
+            if (fallback != null) {
+                if (fallback != KeyEvent.KEYCODE_UNKNOWN) cancelFallback(event, fallback, target);
+                fallbacks.remove(code);
+            }
             return;
         }
-        if (handled && fallback == null) return;
-        if (fallback == null) {
-            fallback = fallbackKey(code, event.getMetaState());
-            // HOME leaves the app on a device; here it would only confuse the Activity.
-            if (fallback == null || fallback == KeyEvent.KEYCODE_HOME) return;
+        boolean initialDown = !up && event.getRepeatCount() == 0;
+        if (fallback == null && !initialDown) return;
+        Integer wanted = fallbackKey(code, event.getMetaState());
+        // HOME leaves the app on a device; here it would only confuse the Activity.
+        if (wanted != null && wanted == KeyEvent.KEYCODE_HOME) wanted = null;
+        if (initialDown) {
+            fallback = wanted != null ? wanted : KeyEvent.KEYCODE_UNKNOWN;
             fallbacks.put(code, fallback);
         }
-        target.dispatch(new KeyEvent(event.getDownTime(), event.getEventTime(), KeyEvent.ACTION_DOWN, fallback,
+        if (fallback != KeyEvent.KEYCODE_UNKNOWN && !fallback.equals(wanted)) {
+            cancelFallback(event, fallback, target);
+            fallback = KeyEvent.KEYCODE_UNKNOWN;
+            if (!up) fallbacks.put(code, fallback);
+        }
+        if (fallback == KeyEvent.KEYCODE_UNKNOWN) return;
+        target.dispatch(new KeyEvent(event.getDownTime(), event.getEventTime(), event.getAction(), fallback,
                 event.getRepeatCount(), event.getMetaState(), event.getDeviceId(), 0,
-                event.getFlags() | KeyEvent.FLAG_FALLBACK, event.getSource()));
+                event.getFlags() | KeyEvent.FLAG_FALLBACK, event.getSource()), IGNORED);
+    }
+
+    // InputDispatcher's CANCEL_FALLBACK_EVENTS: the fallback key goes up, canceled.
+    private static void cancelFallback(KeyEvent event, int fallback, KeyTarget target) throws Exception {
+        target.dispatch(new KeyEvent(event.getDownTime(), event.getEventTime(), KeyEvent.ACTION_UP, fallback, 0,
+                event.getMetaState(), event.getDeviceId(), 0,
+                event.getFlags() | KeyEvent.FLAG_FALLBACK | KeyEvent.FLAG_CANCELED, event.getSource()), IGNORED);
     }
 
     private Handler handler() {
@@ -204,79 +233,6 @@ final class FrameworkGamepads {
             coords[0].setAxisValue(AXES[i], Float.intBitsToFloat((int) e[FIRST_AXIS_WORD + i]));
         return MotionEvent.obtain(e[11] / ms, e[12] / ms, MotionEvent.ACTION_MOVE, 1, properties, coords, 0, 0,
                 1f, 1f, (int) e[6], 0, (int) e[5], 0);
-    }
-
-    // ViewRootImpl's SyntheticInputStage: a joystick motion the app did not handle moves the d-pad focus;
-    // one it handled cancels any synthetic key still held.
-    void joystick(MotionEvent event, boolean handled, KeyTarget target, java.util.function.BooleanSupplier focused)
-            throws Exception {
-        if (handled) { joystickCancel(target); return; }
-        long time = event.getEventTime();
-        joystickAxis(event, time, MotionEvent.AXIS_X, target, focused);
-        joystickAxis(event, time, MotionEvent.AXIS_Y, target, focused);
-        joystickAxis(event, time, MotionEvent.AXIS_HAT_X, target, focused);
-        joystickAxis(event, time, MotionEvent.AXIS_HAT_Y, target, focused);
-    }
-
-    private static final int STATE_UP_OR_LEFT = -1, STATE_NEUTRAL = 0, STATE_DOWN_OR_RIGHT = 1;
-    private final int[] hatStates = {STATE_NEUTRAL, STATE_NEUTRAL}, stickStates = {STATE_NEUTRAL, STATE_NEUTRAL};
-    private final Map<Integer, KeyEvent> joystickUps = new TreeMap<>();
-    private final Runnable[] joystickRepeats = new Runnable[2];
-
-    private void joystickAxis(MotionEvent event, long time, int axis, KeyTarget target,
-                              java.util.function.BooleanSupplier focused) throws Exception {
-        boolean x = axis == MotionEvent.AXIS_X || axis == MotionEvent.AXIS_HAT_X;
-        int index = x ? 0 : 1;
-        boolean stick = axis == MotionEvent.AXIS_X || axis == MotionEvent.AXIS_Y;
-        float value = event.getAxisValue(axis);
-        int next = value >= 0.5f ? STATE_DOWN_OR_RIGHT : value <= -0.5f ? STATE_UP_OR_LEFT : STATE_NEUTRAL;
-        int current = stick ? stickStates[index] : hatStates[index];
-        if (current == next) return;
-        int meta = event.getMetaState(), device = event.getDeviceId(), source = event.getSource();
-        if (current != STATE_NEUTRAL) {
-            target.dispatch(new KeyEvent(time, time, KeyEvent.ACTION_UP, dpadKey(x, current), 0, meta, device, 0,
-                    KeyEvent.FLAG_FALLBACK, source));
-            joystickUps.put(device, null);
-            if (joystickRepeats[index] != null) handler().removeCallbacks(joystickRepeats[index]);
-            joystickRepeats[index] = null;
-        }
-        if (next != STATE_NEUTRAL) {
-            int code = dpadKey(x, next);
-            KeyEvent down = new KeyEvent(time, time, KeyEvent.ACTION_DOWN, code, 0, meta, device, 0,
-                    KeyEvent.FLAG_FALLBACK, source);
-            target.dispatch(down);
-            Runnable again = new Runnable() {
-                KeyEvent last = down;
-                @Override
-                public void run() {
-                    if (joystickRepeats[index] != this || !focused.getAsBoolean()) return;
-                    last = KeyEvent.changeTimeRepeat(last, SystemClock.uptimeMillis(), last.getRepeatCount() + 1);
-                    try { target.dispatch(last); } catch (Exception error) { throw new RuntimeException(error); }
-                    handler().postDelayed(this, ViewConfiguration.getKeyRepeatDelay());
-                }
-            };
-            joystickRepeats[index] = again;
-            handler().postDelayed(again, ViewConfiguration.getKeyRepeatTimeout());
-            joystickUps.put(device, new KeyEvent(time, time, KeyEvent.ACTION_UP, code, 0, meta, device, 0,
-                    KeyEvent.FLAG_FALLBACK | KeyEvent.FLAG_CANCELED, source));
-        }
-        if (stick) stickStates[index] = next; else hatStates[index] = next;
-    }
-
-    private void joystickCancel(KeyTarget target) throws Exception {
-        for (int i = 0; i < 2; i++) {
-            if (joystickRepeats[i] != null) handler().removeCallbacks(joystickRepeats[i]);
-            joystickRepeats[i] = null;
-        }
-        for (KeyEvent up : joystickUps.values())
-            if (up != null) target.dispatch(KeyEvent.changeTimeRepeat(up, SystemClock.uptimeMillis(), 0));
-        joystickUps.clear();
-        hatStates[0] = hatStates[1] = stickStates[0] = stickStates[1] = STATE_NEUTRAL;
-    }
-
-    private static int dpadKey(boolean x, int state) {
-        if (x) return state == STATE_UP_OR_LEFT ? KeyEvent.KEYCODE_DPAD_LEFT : KeyEvent.KEYCODE_DPAD_RIGHT;
-        return state == STATE_UP_OR_LEFT ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN;
     }
 
     // InputDevice.Builder is hidden; reached by reflection like the virtual keyboard's.

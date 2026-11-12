@@ -24,8 +24,9 @@ cached transcoder), a swapchain acquire that no longer re-uploads the frame, a f
 names the library, ASTC transcoding about four times faster in a real game, fewer host instructions per JIT block, Tier-2
 regions through calls and returns, fork children that keep the JIT, a session Zygote for an app's helper processes, microG
 in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and SoundPool, one
-shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every process, and
-NativeActivity games on the managed path that get their window and input.
+shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every process,
+NativeActivity games on the managed path that get their window and input, input delivered through each window's input
+channel, and a controller cursor that hides the desktop pointer.
 
 - The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
   the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
@@ -50,6 +51,25 @@ NativeActivity games on the managed path that get their window and input.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (input reaches windows through their input channels)
+
+- Host input now reaches an Android app's windows the way Android's InputDispatcher sends it (2026-11-12): Bifrost picks
+  the window and publishes the event into that window's input channel, and the app's own `ViewRootImpl` runs its input
+  stages (a NativeActivity's input queue before and after the IME, the views, focus navigation, and the synthetic d-pad
+  keys for joystick motion nothing handled). Before, events went straight to the views. Gamepad sticks and the d-pad now
+  reach a NativeActivity's native code too. A pad button an app leaves unhandled now falls back again (B acts as BACK):
+  every key used to count as handled whenever a window had focus. A key now leaves touch mode, as on a device. Checked
+  with the NativeActivity fixture (a pad's B and its BACK fallback, the d-pad's synthetic keys), host taps on dialog
+  buttons (one owned by an engine thread) and the window, text-input and service tests in both engines. The maintainer
+  reports input in Family Island works like in other games.
+
+### Fixed (the controller cursor hides the desktop pointer)
+
+- Moving or tapping with the controller cursor (Start and Select) now hides the desktop's mouse pointer, as any other pad
+  use already did (2026-11-12). Everything the cursor takes (the left stick, the triggers, A and X) skipped that, so with a
+  lone Joy-Con, whose only stick is the cursor's, the pointer stayed on top of the cursor's arrow. Checked with the fake
+  SDL3 test; not tried with a Joy-Con.
+
 ### Fixed (NativeActivity games on the managed path get their window and input)
 
 - A managed Activity built on `android.app.NativeActivity` now gets the surface and input queue it takes from its window
@@ -58,7 +78,7 @@ NativeActivity games on the managed path that get their window and input.
   destroyed when the window goes). Touches, hover and keys go to the app's native input queue first and reach its views
   only when the native code leaves them unhandled. The managed `libandroid.so` now forwards the `AInputQueue`, `AInputEvent`,
   `AKeyEvent` and `AMotionEvent` functions to Android's own library: the host thunks it used misread real events,
-  including those from `AMotionEvent_fromJava`. Gamepad axes do not reach the native queue yet. Checked with a
+  including those from `AMotionEvent_fromJava`. Checked with a
   NativeActivity fixture that draws and reads back a frame and logs its input. SpongeBob BfBB (UE4) still starts and
   reaches its game Activity, but Family Island itself has not been retried.
 

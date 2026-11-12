@@ -164,12 +164,16 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   after the acquire fence and only when `Image.getFence()` is valid) and go to op 25 (YUV) or 26 (RGBA); a new producer
   format is a case there, not a new reader. `FrameworkSurfaceBuffersProbe` and
   `test_managed_surface_view_takes_every_producer_format` cover it (the second fails on a reader that is rebuilt).
-- A window whose `ViewRootImpl` took its surface or input queue (`NativeActivity`) is never drawn by `FrameworkWindows`.
+- A window whose `ViewRootImpl` took its surface (`NativeActivity`) is never drawn by `FrameworkWindows`.
   `FrameworkSurfaces.updateTaken` gives the taken holder a host surface in `performTraversals` order, on the window's
-  thread, and input goes to `mInputQueue` first and to the views only when it is finished unhandled. The managed
-  `libandroid.so` forwards `AInputQueue_`/`AInputEvent_`/`AKeyEvent_`/`AMotionEvent_` to the real library (the thunks
-  take only native-only shim handles); the native-only adapter keeps the thunks. Run
-  `test_managed_native_activity_gets_its_window_and_input`.
+  thread. The managed `libandroid.so` forwards `AInputQueue_`/`AInputEvent_`/`AKeyEvent_`/`AMotionEvent_` to the real
+  library (the thunks take only native-only shim handles); the native-only adapter keeps the thunks.
+- Input is `InputDispatcher`'s job here: `FrameworkWindows` picks the window and publishes the event into its input
+  channel (`Channel`, an `InputEventSender` on the main Looper); `ViewRootImpl`'s own stages do the rest (taken
+  `InputQueue`, IME, views, synthetic joystick keys). Never call `View.dispatch*` for host input, and decide anything
+  that depends on "handled" (gamepad fallbacks) on the finished signal. Keys wait for the window's earlier events;
+  fallbacks do not. Hidden classes the launcher names go in `Managed/Stubs/` (a javac source path, never dexed).
+  Run `test_managed_native_activity_gets_its_window_and_input` and `test_managed_dialog_and_popup_windows`.
 - Gralloc5 uses the realm-owned native allocator in `Services/GraphicsAllocator.cpp`
   and `Guest/Android/Adapters/gralloc_mapper.c`. Never publish it from an app:
   libui caches its Binder, which must survive other apps exiting. Preserve the
@@ -205,7 +209,7 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   change them together.
 - Gamepads: backends report Android terms (`poll_gamepad`, an append-only plugin field; Xbox 360 key codes, the d-pad
   as hat axes); `AndroidSurfaceManager` owns device ids and controller numbers; `FrameworkGamepads` owns the
-  `InputDevice`s, InputManager's listener, `Generic.kcm` fallbacks and the synthetic d-pad. Keep the ABI enums, the
+  `InputDevice`s, InputManager's listener and `Generic.kcm` fallbacks (the synthetic d-pad is `ViewRootImpl`'s). Keep the ABI enums, the
   SDL mapping, the op-3 words and `FrameworkGamepads` together. Regenerate `FrameworkKeyLayout.java` (both tables)
   with `generate-key-layout.py`. Nothing in `ManagedLauncher`'s static initialization may need the main Looper. Run
   `make test-android-sdl-backend`, `make test-android-window-plugin` and `MANAGED_GAMEPADS_OK`
@@ -213,7 +217,8 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 - The pad cursor (`Window/PadCursor.hpp`, SDL-free) takes the left stick, triggers, A and X while it is on, and Start+Select
   switch it. Whatever it takes it must give back: a chord sends the game the release of the Start or Select it already saw,
   and turning it on releases A and X and centres the stick and triggers for the game. Its events are a mouse's
-  (`kMouseFinger`, `kMouseSecondFinger`) in app pixels. Run `make test-android-pad-cursor` and `make test-android-sdl-backend`.
+  (`kMouseFinger`, `kMouseSecondFinger`) in app pixels, and they hide the desktop pointer like any pad use
+  (`pad_hides_pointer`). Run `make test-android-pad-cursor` and `make test-android-sdl-backend`.
 - Wheel, trackpad pinch and middle-drag input become synthetic two-finger gestures in `Window/WheelGestures`
   (SDL-free; the SDL3 backend queues its events ahead of newer ones). Fingers never stay down: they lift on idle,
   button press, focus loss and close. Test with `make test-android-wheel-gestures` and

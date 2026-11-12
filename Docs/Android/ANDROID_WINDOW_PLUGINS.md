@@ -198,8 +198,9 @@ Start, Back as SELECT and Guide as MODE. The d-pad becomes the hat axes (the las
 release recenters); paddles, touchpads and misc buttons have no Xbox 360 counterpart and are dropped. SDL reports
 pads only while the window has focus (`SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS` defaults to off), so losing focus
 releases held buttons and centers the axes. Using a pad hides the pointer like Steam does (a button, a d-pad
-press, or a stick or trigger past half way, so a resting stick's drift does not); mouse motion over the window shows
-it again, and a pointer the app hid through `set_cursor` stays hidden. The guest side is in
+press, or a stick or trigger past half way, so a resting stick's drift does not, and the touch cursor turning on,
+moving or tapping); mouse motion over the window shows it again, and a pointer the app hid through `set_cursor` stays
+hidden. The guest side is in
 [gamepads](ANDROID_RUNTIME.md#gamepads-2026-11-06).
 
 ### Visibility (2026-11-07)

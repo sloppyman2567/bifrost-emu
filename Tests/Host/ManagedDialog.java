@@ -8,6 +8,9 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.view.InputDevice;
 import android.view.Gravity;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -56,14 +59,41 @@ public final class ManagedDialog extends Activity {
         });
         dialog.show();
         // Leave time for the launcher to lay out and draw the window, then
-        // press the button through the dialog's own view tree.
+        // tap the button as the host would.
         main.postDelayed(() -> getWindow().getDecorView().setVisibility(View.INVISIBLE), 1000);
         main.postDelayed(() -> {
             if (!dialog.getWindow().getDecorView().isAttachedToWindow()
                     || dialog.getWindow().getDecorView().getWidth() == 0)
                 throw new IllegalStateException("dialog window was not laid out");
-            dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick();
+            tap(this, dialog.getButton(DialogInterface.BUTTON_POSITIVE));
         }, 1500);
+    }
+
+    // A host tap at the middle of a view, through the launcher's own entry point (ManagedLauncher.dispatch, with the
+    // records a window backend reports) on the play loop's thread: it reaches the view's window through that window's
+    // input channel, and the click runs on the window's own thread.
+    static void tap(Activity activity, View view) {
+        int[] at = new int[2];
+        view.getLocationOnScreen(at);
+        float x = at[0] + view.getWidth() / 2f, y = at[1] + view.getHeight() / 2f;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                java.lang.reflect.Method dispatch = ClassLoader.getSystemClassLoader().loadClass("ManagedLauncher")
+                        .getDeclaredMethod("dispatch", Activity.class, long[].class);
+                dispatch.setAccessible(true);
+                for (int action : new int[] {0, 1}) {  // ACTION_DOWN, ACTION_UP
+                    long[] e = new long[55];
+                    long now = SystemClock.uptimeMillis() * 1000000L;
+                    e[0] = 2; e[4] = action; e[5] = InputDevice.SOURCE_TOUCHSCREEN; e[6] = 1; e[13] = 1;
+                    e[14] = Float.floatToIntBits(x) & 0xffffffffL; e[15] = Float.floatToIntBits(y) & 0xffffffffL;
+                    e[16] = Float.floatToIntBits(1f) & 0xffffffffL;
+                    e[11] = now; e[12] = now;
+                    dispatch.invoke(null, activity, e);
+                }
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        });
     }
 
     private void showPopupWindow() {
@@ -142,7 +172,7 @@ public final class ManagedDialog extends Activity {
                 // bounds at the next draw, which invalidates it from that draw.
                 engine.postDelayed(() -> dialog.getButton(DialogInterface.BUTTON_POSITIVE)
                         .setText("Continue with the engine"), 800);
-                engine.postDelayed(() -> dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick(), 1800);
+                engine.postDelayed(() -> tap(this, dialog.getButton(DialogInterface.BUTTON_POSITIVE)), 1800);
             });
         }
 

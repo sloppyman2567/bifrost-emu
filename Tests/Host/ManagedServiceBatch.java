@@ -433,8 +433,8 @@ public final class ManagedServiceBatch {
                 "an unknown device has keys");
         final int keys = android.view.InputDevice.SOURCE_KEYBOARD | android.view.InputDevice.SOURCE_GAMEPAD;
         List<android.view.KeyEvent> sent = new ArrayList<>();
-        FrameworkGamepads.KeyTarget unhandled = event -> { sent.add(event); return false; };
-        FrameworkGamepads.KeyTarget handled = event -> { sent.add(event); return true; };
+        FrameworkGamepads.KeyTarget unhandled = (event, finished) -> { sent.add(event); finished.accept(false); };
+        FrameworkGamepads.KeyTarget handled = (event, finished) -> { sent.add(event); finished.accept(true); };
         java.util.function.BiConsumer<Integer, FrameworkGamepads.KeyTarget> press = (code, target) -> {
             try {
                 pads.key(new android.view.KeyEvent(1, 1, android.view.KeyEvent.ACTION_DOWN, code, 0, 0, 2, 0, 0, keys), target);
@@ -462,6 +462,20 @@ public final class ManagedServiceBatch {
         press.accept(android.view.KeyEvent.KEYCODE_BUTTON_MODE, unhandled);
         check(codes.apply(sent).equals("KEYCODE_BUTTON_MODE+ KEYCODE_BUTTON_MODE-"), "MODE became HOME: " + codes.apply(sent));
         sent.clear();
+        // A window answers later: the fallback follows the finished signal, and an app that handles the key's up after
+        // leaving its down unhandled gets the fallback canceled (InputDispatcher's CANCEL_FALLBACK_EVENTS).
+        List<java.util.function.Consumer<Boolean>> later = new ArrayList<>();
+        FrameworkGamepads.KeyTarget window = (event, finished) -> { sent.add(event); later.add(finished); };
+        pads.key(new android.view.KeyEvent(1, 1, android.view.KeyEvent.ACTION_DOWN,
+                android.view.KeyEvent.KEYCODE_BUTTON_B, 0, 0, 2, 0, 0, keys), window);
+        check(codes.apply(sent).equals("KEYCODE_BUTTON_B+"), "a fallback before the key finished: " + codes.apply(sent));
+        later.get(0).accept(false);
+        pads.key(new android.view.KeyEvent(1, 2, android.view.KeyEvent.ACTION_UP,
+                android.view.KeyEvent.KEYCODE_BUTTON_B, 0, 0, 2, 0, 0, keys), window);
+        later.get(2).accept(true);
+        check(codes.apply(sent).equals("KEYCODE_BUTTON_B+ KEYCODE_BACK+f KEYCODE_BUTTON_B- KEYCODE_BACK-f")
+                && (sent.get(3).getFlags() & android.view.KeyEvent.FLAG_CANCELED) != 0, "canceled fallback: " + codes.apply(sent));
+        sent.clear();
         long[] axes = new long[55];
         axes[0] = 2; axes[5] = android.view.InputDevice.SOURCE_JOYSTICK; axes[6] = 2; axes[11] = axes[12] = 5000000; axes[13] = 1;
         axes[20 + 2] = Float.floatToIntBits(0.5f);   // Z
@@ -470,15 +484,7 @@ public final class ManagedServiceBatch {
         check(left.getSource() == android.view.InputDevice.SOURCE_JOYSTICK && left.getDeviceId() == 2
                 && left.getAxisValue(MotionEvent.AXIS_Z) == 0.5f && left.getAxisValue(MotionEvent.AXIS_HAT_X) == -1f
                 && left.getAxisValue(MotionEvent.AXIS_X) == 0f && left.getEventTime() == 5, "joystick axes");
-        pads.joystick(left, false, unhandled, () -> true);
-        axes[20 + 6] = Float.floatToIntBits(0f);
-        MotionEvent centered = FrameworkGamepads.motion(axes);
-        pads.joystick(centered, false, unhandled, () -> true);
-        pads.joystick(left, false, unhandled, () -> true);
-        pads.joystick(centered, true, unhandled, () -> true);  // handled: the held synthetic key is canceled
-        check(codes.apply(sent).equals("KEYCODE_DPAD_LEFT+f KEYCODE_DPAD_LEFT-f KEYCODE_DPAD_LEFT+f KEYCODE_DPAD_LEFT-f")
-                && (sent.get(3).getFlags() & android.view.KeyEvent.FLAG_CANCELED) != 0, "synthetic d-pad: " + codes.apply(sent));
-        left.recycle(); centered.recycle();
+        left.recycle();
         device[4] = 0;
         pads.deviceEvent(device, -1);
         check(changes.size() == 2 && Arrays.equals(changes.get(1), new int[] {-1, 0}) && pads.device(2) == null,

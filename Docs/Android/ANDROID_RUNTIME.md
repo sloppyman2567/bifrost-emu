@@ -1589,19 +1589,23 @@ right doubles it), A is the primary finger and X a second one that stays where i
 app's panel (a fixed-size app's panel, else the window's pixels). The events are the ones a mouse makes (`kMouseFinger` and
 `kMouseSecondFinger`, hover when no finger is down, a drag while A is held), so the app sees ordinary touch. The picture is
 drawn in code (`pad_cursor_bitmap`: a white arrow with a dark outline) into a popup layer above the game, mapped through the
-same letterbox fit, and goes away after four seconds without movement. Its top left is the pointer, so near the right or bottom
+same letterbox fit, and goes away after four seconds without movement. Turning it on, moving it and its taps hide the desktop's
+own pointer, as any pad use does, so only the picture shows whatever pad drives it (a lone Joy-Con's stick is the cursor's
+left stick, so before 2026-11-12 nothing hid the pointer there); mouse motion shows the pointer again. Its top left is the pointer, so near the right or bottom
 edge the picture is cropped to the part inside the panel (`pad_cursor_crop`): a whole-size layer there would hang outside the
 window, and the compositor draws it. B, the d-pad, Y, the shoulders and the right stick
 still reach the game. The first of Start and Select pressed has already gone to the game, so a chord takes it back (the game
 is sent its release) and the rest of both presses is the cursor's; turning the cursor on also releases A and X and centres the
 left stick and the triggers for the game, and turning it off lifts any finger that is down. `make test-android-sdl-backend`
-plays the chord, A, X and the three modes through the real handler with a fake SDL3 (the picture needs a real display and is
-not covered there). Not tried with a real pad. Not done: scrolling with the right stick, and a pointer that follows layers
+plays the chord, A, X, the three modes and the hidden desktop pointer through the real handler with a fake SDL3 (the
+picture needs a real display and is not covered there). Not tried with a real pad. Not done: scrolling with the right stick, and a pointer that follows layers
 created after it.
 
 The op-3 record carries a joystick motion's axes in words 20..27 and a device record as action (word 4), device id
 (6), USB vendor and product (7, 8), controller number (9) and the name (length in 13, bytes from 14).
-`FrameworkGamepads` is the device side the launcher otherwise lacks, read from `android-15.0.0_r1`:
+`FrameworkGamepads` is the device side the launcher otherwise lacks, read from `android-15.0.0_r1`. Its events reach the
+focused window through that window's input channel, like every other event (see
+[input channels](#input-reaches-windows-through-their-input-channels-2026-11-12)):
 
 - `IInputManager.getInputDeviceIds`/`getInputDevice` list each pad beside the virtual keyboard, and
   `registerInputDevicesChangedListener` keeps `InputManagerGlobal`'s listener, which hears the (id, generation)
@@ -1611,21 +1615,25 @@ The op-3 record carries a joystick motion's axes in words 20..27 and a device re
   map of `Generic.kcm` (`FrameworkKeyLayout.GAMEPAD_KEYS`, generated with the virtual keyboard's table). Its motion
   ranges are JoystickInputMapper's normalized ones: sticks -1..1 with the key layout's `flat 4096` (0.125), triggers
   0..1, hats -1..1.
-- A button the app leaves unhandled falls back through that map like `InputDispatcher`
+- A button the window finishes unhandled falls back through that map like `InputDispatcher`
   (`afterKeyEventLockedInterruptable`): B sends `BACK`, A, Start and the stick clicks `DPAD_CENTER`, X `DEL`, Y `SPACE`,
-  Select `MENU`, each with `FLAG_FALLBACK`, released with its button. Mode's `HOME` is withheld: it would leave the app
-  on a device and only confuses the Activity here. Held buttons repeat at `ViewConfiguration`'s key repeat timeout and
-  delay, as `InputDispatcher` repeats trusted keys.
-- A joystick motion goes to `Activity.dispatchGenericMotionEvent`. When nothing handles it, `ViewRootImpl`'s
-  `SyntheticJoystickHandler` is reproduced: the left stick and the hat past ±0.5 send d-pad keys with `FLAG_FALLBACK`,
-  repeating while held and focused; a handled motion cancels a synthetic key still held (`FLAG_CANCELED`).
+  Select `MENU`, each with `FLAG_FALLBACK`, released with its button. The fallback is latched on the initial down and
+  decided when the window's finished signal arrives; a key the app handles after its fallback started cancels it (an up
+  with `FLAG_CANCELED`). Mode's `HOME` is withheld: it would leave the app on a device and only confuses the Activity
+  here. Held buttons repeat at `ViewConfiguration`'s key repeat timeout and delay, as `InputDispatcher` repeats trusted
+  keys.
+- A joystick motion goes to the focused window, as `InputDispatcher` sends non-pointer motion. The window's own
+  `ViewRootImpl` turns motion nothing handled into d-pad keys (`SyntheticJoystickHandler`), and those keys go through
+  its stages again, a taken `InputQueue` included.
 
 Checked: the fake SDL3 (`make test-android-sdl-backend`: mapping, hat, ranges, repeats, unknown devices, focus loss,
 the pointer hidden by a pad and shown by the mouse), the plugin path through `AndroidSurfaceManager`
 (`make test-android-window-plugin`: ids, controller numbers, batching, axis getters, the native queue never seeing
-device records, protocol errors), and `FrameworkGamepads` in the real framework (`MANAGED_GAMEPADS_OK` in
-`ManagedServiceBatch`, both engines: listener pairs, the `InputDevice`, Generic fallbacks, joystick axes, synthetic
-d-pad and cancel). Observed: SDL3 sees the 2026 Steam Controller (Valve `28de:1304`, through its USB puck) with Steam running, and Subway Surfers
+device records, protocol errors), `FrameworkGamepads` in the real framework (`MANAGED_GAMEPADS_OK` in
+`ManagedServiceBatch`, both engines: listener pairs, the `InputDevice`, Generic fallbacks answered at once and later,
+the canceled fallback, joystick axes), and the window path
+(`test_managed_native_activity_gets_its_window_and_input`: a pad's B and its BACK fallback, the hat's synthetic
+d-pad). Observed: SDL3 sees the 2026 Steam Controller (Valve `28de:1304`, through its USB puck) with Steam running, and Subway Surfers
 3.70.3 registered it (`APP_GAMEPAD_ADDED 2 Steam Controller`) and is played with it (maintainer's report, 2026-11-06).
 Other games are not tried with a pad.
 Not implemented: rumble (`InputDevice` vibrators), back paddles, per-game remapping, joystick motion for popup
@@ -2247,10 +2255,10 @@ out and the window is drawn like any other. A base Activity window stacks
 below the dialogs and panels sharing its token, whatever the add order, as
 in WindowManagerService (a dialog shown from `onResume` is added first).
 `IWindowManager.openSession` returns `FrameworkWindows`' `IWindowSession`:
-- `addToDisplay*` registers the window, initializes its input channel pair
-  (ViewRootImpl's receiver requires one), reports size-compat scale 1, display
-  insets and, for sub-windows, the full-screen parent frame, and returns
-  `ADD_FLAG_IN_TOUCH_MODE | ADD_FLAG_APP_VISIBLE`.
+- `addToDisplay*` registers the window, makes its input channel pair (ViewRootImpl
+  reads one end; input is published into the other), reports size-compat scale 1,
+  display insets and, for sub-windows, the full-screen parent frame, and returns
+  `ADD_FLAG_APP_VISIBLE`, with `ADD_FLAG_IN_TOUCH_MODE` while in touch mode.
 - `relayout`/`relayoutLegacy`/`relayoutAsync` compute frames like
   `WindowLayout.computeFrames` without insets (explicit or MATCH_PARENT size,
   else the measured size, then `Gravity.apply`) and report the window's
@@ -2388,23 +2396,49 @@ and never handed the surface over: Family Island stayed blank with `glfw-android
   with a fresh empty `Surface` as ViewRootImpl leaves it. Bifrost draws nothing for such a window (no software layer).
   The taken surface stacks as the window's layer. The log records
   `APP_SURFACE_TAKEN <w>x<h> at <x>,<y> format=<f>` and `APP_SURFACE_DESTROYED taken`.
-- Input (`FrameworkWindows.deliver` and `dispatchKey`): when the target window's `ViewRootImpl` has `mInputQueue`,
-  touches, hover and keys go to `InputQueue.sendInputEvent(event, token, false, callback)` first. They reach the views
-  only when the native code finishes them unhandled, as `ViewRootImpl.NativePostImeInputStage` does. The finished
-  callback runs on the queue's Looper (the window's thread).
+- Input: events go into the window's input channel and `ViewRootImpl` runs its own stages, so a taken `InputQueue` gets
+  keys before the IME (pre-dispatch) and every event after it, and the views get only what the native code finishes
+  unhandled (see [input channels](#input-reaches-windows-through-their-input-channels-2026-11-12)).
 - The managed `libandroid.so` adapter forwards `AInputQueue_*`, `AInputEvent_*`, `AKeyEvent_*` and `AMotionEvent_*`
   to the image's real library (`build-android-adapters.py`), as it already did for `ALooper_*`, `AConfiguration_*`
   and `AChoreographer_*`. Every queue and event in a managed process is the framework's own (NativeActivity's
   `android::InputQueue`, `AMotionEvent_fromJava`). The host thunks for those functions take the native-only path's
   shim handles, so they misread real events; the native-only adapter keeps them.
 
-Limits: joystick and other non-pointer motion (gamepad axes) still goes straight to `activity.dispatchGenericMotionEvent`
-and does not reach the native queue. Gamepad buttons go to the queue like other keys. Touches from a gesture whose
-`ACTION_DOWN` found no window still fall back to `activity.dispatchTouchEvent`, bypassing the queue. A taken surface
-is shown whole: it is not clipped like a SurfaceView video layer. `test_managed_native_activity_gets_its_window_and_input`
-(`ManagedNativeActivity` with `android_native_window_fixture.c`) checks the callback order, a frame drawn with ES2
-and read back, the teardown order, and that native code gets every key and touch while the views get only the
-key it leaves unhandled.
+Limits: a taken surface is shown whole: it is not clipped like a SurfaceView video layer.
+`test_managed_native_activity_gets_its_window_and_input` (`ManagedNativeActivity` with `android_native_window_fixture.c`)
+checks the callback order, a frame drawn with ES2 and read back, the teardown order, and that native code gets every
+key, touch and joystick motion while the views get only what it leaves unhandled. Family Island (Defold) now gets its
+window and renders (2026-11-12, log only: `APP_CMD_INIT_WINDOW`, glfw `window: YES`); its play was not tried.
+
+### Input reaches windows through their input channels (2026-11-12)
+
+`FrameworkWindows` chooses the window as `InputDispatcher` does (touches: the topmost window under the first pointer
+or a modal one; keys and joystick motion: the focused window) and then publishes the event into that window's input
+channel, the server end of the pair made at `addToDisplay`, with the hidden `InputEventSender` (`Channel`, on the
+main Looper). The window's `ViewRootImpl` reads it as it reads `InputDispatcher`'s events and runs its own input stages
+on its own thread ([android-15.0.0_r1 `ViewRootImpl`](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/core/java/android/view/ViewRootImpl.java)):
+a taken `InputQueue` before the IME (keys, pre-dispatch) and after it, the views, focus navigation, and the synthetic
+stage that turns unhandled joystick motion into d-pad keys. Its finished signal says whether the event was handled;
+gamepad fallbacks are decided on it. As in `InputDispatcher`, a key waits until the window has finished every earlier
+event (one may move focus), and a fallback, already targeted at the window, is sent at once ahead of what waits.
+Motion samples sent back to back are batched into one event with history by the window's receiver, as on Android.
+A window removed with events in flight drops them.
+
+The stages now also set touch mode: a key leaves it and a touch enters it (`ViewRootImpl.ensureTouchMode`), through
+`IWindowManager.setInTouchMode`, after which every window is told (`ViewRootImpl.touchModeChanged`) and new windows are
+added in the current mode. Before, input went straight to `View.dispatch*`: a NativeActivity's queue was fed by hand
+after the views' turn was decided, a key never left touch mode, and a pad button's fallback never fired while any window
+had focus (`dispatchKey` reported every key handled).
+
+The launcher compiles against the public SDK, so `Guest/Android/Managed/Stubs/` declares the two hidden classes it names
+(`InputChannel`, `InputEventSender`); they are a source path only (`javac -implicit:none`) and never in the dex.
+Limits: the Activity still gets an event directly when no window takes it (no window focused, or a gesture whose
+`ACTION_DOWN` hit no window), where `InputDispatcher` would drop it. Pointer icons are still resolved by
+`FrameworkCursors` only for hovers no window takes: the host's pointer events are touchscreen events, so `ViewRootImpl`'s
+own `updatePointerIcon` (mouse only) does not run, and an app's icon over its window is not shown (seen in the code, not
+in an app). `test_managed_dialog_and_popup_windows` taps dialog buttons through `ManagedLauncher.dispatch` (one on an
+engine thread, whose click runs there).
 
 ### YUV conversion kernel (2026-10-31)
 

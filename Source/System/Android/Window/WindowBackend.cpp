@@ -1316,12 +1316,6 @@ private:
     auto find = [&](SDL_JoystickID which) {
       return std::find_if(pads_.begin(), pads_.end(), [&](const Pad &pad) { return pad.device == which; });
     };
-    // Playing with a pad hides the pointer, as Steam does; the mouse brings it back. An app's own
-    // hidden pointer (set_cursor) stays hidden either way.
-    auto pad_used = [&]() {
-      if (pad_hid_cursor_ || cursor_hidden_) return;
-      if (sdl_.HideCursor()) pad_hid_cursor_ = true;
-    };
     switch (e.type) {
     case SDL_EVENT_MOUSE_MOTION:
       if (pad_hid_cursor_ && e.motion.windowID == id && e.motion.which != SDL_TOUCH_MOUSEID) {
@@ -1373,7 +1367,7 @@ private:
         const bool negative = e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_LEFT ||
                               e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_UP;
         const float direction = negative ? -1.0f : 1.0f;
-        if (e.gbutton.down) { pad->axes[hat] = direction; pad_used(); }
+        if (e.gbutton.down) { pad->axes[hat] = direction; pad_hides_pointer(); }
         else if (pad->axes[hat] == direction) pad->axes[hat] = 0.0f;
         else return true;
         axes(*pad);
@@ -1384,7 +1378,7 @@ private:
       const uint32_t bit = 1u << e.gbutton.button;
       if (e.gbutton.down == ((pad->held & bit) != 0)) return true;
       pad->held ^= bit;
-      if (e.gbutton.down) pad_used();
+      if (e.gbutton.down) pad_hides_pointer();
       AndroidWindowGamepad payload{};
       payload.kind = BIFROST_GAMEPAD_BUTTON;
       payload.device = pad->device;
@@ -1405,7 +1399,7 @@ private:
       if (slot == value) return true;
       slot = value;
       // Past half way, like ViewRootImpl's d-pad threshold: a resting stick's drift is not play.
-      if (std::fabs(value) >= 0.5f) pad_used();
+      if (std::fabs(value) >= 0.5f) pad_hides_pointer();
       axes(*pad);
       return true;
     }
@@ -1432,6 +1426,12 @@ private:
     default:
       return false;
     }
+  }
+  // Playing with a pad hides the host pointer, as Steam does, and so does the pad cursor (its picture is the pointer then,
+  // whatever pad drives it); the mouse brings it back. An app's own hidden pointer (set_cursor) stays hidden either way.
+  void pad_hides_pointer() {
+    if (pad_hid_cursor_ || cursor_hidden_) return;
+    if (sdl_.HideCursor()) pad_hid_cursor_ = true;
   }
   // The pad cursor's moves: the pointer events a mouse makes (so the app sees ordinary touch), the picture, and a button the
   // game must now see released. The panel it lives in is the fixed size of an app that has one, else the window's pixels.
@@ -1461,6 +1461,7 @@ private:
         event.pressure = down ? 1 : 0;
         pending_.push_back(event);
         cursor_moved_ms_ = time_ms;
+        pad_hides_pointer();
         show_cursor(cursor_.x(), cursor_.y());
         break;
       }
@@ -1475,6 +1476,7 @@ private:
           release_game_button(padbtn::kWest, time_ms);
           center_game_axes(time_ms);
           cursor_moved_ms_ = time_ms;
+          pad_hides_pointer();
           show_cursor(cursor_.x(), cursor_.y());
         } else {
           hide_cursor();

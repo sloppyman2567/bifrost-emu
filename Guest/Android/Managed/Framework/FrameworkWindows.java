@@ -5,10 +5,10 @@
 // (activity_window.c op 9). A fully transparent window, such as an Activity
 // whose SurfaceView punches a hole through all of it, needs no host layer.
 // SurfaceViews in these windows get host surfaces from FrameworkSurfaces.
-// A window whose ViewRootImpl took its surface and input queue (Window.takeSurface and takeInputQueue: NativeActivity)
-// is not drawn here: its app owns the surface, which FrameworkSurfaces.updateTaken provides, and its input goes to that
-// InputQueue first, reaching the views only when the native code leaves it unhandled (ViewRootImpl's native stages).
-// Input goes to the topmost window the way InputDispatcher would deliver it.
+// A window whose ViewRootImpl took its surface (Window.takeSurface: NativeActivity) is not drawn here: its app owns the
+// surface, which FrameworkSurfaces.updateTaken provides.
+// Input goes to the topmost window the way InputDispatcher would deliver it, through the window's input channel
+// (Channel), so ViewRootImpl runs its own input stages, a taken InputQueue included.
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -56,6 +56,7 @@ final class FrameworkWindows {
         final int id;
         WindowManager.LayoutParams attrs;
         Object server;  // android.view.InputChannel (hidden)
+        Channel channel;  // made on first input (channel())
         final Rect frame = new Rect();
         final Rect shown = new Rect();
         final Rect dimShown = new Rect();
@@ -173,8 +174,7 @@ final class FrameworkWindows {
         }
         for (Object out : a) {
             if (CHANNEL.isInstance(out)) {
-                // ViewRootImpl's input receiver requires an initialized channel.
-                // Events are dispatched to the view tree directly (dispatch*).
+                // ViewRootImpl's receiver reads the client end; input is published into the server end (Channel).
                 Object[] pair = (Object[]) CHANNEL.getMethod("openInputChannelPair", String.class)
                         .invoke(null, "bifrost-popup-" + popup.id);
                 popup.server = pair[0];
@@ -194,7 +194,7 @@ final class FrameworkWindows {
                 + " title=" + popup.attrs.getTitle() + " stack=" + stack);  // bottom to top
         updateFocus();
         // WindowManagerService: the flag is set unless the window's Activity is stopped; it is dispatched when that changes.
-        return ADD_FLAG_IN_TOUCH_MODE | (popup.clientVisible ? ADD_FLAG_APP_VISIBLE : 0);
+        return (inTouchMode() ? ADD_FLAG_IN_TOUCH_MODE : 0) | (popup.clientVisible ? ADD_FLAG_APP_VISIBLE : 0);
     }
 
     // Window layers, from WindowManagerPolicy.getWindowLayerFromTypeLw: the types an app can add, application
@@ -349,11 +349,13 @@ final class FrameworkWindows {
 
     private void remove(IBinder token) throws Exception {
         Popup popup;
+        Channel channel;
         synchronized (this) {
             popup = find(token);
             if (popup == null) return;
             popups.remove(popup);
             popup.removed = true;
+            channel = popup.channel;  // none is made once removed is set (channel())
             if (touchTarget == popup) touchTarget = null;
         }
         // ViewRootImpl detaches the tree before removing its window, as
@@ -363,11 +365,23 @@ final class FrameworkWindows {
         popup.observed = null;
         if (popup.onHost) removePopup(popup.id);
         hideDim(popup);
-        if (popup.server != null) CHANNEL.getMethod("dispose").invoke(popup.server);
+        releaseChannel(channel, popup.server);
         if (popup.focused) focus(popup, false);
         if (popup.bitmap != null) popup.bitmap.recycle();
         System.out.println("APP_POPUP_REMOVED " + popup.id);
         updateFocus();
+    }
+
+    // The sender lives on the main Looper; the server end goes after it.
+    private static void releaseChannel(Channel channel, Object server) {
+        Runnable release = () -> {
+            if (channel != null) channel.close();
+            if (server == null) return;
+            try { CHANNEL.getMethod("dispose").invoke(server); }
+            catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
+        };
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) release.run();
+        else new android.os.Handler(android.os.Looper.getMainLooper()).post(release);
     }
 
     private synchronized Popup find(IBinder token) {
@@ -915,7 +929,7 @@ final class FrameworkWindows {
         if (action == MotionEvent.ACTION_HOVER_MOVE || action == MotionEvent.ACTION_HOVER_ENTER
                 || action == MotionEvent.ACTION_HOVER_EXIT) {
             Popup top = hit(event);
-            return top != null && deliver(top, event, true);
+            return top != null && deliver(top, event);
         }
         if (action == MotionEvent.ACTION_DOWN) {
             touchTarget = null;
@@ -932,7 +946,7 @@ final class FrameworkWindows {
                 if ((flags & WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH) != 0) {
                     MotionEvent outside = MotionEvent.obtain(event);
                     outside.setAction(MotionEvent.ACTION_OUTSIDE);
-                    deliver(popup, outside, false);
+                    deliver(popup, outside);
                     outside.recycle();
                 }
             }
@@ -940,7 +954,7 @@ final class FrameworkWindows {
         Popup target = touchTarget;
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) touchTarget = null;
         if (target == null) return false;
-        return deliver(target, event, false);
+        return deliver(target, event);
     }
 
     private Popup hit(MotionEvent event) {
@@ -954,80 +968,165 @@ final class FrameworkWindows {
         return null;
     }
 
-    private static boolean deliver(Popup popup, MotionEvent event, boolean generic) throws Exception {
-        Object viewRoot = viewRoot(popup);
-        View root = root(popup);
-        if (viewRoot == null || root == null) return true;
+    // Touch, hover and ACTION_OUTSIDE for one window: a copy in its own coordinates goes into its input channel.
+    private boolean deliver(Popup popup, MotionEvent event) throws Exception {
+        Channel channel = channel(popup);
+        if (channel == null) return true;  // no input channel, so no input (as under InputDispatcher)
         MotionEvent local = MotionEvent.obtain(event);
         local.offsetLocation(-popup.frame.left, -popup.frame.top);
-        onOwner(viewRoot, () -> {
-            try {
-                // The queue copies the event; the views, if it comes back unhandled, get a copy of their own.
-                MotionEvent later = MotionEvent.obtain(local);
-                if (toInputQueue(viewRoot, local, () -> {
-                    try {
-                        if (generic) root.dispatchGenericMotionEvent(later);
-                        else root.dispatchTouchEvent(later);
-                    } finally {
-                        later.recycle();
-                    }
-                })) return;
-                later.recycle();
-                if (generic) root.dispatchGenericMotionEvent(local);
-                else root.dispatchTouchEvent(local);
-            } finally {
-                local.recycle();
-            }
-        });
+        channel.send(local, null);
         return true;
     }
 
-    // ViewRootImpl's NativePostImeInputStage: a window that took its InputQueue gets the event there first
-    // (sendInputEvent, not pre-dispatched), and the next stage, the views, only when the native code finishes it
-    // unhandled. The callback arrives on the queue's Looper, the window's own thread. Returns false without a queue.
-    private static boolean toInputQueue(Object viewRoot, InputEvent event, Runnable unhandled) {
-        Object queue;
-        try { queue = hiddenField(viewRoot, "mInputQueue"); }
-        catch (Exception error) { throw new IllegalStateException(error); }
-        if (queue == null) return false;
-        Object finished = java.lang.reflect.Proxy.newProxyInstance(FINISHED_CALLBACK.getClassLoader(),
-                new Class<?>[] {FINISHED_CALLBACK}, (self, method, arguments) -> {
-                    if (method.getName().equals("onFinishedInputEvent")) {
-                        if (!(Boolean) arguments[1]) unhandled.run();
-                        return null;
-                    }
-                    if (method.getName().equals("hashCode")) return System.identityHashCode(self);
-                    if (method.getName().equals("equals")) return self == arguments[0];
-                    return "BifrostInputQueueCallback";
-                });
-        try { SEND_INPUT_EVENT.invoke(queue, event, event, false, finished); }
-        catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
-        return true;
+    // Keys go to the focused window; `finished` learns whether it handled them. Returns false when no window has focus:
+    // the Activity gets the key.
+    boolean dispatchKey(KeyEvent event, java.util.function.Consumer<Boolean> finished) throws Exception {
+        return dispatchFocused(event, finished);
     }
 
-    private static final Class<?> FINISHED_CALLBACK;
-    private static final Method SEND_INPUT_EVENT;
-    static {
-        try {
-            FINISHED_CALLBACK = Class.forName("android.view.InputQueue$FinishedInputEventCallback");
-            SEND_INPUT_EVENT = Class.forName("android.view.InputQueue").getMethod("sendInputEvent",
-                    InputEvent.class, Object.class, boolean.class, FINISHED_CALLBACK);
-        } catch (ReflectiveOperationException error) {
-            throw new ExceptionInInitializerError(error);
-        }
+    // Joystick motion (a gamepad's axes) goes to the focused window like keys, as InputDispatcher sends non-pointer
+    // motion. Returns false when no window has focus.
+    boolean dispatchMotion(MotionEvent event) throws Exception {
+        MotionEvent copy = MotionEvent.obtain(event);
+        if (dispatchFocused(copy, null)) return true;
+        copy.recycle();
+        return false;
     }
 
-    // Key delivery to the focused popup. Returns false for the Activity.
-    boolean dispatchKey(KeyEvent event) throws Exception {
+    private boolean dispatchFocused(InputEvent event, java.util.function.Consumer<Boolean> finished) throws Exception {
         Popup top;
         synchronized (this) { top = topFocusable(); }
         if (top == null) return false;
-        Object viewRoot = viewRoot(top);
-        View root = root(top);
-        if (viewRoot != null && root != null) onOwner(viewRoot, () -> {
-            if (!toInputQueue(viewRoot, event, () -> root.dispatchKeyEvent(event))) root.dispatchKeyEvent(event);
-        });
+        Channel channel = channel(top);
+        if (channel != null) {
+            channel.send(event, finished);
+        } else {
+            if (event instanceof MotionEvent) ((MotionEvent) event).recycle();
+            if (finished != null) finished.accept(false);
+        }
         return true;
+    }
+
+    // Made on the play loop's thread (the main Looper), where every event is sent and finished.
+    private Channel channel(Popup popup) {
+        synchronized (this) {
+            if (popup.removed || popup.server == null) return null;
+            if (popup.channel == null) popup.channel = new Channel(popup);
+            return popup.channel;
+        }
+    }
+
+    // InputDispatcher's end of one window's input channel. Events are published into the channel that ViewRootImpl's
+    // receiver reads (InputEventSender), so ViewRootImpl runs its own input stages on the window's thread: a taken
+    // InputQueue (NativeActivity) before and after the IME, the views, then the synthetic stage that turns unhandled
+    // joystick motion into d-pad keys. Its finished signal says whether the event was handled. As in InputDispatcher,
+    // a key waits until every earlier event of the window has finished (one may move focus: the wait happens where
+    // InputDispatcher picks the focused window, findFocusedWindowTargetsLocked), while what a finished callback sends
+    // (a key's fallback, already targeted at this window) goes ahead of the waiting events and is sent at once.
+    private static final class Channel extends android.view.InputEventSender {
+        private static final class Pending {
+            final InputEvent event;
+            final java.util.function.Consumer<Boolean> finished;
+            final boolean targeted;  // a fallback: published without waiting
+            Pending(InputEvent event, java.util.function.Consumer<Boolean> finished, boolean targeted) {
+                this.event = event; this.finished = finished; this.targeted = targeted;
+            }
+        }
+
+        private final Popup popup;
+        private final List<Pending> outbound = new ArrayList<>();
+        private final java.util.Map<Integer, Pending> waiting = new java.util.HashMap<>();
+        private int sequence;
+        private int front = -1;  // while a finished callback runs: where what it sends is queued
+        private boolean closed;
+
+        Channel(Popup popup) {
+            super((android.view.InputChannel) popup.server, android.os.Looper.getMainLooper());
+            this.popup = popup;
+        }
+
+        // Takes the event: a MotionEvent is recycled once it has finished.
+        void send(InputEvent event, java.util.function.Consumer<Boolean> finished) {
+            Pending pending = new Pending(event, finished, front >= 0);
+            if (closed) { done(pending, false); return; }
+            if (front >= 0) outbound.add(front++, pending);
+            else outbound.add(pending);
+            pump();
+        }
+
+        private void pump() {
+            while (!closed && !outbound.isEmpty()) {
+                Pending head = outbound.get(0);
+                if (head.event instanceof KeyEvent && !head.targeted && !waiting.isEmpty()) return;
+                if (++sequence == 0) ++sequence;
+                if (!sendInputEvent(sequence, head.event)) {
+                    if (!waiting.isEmpty()) return;  // the channel is full: the next finished signal makes room
+                    outbound.remove(0);  // nothing is in flight, so the window's end is gone
+                    done(head, false);
+                    continue;
+                }
+                outbound.remove(0);
+                waiting.put(sequence, head);
+            }
+        }
+
+        @Override
+        public void onInputEventFinished(int seq, boolean handled) {
+            Pending pending = waiting.remove(seq);
+            if (pending == null) return;
+            try {
+                front = 0;
+                try { done(pending, handled); } finally { front = -1; }
+                pump();
+            } catch (RuntimeException error) {
+                popup.failure = error;  // thrown by the play loop's next render
+            }
+        }
+
+        private static void done(Pending pending, boolean handled) {
+            if (pending.event instanceof MotionEvent) ((MotionEvent) pending.event).recycle();
+            if (pending.finished != null) pending.finished.accept(handled);
+        }
+
+        // The window is gone: what it never finished is dropped, as InputDispatcher drops a removed window's queue.
+        void close() {
+            if (closed) return;
+            closed = true;
+            dispose();
+            for (Pending pending : outbound) if (pending.event instanceof MotionEvent) ((MotionEvent) pending.event).recycle();
+            for (Pending pending : waiting.values())
+                if (pending.event instanceof MotionEvent) ((MotionEvent) pending.event).recycle();
+            outbound.clear();
+            waiting.clear();
+        }
+    }
+
+    // WindowManagerService's touch mode for the one display. IWindowManager.setInTouchMode comes from the window that
+    // left or entered it (ViewRootImpl.ensureTouchMode, which has switched itself already); InputDispatcher then tells
+    // every window (ViewRootImpl.touchModeChanged, which posts to the window's own thread).
+    private boolean inTouchMode = true;
+    private static final Method TOUCH_MODE_CHANGED = viewRootMethod("touchModeChanged", boolean.class);
+
+    private static Method viewRootMethod(String name, Class<?>... types) {
+        try { return Class.forName("android.view.ViewRootImpl").getMethod(name, types); }
+        catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+    }
+
+    void setInTouchMode(boolean touch) throws Exception {
+        List<Popup> stack;
+        synchronized (this) {
+            if (inTouchMode == touch) return;
+            inTouchMode = touch;
+            stack = new ArrayList<>(popups);
+        }
+        for (Popup popup : stack) {
+            Object viewRoot = viewRoot(popup);
+            if (viewRoot != null) TOUCH_MODE_CHANGED.invoke(viewRoot, touch);
+        }
+    }
+
+    synchronized boolean inTouchMode() {
+        return inTouchMode;
     }
 
     synchronized boolean hasPopups() {

@@ -411,6 +411,24 @@ int main() {
                            "\ngamepad-close 7\ngamepad-quit\ncursor-show\ncursor-destroy " +
                            std::to_string(SDL_SYSTEM_CURSOR_TEXT) + "\ncursor-destroy " +
                            std::to_string(SDL_SYSTEM_CURSOR_POINTER) + "\nwindow-destroy\nvideo-quit\n");
+    // The pad cursor hides the host pointer too, whatever pad drives it (a lone Joy-Con's stick is the cursor's left
+    // stick, so nothing else would): a tap hides it, the mouse shows it, a second finger hides it again.
+    frost::set_pad_cursor_mode(2);
+    setenv("BIFROST_TEST_SDL_BINDING_FAIL", "1", 1);
+    auto pad_pointer = frost::make_sdl_android_window_backend();
+    CHECK(pad_pointer->open("pad pointer", 800, 600) == 0);
+    std::ofstream(log, std::ios::trunc).close();
+    setenv("BIFROST_TEST_SDL_EVENT", "pad:added,a-down,a-up,mouse-move,x-down,x-up", 1);
+    for (int polls = 0; polls < 32; ++polls) {
+      frost::AndroidWindowEvent e{};
+      frost::AndroidWindowGamepad pad{};
+      if (pad_pointer->poll(e) == 1 && e.type == BIFROST_WINDOW_GAMEPAD) pad_pointer->poll_gamepad(pad);
+    }
+    CHECK(contents(log) == "gamepad-open 7\ncursor-hide\ncursor-show\ncursor-hide\n");
+    unsetenv("BIFROST_TEST_SDL_EVENT");
+    unsetenv("BIFROST_TEST_SDL_BINDING_FAIL");
+    pad_pointer.reset();
+    frost::set_pad_cursor_mode(-1);
     // Without gamepad support the window still opens and closes normally.
     setenv("BIFROST_TEST_SDL_GAMEPAD_FAIL", "1", 1);
     auto plain = frost::make_sdl_android_window_backend();

@@ -791,6 +791,12 @@ public final class ManagedLauncher {
         services.register("window", "android.view.IWindowManager", (method, a) -> {
             switch (method) {
                 case "hasNavigationBar": return false;
+                // ViewRootImpl.ensureTouchMode: a key leaves touch mode, a touch enters it (FrameworkWindows tells every window).
+                case "setInTouchMode":
+                case "setInTouchModeOnAllDisplays":
+                    windows.setInTouchMode((Boolean) a[0]);
+                    return null;
+                case "isInTouchMode": return windows.inTouchMode();
                 case "getCurrentAnimatorScale": return 1f;
                 case "getWindowInsets": return displays.windowInsets((Integer) a[0], a[2]);
                 case "attachWindowContextToDisplayArea":
@@ -1601,9 +1607,9 @@ public final class ManagedLauncher {
         if (error != 0 && wanted) System.out.println("APP_TEXT_INPUT_UNAVAILABLE " + error);
     }
 
-    // Converts one op-3 event record (activity_window.c) into a framework
-    // input event and dispatches it like ViewRootImpl's input stages.
-    // Popup windows (FrameworkWindows) above the Activity receive input first.
+    // Converts one op-3 event record (activity_window.c) into a framework input event and hands it to the
+    // window InputDispatcher would choose (FrameworkWindows), whose ViewRootImpl runs its input stages; the
+    // Activity gets it directly only when no window takes it.
     private static void dispatch(Activity activity, long[] e) throws Exception {
         final long ms = 1000000;
         if (e[0] == 1 || e[0] == 2 || e[0] == 0x100) activities.userInput();
@@ -1614,18 +1620,19 @@ public final class ManagedLauncher {
             if (e[4] == 1) inputMethod.commit(text); else inputMethod.compose(text);
             return;
         }
-        FrameworkGamepads.KeyTarget keys = key -> windows.dispatchKey(key) || activity.dispatchKeyEvent(key);
+        FrameworkGamepads.KeyTarget keys = (key, finished) -> {
+            if (!windows.dispatchKey(key, finished)) finished.accept(activity.dispatchKeyEvent(key));
+        };
         if (e[0] == 1) {  // AINPUT_EVENT_TYPE_KEY
             KeyEvent event = new KeyEvent(e[11] / ms, e[12] / ms, (int) e[4],
                     (int) e[8], (int) e[10], (int) e[7], (int) e[6], (int) e[9],
                     (int) e[19], (int) e[5]);
             // A host gamepad's button (enter_key's BUTTON_A is a plain gamepad-source key of device 1).
             if (e[5] == (InputDevice.SOURCE_KEYBOARD | InputDevice.SOURCE_GAMEPAD) && e[6] > 1) gamepads.key(event, keys);
-            else keys.dispatch(event);
+            else keys.dispatch(event, handled -> {});
         } else if (e[0] == 2 && (e[5] & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {  // a gamepad's axes
             MotionEvent event = FrameworkGamepads.motion(e);
-            boolean handled = activity.dispatchGenericMotionEvent(event);
-            gamepads.joystick(event, handled, keys, activity::hasWindowFocus);
+            if (!windows.dispatchMotion(event)) activity.dispatchGenericMotionEvent(event);
             event.recycle();
         } else if (e[0] == 2) {  // AINPUT_EVENT_TYPE_MOTION
             // Pointer 0 is at words 14..18, pointer i > 0 at 15 + 5i: x, y,
@@ -1652,7 +1659,7 @@ public final class ManagedLauncher {
                     if (event.getActionMasked() == MotionEvent.ACTION_HOVER_MOVE)
                         cursors.hover(() -> activity.getWindow().peekDecorView(), event);
                 }
-            } else {
+            } else if (!windows.dispatchMotion(event)) {
                 activity.dispatchGenericMotionEvent(event);
             }
             event.recycle();
