@@ -16,11 +16,13 @@
 #   android_surface    needs SDL3 and a window system
 #   vulkan_texture     needs a window system that can present Vulkan
 #   wayland_bridge, wayland_input   need a Wayland compositor (the second also an input seat)
+# Also not run: xwayland_wire, which needs the real arm64 X11 libraries in the rootfs. No setup script installs them, and
+# CI treats the test as optional too.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT" || exit 1
-KNOWN_SKIPS='^(gles_native_fence|android_surface|vulkan_texture|wayland_bridge|wayland_input)$'
+KNOWN_SKIPS='^(gles_native_fence|android_surface|vulkan_texture|wayland_bridge|wayland_input|xwayland_wire)$'
 
 EMU=./bifrost-emu
 QUICK=0
@@ -70,10 +72,8 @@ stage() {  # NAME COMMAND...
 
 if [ "$PROVISION" = 1 ]; then
     stage musl-toolchain ./Tools/Fetch/fetch-musl-toolchain.sh --bootlin
-    # setup-rootfs-all.sh fetches the glibc toolchain, builds the rootfs and fetches the real-world libraries; it is
-    # skipped once its results are there. Its libraries are what xwayland_wire links against.
-    if [ -x Tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc ] && [ -e rootfs/lib/ld-linux-aarch64.so.1 ] \
-        && [ -e rootfs/usr/lib/libX11.so.6 ]; then
+    # setup-rootfs-all.sh fetches the glibc toolchain and builds the rootfs; it is skipped once its results are there.
+    if [ -x Tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc ] && [ -e rootfs/lib/ld-linux-aarch64.so.1 ]; then
         RESULTS+=("ok      rootfs (already provisioned)")
     else
         stage rootfs ./Scripts/Setup/setup-rootfs-all.sh
@@ -92,9 +92,9 @@ stage generated-check make generated-check
 stage host-api make test-capi test-nb
 # shellcheck disable=SC2086  # the list is words
 stage host-android make $ANDROID_HOST_TESTS
-stage runner-jit ./Scripts/Testing/run_tests.sh --emu "$EMU" --strict
+stage runner-jit ./Scripts/Testing/run_tests.sh --emu "$EMU" --strict --allow-missing '^xwayland_wire$'
 if [ "$QUICK" = 0 ]; then
-    stage runner-interpreter ./Scripts/Testing/run_tests.sh --emu "$EMU" --no-jit --strict
+    stage runner-interpreter ./Scripts/Testing/run_tests.sh --emu "$EMU" --no-jit --strict --allow-missing '^xwayland_wire$'
     stage verify make verify
 fi
 
@@ -113,7 +113,7 @@ for log in "$LOGS"/runner-*.log; do
         if [[ "$test" =~ $KNOWN_SKIPS ]]; then known+=("$name:$test"); else unexpected+=("$name:$test"); fi
     done < <(sed 's/\x1b\[[0-9;]*m//g' "$log" | sed -n -E 's/^[[:space:]]+SKIP[[:space:]]+([^[:space:]]+).*/\1/p')
 done
-[ "${#known[@]}" -eq 0 ] || echo "  Skipped as expected on a machine without a window system or GPU extensions: ${known[*]}"
+[ "${#known[@]}" -eq 0 ] || echo "  Skipped as expected on a fresh machine without a window system or GPU extensions (see Docs/TESTS.md): ${known[*]}"
 if [ "${#unexpected[@]}" -gt 0 ]; then
     echo "  Skipped unexpectedly (a fixture or tool is missing here): ${unexpected[*]}"
 fi

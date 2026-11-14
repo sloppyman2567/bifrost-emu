@@ -100,14 +100,15 @@ make check-fresh                                     # builds, provisions, runs 
 `make check-fresh` builds the emulator, fetches the glibc and musl cross toolchains, the Debian arm64 libraries and programs the
 tests need, builds the rootfs, then runs the host tests, the JIT runner, the interpreter runner and
 `make verify`. A failing stage does not stop the later ones. It ends with a table of stages and the name of every skipped
-test, and exits 1 if a stage failed or a test skipped for a reason other than the five below. Logs are in
+test, and exits 1 if a stage failed or a test skipped for a reason other than the six below. Logs are in
 `build/check-fresh/`. `--quick` runs only the host tests and the JIT runner. Run it a second time and it reuses what it
 fetched.
 
 Five tests skip on a machine without a window system, an input device or a GPU, because they cannot run there:
 `gles_native_fence` (needs an EGL extension that software rendering lacks), `android_surface` (needs SDL3 and a window),
 `vulkan_texture` (needs a window that can present Vulkan) and `wayland_bridge` and `wayland_input` (need a Wayland
-compositor; the second also needs an input seat). Run them on a desktop session. The other GL tests run on any
+compositor; the second also needs an input seat). Run them on a desktop session. A sixth, `xwayland_wire`, is not run
+because it needs the real arm64 X11 libraries in the rootfs, which no setup script installs; CI treats it as optional too. The other GL tests run on any
 machine: with no display the runner uses Mesa's display-less EGL, on the CPU if there is no GPU.
 
 The dnf, zypper and pacman package names in `install-deps.sh --tests` have not been run.

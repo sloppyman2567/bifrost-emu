@@ -57,7 +57,7 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   a summary naming each skipped test. On a new machine: `Scripts/Setup/install-deps.sh --yes --no-asgard --tests`, then
   `make check-fresh`. `install-deps.sh --yes` answers the package manager's questions for scripts. See [the test guide](TESTS.md).
 - With no display, the test runner now uses Mesa's display-less EGL, so six GL tests that skipped on a headless machine run
-  (and pass). Five tests still need a window system or GPU and skip there.
+  (and pass). Five tests still need a window system or GPU and skip there, and `xwayland_wire` is optional (it needs X11 libraries in the rootfs).
 - The apt package names for `--tests` are the ones in use; the dnf, zypper and pacman names are untried.
 
 ### Fixed (instructions that ran differently from a real ARM CPU)
