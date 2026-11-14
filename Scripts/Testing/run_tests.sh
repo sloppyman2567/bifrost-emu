@@ -25,18 +25,19 @@
 #   ./Scripts/Testing/run_tests.sh --allow-missing REGEX # explicit optional fixture exception
 #   ./Scripts/Testing/run_tests.sh --emu PATH   # use an emulator build at PATH
 #
-# Fully provisioned suite (313 selected test runs):
-#   Unit        132  — focused guest and host JIT regressions
-#   Integration  87  — Tests/Apps/*.elf + Tests/Asm/*.elf
-#   Sandbox       2  — BIFROST_ROOT path boundary; rootfs guest startup cwd
-#   Per-thread JIT 1 — cross-thread invalidation without the shared JIT
-#   Toybox        9  — Tests/Apps/toybox subcommands
-#   Real-world   49  — static BusyBox/Toybox commands
-#   Real-world dynamic 7 — glibc binaries; rootfs required
-#   Dynamic      17  — musl/glibc and XWayland tests; rootfs required
-#   Benchmarks    5  — omitted with --quick
-#   Interactive   5  — stdin-driven tests
-# Rootfs-dependent tests require a rootfs; --strict rejects missing fixtures.
+# Categories (the runner prints each one's test count when it starts; the counts change as tests are added):
+#   Unit            focused guest and host JIT regressions
+#   Integration     Tests/Apps/*.elf + Tests/Asm/*.elf
+#   Sandbox         BIFROST_ROOT path boundary; rootfs guest startup cwd
+#   Per-thread JIT  cross-thread invalidation without the shared JIT
+#   Toybox          Tests/Apps/toybox subcommands
+#   Real-world      static BusyBox/Toybox commands
+#   Real-world dynamic  glibc binaries; rootfs required
+#   Dynamic         musl/glibc and XWayland tests; rootfs required
+#   Benchmarks      omitted with --quick
+#   Interactive     stdin-driven tests
+# Rootfs-dependent tests require a rootfs; --strict rejects missing fixtures. On a new machine, make check-fresh
+# provisions everything and runs all of it (Docs/TESTS.md).
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -63,6 +64,13 @@ TIMEOUT=15
 TIMEOUT_LONG=60
 STRICT=0
 ALLOW_MISSING=()
+
+# No display: the GL tests cannot open a window, so they get Mesa's display-less EGL, which renders on a GPU render node
+# when there is one and on the CPU otherwise. Without it they exit 77 (skip) on a headless machine. A session with a
+# display, or an EGL_PLATFORM set by the caller, is left alone.
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${EGL_PLATFORM:-}" ]; then
+    export EGL_PLATFORM=surfaceless
+fi
 
 # Colors (disabled if not a TTY)
 if [ -t 1 ]; then

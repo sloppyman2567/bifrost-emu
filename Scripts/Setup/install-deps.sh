@@ -4,11 +4,13 @@
 # Usage:
 #   ./Scripts/Setup/install-deps.sh                 # what the emulator and Asgard need (or: make deps)
 #   ./Scripts/Setup/install-deps.sh --no-asgard     # only what the emulator needs
+#   ./Scripts/Setup/install-deps.sh --tests         # also what the whole test suite needs (make check-fresh)
+#   ./Scripts/Setup/install-deps.sh --yes           # do not ask the package manager's questions (for scripts and fresh machines)
 #   ./Scripts/Setup/install-deps.sh --dry-run       # print what it would do, install nothing
 #   ./Scripts/Setup/install-deps.sh --manager NAME  # use apt, dnf, zypper or pacman, not the detected one
 #
 # Only packages that are missing are installed, so sudo is needed only then, and the package
-# manager still asks before it changes anything. A package counts as present when its tool or library is
+# manager still asks before it changes anything (unless you give --yes). A package counts as present when its tool or library is
 # found anyway: tools off PATH (debugfs in /usr/sbin, a JDK under /usr/lib/jvm, anything in ~/.local/bin;
 # see find-host-tools.sh) and libraries pkg-config finds (PKG_CONFIG_PATH, or the SDL3 that
 # Tools/Fetch/fetch-sdl3.py builds), so a machine without root can use what it has. Where the
@@ -25,11 +27,15 @@ ROOT=$(cd "$HERE/../.." && pwd)
 export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:+$PKG_CONFIG_PATH:}$ROOT/Tools/sdl3/lib/pkgconfig"
 
 ASGARD=1
+TESTS=0
+YES=0
 DRY_RUN=0
 MANAGER=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-asgard) ASGARD=0 ;;
+        --tests)     TESTS=1 ;;
+        --yes|-y)    YES=1 ;;
         --dry-run)   DRY_RUN=1 ;;
         --manager)   [ $# -ge 2 ] || { echo "--manager needs a name" >&2; exit 2; }
                      MANAGER="$2"; shift ;;
@@ -51,11 +57,13 @@ fi
 # OPTIONAL: left out with a warning where the distribution has no such package.
 OPTIONAL=()
 SDL3_BUILD=()  # what building SDL3 needs where the distribution packages none
+TEST_PACKAGES=()  # with --tests: unpacking the Debian packages the fixtures come from, and a Vulkan driver that runs on a CPU
 case "$MANAGER" in
     apt)
         BUILD=(build-essential pkg-config git python3 curl xz-utils libavcodec-dev libavutil-dev libswscale-dev
                libegl-dev libffi-dev libgl-dev libsdl2-dev libwayland-dev libx11-dev)
         OPTIONAL=(libsdl3-dev)
+        TEST_PACKAGES=(binutils zstd mesa-vulkan-drivers)
         SDL3_BUILD=(cmake libxkbcommon-dev wayland-protocols libwayland-bin libxext-dev libxcursor-dev libxi-dev
                     libxrandr-dev libxfixes-dev libdrm-dev libgbm-dev libudev-dev)
         TOOLS=(clang lld default-jdk-headless e2fsprogs binutils python3-pyqt6)
@@ -65,16 +73,19 @@ case "$MANAGER" in
                mesa-libGL-devel mesa-libEGL-devel libffi-devel wayland-devel libX11-devel
                libavcodec-free-devel libavutil-free-devel libswscale-free-devel)
         TOOLS=(clang lld java-latest-openjdk-devel e2fsprogs binutils python3-pyqt6)
+        TEST_PACKAGES=(binutils zstd mesa-vulkan-drivers)
         ;;
     zypper)
         BUILD=(gcc-c++ make pkgconf-pkg-config git python3 curl xz diffutils SDL3-devel sdl2-compat-devel
                Mesa-libGL-devel Mesa-libEGL-devel libffi-devel wayland-devel libX11-devel
                'pkgconfig(libavcodec)' 'pkgconfig(libavutil)' 'pkgconfig(libswscale)')
         TOOLS=(clang lld java-devel e2fsprogs binutils python3-PyQt6)
+        TEST_PACKAGES=(binutils zstd libvulkan_lvp)
         ;;
     pacman)
         BUILD=(base-devel pkgconf git python curl xz diffutils ffmpeg sdl3 sdl2-compat mesa libglvnd libffi wayland libx11)
         TOOLS=(clang lld jdk-openjdk e2fsprogs binutils python-pyqt6)
+        TEST_PACKAGES=(binutils zstd vulkan-swrast)
         ;;
     "")
         echo "error: no supported package manager found (apt, dnf, zypper or pacman)." >&2
@@ -97,6 +108,7 @@ provides() {
         pkg-config|pkgconf|pkgconf-pkg-config) echo "tool pkg-config" ;;
         python3|python) echo "tool python3" ;;
         xz-utils|xz) echo "tool xz" ;;
+        zstd) echo "tool zstd" ;;
         diffutils) echo "tool diff" ;;
         lld) echo "tool ld.lld" ;;
         e2fsprogs) echo "tool debugfs" ;;
@@ -160,17 +172,19 @@ FOUND_NOTES=()
 if [ "$MANAGER" = apt ]; then
     REFRESH=(apt-get update)
     INSTALL=(apt-get install)
+    [ "$YES" = 0 ] || { INSTALL=(env DEBIAN_FRONTEND=noninteractive apt-get install -y); }
 else
     REFRESH=()
     case "$MANAGER" in
-        dnf)    INSTALL=(dnf install) ;;
-        zypper) INSTALL=(zypper install) ;;
-        pacman) INSTALL=(pacman -S --needed) ;;  # not -Sy: Arch does not support partial upgrades
+        dnf)    INSTALL=(dnf install); [ "$YES" = 0 ] || INSTALL+=(-y) ;;
+        zypper) INSTALL=(zypper install); [ "$YES" = 0 ] || INSTALL=(zypper --non-interactive install) ;;
+        pacman) INSTALL=(pacman -S --needed); [ "$YES" = 0 ] || INSTALL+=(--noconfirm) ;;  # not -Sy: Arch does not support partial upgrades
     esac
 fi
 
 WANTED=("${BUILD[@]}")
 [ "$ASGARD" = 0 ] || WANTED+=("${TOOLS[@]}")
+[ "$TESTS" = 0 ] || WANTED+=("${TEST_PACKAGES[@]}")
 MISSING=()
 for package in "${WANTED[@]}" "${OPTIONAL[@]}"; do
     installed "$package" || MISSING+=("$package")

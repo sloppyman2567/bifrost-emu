@@ -685,10 +685,13 @@ generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlvie
 
 # Local guest-correctness gate: generator drift, host APIs, JIT/interpreter
 # regressions, sandbox coverage, and a focused dynamic-glibc run.
+# Host tests of the Android window and conversion code: no guest, no real window.
+ANDROID_HOST_TESTS := test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-pad-cursor test-android-window-size test-android-window-plugin-cli test-shader-index-conversion
+
 ci: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-pad-cursor test-android-window-size test-android-window-plugin-cli test-shader-index-conversion
+	$(MAKE) $(ANDROID_HOST_TESTS)
 	$(MAKE) verify
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict
 	./Scripts/Testing/run_tests.sh --emu $(TARGET) --unit --quick --strict --no-jit
@@ -703,11 +706,18 @@ ci: setup-tests generated-check $(TARGET)
 check-all: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
 	$(MAKE) test-nb
-	$(MAKE) test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-pad-cursor test-android-window-size test-android-window-plugin-cli test-shader-index-conversion
+	$(MAKE) $(ANDROID_HOST_TESTS)
 	@./Scripts/Setup/setup-rootfs.sh
 	@test -f rootfs/lib/ld-linux-aarch64.so.1 || { echo "error: glibc loader missing from rootfs" >&2; exit 1; }
 	@test -f rootfs/lib/ld-musl-aarch64.so.1 || { echo "error: musl loader missing from rootfs" >&2; exit 1; }
 	@./Scripts/Testing/run_tests.sh --emu $(TARGET) --strict --allow-missing '^(rw_(iperf3_version|coreutils_)|xwayland_wire$$)'
+
+# The whole suite on a machine that only ran Scripts/Setup/install-deps.sh --tests: fetches the toolchains, builds the
+# rootfs and fetches the fixtures first (what check-all leaves to CI's package list), then runs every stage and ends with
+# a summary that names each skipped test. See Docs/TESTS.md.
+.PHONY: check-fresh
+check-fresh: $(TARGET)
+	ANDROID_HOST_TESTS="$(ANDROID_HOST_TESTS)" ./Scripts/Testing/check_fresh.sh --emu "$(TARGET)" $(ARGS)
 
 # Host-side C API test: test_capi.c links libbifrost.a and runs on the
 # HOST (it cannot be cross-compiled as a guest ELF). Builds and runs it.

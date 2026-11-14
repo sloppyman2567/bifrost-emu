@@ -51,6 +51,8 @@ bash Scripts/Testing/run_tests.sh --no-jit --strict
 make verify
 ```
 
+`make check-fresh` runs all of that, and the provisioning it needs, on a new machine (`Docs/TESTS.md`).
+
 Run emulator and test commands with GPU access. Headless builds (`USE_SDL2=0 USE_THUNK_GL=0`) have separate object
 trees and are validated separately. Run the focused regressions for the changed contract, and report missing
 optional fixtures and remaining limitations: a passing build or smoke launch does not establish game playability.

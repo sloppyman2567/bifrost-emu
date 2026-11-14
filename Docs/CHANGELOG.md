@@ -51,6 +51,15 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (run the whole test suite on a fresh machine)
+
+- `make check-fresh` builds the emulator, fetches the toolchains and fixtures the tests need, runs every test stage and prints
+  a summary naming each skipped test. On a new machine: `Scripts/Setup/install-deps.sh --yes --no-asgard --tests`, then
+  `make check-fresh`. `install-deps.sh --yes` answers the package manager's questions for scripts. See [the test guide](TESTS.md).
+- With no display, the test runner now uses Mesa's display-less EGL, so six GL tests that skipped on a headless machine run
+  (and pass). Five tests still need a window system or GPU and skip there.
+- The apt package names for `--tests` are the ones in use; the dnf, zypper and pacman names are untried.
+
 ### Fixed (instructions that ran differently from a real ARM CPU)
 
 - A new script, `Scripts/Testing/sequence_fuzz.py`, runs random instruction sequences under QEMU, the JIT and the interpreter
