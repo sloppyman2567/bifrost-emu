@@ -16,29 +16,19 @@ FP destination 31, single/double precision, aliasing, GPR preservation, and
 discarded FP-to-GPR writes to XZR. It passes under QEMU, JIT, and interpreter;
 see [the vkQuake reproduction](Apps/vkquake.md).
 
-Checked on 2026-11-08 (ASTC through BC7, the swapchain acquire skip, the `/proc/self/pagemap` fix and the crash line): only focused
-checks were run (`test_proc_mem_pagemap` in the JIT, `--no-jit` and natively, `make test-astc-bc7-transcode` at `-O0`/`-O3` and
-under ASan/UBSan, `run_tests.sh --filter vulkan_astc`, the headless `vulkan` and `vulkan_pnext` fixtures, `make generated-check` and
-a build of the site). The full `--strict` suites and `make verify` were not rerun after those changes, and the acquire skip builds
-but has not run in an Android app.
-
-The fully provisioned suite was 377 runs under `run_tests.sh --strict` (2026-11-01) with the JIT and 362 with `--no-jit` (15 tests that exist only in the JIT run are not selected there), in these categories: unit
-(focused guest instruction and JIT regressions and host gates), integration (guest programs in `Tests/Apps/` and
+The runner's categories are: unit (focused guest instruction and JIT regressions and host gates), integration (guest programs in `Tests/Apps/` and
 `Tests/Asm/`), sandbox, per-thread JIT, uncached FP registers (the by-element FP fixtures with `BIFROST_NO_VEC_CACHE=1` and
 `BIFROST_NO_FP_CACHE=1`), interactive (scripted stdin), toybox, real-world static and dynamic programs,
 dynamic linking (musl/glibc and XWayland; needs a rootfs) and benchmarks (omitted by `--quick`). The runner prints
 each category's count when it starts, and `--filter REGEX` runs only the tests whose names match. Without a configured rootfs the
 dynamic runs are not selected; missing guest fixtures and unavailable display or SDL support appear as skips, never as passes.
-Since that count, `jit_ld1r` and the uncached FP registers category added three runs in each mode; without a rootfs the suite
-was 353 runs with the JIT and 337 with `--no-jit` (16 skips) on 2026-11-03. The fully provisioned total was not re-run.
-On 2026-11-06, in a tree that adds `memory_high_gap` (a host `Memory` test for a 16 GiB reservation in a 512 GiB window,
-JIT run only), `--strict` ran 365 tests with the JIT, all passing and none skipped, and 337 with `--no-jit`, all passing, with
-28 JIT-only tests not selected there (15 in the 2026-11-01 count).
-`jit_fcmp_flags` (NZCV after FCMP, FCMPE and FCCMP for every ordering, with branch and cset consumers; it passes under QEMU) adds one more.
-`jit_neon_struct` (LD2-LD4/ST2-ST4: every size, width, register position and post-index form against a reference model that also passes
-under QEMU; page-edge faults; `verify_jit.sh` runs it with `no-fault` and again in full) adds one run in each mode. On 2026-11-07 the
-unit, toybox and real-world categories (no windows, `--quick`) ran 266 tests with the JIT and 240 with `--no-jit` (26 skips), all
-passing, and `make verify` passed; the other categories were not run.
+
+A fully provisioned `run_tests.sh --strict` run on 2026-11-14 (an SDL/GL build, offscreen display, no window tests) ran 402 tests with the JIT, all
+passing, and 374 with `--no-jit`, all passing, with 30 skipped there (the JIT-only tests, and `android_surface` and `vulkan_texture`, which need a
+window). `make verify` and the host tests passed. In the first JIT run `jit_mt_publication` timed out at its 120 s limit, and
+it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bifrost-emu` after a version change, it first
+builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
+`--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
 ### Persistent JIT cache (2026-10-26)
 
@@ -50,7 +40,9 @@ switch (separate fingerprint), `Tests/Unit/jit_disk_cache_relocated.elf` mapping
 0x10000000 and then 0x7000000000 (verify finds the record equal to a fresh compile, the high mapping reuses it;
 the previous distance-based immediate rule failed this), a fourth build whose budget holds about two of the three existing directories
 (older ones pruned, nothing it records dropped) and a group-writable cache directory (cache off, program
-unaffected). It passed 10 runs in a row. It does not cover Android apps, code-cache renewals in a game or
+unaffected). It passed 10 runs in a row when it was written. A Debian 13 run on 2026-11-14 found that the fixture it runs,
+`jit_dispatch_cache_growth.elf`, fails about 1 run in 100 with or without the disk cache (stale code run after an unmap, or a
+segfault), so this test can fail now and then; the cause is open. It does not cover Android apps, code-cache renewals in a game or
 network filesystems; [JIT.md](JIT.md#persistent-translation-cache)
 records the manual checks.
 

@@ -47,6 +47,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Known issue (an intermittent failure in the multithreaded JIT)
+
+- About 1 run in 100 of the test `jit_dispatch_cache_growth` (also run by `jit_disk_cache`) either runs stale code after a page is
+  unmapped or ends in a segfault, with the disk cache on or off. It showed up on a Debian 13 machine and on the development PC. The
+  cause is not found yet; a test run can fail on `jit_disk_cache` now and then. Rerun it, and report it if it fails every time.
+
 ### Fixed (graphics tests skip what the driver cannot do)
 
 - `sdl_gl_mapbuffer` skips its persistent-mapping and immutable-storage checks, and passes the rest, when the driver has no

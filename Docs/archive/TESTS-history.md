@@ -3840,3 +3840,31 @@ fork/exec through Bionic (constructors, TLS, interpreter/vDSO auxv, executable
 path, stack bounds and parent Binder-arena survival). `test-android-window-plugin` checks visibility calls
 and old-descriptor ENOTSUP. These checks do not establish desktop focus,
 Java Runtime.exec/vfork support or game playability.
+
+## Run counts and focused checks before 2026-11-14
+
+Moved out of [the test guide](../TESTS.md) unchanged.
+
+Checked on 2026-11-08 (ASTC through BC7, the swapchain acquire skip, the `/proc/self/pagemap` fix and the crash line): only focused
+checks were run (`test_proc_mem_pagemap` in the JIT, `--no-jit` and natively, `make test-astc-bc7-transcode` at `-O0`/`-O3` and
+under ASan/UBSan, `run_tests.sh --filter vulkan_astc`, the headless `vulkan` and `vulkan_pnext` fixtures, `make generated-check` and
+a build of the site). The full `--strict` suites and `make verify` were not rerun after those changes, and the acquire skip builds
+but has not run in an Android app.
+
+The fully provisioned suite was 377 runs under `run_tests.sh --strict` (2026-11-01) with the JIT and 362 with `--no-jit` (15 tests that exist only in the JIT run are not selected there), in these categories: unit
+(focused guest instruction and JIT regressions and host gates), integration (guest programs in `Tests/Apps/` and
+`Tests/Asm/`), sandbox, per-thread JIT, uncached FP registers (the by-element FP fixtures with `BIFROST_NO_VEC_CACHE=1` and
+`BIFROST_NO_FP_CACHE=1`), interactive (scripted stdin), toybox, real-world static and dynamic programs,
+dynamic linking (musl/glibc and XWayland; needs a rootfs) and benchmarks (omitted by `--quick`). The runner prints
+each category's count when it starts, and `--filter REGEX` runs only the tests whose names match. Without a configured rootfs the
+dynamic runs are not selected; missing guest fixtures and unavailable display or SDL support appear as skips, never as passes.
+Since that count, `jit_ld1r` and the uncached FP registers category added three runs in each mode; without a rootfs the suite
+was 353 runs with the JIT and 337 with `--no-jit` (16 skips) on 2026-11-03. The fully provisioned total was not re-run.
+On 2026-11-06, in a tree that adds `memory_high_gap` (a host `Memory` test for a 16 GiB reservation in a 512 GiB window,
+JIT run only), `--strict` ran 365 tests with the JIT, all passing and none skipped, and 337 with `--no-jit`, all passing, with
+28 JIT-only tests not selected there (15 in the 2026-11-01 count).
+`jit_fcmp_flags` (NZCV after FCMP, FCMPE and FCCMP for every ordering, with branch and cset consumers; it passes under QEMU) adds one more.
+`jit_neon_struct` (LD2-LD4/ST2-ST4: every size, width, register position and post-index form against a reference model that also passes
+under QEMU; page-edge faults; `verify_jit.sh` runs it with `no-fault` and again in full) adds one run in each mode. On 2026-11-07 the
+unit, toybox and real-world categories (no windows, `--quick`) ran 266 tests with the JIT and 240 with `--no-jit` (26 skips), all
+passing, and `make verify` passed; the other categories were not run.
