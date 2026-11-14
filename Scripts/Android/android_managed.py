@@ -366,6 +366,16 @@ def window_mode_environment(environ):
     return {"BIFROST_ANDROID_WINDOW_MODE": mode} if mode else {}
 
 
+def resolution_environment(environ):
+    """The guest variable for the app's Resolution setting (the display's short side in pixels); unset follows the window."""
+    value = environ.get("BIFROST_ANDROID_RESOLUTION")
+    if value in (None, "", "window"):
+        return {}
+    if not re.fullmatch(r"[0-9]{1,5}", value) or not 240 <= int(value) <= 4320:
+        raise ValueError("BIFROST_ANDROID_RESOLUTION must be a short side between 240 and 4320 pixels")
+    return {"BIFROST_ANDROID_RESOLUTION": value}
+
+
 def set_soname(path, soname):
     """Rewrite DT_SONAME in place; the new name must not be longer."""
     data = bytearray(path.read_bytes())
@@ -1336,7 +1346,8 @@ def launch_managed(app, metadata, code, installed_root, emu, no_jit=False,
                                       ROOT / "build/android-framework/rootfs",
                                       ROOT / "build/android-art/rootfs",
                                       ROOT / "build/android-adapters", dex, media_mask)
-        guest_env = dict(guest_env, **network.result(), **window_mode_environment(os.environ))
+        guest_env = dict(guest_env, **network.result(), **window_mode_environment(os.environ),
+                         **resolution_environment(os.environ))
         guest_env["PATH"] = "/system/bin:/apex/com.android.runtime/bin"
         session_preload = {"LD_PRELOAD": "/system/lib64/" + BINDER_ATTACH}
     process_session.update(phase="Optimizing Android app code")

@@ -490,6 +490,29 @@ class LauncherArgumentTests(unittest.TestCase):
         self.assertEqual(len(android_compat.validate(bad, ROOT)), 1)
         self.assertEqual(android_settings.app_defaults("com.serenityforge.dokidokiliteratureclub"), {"window_mode": "keep"})
 
+    def test_the_resolution_setting_reaches_the_host_and_the_guest(self):
+        import android_managed
+        from android_settings import KEYS, launch_changes, parse
+        self.assertIn("resolution", KEYS)
+        self.assertEqual([parse("resolution", x) for x in ("window", "720", "1080", "1440", "2160")],
+                         ["window", "720", "1080", "1440", "2160"])
+        for bad in ("", "1080p", "999", "-1", "Window"):
+            with self.assertRaises(ValueError):
+                parse("resolution", bad)
+        self.assertEqual(launch_changes({"resolution": "window"}), ([], {}))               # following the window adds nothing
+        self.assertEqual(launch_changes({"resolution": "1080"}), ([], {"BIFROST_ANDROID_RESOLUTION": "1080"}))
+        self.assertEqual(android_managed.resolution_environment({}), {})
+        self.assertEqual(android_managed.resolution_environment({"BIFROST_ANDROID_RESOLUTION": "window"}), {})
+        self.assertEqual(android_managed.resolution_environment({"BIFROST_ANDROID_RESOLUTION": "1440"}),
+                         {"BIFROST_ANDROID_RESOLUTION": "1440"})
+        for bad in ("239", "4321", "1080p", "-5", "123456"):
+            with self.assertRaises(ValueError):
+                android_managed.resolution_environment({"BIFROST_ANDROID_RESOLUTION": bad})
+        launcher = (ROOT / "Guest/Android/Managed/ManagedLauncher.java").read_text()
+        self.assertIn('System.getenv("BIFROST_ANDROID_RESOLUTION")', launcher)             # the guest reads the same name
+        backend = (ROOT / "Source/System/Android/Window/WindowBackend.cpp").read_text()
+        self.assertIn('"BIFROST_ANDROID_RESOLUTION"', backend)                              # and so does the host window
+
     def test_the_window_setting_keeps_the_apps_shape_by_default_and_reaches_the_guest(self):
         import android_managed
         from android_settings import KEYS, launch_changes, parse

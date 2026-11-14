@@ -152,6 +152,15 @@ public final class ManagedLauncher {
     private static native int windowMetrics(long[] metrics); // pixel width, height, density dpi
     private static native int systemTheme(); // the desktop's colour scheme: 2 dark, 1 light, 0 unknown
     private static native int fixWindow(int width, int height); // non-resizable app: scale the host window to fit
+
+    // The Resolution setting (BIFROST_ANDROID_RESOLUTION): the short side, in pixels, the app's display is drawn at; 0 follows
+    // the window. The host reads the same variable, so a value it rejects is no setting here either.
+    private static int resolutionSetting() {
+        String text = System.getenv("BIFROST_ANDROID_RESOLUTION");
+        if (text == null || !text.matches("[0-9]{1,5}")) return 0;
+        int value = Integer.parseInt(text);
+        return value >= 240 && value <= 4320 ? value : 0;
+    }
     private static native int orientWindow(int axis);
     private static boolean fixedWindowSize;
     private static int appliedOrientation = Integer.MIN_VALUE;
@@ -1437,7 +1446,6 @@ public final class ManagedLauncher {
             // ActivityThread.updateDefaultDensity: bitmaps an app creates or decodes without a density carry the display's.
             // Without it they get DisplayMetrics.DENSITY_DEVICE (ro.sf.lcd_density, unset here: 160) and an image drawable that
             // scales by density draws them at half size on a 320 dpi window (YouTube's like, dislike and comment icons).
-            Class.forName("android.graphics.Bitmap").getMethod("setDefaultDensity", int.class).invoke(null, (int) metrics[2]);
             // resizeableActivity=false: Android keeps such an app's window at its size and scales it
             // (size compatibility mode) instead of resizing it, so a maximized host window must not
             // grow the app's surface (the game would keep drawing its first, smaller scene in a corner).
@@ -1445,12 +1453,29 @@ public final class ManagedLauncher {
             // (Android reads that as resizable) can draw wrongly in a window of another shape. The default stays
             // resizable, so an app such as YouTube is told the window's shape.
             boolean keepShape = "keep".equals(System.getenv("BIFROST_ANDROID_WINDOW_MODE"));
-            if (keepShape || ActivityInfo.class.getField("resizeMode").getInt(activity) == 0 /* RESIZE_MODE_UNRESIZEABLE */) {
+            // The per-app Resolution setting is a fixed panel too: the app draws at the chosen size and the host scales it
+            // to the window, so an app that keeps the size it started with (Unity) is not left at the first, small window.
+            int resolution = resolutionSetting();
+            if (keepShape || resolution > 0
+                    || ActivityInfo.class.getField("resizeMode").getInt(activity) == 0 /* RESIZE_MODE_UNRESIZEABLE */) {
                 error = fixWindow(width, height);
                 fixedWindow = error == 0;
                 fixedWindowSize = fixedWindow;
                 System.out.println("APP_WINDOW_FIXED " + width + "x" + height + " status=" + error);
+                if (fixedWindow && resolution > 0) {
+                    // The host scaled the panel to that short side; the density follows, so layouts keep their dp sizes.
+                    long[] panel = new long[3];
+                    if (windowMetrics(panel) == 0 && panel[0] > 0 && panel[1] > 0) {
+                        metrics[2] = Math.max(1, Math.round(metrics[2] * (double) Math.min(panel[0], panel[1])
+                                / Math.min(width, height)));
+                        width = (int) panel[0];
+                        height = (int) panel[1];
+                        displays.setMetrics(width, height, (int) metrics[2]);
+                        System.out.println("APP_RESOLUTION " + width + "x" + height + " density=" + metrics[2]);
+                    }
+                }
             }
+            Class.forName("android.graphics.Bitmap").getMethod("setDefaultDensity", int.class).invoke(null, (int) metrics[2]);
             long[] display = new long[2];
             error = displaySize(display);
             if (error != 0) throw new IllegalStateException("host display size: " + error);

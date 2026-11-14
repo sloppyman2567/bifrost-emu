@@ -2568,6 +2568,17 @@ size-only change, which is what the runtime delivers, so the guest's own resize 
 behaves the same was not checked. With `window_mode=keep` Ren'Py never sees a resize and the images stay (user-confirmed
 2026-11-08), so the app's `compatibility.json` entry carries `"settings": {"window_mode": "keep"}` as its built-in default.
 
+#### The Resolution setting (2026-11-14)
+
+A Unity game takes its render size from the display when it starts and keeps it. Umamusume's session logs show the window opening
+at 584x1038 and growing to 778x1384 after its orientation requests, Unity logging "Hardware resolution scaling not supported,
+falling back to software scaling (blit)", and the game's own screenshots at 584x1039 (on 2026-10-23 they were 1384x1440, taken
+when the window was already that size). The per-app `resolution` setting (see [the settings table](ANDROID_APK.md)) gives any app
+a fixed panel of the chosen short side, in the window's shape, so the app draws at that size whatever the window does:
+`ManagedLauncher` takes the `fixWindow` path (as for `window_mode=keep`), re-reads the display, and scales the density by the
+same factor so layouts keep their dp sizes. The host scales the panel to the window like any fixed panel. It does not make an app
+that draws at a lower internal scale sharper.
+
 On a host resize the launcher recomputes the Configuration (`FrameworkDisplay`: `orientation` from the window's width and
 height, `screenWidthDp`, `screenHeightDp`, `smallestScreenWidthDp`), updates the resources, and hands every Activity to
 `FrameworkActivities.configurationChanged`, which relaunches one that does not handle the change (next section).

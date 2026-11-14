@@ -951,7 +951,16 @@ int32_t AndroidSurfaceManager::event_device(uint64_t h, int32_t& vendor, int32_t
 
 int AndroidSurfaceManager::set_fixed_window(int32_t width, int32_t height) {
     if (!window_open_) return -ENODEV;
-    return window_backend_->set_fixed_size(width, height);
+    std::lock_guard<std::mutex> lock(surface_mu_);
+    int error = window_backend_->set_fixed_size(width, height);
+    if (error) return error;
+    // The panel's pixel size is the app's display: its own size, or the Resolution setting's scaling of it.
+    int32_t pixel_w = 0, pixel_h = 0;
+    if (window_backend_->pixel_size(pixel_w, pixel_h) && pixel_w > 0 && pixel_h > 0) {
+        width_ = natural_width_ = pixel_w;
+        height_ = natural_height_ = pixel_h;
+    }
+    return 0;
 }
 
 int AndroidSurfaceManager::set_window_orientation(int32_t axis) {

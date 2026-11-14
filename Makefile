@@ -686,7 +686,7 @@ generated-check: opgen-check nativegen-check opgen-thunk-check wlgen-check wlvie
 # Local guest-correctness gate: generator drift, host APIs, JIT/interpreter
 # regressions, sandbox coverage, and a focused dynamic-glibc run.
 # Host tests of the Android window and conversion code: no guest, no real window.
-ANDROID_HOST_TESTS := test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-pad-cursor test-android-window-size test-android-window-plugin-cli test-shader-index-conversion
+ANDROID_HOST_TESTS := test-android-window-backend test-android-yuv420 test-android-wheel-gestures test-android-pad-cursor test-android-window-size test-android-panel-resolution test-android-window-plugin-cli test-shader-index-conversion
 
 ci: setup-tests generated-check $(TARGET)
 	$(MAKE) test-capi
@@ -798,6 +798,12 @@ test-android-window-size:
 	@mkdir -p $(OBJDIR)
 	$(CXX) $(CXXFLAGS) Tests/Unit/android_window_size.cpp -o $(OBJDIR)/android_window_size
 	./$(OBJDIR)/android_window_size
+
+.PHONY: test-android-panel-resolution
+test-android-panel-resolution:
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) Tests/Unit/android_panel_resolution.cpp -o $(OBJDIR)/android_panel_resolution
+	./$(OBJDIR)/android_panel_resolution
 
 .PHONY: test-android-wheel-gestures
 test-android-wheel-gestures:

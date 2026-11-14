@@ -113,6 +113,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `onConfigurationChanged`; a stopped Activity waits for its restart. A relaunch replaces `Record.activity` and keeps the
   token, results and caller, so never hold an `Activity` across a resize (`activities.root()`, `ManagedLauncher.activityReplaced`).
   `Tests/Host/ManagedRelaunch.java` covers both outcomes.
+- The Resolution setting (`BIFROST_ANDROID_RESOLUTION`, `Window/PanelResolution.hpp`) is a fixed panel scaled to a short side:
+  `ManagedLauncher` takes the `fixWindow` path, and the backend scales the panel in `set_fixed_size` and again when
+  `set_orientation` turns it, so the panel keeps its resolution when an app rotates. `AndroidSurfaceManager::set_fixed_window`
+  refreshes the display size from the backend. The guest and the host both read the variable and reject the same values.
+  `make test-android-panel-resolution` covers the scaling.
 - The `media` provider (`FrameworkMediaStore`, in every app process) models MediaStore's images collection only: an
   inserted, finished picture goes to the supervisor (`publish_media`), which copies it to `~/Pictures/Bifrost/<app>/`.
   Keep the copy as untrusted as the app: below `DCIM/` or `Pictures/` of its shared storage, every folder opened with

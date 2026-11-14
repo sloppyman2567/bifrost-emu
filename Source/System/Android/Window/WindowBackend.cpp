@@ -1,5 +1,6 @@
 #include "System/Android/Window/WindowBackend.hpp"
 #include "System/Android/Window/PadCursor.hpp"
+#include "System/Android/Window/PanelResolution.hpp"
 #include "System/Android/Window/RememberedSize.hpp"
 #include "System/Android/Window/WheelGestures.hpp"
 #include "System/Core/DebugFlags.hpp"
@@ -713,6 +714,7 @@ public:
     if (!window_) return -ENODEV;
     if (w <= 0 || h <= 0) return -EINVAL;
     fixed_w_ = w; fixed_h_ = h;
+    panel_resolution::scale(fixed_w_, fixed_h_, resolution_);  // the Resolution setting: the panel's own pixel size
     // The window is free to take any shape: a compositor tiles it to a half or a corner, and a locked aspect ratio forbids
     // those sizes (a game could then only be maximized or left at its opening size). Nothing is stretched: every layer is
     // scaled by one factor and centred (g_fit, refreshed by update_ratio on each size change), the app is told its panel's
@@ -757,6 +759,7 @@ public:
     }
     if (fixed_w_) {
       fixed_w_ = w; fixed_h_ = h;
+      panel_resolution::scale(fixed_w_, fixed_h_, resolution_);  // the panel keeps its resolution when it turns
       int32_t pixel_w, pixel_h;
       update_ratio(pixel_w, pixel_h);  // refit the layers to the new panel
     }
@@ -865,6 +868,7 @@ public:
       size_path_ = state;
       size_pending_ = remembered_size::load(size_path_, saved_w_, saved_h_);
     }
+    resolution_ = panel_resolution::parse(std::getenv("BIFROST_ANDROID_RESOLUTION"));
     // Gamepads are optional: SDL reports the connected ones as added events.
     gamepads_ready_ = sdl_.InitSubSystem(SDL_INIT_GAMEPAD);
     if (!gamepads_ready_) std::fprintf(stderr, "[android-window] no gamepads: %s\n", sdl_.GetError());
@@ -1862,6 +1866,7 @@ private:
   WaylandBackdrop backdrop_;
   PixelRatio ratio_ = std::make_shared<std::atomic<double>>(1.0);
   int32_t fixed_w_ = 0, fixed_h_ = 0;  // set_fixed_size
+  int32_t resolution_ = 0;  // BIFROST_ANDROID_RESOLUTION: the fixed panel's short side in pixels, 0 follows the window
   int32_t panel_long_ = 0, panel_short_ = 0;  // open()'s size in desktop units
   int32_t area_w_ = INT32_MAX, area_h_ = INT32_MAX;  // work area limits learned from the open clamp
   int32_t orientation_axis_ = 0;

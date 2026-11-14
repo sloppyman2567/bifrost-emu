@@ -47,6 +47,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (a Resolution setting for Android apps)
+
+- Each app has a Resolution setting, in the library's settings and as `asgard config APP resolution 1080` (720, 1080, 1440 or
+  2160). The app draws at that size and the window scales it, so a game that keeps its starting size, such as Umamusume, no longer
+  looks soft after the window grows. It is off by default. Bigger is sharper and slower.
+
 ### Fixed (signing in to Google on a new Asgard folder)
 
 - The first Google sign-in in an Asgard folder closed microG's window with no message, because Android's call for the system's

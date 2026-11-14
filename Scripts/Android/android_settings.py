@@ -29,6 +29,11 @@ CONTROLLERS = (("auto", "Auto: Start+Select for a touch cursor (default)"), ("ga
 # opened at, scaled to the host window and pillarboxed (what Android does for resizeableActivity=false), for a game that
 # draws wrongly in a window of another shape.
 WINDOW_MODES = (("resizable", "Resizable (default)"), ("keep", "Keep the app's shape"))
+# The size the app draws its display at (BIFROST_ANDROID_RESOLUTION): the short side in pixels, so 1080 is 1080x1920 or
+# 1920x1080. The host window scales that panel to its own size. The default follows the window, which is how the app
+# draws at the size it started with when the window grows later (an app such as a Unity game keeps its first size).
+RESOLUTIONS = (("window", "Follow the window (default)"), ("720", "720p"), ("1080", "1080p"), ("1440", "1440p"),
+               ("2160", "2160p (4K)"))
 # auto follows the host's default route; offline blocks all non-loopback IP traffic (BIFROST_ANDROID_OFFLINE=1) and
 # reports no network to Android.
 NETWORKS = ("auto", "offline")
@@ -43,9 +48,10 @@ CHOICES = {"window_stats_mode": tuple(name for name, _ in STATS_MODES),
            "jit_disk_cache": tuple(name for name, _ in JIT_DISK_CACHES),
            "jit_disk_cache_mb": tuple(name for name, _ in JIT_DISK_CACHE_SIZES), "network": NETWORKS,
            "window_mode": tuple(name for name, _ in WINDOW_MODES),
+           "resolution": tuple(name for name, _ in RESOLUTIONS),
            "controller": tuple(name for name, _ in CONTROLLERS)}
 KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "network",
-        "window_mode", "controller", "menu_entry")
+        "window_mode", "resolution", "controller", "menu_entry")
 BOOLEANS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False}
 PROPERTY_PREFIX = "property."
 
@@ -163,6 +169,8 @@ def launch_changes(settings):
         env["BIFROST_ANDROID_OFFLINE"] = "1"
     if "window_mode" in settings:
         env["BIFROST_ANDROID_WINDOW_MODE"] = settings["window_mode"]
+    if settings.get("resolution", "window") != "window":
+        env["BIFROST_ANDROID_RESOLUTION"] = settings["resolution"]
     if "controller" in settings:
         env["BIFROST_ANDROID_CONTROLLER"] = settings["controller"]
     return flags, env
