@@ -27,6 +27,11 @@ it under the guide's Recorded changes.
   gives the new image a fresh JIT (`Emulator::restart_jit_for_exec`, which abandons the old one because
   the caller is still returning through its code buffer). Anything process-wide a JIT starts must be
   re-startable in a fork child. `test_fork_jit`, `test_exec_jit.sh` and `test_exec_mt` cover it.
+- JIT switches are `DebugFlags` members (`Source/System/Core/DebugFlags.hpp`), parsed once from the environment with
+  the variable's name quoted in the parser: the Makefile lists those quoted names into the disk-cache fingerprint
+  (`JitCodegenSwitches.inc`), so a switch must not be read with `getenv` in the JIT or set with `setenv` at run time.
+  The exceptions are `PersistentCache` (its settings arrive from `Main`'s options through the environment) and
+  `FrostJIT::force_rwx_code_buffers` for shared-JIT mode.
 - Preserve aliases and precise fault state. Spill/drop mappings before
   overwriting a live host register. Taken-path emission must not consume dirty
   state needed while emitting the fall-through path. Keep bounds, permissions

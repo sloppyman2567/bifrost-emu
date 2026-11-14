@@ -23,6 +23,7 @@
 #include "FrostJIT/Runtime/SampleProfile.hpp"
 #include <sys/mman.h>
 #include <cerrno>
+#include <atomic>
 #include <cstring>   // memcpy
 #include <cstdlib>   // getenv
 #include <algorithm> // sort
@@ -30,6 +31,10 @@
 #include <map>
 #include <stdexcept>
 namespace arm64emu {
+// Process-wide: set once by enable_jit() in shared-JIT mode, and every JIT built afterwards
+// (renewed and per-thread ones included) takes the writable+executable buffer.
+static std::atomic<bool> g_force_rwx_code{false};
+void FrostJIT::force_rwx_code_buffers() { g_force_rwx_code.store(true, std::memory_order_relaxed); }
 // ── Construction ────────────────────────────────────────────────────────
 FrostJIT::FrostJIT() {
     dispatch_stats_enabled_ = dbg().jit_dispatch_stats;
@@ -41,10 +46,11 @@ FrostJIT::FrostJIT() {
     // from being simultaneously writable and executable, mitigating
     // code-injection attacks via JIT bugs.
     //
-    // We check BIFROST_NO_WEX=1 to disable (for perf-sensitive builds).
+    // BIFROST_NO_WEX=1 disables it (for perf-sensitive builds), and so does
+    // force_rwx_code_buffers() (shared-JIT mode, below).
     // If the initial mprotect to RX fails (some hardened kernels reject
     // PROT_EXEC on anonymous mappings), we fall back to RWX.
-    bool disable_wex = (getenv("BIFROST_NO_WEX") != nullptr);
+    bool disable_wex = dbg().no_wex || g_force_rwx_code.load(std::memory_order_relaxed);
     int initial_prot = disable_wex
         ? (PROT_READ | PROT_WRITE | PROT_EXEC)
         : (PROT_READ | PROT_WRITE);
@@ -100,8 +106,8 @@ FrostJIT::FrostJIT() {
     // against the decomposed codegen on the same machine, and it gives
     // users a workaround if FMA3 codegen has a bug we haven't found yet.
     cpu_features_ = detect_cpu_features();
-    no_fma3_ = (getenv("BIFROST_NO_FMA3") != nullptr);
-    no_avx2_ = (getenv("BIFROST_NO_AVX2") != nullptr);
+    no_fma3_ = dbg().no_fma3;
+    no_avx2_ = dbg().no_avx2;
     init_fault_recovery();
 }
 FrostJIT::~FrostJIT() {

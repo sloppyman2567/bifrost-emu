@@ -44,7 +44,7 @@ extern "C" {
 static void interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
                         arm64emu::InterpretedProfileReason reason) {
     // Cache the env lookup — this runs on every CALL_INTERP fallback.
-    static const bool step_trace_ = (getenv("BIFROST_STEP_TRACE") != nullptr);
+    static const bool step_trace_ = dbg().step_trace;
     if (step_trace_) {
         fprintf(stderr, "    [step] pc=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x24=0x%llx x27=0x%llx pstate=0x%x\n",
                 static_cast<unsigned long long>(cpu->pc),

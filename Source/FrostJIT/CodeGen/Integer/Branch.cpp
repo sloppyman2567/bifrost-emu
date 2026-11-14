@@ -30,7 +30,7 @@ namespace arm64emu {
 // advances it). Flags must be committed before entering this helper: its
 // sentinel/epoch checks overwrite host RFLAGS.
 bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
-    static const bool no_selfloop = getenv("BIFROST_NO_SELFLOOP") != nullptr;
+    static const bool no_selfloop = dbg().no_selfloop;
     if (target_pc != current_start_pc_ || no_selfloop ||
         (mt_active() && dbg().no_chain)) return false;
     has_selfloop_slot_ = true;
@@ -470,7 +470,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // ── Taken path ──
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
-            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+            static bool no_selfloop_ = dbg().no_selfloop;
             bool is_selfloop = (bp.target == current_start_pc_) &&
                 (!mt_active() || !dbg().no_chain);
             // On a self-loop back-edge, skip the pstate materialization

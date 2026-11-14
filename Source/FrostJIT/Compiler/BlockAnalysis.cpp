@@ -58,10 +58,7 @@ bool instr_will_call_interp(const DecodedInst& d) {
             //   0x40 FMA family
             //   0x80 FCSEL
             //   0x100 Scalar 64-bit shift-by-immediate (SHL/USHR/SSHR Dd,Dn,#imm)
-            static int fp_gate = [] {
-                const char* s = getenv("BIFROST_FP_NATIVE_GATE");
-                return s ? static_cast<int>(strtol(s, nullptr, 0)) : -1;  // -1 = all native
-            }();
+            static const int fp_gate = dbg().fp_native_gate;  // -1 = all native
             // NOTE on polarity: `native` means "the IR translator handles
             // this op natively" so we must predict NO interp call. The
             // return is therefore `fp_gate >= 0 && !(fp_gate & bit)`:

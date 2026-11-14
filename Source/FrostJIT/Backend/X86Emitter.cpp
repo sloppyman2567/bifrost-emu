@@ -22,6 +22,7 @@
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/Emulator.hpp"  // Emulator complete type (for slow-path helpers)
+#include "System/Core/DebugFlags.hpp"
 #include "System/Core/ExclusiveMonitor.hpp"
 #include <algorithm>
 #include <atomic>
@@ -577,7 +578,7 @@ extern "C" {
             return 0;  // cpu->running is now false (or handler installed)
         }
         // Cache the env lookup — this runs on every JIT slow-path memory access.
-        static const bool mem_trace_ = (getenv("BIFROST_MEM_TRACE") != nullptr);
+        static const bool mem_trace_ = dbg().mem_trace;
         if (mem_trace_) {
             fprintf(stderr, "    [load] addr=0x%llx w=%d → 0x%llx\n",
                     static_cast<unsigned long long>(addr), width, static_cast<unsigned long long>(val));
@@ -612,7 +613,7 @@ extern "C" {
         }
     }
     void jit_store_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
-        static const bool mem_trace_ = (getenv("BIFROST_MEM_TRACE") != nullptr);
+        static const bool mem_trace_ = dbg().mem_trace;
         if (mem_trace_) {
             fprintf(stderr, "    [store] addr=0x%llx val=0x%llx w=%d\n",
                     static_cast<unsigned long long>(addr), static_cast<unsigned long long>(val), width);
@@ -846,7 +847,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w, boo
     // BIFROST_JIT_SLOW_STORES=1: route EVERY store through the C slow path
     // (jit_store_mem_slow → Memory::write) so BIFROST_WATCH can observe JIT
     // stores with a pc (diagnostic; very slow).
-    static const bool slow_stores_ = getenv("BIFROST_JIT_SLOW_STORES") != nullptr;
+    static const bool slow_stores_ = dbg().jit_slow_stores;
     size_t jbe_patch = 0;
     if (!slow_stores_ && !memory_fault_stub_) {
         // Limit check: idx <= window_size - w (the slow helper checks the rest).

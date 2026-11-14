@@ -1,5 +1,6 @@
 // Resolve store footprints for differential replay without changing guest state.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
+#include "System/Core/DebugFlags.hpp"
 #include <cstdio>
 #include <cstdlib>
 namespace arm64emu {
@@ -142,7 +143,7 @@ void FrostJIT::record_verification_stores(const IRBlock& ir_block, uint64_t star
                 }
                 if (!resolvable) {
                     if (!has_call_like) entry.has_unresolved_store = true;
-                    static bool trace_simdst16_ = (getenv("BIFROST_TRACE_SIMDST16") != nullptr);
+                    static bool trace_simdst16_ = dbg().trace_simdst16;
                     if (trace_simdst16_) {
                         const St16Params sp = inst.st16_params();
                         fprintf(stderr, "[SIMDST16] block @ 0x%llx: UNTRACKED SIMD_ST16 src2=%d flags_op=%u imm=%lld\n",

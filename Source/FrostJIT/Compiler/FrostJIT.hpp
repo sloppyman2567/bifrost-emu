@@ -146,6 +146,10 @@ class FrostJIT {
 public:
     FrostJIT();
     ~FrostJIT();
+    // Every FrostJIT constructed from now on allocates its code buffer RWX, as
+    // BIFROST_NO_WEX=1 does. Process-wide and permanent: Emulator::enable_jit()
+    // calls it in shared-JIT mode, where threads run JIT code while another translates.
+    static void force_rwx_code_buffers();
     FrostJIT(const FrostJIT&) = delete;
     FrostJIT& operator=(const FrostJIT&) = delete;
     void set_direct_window(uint8_t* base, const Memory* mem = nullptr) {
@@ -1059,11 +1063,10 @@ private:
     // from within translate_block without prematurely toggling the buffer
     // to RX while translate_block is still emitting code.
     //
-    // Disabled if BIFROST_NO_WEX=1 is set in the environment (for
-    // performance-sensitive builds where the security tradeoff is
-    // acceptable). On systems where mprotect fails (e.g., some hardened
-    // kernels), W^X is automatically disabled and the buffer falls back
-    // to RWX.
+    // Disabled by BIFROST_NO_WEX=1 (for performance-sensitive builds where
+    // the security tradeoff is acceptable) or force_rwx_code_buffers(). On
+    // systems where mprotect fails (e.g., some hardened kernels), W^X is
+    // automatically disabled and the buffer falls back to RWX.
     bool     wex_enabled_ = false;
     int      wex_write_depth_ = 0;  // >0 means buffer is currently writable
     void make_writable();   // mprotect(code_buf_, RW) — call before writes

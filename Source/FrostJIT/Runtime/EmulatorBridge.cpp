@@ -154,8 +154,8 @@ void Emulator::enable_jit() {
     // (not W^X) so translation (writes) and execution (reads/exec) can
     // happen concurrently. W^X would toggle mprotect on the WHOLE buffer,
     // crashing any thread executing JIT code.
-    // We force-disable W^X by setting BIFROST_NO_WEX before the FrostJIT
-    // constructor runs (it checks the env var at construction).
+    // We force-disable W^X before the FrostJIT constructor runs
+    // (FrostJIT::force_rwx_code_buffers; it applies to every later JIT too).
     // Opt out via BIFROST_NO_SHARED_JIT=1 for per-thread JIT (lock-free,
     // W^X-protected, but 64 MiB per thread).
     // Security tradeoff: acceptable — the emulator is a single-process
@@ -164,11 +164,11 @@ void Emulator::enable_jit() {
     static bool shared_jit_checked = false;
     static bool shared_jit_mode = false;
     if (!shared_jit_checked) {
-        shared_jit_mode = (getenv("BIFROST_NO_SHARED_JIT") == nullptr);
+        shared_jit_mode = !dbg().no_shared_jit;
         shared_jit_checked = true;
     }
     if (shared_jit_mode) {
-        setenv("BIFROST_NO_WEX", "1", 1);
+        FrostJIT::force_rwx_code_buffers();
     }
     jit_shared_mode_ = shared_jit_mode;
     jit_.add(std::make_unique<FrostJIT>());
@@ -282,7 +282,7 @@ void Emulator::print_jit_stats() {
         fprintf(stderr, "[%s] frostJIT: avg %.1f instructions/block\n",
                 CODENAME, avg);
     }
-    if (getenv("BIFROST_BLOCK_PROF")) {
+    if (dbg().block_prof) {
         auto& bp = jit_->block_profile;
         fprintf(stderr, "[%s] frostJIT block-end reasons: "
                 "natural_branch=%llu entry_point=%llu call_interp_cap=%llu "
@@ -327,7 +327,7 @@ void Emulator::dump_prof_snapshot() {
     }
     // Where the JIT samples fell: thread, and entry/body/exit/cold of the block. BIFROST_PC_HIST=1 also lists the hottest
     // guest blocks (map a pc to a function with aarch64 objdump). Gated separately so the default run stays short.
-    static const bool pc_hist = (getenv("BIFROST_PC_HIST") != nullptr);
+    static const bool pc_hist = dbg().pc_hist;
     prof_print(stderr, prof_collect(pc_hist ? 20 : 0), pc_hist);
 }
 // Periodic real-guest-throughput + block-structure reporter. The old
@@ -468,7 +468,7 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     // the interpreter (bisection gate — confirms corruption originates in a
     // callee block, which jit_call_helper dispatches WITHOUT the run_block
     // verify path, so MEMFULL never sees those blocks).
-    static const bool interp_bl_call_ = (getenv("BIFROST_INTERP_BL_CALL") != nullptr);
+    static const bool interp_bl_call_ = dbg().interp_bl_call;
     // Starts on the instance whose code called this helper; once that instance is retired the
     // loop moves to the current one (below), so a long callee does not interpret forever.
     auto* jit = FrostJIT::running(*emu);

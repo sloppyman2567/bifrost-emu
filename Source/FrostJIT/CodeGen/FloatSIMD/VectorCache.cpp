@@ -11,6 +11,7 @@
 // Precise exits and NaN recovery publish the actual layout at that point.
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "FrostJIT/CodeGen/Native/NativeSIMD.hpp"
+#include "System/Core/DebugFlags.hpp"
 namespace arm64emu {
 
 // ── Cache enablement pre-scan ──────────────────────────────────────────
@@ -212,7 +213,7 @@ bool FrostJIT::vec_inst_effects(const IRInst& inst, VectorEffects& effects) cons
 }
 
 bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
-    static const bool no_vec_cache = getenv("BIFROST_NO_VEC_CACHE") != nullptr;
+    static const bool no_vec_cache = dbg().no_vec_cache;
     if (no_vec_cache || !has_fma3()) return false;
     uint32_t used = 0, written = 0;
     unsigned uses[32] = {};
@@ -549,7 +550,7 @@ static inline void fp_touch(uint8_t r, int (&use)[32]) {
 }
 
 bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
-    static const bool no_fp_cache_ = (getenv("BIFROST_NO_FP_CACHE") != nullptr);
+    static const bool no_fp_cache_ = dbg().no_fp_cache;
     if (no_fp_cache_) return false;
     if (!has_fma3()) return false;
     int fp_use[32] = {};

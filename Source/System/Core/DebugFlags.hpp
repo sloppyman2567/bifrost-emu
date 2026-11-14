@@ -63,6 +63,50 @@ struct DebugFlags {
     uint64_t jit_memfull_end = 0x14000000ULL;  // BIFROST_MEMFULL_END: end (exclusive) of that range
     bool verify_untracked = false;  // BIFROST_VERIFY_UNTRACKED: also verify blocks with unresolved stores
     bool verify_trace = false;  // BIFROST_VERIFY_TRACE: print each verified block's entry state
+    // ── JIT toggles and diagnostics (presence of the variable turns each on) ──
+    bool no_selfloop = false;  // BIFROST_NO_SELFLOOP: keep self-loop blocks as ordinary blocks (no pinned loop body)
+    bool no_vec_cache = false;  // BIFROST_NO_VEC_CACHE: no cached vector registers across instructions (A/B control)
+    bool no_fp_cache = false;  // BIFROST_NO_FP_CACHE: no cached scalar FP registers across instructions (A/B control)
+    bool step_trace = false;  // BIFROST_STEP_TRACE: trace the interpreter steps the JIT bridge takes
+    bool no_shared_jit = false;  // BIFROST_NO_SHARED_JIT: one JIT per thread instead of one shared instance
+    bool block_prof = false;  // BIFROST_BLOCK_PROF: print the block-end reason counters at exit
+    bool pc_hist = false;  // BIFROST_PC_HIST: histogram of the guest pcs the JIT bridge runs
+    bool interp_bl_call = false;  // BIFROST_INTERP_BL_CALL: run BL through the interpreter bridge
+    bool hot_interp = false;  // BIFROST_HOT_INTERP: demote hot blocks that mostly call the interpreter
+    bool jit_trace = false;  // BIFROST_JIT_TRACE: trace each block dispatch
+    bool no_callregion = false;  // BIFROST_NO_CALLREGION: Tier-2 regions do not run through calls
+    bool no_opt = false;  // BIFROST_NO_OPT: skip the IR optimizer (Tier-1 and Tier-2)
+    bool no_fma3 = false;  // BIFROST_NO_FMA3: decomposed FMA codegen even on FMA3 CPUs
+    bool no_avx2 = false;  // BIFROST_NO_AVX2: no AVX2 codegen even on AVX2 CPUs
+    bool trace_simdst16 = false;  // BIFROST_TRACE_SIMDST16: trace 16-byte vector stores recorded for replay
+    bool mem_trace = false;  // BIFROST_MEM_TRACE: trace each memory access the JIT emits
+    bool jit_slow_stores = false;  // BIFROST_JIT_SLOW_STORES: route every store through the slow path (BIFROST_WATCH sees JIT stores)
+    bool regalloc_check = false;  // BIFROST_REGALLOC_CHECK: vreg bounds checks in release builds
+    bool no_bl_call = false;  // BIFROST_NO_BL_CALL: BL ends the block instead of calling the target
+    bool no_blr_call = false;  // BIFROST_NO_BLR_CALL: BLR ends the block instead of calling the target
+    bool enable_leaf_inline = false;  // BIFROST_ENABLE_LEAF_INLINE: inline leaf callees into the calling block
+    bool debug_inline = false;  // BIFROST_DEBUG_INLINE: log leaf-inlining decisions
+    bool malloc_interp = false;  // BIFROST_MALLOC_INTERP: run the allocator entry points through the interpreter
+    bool class_prof = false;  // BIFROST_CLASS_PROF: instruction-class counts for blocks that fall back to the interpreter
+    bool jit_dump = false;  // BIFROST_JIT_DUMP: dump the IR of every compiled block
+    bool no_pin = false;  // BIFROST_NO_PIN: no pinned host registers in loops
+    bool no_rdce = false;  // BIFROST_NO_RDCE: Tier-2 planner: no redundant-store elimination
+    bool no_licm = false;  // BIFROST_NO_LICM: Tier-2 planner: no loop-invariant hoisting
+    bool no_destsrc = false;  // BIFROST_NO_DESTSRC: Tier-2 planner: no destination-as-source reuse
+    bool no_keepres = false;  // BIFROST_NO_KEEPRES: Tier-2: no resident registers across the loop back-edge
+    bool no_exitchain = false;  // BIFROST_NO_EXITCHAIN: Tier-2: region exits do not chain
+    bool t2_regiondump = false;  // BIFROST_T2_REGIONDUMP: hexdump each published Tier-2 region
+    bool no_chain_skip = false;  // BIFROST_NO_CHAIN_SKIP: chain edges do not skip the frame teardown and prologue
+    bool no_direct_call = false;  // BIFROST_NO_DIRECT_CALL: BL sites call through the helper, not a patched direct call
+    bool no_fwd = false;  // BIFROST_NO_FWD: skip load/store forwarding in the optimizer
+    bool no_dse = false;  // BIFROST_NO_DSE: skip dead-store elimination in the optimizer
+    bool no_wex = false;  // BIFROST_NO_WEX: allocate the code buffer writable and executable (no W^X toggling)
+    bool dbg_pc_set = false;  // BIFROST_DBG_PC=addr: print the entry and exit state of the block at addr
+    uint64_t dbg_pc = 0;
+    uint64_t dump_pc = 0;  // BIFROST_DUMP_PC=addr: BIFROST_JIT_DUMP only dumps the block at addr (0 = all)
+    bool tier2_hits_fixed = false;  // BIFROST_TIER2_HITS=N: Tier-2 candidates need N entries and skip the rate gate
+    uint32_t tier2_hits = 1000;
+    int fp_native_gate = -1;  // BIFROST_FP_NATIVE_GATE=mask: FP op classes the translator handles natively (-1 = all)
     bool no_ssa = false; // BIFROST_NO_SSA — compare with the legacy scalar IR pipeline
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;  // [lo, hi) guest pcs
@@ -247,6 +291,50 @@ struct DebugFlags {
         if (const char* end = std::getenv("BIFROST_MEMFULL_END")) f.jit_memfull_end = std::strtoull(end, nullptr, 0);
         f.verify_untracked = env("BIFROST_VERIFY_UNTRACKED");
         f.verify_trace = env("BIFROST_VERIFY_TRACE");
+        f.no_selfloop = env("BIFROST_NO_SELFLOOP");
+        f.no_vec_cache = env("BIFROST_NO_VEC_CACHE");
+        f.no_fp_cache = env("BIFROST_NO_FP_CACHE");
+        f.step_trace = env("BIFROST_STEP_TRACE");
+        f.no_shared_jit = env("BIFROST_NO_SHARED_JIT");
+        f.block_prof = env("BIFROST_BLOCK_PROF");
+        f.pc_hist = env("BIFROST_PC_HIST");
+        f.interp_bl_call = env("BIFROST_INTERP_BL_CALL");
+        f.hot_interp = env("BIFROST_HOT_INTERP");
+        f.jit_trace = env("BIFROST_JIT_TRACE");
+        f.no_callregion = env("BIFROST_NO_CALLREGION");
+        f.no_opt = env("BIFROST_NO_OPT");
+        f.no_fma3 = env("BIFROST_NO_FMA3");
+        f.no_avx2 = env("BIFROST_NO_AVX2");
+        f.trace_simdst16 = env("BIFROST_TRACE_SIMDST16");
+        f.mem_trace = env("BIFROST_MEM_TRACE");
+        f.jit_slow_stores = env("BIFROST_JIT_SLOW_STORES");
+        f.regalloc_check = env("BIFROST_REGALLOC_CHECK");
+        f.no_bl_call = env("BIFROST_NO_BL_CALL");
+        f.no_blr_call = env("BIFROST_NO_BLR_CALL");
+        f.enable_leaf_inline = env("BIFROST_ENABLE_LEAF_INLINE");
+        f.debug_inline = env("BIFROST_DEBUG_INLINE");
+        f.malloc_interp = env("BIFROST_MALLOC_INTERP");
+        f.class_prof = env("BIFROST_CLASS_PROF");
+        f.jit_dump = env("BIFROST_JIT_DUMP");
+        f.no_pin = env("BIFROST_NO_PIN");
+        f.no_rdce = env("BIFROST_NO_RDCE");
+        f.no_licm = env("BIFROST_NO_LICM");
+        f.no_destsrc = env("BIFROST_NO_DESTSRC");
+        f.no_keepres = env("BIFROST_NO_KEEPRES");
+        f.no_exitchain = env("BIFROST_NO_EXITCHAIN");
+        f.t2_regiondump = env("BIFROST_T2_REGIONDUMP");
+        f.no_chain_skip = env("BIFROST_NO_CHAIN_SKIP");
+        f.no_direct_call = env("BIFROST_NO_DIRECT_CALL");
+        f.no_fwd = env("BIFROST_NO_FWD");
+        f.no_dse = env("BIFROST_NO_DSE");
+        f.no_wex = env("BIFROST_NO_WEX");
+        if (const char* pc = std::getenv("BIFROST_DBG_PC")) { f.dbg_pc_set = true; f.dbg_pc = std::strtoull(pc, nullptr, 0); }
+        if (const char* pc = std::getenv("BIFROST_DUMP_PC")) f.dump_pc = std::strtoull(pc, nullptr, 0);
+        if (const char* hits = std::getenv("BIFROST_TIER2_HITS")) {
+            f.tier2_hits_fixed = true;
+            f.tier2_hits = static_cast<uint32_t>(std::strtoul(hits, nullptr, 10));
+        }
+        if (const char* gate = std::getenv("BIFROST_FP_NATIVE_GATE")) f.fp_native_gate = static_cast<int>(std::strtol(gate, nullptr, 0));
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.audio_trace = all || env("BIFROST_AUDIO_TRACE");
         if (const char* dump = std::getenv("BIFROST_AUDIO_DUMP")) {

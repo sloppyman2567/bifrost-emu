@@ -83,7 +83,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc, size_t site) {
         // on thousands of blocks, and trials for them filled the 32 MiB budget.
         // Time a second window, and compile only heads doing real work per
         // second. BIFROST_TIER2_HITS asks for a fixed count and skips this.
-        static const bool rate_gate = !getenv("BIFROST_TIER2_HITS");
+        static const bool rate_gate = !dbg().tier2_hits_fixed;
         if (rate_gate) {
             const auto counter = hot_counter_sites_.find(site);
             if (counter == hot_counter_sites_.end()) return;

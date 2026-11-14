@@ -178,7 +178,7 @@ static inline bool regalloc_check_enabled() {
 #ifndef NDEBUG
     return true;
 #else
-    static bool enabled = (getenv("BIFROST_REGALLOC_CHECK") != nullptr);
+    static bool enabled = dbg().regalloc_check;
     return enabled;
 #endif
 }

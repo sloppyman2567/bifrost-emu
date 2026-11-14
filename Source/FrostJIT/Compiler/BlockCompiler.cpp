@@ -84,8 +84,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // Bisection gates: BIFROST_NO_BL_CALL / BIFROST_NO_BLR_CALL disable the
     // native call-within-block for that form only (BL/BLR falls back to a
     // plain block-end dispatch, or CALL_INTERP for BLR).
-    static const bool no_bl_call_ = (getenv("BIFROST_NO_BL_CALL") != nullptr);
-    static const bool no_blr_call_ = (getenv("BIFROST_NO_BLR_CALL") != nullptr);
+    static const bool no_bl_call_ = dbg().no_bl_call;
+    static const bool no_blr_call_ = dbg().no_blr_call;
     bl_call_disabled_ = bl_call_disabled_ || no_bl_call_;
     blr_call_disabled_ = no_blr_call_;
     // Persistent cache (CacheRecording.cpp): reuse a translation an earlier
@@ -212,7 +212,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // next_pc/verify/interp_only accounting), so it stays available for a
     // future regalloc change that can run the leaf with a fresh register
     // context.
-    static const bool leaf_inline_enabled_ = (getenv("BIFROST_ENABLE_LEAF_INLINE") != nullptr);
+    static const bool leaf_inline_enabled_ = dbg().enable_leaf_inline;
     bool has_inlined_leaf = false;  // cannot use contiguous interpreter step counts
     bool has_brcond_skip = false;   // blocks with BRCOND_SKIP skip optimize_ir (op-count stability)
     uint64_t loop_tail_end = 0;
@@ -266,7 +266,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
         if (d.cls == InstClass::BL && leaf_inline_enabled_ && !bl_call_disabled_) {
             uint64_t target = cur_pc + static_cast<uint64_t>(d.imm);
             jit_analysis::LeafScanResult scan = jit_analysis::leaf_scan(emu, target);
-            if (getenv("BIFROST_DEBUG_INLINE")) {
+            if (dbg().debug_inline) {
                 fprintf(stderr, "[leaf] pc=0x%llx bl->0x%llx scan.size=%d has_branch=%d\n",
                         (unsigned long long)cur_pc, (unsigned long long)target,
                         scan.size, (int)scan.has_branch);
@@ -338,14 +338,14 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
                     has_inlined_leaf = true;
                     inlined_ranges_.emplace_back(target, leaf_count);
                     block_profile.leaf_inlined++;
-                    if (getenv("BIFROST_DEBUG_INLINE"))
+                    if (dbg().debug_inline)
                         fprintf(stderr, "[leaf] INLINED bl@0x%llx -> 0x%llx (%d instrs)\n",
                                 (unsigned long long)cur_pc, (unsigned long long)target,
                                 leaf_count);
                     cur_pc += 4;  // caller continuation after the BL
                     continue;
                 }
-                if (getenv("BIFROST_DEBUG_INLINE"))
+                if (dbg().debug_inline)
                     fprintf(stderr, "[leaf] REJECTED bl@0x%llx -> 0x%llx leaf_ok=%d count=%d/%d\n",
                             (unsigned long long)cur_pc, (unsigned long long)target,
                             (int)leaf_ok, leaf_count, scan.size);
@@ -394,7 +394,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // corrupting the heap). Blocks inside glibc's allocator hot region
     // run via the interpreter, which is the correct baseline. The region
     // is matched by name + file offset so it survives ASLR.
-    static const bool qt_quarantine_ = (getenv("BIFROST_MALLOC_INTERP") != nullptr);
+    static const bool qt_quarantine_ = dbg().malloc_interp;
     if (qt_quarantine_) {
         if (emu.dyn_linker()) {
             uint64_t off = emu.dyn_linker()->object_relative_offset(start_pc, "libc");
@@ -468,7 +468,7 @@ if (!has_inlined_leaf) {
     demote_interp = actual_call_interp > 0 && actual_call_interp * 2 > instr_count;
 }
 if (demote_interp) {
-        if (getenv("BIFROST_CLASS_PROF")) {
+        if (dbg().class_prof) {
             static uint64_t dump_ct = 0;
             if (++dump_ct <= 300) {
                 std::string cls_list;
@@ -540,18 +540,15 @@ if (demote_interp) {
     // invalidate the region's op count stored in the BRCOND_SKIP imm (the
     // compile-loop fixup target is an IR op index). The inlined bodies are
     // already tight native FP/GPR code; skipping the pass costs little.
-    static bool no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
+    static bool no_opt_ = dbg().no_opt;
     if (!no_opt_ && !has_brcond_skip) optimize_ir(ir_block);
     // Per-op IR parameter contract check (only migrated ops; see IR.hpp).
     // Validates what codegen is about to consume, after the optimizer.
     if (dbg().ir_validate) validate_ir_block(ir_block);
-    static bool dump_ir_ = (getenv("BIFROST_JIT_DUMP") != nullptr);
+    static bool dump_ir_ = dbg().jit_dump;
     // BIFROST_DUMP_PC=0x... restricts the IR dump to a single block pc
     // (useful when BIFROST_JIT_DUMP would flood with thousands of blocks).
-    static uint64_t dump_pc_ = []() -> uint64_t {
-        const char* s = getenv("BIFROST_DUMP_PC");
-        return s ? strtoull(s, nullptr, 0) : 0;
-    }();
+    static const uint64_t dump_pc_ = dbg().dump_pc;
     if ((dump_ir_ && (!dump_pc_ || start_pc == dump_pc_)) || start_pc == force_dump_pc_.load()) {
         fprintf(stderr, "══ Block @ 0x%llx (%d ARM instrs) ══\n",
                 static_cast<unsigned long long>(start_pc), instr_count);
@@ -867,14 +864,14 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         pinned_host_regs_ = 0;
         keep_store_dest_ = false;
         bool no_selfloop = (mt_active() && dbg().no_chain) ||
-            (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+            dbg().no_selfloop;
         bool is_selfloop = false;
         if (!ir_block.insts.empty()) {
             const IRInst& last = ir_block.insts.back();
             is_selfloop = (last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO ||
                            last.op == IROp::BRCOND_BIT) && last.branch_target() == start_pc;
         }
-        if (is_selfloop && !no_selfloop && !getenv("BIFROST_NO_PIN") &&
+        if (is_selfloop && !no_selfloop && !dbg().no_pin &&
             !dbg().jit_verify) {
             // Pinning is disabled under BIFROST_JIT_VERIFY: verify mode
             // un-patches the self-loop slot, so the taken back-edge returns

@@ -226,7 +226,7 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
 
             // ── Trace-aborting instruction classes (never in a region) ──
             static const bool no_callregion_ =
-                (getenv("BIFROST_NO_CALLREGION") != nullptr);
+                dbg().no_callregion;
             if (d.cls == InstClass::SVC || d.cls == InstClass::SVC_IMM) {
                 trace.stop_reason = "svc";
                 aborted = true;
@@ -483,7 +483,7 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
         // could erase ops inside the skip region and invalidate the skip's
         // op-count imm). The term op survives optimization, so re-derive the
         // recorded side-exit op index (insts.size()-1) afterwards.
-        static bool walker_no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
+        static bool walker_no_opt_ = dbg().no_opt;
         bool has_brcond_skip = false;
         for (const auto& ir_inst : tb.ir.insts) {
             if (ir_inst.op == IROp::BRCOND_SKIP) {

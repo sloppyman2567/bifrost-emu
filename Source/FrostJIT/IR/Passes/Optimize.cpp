@@ -227,7 +227,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     // correctness bugs (CAS writes wrong desired value, etc.).
     // FWD is a ~5.6% speedup on compute loops — we skip it only for
     // blocks with atomics, which are rare in compute workloads.
-    static bool fwd_off_ = (getenv("BIFROST_NO_FWD") != nullptr);
+    static bool fwd_off_ = dbg().no_fwd;
     // (legacy BIFROST_ENABLE_FWD=1 is accepted and means on, which is now
     // the default — it only matters if some script still exports it.)
     // The tier-2 walker forces FWD on for region blocks: without the
@@ -871,7 +871,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     // (BIFROST_ENABLE_FWD=1): without it, the intervening LOAD_REGs are
     // still present and this pass is mostly a no-op. It's still correct
     // to run, just less impactful. Disable with BIFROST_NO_DSE=1.
-    static bool no_dse_ = (getenv("BIFROST_NO_DSE") != nullptr);
+    static bool no_dse_ = dbg().no_dse;
     if (!no_dse_) {
         dse_pass();
     }

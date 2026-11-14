@@ -162,8 +162,8 @@ bool FrostJIT::disk_cache_ready(Emulator& emu) {
     disk_cache_checked_ = true;
     if (PersistentCache::configured_mode() == PersistentCache::Mode::Off) return false;
     // Translations these switches shape carry state no record describes.
-    static const bool leaf_inline = getenv("BIFROST_ENABLE_LEAF_INLINE") != nullptr;
-    static const bool malloc_interp = getenv("BIFROST_MALLOC_INTERP") != nullptr;
+    static const bool leaf_inline = dbg().enable_leaf_inline;
+    static const bool malloc_interp = dbg().malloc_interp;
     const char* why = tier2_enabled() ? "Tier-2 is enabled" : dbg().jit_verify ? "BIFROST_JIT_VERIFY is set"
         : leaf_inline ? "leaf inlining is enabled" : malloc_interp ? "BIFROST_MALLOC_INTERP is set"
         : !dbg().block_trace.empty() ? "BIFROST_BLOCK_TRACE is set" : !guest_memory_ || !window_base_

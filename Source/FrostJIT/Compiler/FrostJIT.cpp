@@ -54,7 +54,7 @@ namespace arm64emu {
 // teardown AND the successor's prologue. BIFROST_CHAIN_SKIP=1 is still
 // accepted (it means on).
 bool FrostJIT::chain_skip_enabled() {
-    static const bool on = (getenv("BIFROST_NO_CHAIN_SKIP") == nullptr);
+    static const bool on = !dbg().no_chain_skip;
     return on;
 }
 // ── Direct BL call env gate (default ON) ───────────────────────────────
@@ -69,7 +69,7 @@ bool FrostJIT::chain_skip_enabled() {
 // AllocBlock corruption reproduces with the direct call disabled too),
 // but keep it in mind for miscompile hunts.
 bool FrostJIT::direct_call_enabled() {
-    static const bool on = (getenv("BIFROST_NO_DIRECT_CALL") == nullptr);
+    static const bool on = !dbg().no_direct_call;
     return on;
 }
 // Tier-1 JIT is the default. Tier-2 region promotion remains experimental:
@@ -89,15 +89,11 @@ bool FrostJIT::tier2_enabled() {
     return dbg().tier2 && !dbg().jit_verify;
 }
 uint32_t FrostJIT::tier2_hits_threshold() {
-    static const uint32_t hits = [] {
-        const char* s = getenv("BIFROST_TIER2_HITS");
-        // Default 1000 (2026-08-20): hot blocks neutralize their in-code
-        // counters 10x sooner, and with loop-regions-only the extra regions
-        // the lower bar admits are genuine loops. CoreMark A/B: 3614 vs
-        // 3590 iters/s (3 reps each) — small but reproducible.
-        return s ? static_cast<uint32_t>(strtoul(s, nullptr, 10)) : 1000;
-    }();
-    return hits;
+    // Default 1000 (set in DebugFlags): hot blocks neutralize their in-code
+    // counters 10x sooner, and with loop-regions-only the extra regions the
+    // lower bar admits are genuine loops. CoreMark A/B: 3614 vs 3590 iters/s
+    // (3 reps each) — small but reproducible.
+    return dbg().tier2_hits;
 }
 bool FrostJIT::tier2_trace_enabled() {
     return dbg().tier2_trace;

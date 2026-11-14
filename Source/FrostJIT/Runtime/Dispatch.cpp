@@ -66,7 +66,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled
     // by default (measured ~8-10% SLOWER on the minecraft game). getenv() on
     // every slow-path cache hit was a full environ scan per dispatch.
-    static bool hot_interp_ = (getenv("BIFROST_HOT_INTERP") != nullptr);
+    static bool hot_interp_ = dbg().hot_interp;
     ProfRunGuard prof_g;
     if (!code_buf_ || jit_disabled_.load(std::memory_order_relaxed)) {
         interpreter_fallbacks++;
@@ -267,7 +267,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // Lazy block chaining — release shared, try exclusive (non-blocking).
         // If we can't get exclusive, skip chaining (optimization, not correctness).
         if (!entry.chained) {
-            static bool no_chain_hit_ = (getenv("BIFROST_NO_CHAIN") != nullptr);
+            static bool no_chain_hit_ = dbg().no_chain;
             blocks_mutex_.unlock_shared();
             if (!no_chain_hit_ && blocks_mutex_.try_lock()) {
                 if (entry.chain_target_pc != 0) {
@@ -352,10 +352,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         ibl_note(pc, entry.chain_entry);
     }
     // Debug: print pstate at entry for specific blocks
-    static bool dbg_ = (getenv("BIFROST_DBG_PC") != nullptr);
+    static const bool dbg_ = dbg().dbg_pc_set;
     if (dbg_) {
-        const char* s = getenv("BIFROST_DBG_PC");
-        uint64_t target = strtoull(s, nullptr, 0);
+        const uint64_t target = dbg().dbg_pc;
         if (pc == target) {
             fprintf(stderr, "[DBG] entry block @ 0x%llx pstate=0x%x x1=0x%llx x9=0x%llx x11=0x%llx x31=0x%llx\n",
                     static_cast<unsigned long long>(pc), cpu.nzcv(),
@@ -655,8 +654,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
         // Debug: print pstate after JIT
         if (dbg_) {
-            const char* s = getenv("BIFROST_DBG_PC");
-            uint64_t target = strtoull(s, nullptr, 0);
+            const uint64_t target = dbg().dbg_pc;
             if (pc == target) {
                 fprintf(stderr, "[DBG] exit  block @ 0x%llx pstate=0x%x x19=0x%llx x31=0x%llx jit_next=0x%llx\n",
                         static_cast<unsigned long long>(pc), cpu.nzcv(),
@@ -887,7 +885,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
         return jit_next;
     }
-    static bool trace_ = (getenv("BIFROST_JIT_TRACE") != nullptr);
+    static bool trace_ = dbg().jit_trace;
     if (trace_) {
         fprintf(stderr, "[JIT] run block @ 0x%llx sp=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x5=0x%llx\n",
                 static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.sp),

@@ -159,7 +159,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     // performed before destruction, with dominator-scoped availability.
     std::vector<IRInst> ssa_preheader;
     bool ssa_region = false;
-    if (!dbg().no_ssa && !getenv("BIFROST_NO_OPT")) {
+    if (!dbg().no_ssa && !dbg().no_opt) {
         size_t conditional = 0;
         // A final BR (RET) is the path's exit, not a conditional side exit.
         auto conditional_term = [&](const RBlock& b) {
@@ -277,7 +277,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
         for (int i = 0; i < 32; i++) arch_pin_[i] = -1;
         pinned_host_regs_ = 0;
         keep_store_dest_ = false;
-        if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
+        if (last_is_backedge && !dbg().no_pin) {
             if (has_call) {
                 // Call-aware region: the callee can write any cpu.regs[], so a
                 // pin (loop-carried in the register, cpu.regs[] possibly
@@ -327,7 +327,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     // One pass is sufficient: removing an op only removes a DEFINITION, never
     // a use, so it cannot make another op newly-dead (a leftover dead op
     // merely computes an unused value — harmless).
-    if (!getenv("BIFROST_NO_RDCE")) {
+    if (!dbg().no_rdce) {
         std::vector<uint16_t> uses(4096, 0);
         for (const auto& inst : region_ir) {
             if (inst.op != IROp::LOAD_REG) {
@@ -365,7 +365,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     // in their pre-assigned stack slots; block0's body is compiled after a
     // flush+invalidate, so it reloads them from the slots each iteration.
     std::vector<IRInst> preheader = std::move(ssa_preheader);
-    if (last_is_backedge && !getenv("BIFROST_NO_LICM")) {
+    if (last_is_backedge && !dbg().no_licm) {
         std::vector<bool> hoisted_vreg(4096, false);
         for (const auto& i : preheader) if (i.dest > 32) hoisted_vreg[i.dest] = true;
         std::vector<char> hoisted_op(region_ir.size(), 0);
@@ -462,7 +462,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
     // arch vregs (<=32) are excluded so cpu.regs[] homes and pins are
     // untouched. old_dest > 32 also makes operand renames unambiguous
     // against LOAD_REG's arch-index src1.
-    if (!getenv("BIFROST_NO_DESTSRC")) {
+    if (!dbg().no_destsrc) {
         const size_t n = region_ir.size();
         std::vector<bool> invariant(4096, false);
         for (const auto& inst : preheader)

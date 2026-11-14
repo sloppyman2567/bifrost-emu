@@ -396,7 +396,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         // caller-saved state — mirrors the arch-pin policy) and fenced to
         // leave the body ≥3 allocatable regs (the emitter-audit fence: a
         // steered/pinned pool under 3 regs exposes ALU-emitter variant-2).
-        if (!getenv("BIFROST_NO_KEEPRES") && last_is_backedge && !has_call) {
+        if (!dbg().no_keepres && last_is_backedge && !has_call) {
             const size_t n_body = region_ir.size();
             struct KeepCand { uint16_t v; int uses; };
             std::vector<KeepCand> cands;
@@ -755,7 +755,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     };
     // Region exits use revocable data cells in both modes. Untracked target
     // constants can execute stale guest instructions after invalidation.
-    static const bool no_exitchain_ = (getenv("BIFROST_NO_EXITCHAIN") != nullptr);
+    static const bool no_exitchain_ = dbg().no_exitchain;
     const bool exitchain_ok = !no_exitchain_ && !dbg().jit_verify;
     std::vector<size_t> cell_exit_patches;
     auto emit_chainout_exit = [&](uint64_t pc) -> bool {
@@ -1031,7 +1031,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             code_buf_ + region_chain_entry_off);
     // TEMP diagnostic (BIFROST_T2_REGIONDUMP): hexdump the published region
     // for offline objdump — same gate name the P2 review session used.
-    if (getenv("BIFROST_T2_REGIONDUMP")) {
+    if (dbg().t2_regiondump) {
         fprintf(stderr, "[t2dump] pc=0x%llx fn=%p bytes=%zu body=%zu\n",
                 static_cast<unsigned long long>(trace.head_pc),
                 reinterpret_cast<void*>(code_buf_ + block_start), size,

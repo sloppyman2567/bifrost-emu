@@ -26,6 +26,7 @@
 #include "FrostJIT/IR/Builder.hpp"        // emit/load_imm/swar helpers + g_alloc
 #include "FrostJIT/IR/IR.hpp"      // public IR types
 #include "System/Core/Emulator.hpp"  // for cond_true()
+#include "System/Core/DebugFlags.hpp"
 #include <cstdio>
 #include <cstdlib>
 namespace arm64emu {
@@ -933,7 +934,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // BIFROST_CLASS_PROF companion: which classes hit the
             // translate-time CALL_INTERP fallback (translation counts,
             // not dynamic). Printed at exit via ir_dump_callinterp.
-            if (std::getenv("BIFROST_CLASS_PROF")) {
+            if (dbg().class_prof) {
                 static uint64_t ci_cls[128] = {0};
                 int ci = (int)d.cls;
                 if (ci >= 0 && ci < 128) ci_cls[ci]++;

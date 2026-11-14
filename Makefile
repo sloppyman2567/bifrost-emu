@@ -333,8 +333,9 @@ $(SOURCE_STAMP): FORCE
 
 # The persistent JIT cache fingerprints the value of every BIFROST_* switch the
 # JIT and DebugFlags read (Source/FrostJIT/Runtime/CacheRecording.cpp). Listed
-# from the sources on every build, so a new switch cannot be missed; the file
-# is replaced only when the list changes.
+# from the sources on every build (the quoted names in DebugFlags.hpp and any
+# getenv("BIFROST_...") in Source/FrostJIT), so a new switch cannot be missed;
+# the file is replaced only when the list changes.
 JIT_SWITCHES := $(OBJDIR)/generated/JitCodegenSwitches.inc
 $(JIT_SWITCHES): FORCE
 	@mkdir -p $(dir $@)
