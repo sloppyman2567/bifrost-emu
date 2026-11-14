@@ -52,9 +52,9 @@ python3 Tools/Android/build-android-adapters.py
 announce "Managed launcher"
 python3 Scripts/Android/android_managed.py build
 announce "ART and the Android 15 system image (the large download, about 734 MiB)"
-python3 Tools/Android/android_art.py
+python3 Tools/Android/android_art.py --replace-obsolete
 announce "Android framework"
-python3 Tools/Android/android_framework.py
+python3 Tools/Android/android_framework.py --replace-obsolete
 announce "microG (Google account support)"
 python3 - <<'PY'
 import sys

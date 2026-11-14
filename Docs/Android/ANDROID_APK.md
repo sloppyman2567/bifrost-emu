@@ -71,6 +71,10 @@ A new prefix means a second install, because the installers do not look for othe
 whichever `bin` comes first on `PATH` runs, and `bifrost-emu` uses the Asgard beside it. App state is separate from both, so they
 share it. To update an install that already exists, use its own prefix: after a `git pull`, `sudo make install-asgard` for
 `/usr/local` rebuilds the launcher, adapters and framework additions that the new sources changed and copies the result.
+A framework or ART tree that an update made unusable (another Android image, an older manifest format, changed codec
+adapters) is deleted and provisioned again (`--replace-obsolete`, which only ever acts on a tree whose manifest says it
+cannot be used); that downloads the Android image again, 734 MiB. `sudo make install` for the emulator itself likewise
+needs `make` run first as your user: root does not compile in a checkout you own (`ALLOW_ROOT_BUILD=1` overrides).
 
 It runs these steps, which can also be run by hand:
 

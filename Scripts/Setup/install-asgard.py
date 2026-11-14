@@ -68,8 +68,8 @@ PROVISIONING = {
     "Tools/android-tools": "python3 Tools/Android/fetch-aapt2.py && python3 Tools/Android/fetch-android-package-tools.py",
     "build/android-adapters": "make android-runtime-adapters",
     "build/android-managed-launcher": "make android-managed-launcher",
-    "build/android-framework/rootfs": "python3 Tools/Android/android_framework.py  (builds ART too)",
-    "build/android-art/rootfs": "python3 Tools/Android/android_art.py",
+    "build/android-framework/rootfs": "python3 Tools/Android/android_framework.py --replace-obsolete  (builds ART too)",
+    "build/android-art/rootfs": "python3 Tools/Android/android_art.py --replace-obsolete",
 }
 # Written last, when a tree is complete. The tools that write them refuse to touch a tree without one.
 MANIFESTS = ("build/android-art/rootfs/bifrost-art.json", "build/android-framework/rootfs/bifrost-framework.json")
@@ -278,9 +278,9 @@ def provisioning_hint(name):
 
 
 def fresh_provisioning(name):
-    """The command that rebuilds a tree whose manifest guards it from being changed in place."""
-    tree = str(Path(name).parent)
-    return f"chmod -R u+w {tree} && rm -rf {tree}, then {provisioning_hint(name)}"
+    """The command that rebuilds a tree whose manifest guards it from being changed in place: the tool deletes the
+    old tree itself when its manifest says it can no longer be used, and downloads the Android image again."""
+    return provisioning_hint(name)
 
 
 def checkout_tool(name):
@@ -303,7 +303,8 @@ def stale_framework():
     if not missing:
         return []
     more = f" and {len(missing) - 1} more" if len(missing) > 1 else ""
-    return [(f"missing {tree.relative_to(ROOT)}/{missing[0]}{more}", "python3 Tools/Android/android_framework.py  (in place)")]
+    return [(f"missing {tree.relative_to(ROOT)}/{missing[0]}{more}",
+             "python3 Tools/Android/android_framework.py --replace-obsolete  (in place)")]
 
 
 def missing_provisioning():

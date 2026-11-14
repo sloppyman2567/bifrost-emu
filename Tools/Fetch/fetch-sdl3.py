@@ -9,6 +9,9 @@ compiles against it when pkg-config finds no system SDL3 and makes the emulator 
 or from <prefix>/lib/bifrost once installed. The build needs CMake and SDL's X11, Wayland, EGL and
 input development packages (Scripts/Setup/install-deps.sh installs them on apt systems).
 
+A copy built from another release (the pin moved since) is built again, over the old one, which comes back if the
+build fails. A system SDL3 makes the built copy unused, so it is then left alone.
+
 Usage: fetch-sdl3.py [--force]   (--force builds even when the system has SDL3, for tests)
 """
 import argparse
@@ -60,18 +63,63 @@ def video_drivers(build):
     return drivers
 
 
+def built_version():
+    """The release recorded in the built tree's sdl3.pc ("" when it names none), or None when nothing is built there."""
+    pc = DESTINATION / "lib/pkgconfig/sdl3.pc"
+    if not pc.is_file():
+        return None
+    for line in pc.read_text(errors="replace").splitlines():
+        if line.startswith("Version:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def decide(built, destination_exists, system, force):
+    """What to do: "current" (the built copy is the pinned release), "system" (a system SDL3 makes building needless),
+    "replace" (a built copy of another release), "incomplete" (a directory with no build in it) or "build"."""
+    if built == VERSION:
+        return "current"
+    if system and not force:
+        return "system"
+    if built is not None:
+        return "replace"
+    return "incomplete" if destination_exists else "build"
+
+
+def replace_destination(install, replacing):
+    """Run install(), which writes DESTINATION. With `replacing`, the old tree is moved aside first and comes back if
+    install() fails; it is deleted once install() has succeeded."""
+    old = DESTINATION.with_name(DESTINATION.name + ".old")
+    if replacing:
+        shutil.rmtree(old, ignore_errors=True)
+        DESTINATION.rename(old)
+    try:
+        install()
+    except BaseException:
+        shutil.rmtree(DESTINATION, ignore_errors=True)
+        if replacing:
+            old.rename(DESTINATION)
+        raise
+    if replacing:
+        shutil.rmtree(old, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--force", action="store_true", help="build even when the system has SDL 3.2 or newer")
     args = parser.parse_args()
-    if (DESTINATION / "lib/pkgconfig/sdl3.pc").is_file():
+    built = built_version()
+    action = decide(built, DESTINATION.exists(), system_sdl3() if built != VERSION else False, args.force)
+    if action == "current":
         print(f"SDL3 {VERSION} is already built in Tools/sdl3")
         return
-    if system_sdl3() and not args.force:
+    if action == "system":
         print("The system has SDL 3.2 or newer; nothing to build")
         return
-    if DESTINATION.exists():
+    if action == "incomplete":
         raise SystemExit("An incomplete Tools/sdl3 exists; remove it and run this again")
+    if action == "replace":
+        print(f"Tools/sdl3 holds SDL3 {built or 'of an unknown release'}, not the pinned {VERSION}: building it again")
     if not shutil.which("cmake"):
         raise SystemExit("Building SDL3 needs CMake (and SDL's development packages; see Scripts/Setup/install-deps.sh)")
     with tempfile.TemporaryDirectory(prefix=".sdl3-build-", dir=ROOT / "Tools") as directory:
@@ -94,11 +142,8 @@ def main():
                              "missing (libx11-dev libxext-dev libxkbcommon-dev libwayland-dev wayland-protocols "
                              "libwayland-bin on Debian; Scripts/Setup/install-deps.sh installs them)")
         subprocess.run(["cmake", "--build", str(build), "--parallel", str(os.cpu_count() or 2)], check=True)
-        try:
-            subprocess.run(["cmake", "--install", str(build)], check=True)
-        except BaseException:
-            shutil.rmtree(DESTINATION, ignore_errors=True)
-            raise
+        replace_destination(lambda: subprocess.run(["cmake", "--install", str(build)], check=True),
+                            replacing=action == "replace")
     archive.unlink(missing_ok=True)
     print(f"SDL3 {VERSION} is built in Tools/sdl3; rebuild bifrost-emu to use it (make)")
 

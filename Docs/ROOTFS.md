@@ -64,7 +64,7 @@ is a small stub, which is why Linux games need the `games` profile below.
 ./Scripts/Setup/install-rootfs.sh --profile NAME   # a named rootfs: <data>/rootfs.d/NAME
 ./Scripts/Setup/install-rootfs.sh --games    # profile "games": plus OpenAL, SDL2_ttf/image/mixer, Vorbis, libsndfile, libpng, libjpeg, libcurl, ...
 ./Scripts/Setup/install-rootfs.sh --games --rebuild   # rebuild the profile from scratch instead of updating it
-sudo make install install-rootfs             # system-wide, in $(PREFIX)/share/bifrost/rootfs
+make && sudo make install install-rootfs    # system-wide, in $(PREFIX)/share/bifrost/rootfs (build as yourself first)
 ./Scripts/Setup/install-rootfs.sh --uninstall   # or: sudo make uninstall-rootfs
 ```
 

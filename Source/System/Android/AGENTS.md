@@ -44,7 +44,9 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   `missing_additions` covers the framework tree). Checkouts only: an installed copy has no sources. A new input to the adapter
   build goes into `INPUTS`, a new launcher source into `LAUNCHER_SOURCES`; the builders skip when current and take `--force`.
   `install-asgard.py` runs that module (as the checkout's owner when root) before it copies, so an update needs no separate
-  build command. An app launch never compiles; a stale launcher stops it and names the fix.
+  build command. A framework or ART tree whose manifest is from another image, format or set of codec adapters is deleted and
+  provisioned again by `--replace-obsolete` (`android_art.obsolete_reason` / `android_framework.obsolete_reason` judge it from
+  the manifest alone; never a current, modified, linked or installed tree), so no update needs a manual `rm -rf`. An app launch never compiles; a stale launcher stops it and names the fix.
 - Launch path cost (`Scripts/Android`): every SHA-256 goes through `Tools/Android/file_digests.py` (a digest is
   reused while device, inode, size, mtime and ctime are unchanged; never call `hashlib` on installed files
   directly). Profile merges and the recompiles they ask for run after the session (`optimize_after_session`),

@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -145,23 +146,65 @@ def unpack_apex(system, name, suffix, work, root):
     shutil.rmtree(destination / "lost+found", ignore_errors=True)
 
 
-def install(destination, archive=None):
+class ObsoleteRuntime(ValueError):
+    """An existing tree that no later change can make usable: only a fresh provision fixes it."""
+
+
+REPLACE_HINT = "run it again with --replace-obsolete (that deletes the old tree and downloads the Android image again)"
+
+
+def obsolete_reason(destination):
+    """Why an existing runtime tree has to be regenerated, judged from its manifest alone (no file is read), or None.
+    A tree whose manifest cannot be read, or is not ours, is not judged here: install() refuses it."""
+    manifest = destination / "bifrost-art.json"
+    if destination.is_symlink() or manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 256 * 1024:
+        return None
+    try:
+        metadata = json.loads(manifest.read_text())
+    except ValueError:
+        return None
+    if not isinstance(metadata, dict) or metadata.get("schema_version") != 2:
+        return "its manifest is from an older format"
+    if metadata.get("image_sha256") != IMAGE_SHA256:
+        return "it was built from another Android image"
+    return None
+
+
+def discard(destination):
+    """Delete a runtime tree the image made read-only. Only a real directory goes: never a link, never a path that
+    holds no manifest (the callers have judged it obsolete from that manifest)."""
+    if destination.is_symlink() or not destination.is_dir():
+        raise ValueError(f"Refusing to delete {destination}: not a runtime directory")
+    for directory, _, _ in os.walk(destination):  # does not follow links
+        path = Path(directory)
+        if not path.is_symlink():
+            path.chmod(path.stat().st_mode | 0o700)
+    shutil.rmtree(destination)
+
+
+def install(destination, archive=None, replace_obsolete=False):
     if destination.is_symlink():
         raise ValueError("Refusing redirected ART runtime")
     destination = destination.resolve()
+    if replace_obsolete and destination.exists():
+        reason = obsolete_reason(destination)
+        if reason:
+            print(f"Replacing the ART runtime at {destination}: {reason}")
+            discard(destination)
     if destination.exists():
         manifest = destination / "bifrost-art.json"
         if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 256 * 1024:
             raise ValueError("Invalid ART manifest")
         metadata = json.loads(manifest.read_text())
         if not isinstance(metadata, dict) or metadata.get("schema_version") != 2:
-            raise ValueError("Obsolete or unknown ART manifest; provision a fresh runtime directory")
+            raise ObsoleteRuntime(f"Obsolete or unknown ART manifest; {REPLACE_HINT}")
+        if metadata.get("image_sha256") != IMAGE_SHA256:
+            raise ObsoleteRuntime(f"The ART runtime was built from another Android image; {REPLACE_HINT}")
         verify_inventory(metadata.get("files"))
         actual = inventory(destination)
         actual.pop("bifrost-art.json", None)
         # Writable data and fixture files are deliberately outside this root.
-        if (metadata.get("image_sha256") != IMAGE_SHA256 or
-                without_bionic_links(actual) != without_bionic_links(metadata["files"])):
+        if without_bionic_links(actual) != without_bionic_links(metadata["files"]):
             raise ValueError("Refusing modified ART runtime")
         return update_bionic_inventory(destination, metadata, manifest)
     for tool in ("debugfs", "readelf"):
@@ -206,9 +249,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--destination", type=Path, default=ROOT / "build/android-art/rootfs")
     parser.add_argument("--archive", type=Path)
+    parser.add_argument("--replace-obsolete", action="store_true",
+                        help="delete an existing tree whose manifest is from another format or image, then provision it again")
     args = parser.parse_args()
     try:
-        metadata = install(args.destination, args.archive)
+        metadata = install(args.destination, args.archive, args.replace_obsolete)
         print(f"Verified ART runtime: {args.destination} ({len(metadata['files'])} files)")
     except (OSError, ValueError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         parser.exit(1, f"android-art: {error}\n")

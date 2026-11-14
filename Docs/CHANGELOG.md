@@ -78,6 +78,26 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   QEMU and Bifrost both execute are used, so a clean run proves nothing about other encodings. The IEEE cumulative exception
   flags of FPSR are left out of the comparison by default (Bifrost does not raise them).
 
+### Fixed (installing and updating)
+
+- Found by auditing the install and update paths for the same kind of fault as the stale launcher (2026-11-13); each was
+  reproduced first.
+- `sudo make install` after a `git pull` compiled the whole tree as root, leaving root-owned objects in `build/` and a
+  root-owned `bifrost-emu` that the next plain `make` could not replace. Run as root in a checkout another user owns, it now
+  installs a build that is current and otherwise stops and says to run `make` first (`ALLOW_ROOT_BUILD=1` builds anyway; a
+  checkout root owns builds as before). The check compares C/C++ sources and headers with the binary's time: it cannot ask
+  `make`, whose dry run lists every compile because of its always-checked stamp rules.
+- A framework or ART tree that an update made unusable (another Android image, an older manifest format, or changed codec
+  adapters: the fingerprint covers `android_codecs.py`, four launcher sources and `android_bionic_start.S`) stopped the install
+  with "provision a fresh directory" and left deleting a read-only tree to the user. `android_framework.py` and `android_art.py`
+  take `--replace-obsolete`, which deletes such a tree and provisions it again, and `make android-provision`,
+  `asgard setup`, `install-asgard` and `asgard-setup` pass it. It judges from the manifest only and never deletes a current,
+  modified or installed tree or a link. The rebuild downloads the Android image again (734 MiB).
+- `fetch-sdl3.py` called any built `Tools/sdl3` current. It now compares the release in `sdl3.pc` with the pin and builds again
+  over an older copy (kept aside and restored if the build fails), unless the system has SDL3, which makes the built copy unused.
+- Not fixed: `bifrost-emu` and an installed Asgard check nothing about each other. The install records a git revision that
+  nothing reads, and the emulator does not embed its own, so updating only one of them fails later and obscurely.
+
 ### Changed (installing Asgard builds what changed)
 
 - `sudo make install-asgard` now builds what the checkout lacks or has out of date before it copies anything (2026-11-13),

@@ -269,6 +269,64 @@ class FetchSdl3Tests(unittest.TestCase):
         self.config("X11", "DUMMY")
         self.assertEqual(self.fetch.video_drivers(self.work), {"X11"})
 
+    def built(self, text):
+        pc = self.work / "sdl3/lib/pkgconfig/sdl3.pc"
+        pc.parent.mkdir(parents=True)
+        pc.write_text(text)
+        self.fetch.DESTINATION = self.work / "sdl3"
+
+    def test_the_built_release_is_read_from_sdl3_pc(self):
+        self.fetch.DESTINATION = self.work / "sdl3"
+        self.assertIsNone(self.fetch.built_version())                      # nothing built
+        self.built("Name: sdl3\nVersion: 3.2.0\nLibs: -lSDL3\n")
+        self.assertEqual(self.fetch.built_version(), "3.2.0")
+        (self.work / "sdl3/lib/pkgconfig/sdl3.pc").write_text("Name: sdl3\n")
+        self.assertEqual(self.fetch.built_version(), "")                   # a build that names no release
+
+    def test_a_build_of_another_release_is_replaced_unless_the_system_has_sdl3(self):
+        v = self.fetch.VERSION
+        decide = self.fetch.decide
+        self.assertEqual(decide(v, True, False, False), "current")
+        self.assertEqual(decide(v, True, True, True), "current")           # the pinned release wins, forced or not
+        self.assertEqual(decide("3.2.0", True, False, False), "replace")   # the pin moved since it was built
+        self.assertEqual(decide("", True, False, False), "replace")
+        self.assertEqual(decide("3.2.0", True, True, False), "system")     # a system SDL3 makes the old copy unused
+        self.assertEqual(decide("3.2.0", True, True, True), "replace")     # --force
+        self.assertEqual(decide(None, False, False, False), "build")
+        self.assertEqual(decide(None, True, False, False), "incomplete")   # a directory with no build in it
+        self.assertEqual(decide(None, False, True, False), "system")
+
+    def test_replacing_a_build_keeps_the_old_one_until_the_new_one_is_in(self):
+        self.built("Version: 3.2.0\n")
+        destination = self.fetch.DESTINATION
+
+        def failing():
+            (destination / "half").mkdir(parents=True)                      # what an install leaves when it stops
+            raise RuntimeError("cmake --install failed")
+        with self.assertRaises(RuntimeError):
+            self.fetch.replace_destination(failing, replacing=True)
+        self.assertEqual(self.fetch.built_version(), "3.2.0")              # the old build is back, whole
+        self.assertFalse((destination / "half").exists())
+        self.assertFalse(destination.with_name("sdl3.old").exists())
+
+        def installing():
+            pc = destination / "lib/pkgconfig/sdl3.pc"
+            pc.parent.mkdir(parents=True)
+            pc.write_text(f"Version: {self.fetch.VERSION}\n")
+        self.fetch.replace_destination(installing, replacing=True)
+        self.assertEqual(self.fetch.built_version(), self.fetch.VERSION)
+        self.assertFalse(destination.with_name("sdl3.old").exists())
+
+    def test_a_failed_first_build_leaves_nothing_behind(self):
+        self.fetch.DESTINATION = self.work / "sdl3"
+
+        def failing():
+            (self.fetch.DESTINATION / "half").mkdir(parents=True)
+            raise RuntimeError("cmake --install failed")
+        with self.assertRaises(RuntimeError):
+            self.fetch.replace_destination(failing, replacing=False)
+        self.assertFalse(self.fetch.DESTINATION.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

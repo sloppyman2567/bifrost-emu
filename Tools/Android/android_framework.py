@@ -368,18 +368,35 @@ def in_place_inventory():
 
 
 def existing_metadata(destination):
-    """The manifest of an existing runtime, checked for what only a fresh provision can fix. Reads no file contents."""
+    """The manifest of an existing runtime, checked for what only a fresh provision can fix (ObsoleteRuntime).
+    Reads no file contents."""
     manifest = destination / "bifrost-framework.json"
     if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 1024 * 1024:
         raise ValueError("Invalid framework manifest")
     metadata = json.loads(manifest.read_text())
     if not isinstance(metadata, dict) or metadata.get("schema_version") != SCHEMA:
-        raise ValueError("Unknown framework manifest; provision a fresh directory")
-    if metadata.get("image_sha256") != IMAGE_SHA256 or not isinstance(metadata.get("files"), dict):
+        raise android_art.ObsoleteRuntime(f"Unknown framework manifest; {android_art.REPLACE_HINT}")
+    if metadata.get("image_sha256") != IMAGE_SHA256:
+        raise android_art.ObsoleteRuntime(f"The framework runtime was built from another Android image; {android_art.REPLACE_HINT}")
+    if not isinstance(metadata.get("files"), dict):
         raise ValueError("Refusing modified framework runtime")
     if metadata.get("codecs", {}).get("adapter_fingerprint") != android_codecs.fingerprint():
-        raise ValueError("Codec adapters changed; provision a fresh framework directory")
+        raise android_art.ObsoleteRuntime(f"Codec adapters changed; {android_art.REPLACE_HINT}")
     return metadata
+
+
+def obsolete_reason(destination):
+    """Why an existing framework tree has to be regenerated (a pin, the manifest format or the codec adapters changed
+    since it was built), or None: absent, current, unreadable or modified trees are not judged here."""
+    if destination.is_symlink() or not destination.is_dir():
+        return None
+    try:
+        existing_metadata(destination)
+    except android_art.ObsoleteRuntime as error:
+        return str(error).split(";")[0]
+    except (OSError, ValueError):
+        return None
+    return None
 
 
 def missing_additions(destination, metadata=None):
@@ -408,12 +425,17 @@ def stale_install_error(detail):
                       "as your user, then install Asgard again (`sudo make install-asgard` for /usr/local).")
 
 
-def install(destination, art_root, archive=None):
+def install(destination, art_root, archive=None, replace_obsolete=False):
     if destination.is_symlink():
         raise ValueError("Refusing redirected framework runtime")
     destination = destination.resolve()
     manifest = destination / "bifrost-framework.json"
     read_only = installed_tree(destination)
+    if replace_obsolete and destination.exists() and not read_only:  # an installed copy is only ever installed again
+        reason = obsolete_reason(destination)
+        if reason:
+            print(f"Replacing the framework runtime at {destination}: {reason}")
+            android_art.discard(destination)
     if destination.exists():
         metadata = existing_metadata(destination)
         missing = missing_additions(destination, metadata) if read_only else []
@@ -433,7 +455,7 @@ def install(destination, art_root, archive=None):
         return update_inventory(metadata, manifest, {**metadata["files"], **in_place_inventory()})
     if read_only:
         raise stale_install_error("it has no framework runtime")
-    android_art.install(art_root)  # verifies the pinned ART layer
+    android_art.install(art_root, replace_obsolete=replace_obsolete)  # verifies the pinned ART layer
     archive = image_archive(archive)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".android-framework-", dir=destination.parent) as directory:
@@ -540,9 +562,12 @@ if __name__ == "__main__":
     parser.add_argument("--destination", type=Path, default=ROOT / "build/android-framework/rootfs")
     parser.add_argument("--art-root", type=Path, default=ROOT / "build/android-art/rootfs")
     parser.add_argument("--archive", type=Path)
+    parser.add_argument("--replace-obsolete", action="store_true",
+                        help="delete an existing tree whose manifest is from another format, image or codec adapters, "
+                             "then provision it again (also the ART tree it is built on)")
     args = parser.parse_args()
     try:
-        metadata = install(args.destination, args.art_root, args.archive)
+        metadata = install(args.destination, args.art_root, args.archive, args.replace_obsolete)
         print(f"Verified framework runtime: {args.destination} ({len(metadata['files'])} files)")
     except (OSError, ValueError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         parser.exit(1, f"android-framework: {error}\n")

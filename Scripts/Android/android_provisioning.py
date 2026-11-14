@@ -73,8 +73,14 @@ def framework_stale(root):
     tree = Path(root) / "build/android-framework/rootfs"
     try:
         return bool(load(root, "Tools/Android/android_framework.py", "bifrost_framework_currency").missing_additions(tree))
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError):  # includes an obsolete tree: the tool replaces it (--replace-obsolete)
         return True
+
+
+def art_stale(root):
+    """The ART tree's manifest is from another format or Android image: the tool replaces it."""
+    module = load(root, "Tools/Android/android_art.py", "bifrost_art_currency")
+    return module.obsolete_reason(Path(root) / "build/android-art/rootfs") is not None
 
 
 # In the order of the Makefile's android-provision.
@@ -93,10 +99,10 @@ STEPS = (
          [[PY, "Scripts/Android/android_managed.py", "build"]], stale=launcher_stale),
     Step("framework", "Android framework", "the Android 15 framework and runtime (ART) apps run on",
          ["build/android-framework/rootfs/bifrost-framework.json"],
-         [[PY, "Tools/Android/android_framework.py"]], stale=framework_stale),
+         [[PY, "Tools/Android/android_framework.py", "--replace-obsolete"]], stale=framework_stale),
     Step("art", "Android runtime (ART) image", "the compiled Java runtime image",
          ["build/android-art/rootfs/bifrost-art.json"],
-         [[PY, "Tools/Android/android_art.py"]]),
+         [[PY, "Tools/Android/android_art.py", "--replace-obsolete"]], stale=art_stale),
     Step("microg", "Google services stand-in (microG)", "the sign-in and Play services stand-in apps use",
          [], [[PY, "Tools/Android/android_microg.py"]]),
 )

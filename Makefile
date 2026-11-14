@@ -442,8 +442,16 @@ cross:
 	@echo "Built $(OUT)"
 
 # Install to /usr/local/bin (override with `make install DESTDIR=/prefix PREFIX=/opt`)
+#
+# `make && sudo make install` is the way to update. Run as root in a checkout another user owns, install does not
+# compile: after an update that would leave root-owned objects in build/ and a root-owned bifrost-emu beside the
+# sources, which the next plain `make` cannot replace. It installs a build that is current (no C or C++ source or header
+# under Source/, Include/ or Plugins/ is newer than it) and stops with the command to run otherwise. ALLOW_ROOT_BUILD=1
+# builds as root anyway. INSTALL_UID and CHECKOUT_UID exist so that this can be tested without root.
 PREFIX ?= /usr/local
-install: $(TARGET)
+INSTALL_UID ?= $(shell id -u)
+CHECKOUT_UID ?= $(shell stat -c %u . 2>/dev/null || echo 0)
+install: $(if $(and $(filter 0,$(INSTALL_UID)),$(filter-out 0,$(CHECKOUT_UID)),$(if $(filter 1,$(ALLOW_ROOT_BUILD)),,yes)),install-check,$(TARGET))
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/
 	@if [ -e Tools/sdl3/lib/libSDL3.so.0 ]; then \
@@ -453,6 +461,16 @@ install: $(TARGET)
 	fi
 	@echo "Dynamic programs also need a rootfs: make install-rootfs (system) or Scripts/Setup/install-rootfs.sh (user)."
 	@echo "Android apps need Asgard: make install-asgard (system) or Scripts/Setup/install-asgard.py (user)."
+
+.PHONY: install-check
+install-check:
+	@if [ ! -x "$(TARGET)" ]; then \
+		echo "error: $(TARGET) is not built. Run make as your user first (so root owns no build files), then sudo make install." >&2; exit 1; \
+	fi
+	@newer=$$(find Source Include Plugins -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' -o -name '*.inc' \) -newer "$(TARGET)" -print -quit 2>/dev/null); \
+	if [ -n "$$newer" ]; then \
+		echo "error: $(TARGET) is older than $$newer. Run make as your user first (so root owns no build files), then sudo make install." >&2; exit 1; \
+	fi
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/bifrost-emu
@@ -485,6 +503,8 @@ deb:
 # `make android-provision` alone builds everything Android needs in the checkout (and rebuilds only
 # what changed); install for yourself with PREFIX=$(HOME)/.local.
 # android_framework.py builds ART only with the framework tree; the [ -f ] covers a tree left without ART.
+# --replace-obsolete deletes a framework or ART tree that an update made unusable (another image, manifest format or
+# codec adapters) and provisions it again; it never touches a current, modified or installed tree.
 #
 # bootstrap is the one command for a fresh clone: the host packages (deps), the emulator, then
 # provision-asgard, all for your user under ~/.local unless you give a PREFIX. Run it as yourself:
@@ -519,8 +539,8 @@ android-provision:
 	python3 Tools/Android/fetch-android-package-tools.py
 	python3 Tools/Android/build-android-adapters.py
 	python3 Scripts/Android/android_managed.py build
-	python3 Tools/Android/android_framework.py
-	[ -f build/android-art/rootfs/bifrost-art.json ] || python3 Tools/Android/android_art.py
+	python3 Tools/Android/android_framework.py --replace-obsolete
+	[ -f build/android-art/rootfs/bifrost-art.json ] || python3 Tools/Android/android_art.py --replace-obsolete
 	python3 Tools/Android/android_microg.py
 
 install-asgard:

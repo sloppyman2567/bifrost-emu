@@ -304,7 +304,8 @@ class AsgardInstallTests(unittest.TestCase):
             manifest.unlink()                      # a tree that never finished
             output = self.run_installer(expect=1)
             self.assertIn(f"missing {name}", output)
-            self.assertIn(f"rm -rf {Path(name).parent}, then python3 Tools/Android/{build}", output)
+            self.assertIn(f"python3 Tools/Android/{build} --replace-obsolete", output)    # the tool replaces the tree itself
+            self.assertNotIn("rm -rf", output)
             self.assertIn("make provision-asgard", output)
             manifest.write_text("")                # a manifest that is itself empty
             self.assertIn(f"missing {name}", self.run_installer(expect=1))
@@ -358,7 +359,37 @@ class AsgardInstallTests(unittest.TestCase):
             place = make.stdout.index(step, place)
         self.assertRegex(make.stdout[place:], r"install-asgard\.py --prefix \"/stage/opt/x\"\n")
         art = [line for line in make.stdout.splitlines() if "android_art.py" in line]
-        self.assertEqual(art, ["[ -f build/android-art/rootfs/bifrost-art.json ] || python3 Tools/Android/android_art.py"])
+        self.assertEqual(art, ["[ -f build/android-art/rootfs/bifrost-art.json ] || "
+                               "python3 Tools/Android/android_art.py --replace-obsolete"])
+
+    def make(self, *arguments):
+        return subprocess.run(["make", "--no-print-directory", *arguments], cwd=REPOSITORY, capture_output=True, text=True)
+
+    def test_sudo_make_install_never_compiles_in_a_checkout_someone_else_owns(self):
+        """Root compiling after an update would leave root-owned objects in build/ that the next plain make cannot replace."""
+        root_of_user = ("INSTALL_UID=0", "CHECKOUT_UID=1000")
+        target = self.work / "built" / "bifrost-emu"
+        missing = self.make("install-check", f"TARGET={target}", *root_of_user)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("is not built. Run make as your user first", missing.stderr)
+        target.parent.mkdir()
+        target.write_text("")
+        target.chmod(0o755)                                                         # newer than every source
+        self.assertEqual(self.make("install-check", f"TARGET={target}", *root_of_user).returncode, 0)
+        os.utime(target, (946684800, 946684800))                                    # older than the sources
+        stale = self.make("install-check", f"TARGET={target}", *root_of_user)
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn("is older than", stale.stderr)
+        self.assertIn("sudo make install", stale.stderr)
+
+        def compiles(*arguments):
+            plan = self.make("-n", "install", f"TARGET={self.work / 'never-built' / 'bifrost-emu'}", "PREFIX=/opt/x", *arguments)
+            self.assertEqual(plan.returncode, 0, plan.stderr)
+            return " -c Source/" in plan.stdout
+        self.assertTrue(compiles("INSTALL_UID=1000", "CHECKOUT_UID=1000"))           # an ordinary user's install builds first
+        self.assertFalse(compiles(*root_of_user))                                    # root only installs what exists
+        self.assertTrue(compiles("INSTALL_UID=0", "CHECKOUT_UID=0"))                 # a checkout root owns: nothing to protect
+        self.assertTrue(compiles(*root_of_user, "ALLOW_ROOT_BUILD=1"))               # asked for explicitly
 
     def test_update_copies_only_what_changed_and_removes_what_went_away(self):
         self.run_installer()
@@ -494,7 +525,7 @@ class AsgardInstallTests(unittest.TestCase):
         extractor.unlink()                         # provisioned before the scripts pinned this file
         output = self.run_installer(expect=1)
         self.assertIn("missing build/android-framework/rootfs/system/bin/mediaextractor", output)
-        self.assertIn("python3 Tools/Android/android_framework.py  (in place)", output)
+        self.assertIn("python3 Tools/Android/android_framework.py --replace-obsolete  (in place)", output)
         extractor.write_text("placeholder")
         files = dict(self.pins["files"])
         del files["system/lib64/libsoundpool.so"]  # on disk but not yet in the inventory
@@ -503,8 +534,91 @@ class AsgardInstallTests(unittest.TestCase):
         self.write_framework_manifest(self.pins["files"], fingerprint="0" * 64)
         output = self.run_installer(expect=1)
         self.assertIn("build/android-framework/rootfs is out of date (Codec adapters changed", output)
-        self.assertIn("rm -rf build/android-framework/rootfs, then python3 Tools/Android/android_framework.py", output)
+        self.assertIn("python3 Tools/Android/android_framework.py --replace-obsolete", output)
+        self.assertNotIn("rm -rf", output)
         self.assertFalse(self.tree.exists())
+
+    def test_obsolete_reason_names_each_way_a_framework_tree_becomes_unusable_and_only_those(self):
+        reason = "from pathlib import Path\nprint(f.obsolete_reason(Path('build/android-framework/rootfs')))"
+        self.assertEqual(self.framework_tool(reason).stdout.strip(), "None")          # current
+        self.write_framework_manifest(self.pins["files"], fingerprint="0" * 64)
+        self.assertEqual(self.framework_tool(reason).stdout.strip(), "Codec adapters changed")
+        manifest = self.framework / "bifrost-framework.json"
+        data = json.loads(manifest.read_text())
+        manifest.write_text(json.dumps({**data, "codecs": {"adapter_fingerprint": self.pins["codecs"]}, "image_sha256": "1" * 64}))
+        self.assertIn("another Android image", self.framework_tool(reason).stdout)
+        manifest.write_text(json.dumps({**data, "codecs": {"adapter_fingerprint": self.pins["codecs"]},
+                                        "schema_version": self.pins["schema"] + 1}))
+        self.assertIn("Unknown framework manifest", self.framework_tool(reason).stdout)
+        manifest.write_text("not json")                                                 # unreadable: not judged
+        self.assertEqual(self.framework_tool(reason).stdout.strip(), "None")
+        manifest.unlink()
+        self.assertEqual(self.framework_tool(reason).stdout.strip(), "None")            # absent: nothing to replace
+
+    def test_replace_obsolete_deletes_an_obsolete_tree_read_only_directories_included_and_nothing_else(self):
+        # A fresh build would download the image: stop where the ART layer is verified, which comes right after the delete.
+        stop = ("from pathlib import Path\nimport sys\n"
+                "def stop(*args, **kwargs):\n    print('REACHED-ART-INSTALL')\n    sys.exit(0)\n"
+                "f.android_art.install = stop\n"
+                "tree = Path('build/android-framework/rootfs')\n"
+                "try:\n    f.install(tree, Path('build/android-art/rootfs'), replace_obsolete=True)\n"
+                "except ValueError as error:\n    print('REFUSED', error)\n"
+                "print('TREE-EXISTS', tree.exists())\n")
+        self.write_framework_manifest(self.pins["files"], fingerprint="0" * 64)
+        (self.framework / "system").chmod(0o555)                                         # as the image leaves directories
+        self.addCleanup(lambda: (self.framework / "system").exists() and (self.framework / "system").chmod(0o755))
+        result = self.framework_tool(stop)
+        self.assertIn("Replacing the framework runtime", result.stdout)
+        self.assertIn("REACHED-ART-INSTALL", result.stdout)
+        self.assertFalse(self.framework.exists())
+
+    def test_replace_obsolete_leaves_a_current_tree_a_link_and_an_installed_copy_alone(self):
+        script = ("from pathlib import Path\nimport sys\n"
+                  "tree = Path('build/android-framework/rootfs')\n"
+                  "try:\n    f.install(tree, Path('build/android-art/rootfs'), replace_obsolete=True)\n"
+                  "except ValueError as error:\n    print('REFUSED', error)\n"
+                  "print('TREE-EXISTS', tree.exists())\n")
+        # current: nothing is deleted, whatever else install() decides about it
+        self.assertIn("TREE-EXISTS True", self.framework_tool(script).stdout)
+        # an installed copy is only ever installed again, even when its manifest is obsolete
+        self.write_framework_manifest(self.pins["files"], fingerprint="0" * 64)
+        (self.checkout / ".asgard-install").write_text("{}")
+        result = self.framework_tool(script).stdout
+        self.assertIn("TREE-EXISTS True", result)
+        self.assertIn("REFUSED Codec adapters changed", result)
+        (self.checkout / ".asgard-install").unlink()
+        # a link is refused outright
+        moved = self.work / "elsewhere"
+        shutil.move(self.framework, moved)
+        os.symlink(moved, self.framework)
+        self.assertIn("REFUSED Refusing redirected framework runtime", self.framework_tool(script).stdout)
+        self.assertTrue(moved.is_dir())
+        # discard() itself refuses links and plain files
+        for target in (self.framework, self.checkout / "Makefile"):
+            (self.checkout / "Makefile").write_text("")
+            code = ("from pathlib import Path\ntry:\n    f.android_art.discard(Path(%r))\n    print('DELETED')\n"
+                    "except ValueError as error:\n    print('REFUSED', error)\n" % str(target))
+            self.assertIn("REFUSED Refusing to delete", self.framework_tool(code).stdout)
+
+    def test_the_art_tree_follows_the_same_rules(self):
+        tree = self.checkout / "build/android-art/rootfs"
+        script = ("from pathlib import Path\nart = f.android_art\ntree = Path('build/android-art/rootfs')\n"
+                  "print(art.obsolete_reason(tree))\n")
+        manifest = tree / "bifrost-art.json"
+        manifest.write_text(json.dumps({"schema_version": 2, "image_sha256": self.framework_tool(
+            "print(f.android_art.IMAGE_SHA256)").stdout.strip()}))
+        self.assertEqual(self.framework_tool(script).stdout.strip(), "None")
+        manifest.write_text(json.dumps({"schema_version": 1}))
+        self.assertIn("older format", self.framework_tool(script).stdout)
+        manifest.write_text(json.dumps({"schema_version": 2, "image_sha256": "1" * 64}))
+        self.assertIn("another Android image", self.framework_tool(script).stdout)
+        scratch = self.work / "art-scratch"                                               # not the fixture's own tree
+        (scratch / "apex/deep").mkdir(parents=True)
+        (scratch / "apex/deep/file").write_text("x")
+        (scratch / "apex/deep").chmod(0o555)
+        (scratch / "apex").chmod(0o555)                                                   # read-only, as the image leaves it
+        code = f"from pathlib import Path\nf.android_art.discard(Path({str(scratch)!r}))\nprint(Path({str(scratch)!r}).exists())"
+        self.assertEqual(self.framework_tool(code).stdout.strip(), "False")
 
     def test_an_installed_framework_is_never_upgraded_in_place(self):
         self.run_installer()

@@ -250,7 +250,7 @@ Install a standard one, then run programs directly ([details](Docs/ROOTFS.md)):
 
 ```bash
 ./bifrost-emu --setup-rootfs           # for your user, ~/.local/share/bifrost/rootfs (~235 MB download)
-sudo make install install-rootfs       # or system-wide, under $(PREFIX)/share/bifrost
+make && sudo make install install-rootfs   # or system-wide, under $(PREFIX)/share/bifrost (build as yourself first)
 bifrost-emu my_dynamic_app.elf         # finds the rootfs automatically
 ```
 
