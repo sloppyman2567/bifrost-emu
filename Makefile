@@ -58,6 +58,8 @@ USE_SDL3 ?= $(USE_SDL2)
 BUILD_DIR ?= build/$(BUILD_PROFILE)-sdl$(USE_SDL2)-gl$(USE_THUNK_GL)
 OBJDIR   := $(BUILD_DIR)
 TARGET   ?= $(BUILD_DIR)/bifrost-emu
+# The emulator build that install-asgard.py records as the one an installed Asgard belongs with (Scripts/Android/android_pairing.py).
+export BIFROST_BUILT_EMULATOR := $(TARGET)
 LIB      := $(OBJDIR)/libbifrost.a
 CONFIG_STAMP := $(OBJDIR)/.build-config
 SOURCE_STAMP := $(OBJDIR)/.source-list
@@ -833,6 +835,7 @@ test-android-package: $(TARGET) android-window-plugin android-runtime-adapters
 	python3 Scripts/Android/test_android_package.py --emu $(abspath $(TARGET)) --plugin $(abspath $(ANDROID_WINDOW_PLUGIN))
 	python3 Scripts/Android/test_android_gamepad.py
 	python3 Scripts/Android/test_android_provisioning.py
+	python3 Scripts/Android/test_android_pairing.py
 
 android-window-plugin: $(ANDROID_WINDOW_PLUGIN)
 

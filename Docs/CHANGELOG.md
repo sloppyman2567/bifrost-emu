@@ -78,6 +78,20 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   QEMU and Bifrost both execute are used, so a clean run proves nothing about other encodings. The IEEE cumulative exception
   flags of FPSR are left out of the comparison by default (Bifrost does not raise them).
 
+### Added (a warning when Asgard and the emulator are from different builds)
+
+- An installed Asgard now warns when the emulator running it is not the build it was installed for (2026-11-13). Updating
+  only one of the two used to fail later and obscurely (a flag the emulator does not know, a launcher it does not expect).
+  `install-asgard.py` records the SHA-256 of the emulator it belongs with: the build `make install` copies (the Makefile
+  exports its target as `BIFROST_BUILT_EMULATOR`), the package's `/usr/bin/bifrost-emu` in `asgard-setup`, or the
+  checkout's own `bifrost-emu`. `asgard` compares that with the `--emu` it was started with, which `bifrost-emu app.apk` passes,
+  and prints one line naming both digests and the update command. Recording the built emulator, not the installed one,
+  means updating only Asgard is caught as well as only the emulator.
+- It warns and never blocks, because a different build is not always an incompatible one. Installs made without an emulator
+  or before this check, a checkout's own Asgard and an unreadable emulator are not judged; `BIFROST_NO_PAIRING_WARNING=1`
+  silences it. Installing also notes an emulator older than the C/C++ sources (make first). Limit: the digest names a
+  build, not a contract, so a rebuild with unrelated changes warns until Asgard is installed again.
+
 ### Fixed (installing and updating)
 
 - Found by auditing the install and update paths for the same kind of fault as the stale launcher (2026-11-13); each was
@@ -95,8 +109,6 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   modified or installed tree or a link. The rebuild downloads the Android image again (734 MiB).
 - `fetch-sdl3.py` called any built `Tools/sdl3` current. It now compares the release in `sdl3.pc` with the pin and builds again
   over an older copy (kept aside and restored if the build fails), unless the system has SDL3, which makes the built copy unused.
-- Not fixed: `bifrost-emu` and an installed Asgard check nothing about each other. The install records a git revision that
-  nothing reads, and the emulator does not embed its own, so updating only one of them fails later and obscurely.
 
 ### Changed (installing Asgard builds what changed)
 

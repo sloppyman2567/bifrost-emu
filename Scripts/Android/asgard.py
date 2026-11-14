@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 
 from android_preflight import EXIT_UNSUPPORTED_ABI
 from android_processes import exit_description, log_tail
+import android_pairing
 import android_paths
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -545,6 +546,8 @@ def main():
         parser.error(f"unknown command {args.command!r}" + (f" (did you mean {close[0]!r}?)" if close else "")
                      + "; asgard --help lists the commands")
     state = args.state_root.resolve()
+    if args.command != "setup":  # setup builds a checkout; nothing runs the emulator
+        android_pairing.warn(args.emu.resolve())
     try:
         os.environ.update(debug_environment(args.debug))
         if args.command == "realm":

@@ -16,7 +16,8 @@ Java changed, the adapters after theirs, a framework tree older than its scripts
 `make android-provision`, which keeps what is current), so updating is `git pull` and this. That runs as the
 checkout's owner when this runs as root, so `sudo make install-asgard` leaves no root-owned files in build/.
 The pinned microG APKs are downloaded here when they are missing or the wrong size; --dry-run only reports
-them. The install is a self-contained copy of what Asgard reads (about 1 GiB: scripts, signing/dex tools,
+them. The marker also records the emulator build this install belongs with (BIFROST_BUILT_EMULATOR, which the Makefile
+exports, or the checkout's bifrost-emu), so that `asgard` can warn when another build runs it. The install is a self-contained copy of what Asgard reads (about 1 GiB: scripts, signing/dex tools,
 the framework and ART images, adapters, launcher, microG) under <prefix>/share/bifrost/asgard,
 plus <prefix>/bin/asgard. Run it again after updating the checkout: only files that differ
 (size, modification time, or link target) are copied, each replaced atomically so a running
@@ -354,6 +355,34 @@ def build_missing(dry_run):
                  "download resumes.\n  --no-build installs what is built and stops at what is missing.")
 
 
+def paired_emulator():
+    """(path, sha256) of the emulator this install belongs with, or None: BIFROST_BUILT_EMULATOR (the Makefile exports
+    its build target; the package's wrapper names /usr/bin/bifrost-emu) or else the checkout's own bifrost-emu. It is the
+    build `make install` copies, not whatever is installed now, so that updating only Asgard is noticed too (see
+    Scripts/Android/android_pairing.py)."""
+    named = os.environ.get("BIFROST_BUILT_EMULATOR")
+    path = (ROOT / named) if named else ROOT / "bifrost-emu"  # an absolute `named` keeps itself
+    try:
+        with path.open("rb") as stream:
+            return path, hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
+SOURCE_SUFFIXES = (".cpp", ".hpp", ".h", ".c", ".inc")
+
+
+def newer_source(emulator):
+    """The first C or C++ source or header under Source/, Include/ or Plugins/ that is newer than `emulator`, or None."""
+    limit = emulator.stat().st_mtime_ns
+    for top in ("Source", "Include", "Plugins"):
+        for directory, _, files in os.walk(ROOT / top):
+            for name in files:
+                if name.endswith(SOURCE_SUFFIXES) and (Path(directory) / name).stat().st_mtime_ns > limit:
+                    return Path(directory) / name
+    return None
+
+
 def microg_tool():
     return checkout_tool("android_microg")
 
@@ -438,7 +467,13 @@ def install(prefix, verify, dry_run, build=True):
                                   capture_output=True, text=True).stdout.strip()
     except OSError:
         revision = ""
-    write_marker(tree, complete=True, source_revision=revision or None, updated_at=int(time.time()))
+    pair = paired_emulator()
+    newer = newer_source(pair[0]) if pair and (ROOT / "Makefile").is_file() else None
+    if newer:
+        print(f"note: {pair[0]} is older than {newer.relative_to(ROOT)}. Run make first, then install again, so that the "
+              "emulator and Asgard come from the same sources.", file=sys.stderr)
+    emulator = {"sha256": pair[1], "path": str(pair[0])} if pair else None
+    write_marker(tree, complete=True, source_revision=revision or None, updated_at=int(time.time()), emulator=emulator)
     if changed or removed:
         compileall.compile_dir(tree / "Scripts/Android", quiet=2)
         compileall.compile_dir(tree / "Tools/Android", quiet=2)

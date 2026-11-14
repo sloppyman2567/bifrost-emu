@@ -130,9 +130,11 @@ class AsgardInstallTests(unittest.TestCase):
             os.chmod(directory, 0o755)
         shutil.rmtree(self.work, ignore_errors=True)
 
-    def run_installer(self, *args, expect=0):
+    def run_installer(self, *args, expect=0, env=None):
+        """`env` overrides the environment; a value of None removes the variable (the test's own may come from make)."""
+        environment = {name: value for name, value in {**os.environ, **(env or {})}.items() if value is not None}
         result = subprocess.run([sys.executable, str(self.checkout / "Scripts/Setup/install-asgard.py"),
-                                 "--prefix", str(self.prefix), *args], capture_output=True, text=True)
+                                 "--prefix", str(self.prefix), *args], capture_output=True, text=True, env=environment)
         self.assertEqual(result.returncode, expect, result.stdout + result.stderr)
         return result.stdout + result.stderr
 
@@ -447,6 +449,58 @@ class AsgardInstallTests(unittest.TestCase):
         self.assertIn("0 to copy", self.run_installer())
         self.assertIn("1 to copy", self.run_installer("--verify"))
         self.assertEqual(target.read_text(), "v1 Tools/android-tools/aapt2")
+
+    def marker(self):
+        return json.loads((self.tree / ".asgard-install").read_text())
+
+    def test_the_install_records_the_emulator_it_belongs_with(self):
+        emulator = self.work / "built-emulator"
+        emulator.write_bytes(b"emulator build A")
+        self.run_installer(env={"BIFROST_BUILT_EMULATOR": str(emulator)})
+        self.assertEqual(self.marker()["emulator"], {"sha256": hashlib.sha256(b"emulator build A").hexdigest(),
+                                                     "path": str(emulator)})
+
+    def test_without_the_variable_the_checkouts_own_emulator_is_the_one(self):
+        (self.checkout / "bifrost-emu").write_bytes(b"checkout build")
+        self.run_installer(env={"BIFROST_BUILT_EMULATOR": None})
+        self.assertEqual(self.marker()["emulator"]["sha256"], hashlib.sha256(b"checkout build").hexdigest())
+
+    def test_an_install_made_without_an_emulator_records_none_and_is_not_judged(self):
+        self.run_installer(env={"BIFROST_BUILT_EMULATOR": str(self.work / "never-built")})
+        self.assertIsNone(self.marker()["emulator"])
+
+    def test_the_recorded_emulator_is_what_a_later_run_is_compared_with(self):
+        sys.path.insert(0, str(REPOSITORY / "Scripts/Android"))
+        import android_pairing
+        built, other = self.work / "built", self.work / "other"
+        built.write_bytes(b"emulator build A")
+        other.write_bytes(b"emulator build B")
+        self.run_installer(env={"BIFROST_BUILT_EMULATOR": str(built)})
+        self.assertIsNone(android_pairing.mismatch(built, self.tree))                    # updated together
+        self.assertIn("different bifrost-emu build", android_pairing.mismatch(other, self.tree))   # emulator updated alone
+
+    def test_an_emulator_older_than_the_sources_is_noted_at_install_time(self):
+        (self.checkout / "Makefile").write_text("")
+        source = self.checkout / "Source/Part.cpp"
+        source.parent.mkdir(parents=True)
+        source.write_text("")
+        emulator = self.work / "built-emulator"
+        emulator.write_bytes(b"x")
+        os.utime(emulator, (946684800, 946684800))                                       # built before the source changed
+        output = self.run_installer(env={"BIFROST_BUILT_EMULATOR": str(emulator)})
+        self.assertIn("is older than Source/Part.cpp", output)
+        self.assertIn("Run make first", output)
+        os.utime(source, (946684800, 946684800))
+        os.utime(emulator, None)                                                         # now newer than every source
+        self.assertNotIn("is older than", self.run_installer(env={"BIFROST_BUILT_EMULATOR": str(emulator)}))
+
+    def test_the_makefile_exports_its_build_target_as_the_built_emulator(self):
+        include = self.work / "show.mk"
+        include.write_text("show:\n\t@echo \"[$$BIFROST_BUILT_EMULATOR]\"\n")
+        plain = self.make("-f", "Makefile", "-f", str(include), "show")
+        self.assertRegex(plain.stdout, r"\[build/[^\]]+/bifrost-emu\]")
+        named = self.make("-f", "Makefile", "-f", str(include), "show", "TARGET=elsewhere/bifrost-emu")
+        self.assertIn("[elsewhere/bifrost-emu]", named.stdout)
 
     def provisioning_stub(self, status=0, makefile=True):
         """A checkout (it has a Makefile) whose android_provisioning.py records how it was run and exits with `status`."""

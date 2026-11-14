@@ -47,6 +47,11 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   build command. A framework or ART tree whose manifest is from another image, format or set of codec adapters is deleted and
   provisioned again by `--replace-obsolete` (`android_art.obsolete_reason` / `android_framework.obsolete_reason` judge it from
   the manifest alone; never a current, modified, linked or installed tree), so no update needs a manual `rm -rf`. An app launch never compiles; a stale launcher stops it and names the fix.
+- Emulator pairing: an install's marker records the SHA-256 of the emulator build it belongs with (`emulator` in
+  `.asgard-install`, from `BIFROST_BUILT_EMULATOR`: the Makefile's `$(TARGET)`, or `/usr/bin/bifrost-emu` in
+  `debian/asgard-setup`), and `asgard.py` calls `android_pairing.warn` with its `--emu` before any command but `setup`. It only
+  warns. Anything that changes how `bifrost-emu` finds or starts Asgard keeps passing `--emu`; a new way to install the
+  emulator must name its binary there.
 - Launch path cost (`Scripts/Android`): every SHA-256 goes through `Tools/Android/file_digests.py` (a digest is
   reused while device, inode, size, mtime and ctime are unchanged; never call `hashlib` on installed files
   directly). Profile merges and the recompiles they ask for run after the session (`optimize_after_session`),

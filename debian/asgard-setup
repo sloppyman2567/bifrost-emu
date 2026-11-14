@@ -64,4 +64,6 @@ for package in microg.PACKAGES:
     print(microg.archive(package))
 PY
 announce "Installing Asgard"
+# The package's emulator is the one this Asgard belongs with: after an apt upgrade, asgard warns until this runs again.
+[ -x /usr/bin/bifrost-emu ] && export BIFROST_BUILT_EMULATOR=/usr/bin/bifrost-emu
 exec python3 Scripts/Setup/install-asgard.py "$@"

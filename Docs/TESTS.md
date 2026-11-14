@@ -98,6 +98,7 @@ directories and exercise the current emulator (`BIFROST_EMU` can override it):
 ./Scripts/Android/test_android_super.py        # dynamic-partition unpacker vs a synthetic image (--compare SUPER.img: vs lpunpack)
 ./Scripts/Android/test_android_adapter_exports.py # the built managed libGLESv2.so exports every core ES 2.0-3.2 command and libandroid.so exports ASurfaceControl_createFromWindow (an app library's missing import fails its whole dlopen)
 ./Scripts/Android/test_android_provisioning.py  # asgard setup: the steps a tree lacks and running them (fake commands), tied to the Makefile and the installer
+./Scripts/Android/test_android_pairing.py       # an installed Asgard warns when the emulator running it is not the build it was installed for (recorded digest, silencing, what is not judged)
 ./Scripts/Android/test_android_gamepad.py     # the library's gamepad control: pad states to actions, repeat, stick, keys per widget (offline)
 ./Scripts/Android/test_download_progress.py    # asgard-setup's download progress lines (terminal and piped), and resumable fetch against a local HTTP server
 ./Scripts/Android/test_file_digests.py         # launch-time file hashes are reused only while size, mtime, ctime and inode are unchanged (same-size edit with mtime restored, replacement, recent file, unusable cache)
