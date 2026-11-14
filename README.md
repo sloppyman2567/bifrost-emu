@@ -54,7 +54,7 @@ and how to install.
 
 ## What runs
 
-**19 games recorded (2026-11-08): 16 playable** (12 Android, 4 Linux), **1 starts** without confirmed gameplay
+**20 games recorded (2026-11-14): 17 playable** (13 Android, 4 Linux), **1 starts** without confirmed gameplay
 (Teeworlds) and **2 are blocked** (Roblox, TrickCal). Umamusume counts as playable through its
 Global client; its JP client is blocked. Apps such as YouTube and Firefox are not counted.
 
@@ -76,6 +76,7 @@ that every feature has an automated test or a recorded capture.
 | Hungry Shark Evolution 14.5.0, Hungry Shark World 8.2.6 | Android | User-reported stable gameplay (2026-11-06). Hungry Shark World's Play Games sign-in does not complete. |
 | YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
 | [Oddmar](Docs/Apps/oddmar.md) | Android, Unity/IL2CPP | User-confirmed gameplay in the first level on 2.0.0-beta.1 (2026-11-08), with no stutter noticed; later levels are not confirmed. |
+| Family Island 2026370.1.94765 | Android, Defold | User-reported stable play on 2.0.0-beta.2 (2026-11-14): home island, the Torch Island map and the Beaver Grove screen captured at about 27 to 47 FPS on the overlay while other programs loaded the machine; one session, no longer run recorded. |
 | Uptodown | Android | Draws its home list, then asks for all-files access, which Bifrost cannot grant. |
 | Roblox, TrickCal | Android | Blocked: Roblox is disconnected after joining (needs real Google attestation); TrickCal's anti-cheat ends it. |
 | [Neverball 1.6.0](Docs/Apps/neverball.md) | Linux, SDL2/GL | User-confirmed stable gameplay, replays, menus and fonts. |
@@ -89,7 +90,7 @@ that every feature has an automated test or a recorded capture.
 ## Screenshots
 
 User-supplied captures, not benchmarks. The Android shots are from 2.0.0-alpha.1 to 2.0.0-beta.1 (SpongeBob, Azur Lane
-home and Umamusume November 1, Arknights November 3, Oddmar November 8, Azur Lane's login screen October 14); the Linux games are
+home and Umamusume November 1, Arknights November 3, Oddmar November 8, Family Island November 14, Azur Lane's login screen October 14); the Linux games are
 from October 2 to 4. More are in the
 [SpongeBob gallery](Docs/Apps/spongebob.md#screenshots-2026-11-01),
 [Azur Lane gallery](Docs/Apps/azur-lane.md#screenshots-2026-10-14) and
@@ -120,6 +121,11 @@ from October 2 to 4. More are in the
 <td><img src="Docs/Images/Oddmar-2026-11-08/harbour.png" alt="Oddmar harbour level" width="320"><br><sub>Oddmar, a harbour level (Android)</sub></td>
 <td><img src="Docs/Images/MinecraftWeekend-2026-10-04/nighttime.png" alt="Minecraft Weekend at night" width="320"><br><sub>Minecraft Weekend at night (Linux)</sub></td>
 <td><img src="Docs/Images/Neverball-2026-10-04/new-record.png" alt="Neverball new record screen" width="320"><br><sub>Neverball new record (Linux, SDL2/GL)</sub></td>
+</tr>
+<tr>
+<td><img src="Docs/Images/FamilyIsland-2026-11-14/home.png" alt="Family Island home island" width="320"><br><sub>Family Island home island (Android)</sub></td>
+<td><img src="Docs/Images/FamilyIsland-2026-11-14/torch-island.png" alt="Family Island Torch Island map" width="320"><br><sub>Family Island island map (Android)</sub></td>
+<td><img src="Docs/Images/FamilyIsland-2026-11-14/beaver-grove.png" alt="Family Island Beaver Grove" width="320"><br><sub>Family Island Beaver Grove (Android)</sub></td>
 </tr>
 </table>
 

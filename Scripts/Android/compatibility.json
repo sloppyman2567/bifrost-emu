@@ -49,6 +49,16 @@
       ],
       "page": "Docs/Apps/oddmar.md"
     },
+    "com.MelsoftGames.FamilyIslandFarm": {
+      "name": "Family Island",
+      "tested_version": "2026370.1.94765",
+      "status": "playable",
+      "checked": "2026-11-14",
+      "evidence": "The maintainer reports stable play on 2.0.0-beta.2 (2026-11-14), with some lag while other programs loaded the machine. Three screenshots (the home island, an island map, the Beaver Grove screen) show the game drawn at 3440x1384 with the overlay at 26.7 to 47.0 FPS. One session; no longer run and no frame-time measurement are recorded.",
+      "notes": [
+        "A Defold game whose Activity extends NativeActivity: it needed the surface and the input queue handed over (Docs/Android/ANDROID_RUNTIME_REFERENCE.md)."
+      ]
+    },
     "com.ubisoft.hungrysharkworld": {
       "name": "Hungry Shark World",
       "tested_version": "8.2.6",

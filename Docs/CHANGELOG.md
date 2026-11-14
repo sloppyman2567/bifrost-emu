@@ -47,6 +47,11 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (Family Island in the list of games)
+
+- Family Island is in the README's table and gallery as user-reported stable play, with three screenshots from 2026-11-14. One
+  session was recorded, with some lag while other programs were running; the account ID in one capture is blurred.
+
 ### Fixed (an intermittent failure of `jit_dispatch_cache_growth`)
 
 - About 1 run in 100 of `jit_dispatch_cache_growth` (also run by `jit_disk_cache`) failed with stale code or a segfault. The test was
