@@ -498,7 +498,7 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
         CallStatsGuard(FrostJIT* j, unsigned& d) : jit(j), depth(d) { ++depth; }
         ~CallStatsGuard() { if (--depth == 0 && jit) jit->flush_stat_tls(); }
     } stats_guard(jit, call_depth);
-    static const bool verify_mode_ = (getenv("BIFROST_JIT_VERIFY") != nullptr);
+    static const bool verify_mode_ = dbg().jit_verify;
     uint64_t dbg2_count = 0;
     while (cpu->running && !cpu->jit_dispatch_requested && cpu->pc != return_pc &&
            (!cpu->jit_stop_pc || cpu->pc != cpu->jit_stop_pc)) {

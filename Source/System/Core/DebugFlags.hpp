@@ -55,6 +55,14 @@ struct DebugFlags {
     unsigned jit_superblock_limit = 8; // BIFROST_JIT_SUPERBLOCK_LIMIT=2..8
     bool no_chain = false; // BIFROST_NO_CHAIN — disable block/region edges
     bool jit_verify = false;  // BIFROST_JIT_VERIFY: presence enables differential replay
+    // Differential-replay options (they only act with BIFROST_JIT_VERIFY):
+    uint64_t jit_verify_every = 1;  // BIFROST_JIT_VERIFY_EVERY=N: re-verify each block on its first N dispatches
+    bool jit_verify_mem = false;  // BIFROST_JIT_VERIFY_MEM: compare each tracked store's bytes
+    bool jit_verify_memfull = false;  // BIFROST_JIT_VERIFY_MEMFULL: compare every byte of the range below
+    uint64_t jit_memfull_start = 0x10000000ULL;  // BIFROST_MEMFULL_START: first guest VA of that range
+    uint64_t jit_memfull_end = 0x14000000ULL;  // BIFROST_MEMFULL_END: end (exclusive) of that range
+    bool verify_untracked = false;  // BIFROST_VERIFY_UNTRACKED: also verify blocks with unresolved stores
+    bool verify_trace = false;  // BIFROST_VERIFY_TRACE: print each verified block's entry state
     bool no_ssa = false; // BIFROST_NO_SSA — compare with the legacy scalar IR pipeline
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;  // [lo, hi) guest pcs
@@ -232,6 +240,13 @@ struct DebugFlags {
         f.jit_software_guard = env("BIFROST_JIT_SOFTWARE_GUARD") || env("BIFROST_GUARD_ALLOCS") || env("BIFROST_JIT_SLOW_STORES");
         f.no_chain = env("BIFROST_NO_CHAIN");
         f.jit_verify = std::getenv("BIFROST_JIT_VERIFY") != nullptr;
+        if (const char* every = std::getenv("BIFROST_JIT_VERIFY_EVERY")) f.jit_verify_every = std::strtoull(every, nullptr, 0);
+        f.jit_verify_mem = env("BIFROST_JIT_VERIFY_MEM");
+        f.jit_verify_memfull = env("BIFROST_JIT_VERIFY_MEMFULL");
+        if (const char* start = std::getenv("BIFROST_MEMFULL_START")) f.jit_memfull_start = std::strtoull(start, nullptr, 0);
+        if (const char* end = std::getenv("BIFROST_MEMFULL_END")) f.jit_memfull_end = std::strtoull(end, nullptr, 0);
+        f.verify_untracked = env("BIFROST_VERIFY_UNTRACKED");
+        f.verify_trace = env("BIFROST_VERIFY_TRACE");
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.audio_trace = all || env("BIFROST_AUDIO_TRACE");
         if (const char* dump = std::getenv("BIFROST_AUDIO_DUMP")) {

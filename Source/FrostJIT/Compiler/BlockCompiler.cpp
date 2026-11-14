@@ -875,7 +875,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                            last.op == IROp::BRCOND_BIT) && last.branch_target() == start_pc;
         }
         if (is_selfloop && !no_selfloop && !getenv("BIFROST_NO_PIN") &&
-            !getenv("BIFROST_JIT_VERIFY")) {
+            !dbg().jit_verify) {
             // Pinning is disabled under BIFROST_JIT_VERIFY: verify mode
             // un-patches the self-loop slot, so the taken back-edge returns
             // to the dispatcher and re-runs the prologue — whose preloads

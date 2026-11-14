@@ -401,10 +401,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // operand >= 32 to manifest) pass first-dispatch verify and then
     // corrupt memory invisibly — the neverball/vkQuake heap-corruption
     // hunt needed N in the hundreds to catch them.
-    static uint64_t verify_every_ = [] {
-        const char* s = getenv("BIFROST_JIT_VERIFY_EVERY");
-        return s ? strtoull(s, nullptr, 0) : 1;
-    }();
+    static const uint64_t verify_every_ = dbg().jit_verify_every;
     // Quarantine: blocks whose ref re-run is unsound skip verify and run
     // once, normally. SVC re-executes kernel side effects; calls step the
     // ref INTO the callee while the JIT called-and-continued; unresolved
@@ -412,7 +409,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // BIFROST_VERIFY_UNTRACKED=1 (debug only) also verifies unresolved-
     // store blocks; their ref re-run can double-apply stores, so only
     // trust divergences that reproduce and make sense (register splits).
-    static bool verify_untracked_ = (getenv("BIFROST_VERIFY_UNTRACKED") != nullptr);
+    static const bool verify_untracked_ = dbg().verify_untracked;
     // Regions have internal loops and no Tier-1 chain/self-loop slots.
     // Replaying them with a fixed block count (or unpatching offset zero)
     // is invalid; use their independent result oracles instead.
@@ -507,7 +504,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // saved's pending queue is empty. That's fine for verify mode —
         // verify runs single-threaded and no signals should be pending.
         // Debug: print entry state for specific blocks
-        static bool vtrace_ = (getenv("BIFROST_VERIFY_TRACE") != nullptr);
+        static const bool vtrace_ = dbg().verify_trace;
         if (vtrace_) {
             fprintf(stderr, "[VTRACE] entry block @ 0x%llx x0=0x%llx x1=0x%llx pstate=0x%x\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
@@ -574,15 +571,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // Cost: ~3 passes over the range per verified dispatch — keep
         // BIFROST_JIT_VERIFY_EVERY modest. Snapshot here (pre-JIT); compare+restore
         // at the memverify site after both executions.
-        static bool memfull_ = (getenv("BIFROST_JIT_VERIFY_MEMFULL") != nullptr);
-        static uint64_t mf_start_ = [] {
-            const char* s = getenv("BIFROST_MEMFULL_START");
-            return s ? strtoull(s, nullptr, 0) : 0x10000000ULL;
-        }();
-        static uint64_t mf_end_ = [] {
-            const char* s = getenv("BIFROST_MEMFULL_END");
-            return s ? strtoull(s, nullptr, 0) : 0x14000000ULL;
-        }();
+        static const bool memfull_ = dbg().jit_verify_memfull;
+        static const uint64_t mf_start_ = dbg().jit_memfull_start;
+        static const uint64_t mf_end_ = dbg().jit_memfull_end;
         const size_t mf_bytes = (size_t)(mf_end_ - mf_start_);
         std::vector<uint8_t> mf_snap_(memfull_ ? mf_bytes : 0);
         std::vector<uint8_t> mf_jit_(memfull_ ? mf_bytes : 0);
@@ -831,7 +822,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 emu.mem().write(mf_start_, mf_jit_.data(), mf_bytes);
             } catch (...) {}
         }
-        static bool memverify_ = (getenv("BIFROST_JIT_VERIFY_MEM") != nullptr);
+        static const bool memverify_ = dbg().jit_verify_mem;
         if (memverify_) {
             for (int i = 0; i < saved_mem_count; i++) {
                 uint8_t ref_bytes[16] = {0};
