@@ -38,6 +38,13 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   a microG service bind, a GServices query and the chimera lookup. microG's
   `AdRequestService` stub is never bound (`FrameworkServiceRuntime`), so
   Google Mobile Ads uses its local request path; see the runtime guide.
+- Provisioning currency: `Scripts/Android/android_provisioning.py` is the one list of what a checkout needs, and a
+  finished step counts as missing when its result no longer matches its sources (`launcher_current` in `android_managed.py`
+  hashes every Java source and stub, `current`/`input_digest` in `build-android-adapters.py` digest every file the build reads,
+  `missing_additions` covers the framework tree). Checkouts only: an installed copy has no sources. A new input to the adapter
+  build goes into `INPUTS`, a new launcher source into `LAUNCHER_SOURCES`; the builders skip when current and take `--force`.
+  `install-asgard.py` runs that module (as the checkout's owner when root) before it copies, so an update needs no separate
+  build command. An app launch never compiles; a stale launcher stops it and names the fix.
 - Launch path cost (`Scripts/Android`): every SHA-256 goes through `Tools/Android/file_digests.py` (a digest is
   reused while device, inode, size, mtime and ctime are unchanged; never call `hashlib` on installed files
   directly). Profile merges and the recompiles they ask for run after the session (`optimize_after_session`),

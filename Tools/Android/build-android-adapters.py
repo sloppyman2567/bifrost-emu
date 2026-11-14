@@ -13,6 +13,12 @@ import tempfile
 from android_guest_dependencies import build_zlib, extract, prepare_headers
 
 ROOT = Path(__file__).resolve().parents[2]
+# What the build reads from the tree, as paths below the root (a directory counts every file in it). A change to any of
+# them makes the built adapters out of date; the manifest records their digest.
+INPUTS = ("Guest/Android/Adapters", "Guest/Android/Include", "Guest/Android/Launchers", "Include/Bifrost",
+          "Tests/Unit/android_bionic_start.S", "Tools/CodeGen/thunk_dp.txt", "ThirdParty/GLRegistry/gl.xml",
+          "ThirdParty/VulkanHeaders", "Tools/Android/build-android-adapters.py",
+          "Tools/Android/android_guest_dependencies.py", "Tools/Android/fetch-android-runtime.py")
 
 
 def shim(library, names, hidden=(), resolver=None):
@@ -346,6 +352,34 @@ def vulkan_extension_table():
     return "\n".join(lines)
 
 
+def input_digest(root=ROOT):
+    """One digest of everything the build reads from the tree, plus the pinned runtime archive's own digest (the
+    manifest records that too, but it changes only with the fetch script above)."""
+    value = hashlib.sha256()
+    for name in INPUTS:
+        base = root / name
+        files = sorted(path for path in base.rglob("*") if path.is_file()) if base.is_dir() else [base]
+        for path in files:
+            value.update(path.relative_to(root).as_posix().encode() + b"\0")
+            try:
+                with path.open("rb") as stream:
+                    value.update(hashlib.file_digest(stream, "sha256").digest())
+            except OSError:  # an absent input is part of the answer: it changes the digest when it appears
+                value.update(b"absent")
+    return value.hexdigest()
+
+
+def current(output, root=ROOT):
+    """Whether `output` holds adapters built from the inputs in `root`: every file the manifest names is there and the
+    manifest's input digest is this tree's. A manifest from before the digest existed is out of date."""
+    try:
+        manifest = json.loads((output / "adapters.json").read_text())
+        return (manifest.get("inputs") == input_digest(root)
+                and all((output / name).is_file() for name in manifest["files"]))
+    except (OSError, ValueError, KeyError, AttributeError):
+        return False
+
+
 def build(runtime, output):
     spec = importlib.util.spec_from_file_location(
         "runtime", ROOT / "Tools/Android/fetch-android-runtime.py"
@@ -592,6 +626,7 @@ def build(runtime, output):
             names.append("managed/" + soname)
         metadata = {
             "schema_version": 1,
+            "inputs": input_digest(),
             "runtime_archive_sha256": module.SHA256,
             "dependencies": dependencies,
             "files": {
@@ -614,5 +649,9 @@ if __name__ == "__main__":
         "--runtime-root", type=Path, default=ROOT / "Tools/android-runtime/rootfs"
     )
     parser.add_argument("--output", type=Path, default=ROOT / "build/android-adapters")
+    parser.add_argument("--force", action="store_true", help="build even when the adapters match their sources")
     args = parser.parse_args()
-    build(args.runtime_root, args.output)
+    if not args.force and current(args.output):
+        print(f"Runtime adapters are up to date: {args.output}")
+    else:
+        build(args.runtime_root, args.output)

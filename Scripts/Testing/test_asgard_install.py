@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 INSTALLER = REPOSITORY / "Scripts/Setup/install-asgard.py"
@@ -415,6 +416,69 @@ class AsgardInstallTests(unittest.TestCase):
         self.assertIn("0 to copy", self.run_installer())
         self.assertIn("1 to copy", self.run_installer("--verify"))
         self.assertEqual(target.read_text(), "v1 Tools/android-tools/aapt2")
+
+    def provisioning_stub(self, status=0, makefile=True):
+        """A checkout (it has a Makefile) whose android_provisioning.py records how it was run and exits with `status`."""
+        ran = self.work / "provisioning-ran"
+        if makefile:
+            (self.checkout / "Makefile").write_text("")
+        (self.checkout / "Scripts/Android/android_provisioning.py").write_text(
+            f"import sys\nopen({str(ran)!r}, 'a').write(' '.join(sys.argv[1:]) + '|')\nsys.exit({status})\n")
+        return ran
+
+    def test_a_checkout_is_built_before_it_is_installed(self):
+        ran = self.provisioning_stub()
+        output = self.run_installer()
+        self.assertEqual(ran.read_text(), "|")                                 # no arguments: build what is missing or stale
+        self.assertIn("Asgard installed in", output)
+        self.assertTrue((self.tree / "build/android-managed-launcher/classes.dex").is_file())
+
+    def test_a_failed_build_installs_nothing_and_says_how_to_go_on(self):
+        self.provisioning_stub(status=3)
+        output = self.run_installer(expect=1)
+        self.assertIn("could not build what this checkout needs", output)
+        self.assertIn("--no-build", output)
+        self.assertFalse(self.prefix.exists())                                  # stopped before anything was written
+
+    def test_dry_run_only_asks_what_would_be_built(self):
+        ran = self.provisioning_stub()
+        self.run_installer("--dry-run")
+        self.assertEqual(ran.read_text(), "--check|")
+        self.assertFalse(self.tree.exists())
+
+    def test_dry_run_survives_a_check_that_finds_work_to_do(self):
+        self.provisioning_stub(status=1)                                        # --check exits 1 when something is missing
+        self.run_installer("--dry-run")
+
+    def test_no_build_installs_what_is_built_and_runs_no_build(self):
+        ran = self.provisioning_stub(status=3)
+        self.run_installer("--no-build")
+        self.assertFalse(ran.exists())
+        self.assertTrue(self.tree.is_dir())
+
+    def test_a_setup_tree_without_a_makefile_has_nothing_to_build_from(self):
+        ran = self.provisioning_stub(status=3, makefile=False)
+        self.run_installer()
+        self.assertFalse(ran.exists())
+
+    def test_as_root_the_build_runs_as_the_checkouts_owner_with_their_environment(self):
+        spec = importlib.util.spec_from_file_location("install_asgard_owner", INSTALLER)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        installer.ROOT = self.checkout
+        with mock.patch.object(installer.os, "geteuid", return_value=0), \
+                mock.patch.dict(installer.os.environ, {"SUDO_USER": "x", "XDG_CACHE_HOME": "/root/.cache", "KEEP": "1"}):
+            options = installer.owner_options()
+        owner = installer.pwd.getpwuid(self.checkout.stat().st_uid)
+        self.assertEqual((options["user"], options["group"]), (self.checkout.stat().st_uid, self.checkout.stat().st_gid))
+        self.assertEqual((options["env"]["HOME"], options["env"]["USER"], options["env"]["KEEP"]),
+                         (owner.pw_dir, owner.pw_name, "1"))
+        self.assertFalse([name for name in options["env"] if name.startswith(("SUDO_", "XDG_"))])
+        with mock.patch.object(installer.os, "geteuid", return_value=1000):
+            self.assertEqual(installer.owner_options(), {})                     # not root: run as ourselves
+        installer.ROOT = mock.Mock(**{"stat.return_value": mock.Mock(st_uid=0, st_gid=0)})
+        with mock.patch.object(installer.os, "geteuid", return_value=0):
+            self.assertEqual(installer.owner_options(), {})                     # a root-owned checkout: root builds
 
     def test_an_unprovisioned_checkout_names_the_missing_pieces(self):
         shutil.rmtree(self.checkout / "build/android-adapters")

@@ -276,8 +276,12 @@ downloads) and installs it so it works from any directory:
 
 ```bash
 make provision-asgard PREFIX=$HOME/.local      # for your user; add ~/.local/bin to PATH for the asgard command
-make android-provision && sudo make install-asgard   # or system-wide: /usr/local needs sudo
+sudo make install-asgard                       # or system-wide: /usr/local needs sudo
 ```
+
+To update after a `git pull`, run the same install again (`make`, then `sudo make install-asgard`): it first builds
+whatever changed (the app launcher after its Java changed, the adapters after theirs, anything not yet downloaded), as your
+user, then copies only the files that differ. `make android-provision` does the building alone.
 
 The desktop launcher (`asgard launcher`) also needs PyQt6, which `make deps` and `make bootstrap` install;
 `bifrost-emu app.apk` works without it. Run the command again after an update: only the files that changed are copied. `./Scripts/Setup/install-asgard.py` is the

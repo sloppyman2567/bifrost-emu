@@ -78,6 +78,22 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   QEMU and Bifrost both execute are used, so a clean run proves nothing about other encodings. The IEEE cumulative exception
   flags of FPSR are left out of the comparison by default (Bifrost does not raise them).
 
+### Changed (installing Asgard builds what changed)
+
+- `sudo make install-asgard` now builds what the checkout lacks or has out of date before it copies anything (2026-11-13),
+  so updating after a `git pull` is `make` and `sudo make install-asgard`. Updating from a build older than the Zygote
+  work needed a separate `make android-managed-launcher` (reported): the install copied whatever the checkout had built,
+  and launching an app stopped with "run make android-managed-launcher" when that no longer matched the Java sources.
+  The build runs as the checkout's owner when make runs as root, so root owns no build files.
+- A step counts as out of date, in a checkout, when the launcher's Java or stubs changed since its build, when the adapters'
+  inputs changed (`adapters.json` records a digest of everything their build reads; a build from before that is rebuilt
+  once), or when the framework tree lacks files the scripts add in place. `asgard setup` and the library's Set up…
+  use the same check. The launcher and adapter builds skip when current (`--force` rebuilds): on this tree the adapters
+  took 5 s to build and 0.1 s to skip. `install-asgard.py --no-build` keeps the old behaviour of stopping at what is missing.
+- Checked with unit tests for the currency rules, the build step and the as-root options, and a real adapter build in
+  a scratch directory (bit-identical to the existing one). Not run as root, and not run from a checkout that
+  `git pull` has just changed.
+
 ### Fixed (stale source comments and a broken import)
 
 - Comments that named files, functions and generators that no longer exist now name the current ones (the interpreter and

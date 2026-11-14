@@ -1851,8 +1851,10 @@ package state into [`FrameworkPackages.java`](../../Guest/Android/Managed/Framew
 and host-network state and callbacks into
 [`FrameworkConnectivity.java`](../../Guest/Android/Managed/Framework/FrameworkConnectivity.java).
 `ManagedLauncher` retains Activity lifecycle, windows, input and native wire services.
-The explicit launcher build and freshness check hash every module; after changing
-any of them, run `make android-managed-launcher` before launching an installed app.
+The explicit launcher build and freshness check hash every module. After changing
+any of them, `make android-managed-launcher` (or `make android-provision`, which also checks the adapters and the rest) rebuilds
+the launcher, and `sudo make install-asgard` does that first and then updates an installed copy. An app launch never compiles:
+a launcher that does not match its sources stops the launch and names that command.
 
 The package service now supports receiver/provider component lookup, installed
 package/application enumeration, package-to-UID and UID-to-package queries. This

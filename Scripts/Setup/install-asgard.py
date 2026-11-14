@@ -5,14 +5,18 @@ Usage:
   ./Scripts/Setup/install-asgard.py                 # for your user: ~/.local
   ./Scripts/Setup/install-asgard.py --prefix DIR    # DIR/share/bifrost/asgard and DIR/bin/asgard
   ./Scripts/Setup/install-asgard.py --system        # /usr/local (needs root)
-  ./Scripts/Setup/install-asgard.py --dry-run       # list what would change, write nothing
+  ./Scripts/Setup/install-asgard.py --dry-run       # list what would be built and what would change, write nothing
+  ./Scripts/Setup/install-asgard.py --no-build      # install only what is already built; stop if anything is missing
   ./Scripts/Setup/install-asgard.py --verify        # also compare file contents, not just size and time
   ./Scripts/Setup/install-asgard.py --check-prefix  # only check that the prefix can be installed to
   ./Scripts/Setup/install-asgard.py --uninstall     # remove it from the chosen prefix
 
-This checkout must already be provisioned for Android: `make provision-asgard` does all of it
-(see Docs/Android/ANDROID_APK.md). The exception is the pinned microG APKs, which a real install
-downloads when they are missing or the wrong size; --dry-run only reports them. The install is a self-contained copy of what Asgard reads (about 1 GiB: scripts, signing/dex tools,
+In a checkout, the install first builds what the checkout lacks or has out of date (the app launcher after its
+Java changed, the adapters after theirs, a framework tree older than its scripts, anything not yet downloaded:
+`make android-provision`, which keeps what is current), so updating is `git pull` and this. That runs as the
+checkout's owner when this runs as root, so `sudo make install-asgard` leaves no root-owned files in build/.
+The pinned microG APKs are downloaded here when they are missing or the wrong size; --dry-run only reports
+them. The install is a self-contained copy of what Asgard reads (about 1 GiB: scripts, signing/dex tools,
 the framework and ART images, adapters, launcher, microG) under <prefix>/share/bifrost/asgard,
 plus <prefix>/bin/asgard. Run it again after updating the checkout: only files that differ
 (size, modification time, or link target) are copied, each replaced atomically so a running
@@ -26,6 +30,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -315,6 +320,39 @@ def missing_provisioning():
     return missing or stale_framework()
 
 
+def owner_options():
+    """subprocess options that run a command as the checkout's owner when this runs as root (sudo make install-asgard):
+    the build trees stay that user's, and so do the caches the build tools write. Empty otherwise."""
+    info = ROOT.stat()
+    if os.geteuid() != 0 or info.st_uid == 0:
+        return {}
+    try:
+        owner = pwd.getpwuid(info.st_uid)
+    except KeyError:
+        return {}
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith(("XDG_", "SUDO_"))}
+    env.update(HOME=owner.pw_dir, USER=owner.pw_name, LOGNAME=owner.pw_name)
+    return {"user": info.st_uid, "group": info.st_gid, "env": env,
+            "extra_groups": os.getgrouplist(owner.pw_name, info.st_gid)}
+
+
+def build_missing(dry_run):
+    """Build what this checkout lacks or has out of date, with Scripts/Android/android_provisioning.py: the same steps
+    as `make android-provision` and `asgard setup`, each of which keeps what is current. An installed copy's setup tree
+    has no sources and no Makefile, and is left to the check in missing_provisioning()."""
+    script = ROOT / "Scripts/Android/android_provisioning.py"
+    if not script.is_file() or not (ROOT / "Makefile").is_file():
+        return
+    command = [sys.executable, "-B", str(script)] + (["--check"] if dry_run else [])
+    sys.stdout.flush()
+    result = subprocess.run(command, cwd=ROOT, **owner_options())
+    if result.returncode and not dry_run:
+        sys.exit("error: could not build what this checkout needs for Android (the reason is above); nothing was "
+                 "installed.\n  Fix that and run this again: steps already done are kept, and an interrupted "
+                 "download resumes.\n  --no-build installs what is built and stops at what is missing.")
+
+
 def microg_tool():
     return checkout_tool("android_microg")
 
@@ -365,7 +403,9 @@ def check_prefix(prefix, writing=True):
                      "(/usr/local needs sudo).")
 
 
-def install(prefix, verify, dry_run):
+def install(prefix, verify, dry_run, build=True):
+    if build:
+        build_missing(dry_run)
     missing = missing_provisioning()
     if missing:
         print("error: this checkout is not fully provisioned for Android:", file=sys.stderr)
@@ -434,6 +474,8 @@ def main():
     where.add_argument("--system", action="store_true", help="install under /usr/local")
     where.add_argument("--prefix", type=Path, help="install under DIR/share/bifrost and DIR/bin")
     parser.add_argument("--dry-run", action="store_true", help="list what would change and write nothing")
+    parser.add_argument("--no-build", action="store_true",
+                        help="do not build what is missing or out of date first; stop at what is missing")
     parser.add_argument("--verify", action="store_true", help="compare contents as well as size and time")
     parser.add_argument("--check-prefix", action="store_true",
                         help="check that this prefix can be installed to, change nothing and stop")
@@ -446,7 +488,7 @@ def main():
         elif args.uninstall:
             uninstall(prefix)
         else:
-            install(prefix, args.verify, args.dry_run)
+            install(prefix, args.verify, args.dry_run, build=not args.no_build)
     except PermissionError as error:
         sys.exit(f"error: {error}\n  Run it as the user (or with sudo) that owns {prefix}.")
 

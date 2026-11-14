@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""asgard setup: what an Asgard tree is missing, and running the missing steps (no downloads, no builds)."""
+"""asgard setup: what an Asgard tree is missing or has out of date, and running those steps (no downloads, no builds)."""
 import contextlib
 import importlib.util
 import io
@@ -16,6 +16,19 @@ import android_provisioning as provisioning  # noqa: E402
 
 ROOT = provisioning.ROOT
 MICROG = (("microg-a.apk", 5), ("microg-b.apk", 3))
+CHECKS = {}
+
+
+def setUpModule():
+    """The fake trees below hold no sources to compare with, so no step has a staleness check unless a test gives it one."""
+    for step in provisioning.STEPS:
+        CHECKS[step.key] = step.stale
+        step.stale = None
+
+
+def tearDownModule():
+    for step in provisioning.STEPS:
+        step.stale = CHECKS[step.key]
 
 
 def tree(directory, *, sources=True, done=()):
@@ -169,6 +182,168 @@ class RunTests(unittest.TestCase):
             code, lines, calls = self.run_setup(root)
             self.assertEqual((code, calls), (1, []))
             self.assertIn("make install-asgard", lines[-1])
+
+
+class OutOfDateTests(unittest.TestCase):
+    """A finished step whose sources changed counts as missing in a checkout, and only there."""
+
+    def setUp(self):
+        self.step = next(step for step in provisioning.STEPS if step.key == "launcher")
+        self.addCleanup(setattr, self.step, "stale", None)
+
+    def complete(self, directory):
+        return tree(directory, done=[step.key for step in provisioning.STEPS])
+
+    def test_an_out_of_date_step_is_missing_and_says_so(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.complete(directory)
+            self.step.stale = lambda root: True
+            self.assertEqual([step.key for step in provisioning.missing(root)], ["launcher"])
+            self.assertEqual(provisioning.status(root)["missing"][0]["state"], "out of date")
+            self.step.stale = lambda root: False
+            self.assertEqual(provisioning.missing(root), [])
+            self.step.stale = None
+            (root / self.step.outputs[0]).unlink()
+            self.assertEqual(provisioning.status(root)["missing"][0]["state"], "missing")
+
+    def test_an_installed_copy_cannot_rebuild_so_it_never_looks_for_out_of_date_steps(self):
+        def never(root):
+            raise AssertionError("an installed copy compared a step with sources it does not have")
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.complete(directory)
+            (root / provisioning.MARKER).write_text("{}")
+            self.step.stale = never
+            self.assertEqual(provisioning.missing(root), [])
+        with tempfile.TemporaryDirectory() as directory:
+            root = tree(directory, sources=False, done=[step.key for step in provisioning.STEPS])
+            self.step.stale = never
+            self.assertEqual(provisioning.missing(root), [])                      # no Makefile either
+
+    def test_setup_rebuilds_only_the_out_of_date_step_and_checks_it_took(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.complete(directory)
+            current = {"yes": False}
+            self.step.stale = lambda root: not current["yes"]
+            calls, lines = [], []
+
+            def runner(command, cwd=None, env=None):
+                calls.append(list(command))
+                if command[0] != "bash":
+                    current["yes"] = True
+                return types.SimpleNamespace(returncode=0)
+            self.assertEqual(provisioning.run_setup(root, out=lines.append, runner=runner), 0)
+            self.assertEqual([Path(call[1]).name for call in calls[1:]], ["android_managed.py"])
+            self.assertIn("App launcher (out of date, rebuilding)", lines[0])
+            self.assertEqual(lines[-1], "Asgard is set up.")
+
+    def test_a_step_that_is_still_out_of_date_after_its_command_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.complete(directory)
+            self.step.stale = lambda root: True
+            lines = []
+            code = provisioning.run_setup(root, out=lines.append,
+                                          runner=lambda command, cwd=None, env=None: types.SimpleNamespace(returncode=0))
+            self.assertEqual(code, 1)
+            self.assertIn("App launcher is still out of date", lines[-1])
+
+    def test_a_check_that_cannot_run_counts_as_out_of_date_and_says_why(self):
+        def broken(root):
+            raise ImportError("No module named 'android_processes'")
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.complete(directory)
+            self.step.stale = broken
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                self.assertEqual([step.key for step in provisioning.missing(root)], ["launcher"])
+            self.assertIn("android_processes", error.getvalue())
+
+    def test_check_names_the_out_of_date_steps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.complete(directory)
+            self.step.stale = lambda root: True
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(provisioning.main(["--check"], root=root), 1)
+            self.assertIn("App launcher (out of date):", out.getvalue())
+
+
+class CurrencyTests(unittest.TestCase):
+    """The checks the steps use: what the launcher and the adapters were built from against what is in the tree."""
+
+    def test_the_launcher_is_current_only_while_its_sources_stubs_and_dex_are_unchanged(self):
+        managed = provisioning.load(ROOT, "Scripts/Android/android_managed.py", "bifrost_managed_test")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            sources, stubs, output = base / "sources", base / "sources/Stubs", base / "out"
+            stubs.mkdir(parents=True)
+            output.mkdir()
+            (sources / "A.java").write_text("class A {}")
+            (stubs / "S.java").write_text("class S {}")
+            (output / "classes.dex").write_bytes(b"dex")
+            names = managed.LAUNCHER_SOURCES
+            saved = (managed.LAUNCHER_DIR, managed.LAUNCHER_STUBS, managed.LAUNCHER_SOURCES)
+            managed.LAUNCHER_DIR, managed.LAUNCHER_STUBS, managed.LAUNCHER_SOURCES = sources, stubs, ("A.java",)
+            self.addCleanup(lambda: (setattr(managed, "LAUNCHER_DIR", saved[0]), setattr(managed, "LAUNCHER_STUBS", saved[1]),
+                                     setattr(managed, "LAUNCHER_SOURCES", saved[2])))
+            self.assertTrue(names)
+            self.assertFalse(managed.launcher_current(output))                         # no manifest yet
+
+            def record():
+                (output / "sources.json").write_text(json.dumps(
+                    {"sources": {"A.java": managed.file_hash(sources / "A.java")},
+                     "stubs": managed.launcher_stub_hashes(), "dex": managed.file_hash(output / "classes.dex")}))
+            record()
+            self.assertTrue(managed.launcher_current(output))
+            (sources / "A.java").write_text("class A { int x; }")                     # the Java changed
+            self.assertFalse(managed.launcher_current(output))
+            record()
+            (stubs / "S.java").write_text("class S { int y; }")                       # a stub changed
+            self.assertFalse(managed.launcher_current(output))
+            record()
+            (output / "classes.dex").write_bytes(b"other")                            # the dex is not the one built
+            self.assertFalse(managed.launcher_current(output))
+            record()
+            (output / "sources.json").write_text("not json")
+            self.assertFalse(managed.launcher_current(output))
+            record()
+            (output / "classes.dex").unlink()
+            self.assertFalse(managed.launcher_current(output))
+
+    def test_the_adapters_are_current_only_while_their_inputs_and_files_are_unchanged(self):
+        adapters = provisioning.load(ROOT, "Tools/Android/build-android-adapters.py", "bifrost_adapters_test")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in adapters.INPUTS:
+                path = root / name
+                if "." in Path(name).name:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(name)
+                else:
+                    (path / "sub").mkdir(parents=True, exist_ok=True)
+                    (path / "sub/file.c").write_text(name)
+            output = root / "build/android-adapters"
+            output.mkdir(parents=True)
+            (output / "libx.so").write_text("x")
+            self.assertFalse(adapters.current(output, root))                           # no manifest yet
+
+            def record(**more):
+                (output / "adapters.json").write_text(json.dumps(
+                    {"inputs": adapters.input_digest(root), "files": {"libx.so": "00"}, **more}))
+            record()
+            self.assertTrue(adapters.current(output, root))
+            (root / "Guest/Android/Adapters/sub/file.c").write_text("changed")        # an adapter source changed
+            self.assertFalse(adapters.current(output, root))
+            record()
+            (root / "Guest/Android/Adapters/sub/new.c").write_text("added")           # a file appeared in an input directory
+            self.assertFalse(adapters.current(output, root))
+            record()
+            (output / "libx.so").unlink()                                              # a built file is gone
+            self.assertFalse(adapters.current(output, root))
+            (output / "libx.so").write_text("x")
+            (output / "adapters.json").write_text(json.dumps({"files": {"libx.so": "00"}}))   # a manifest from before the digest
+            self.assertFalse(adapters.current(output, root))
+            (output / "adapters.json").write_text("[]")
+            self.assertFalse(adapters.current(output, root))
 
 
 class CommandTests(unittest.TestCase):

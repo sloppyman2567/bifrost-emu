@@ -664,16 +664,27 @@ def launcher_stub_hashes():
     return {path.relative_to(LAUNCHER_STUBS).as_posix(): file_hash(path) for path in sorted(LAUNCHER_STUBS.rglob("*.java"))}
 
 
-def launcher_dex(directory):
+def launcher_current(directory):
+    """Whether `directory` holds a launcher built from the sources and stubs in this tree: the dex is there, is the
+    file the build wrote, and every source and stub hashes as it did then."""
     dex = directory / "classes.dex"
-    sources = {Path(name).name: file_hash(LAUNCHER_DIR / name)
-               for name in LAUNCHER_SOURCES}
     manifest = directory / "sources.json"
-    saved = json.loads(manifest.read_text()) if manifest.is_file() else {}
-    if (not dex.is_file() or saved.get("sources") != sources or saved.get("stubs") != launcher_stub_hashes()
-            or saved.get("dex") != file_hash(dex)):
-        raise ValueError("Managed launcher is missing or stale; run make android-managed-launcher")
-    return dex
+    try:
+        saved = json.loads(manifest.read_text()) if manifest.is_file() else {}
+        sources = {Path(name).name: file_hash(LAUNCHER_DIR / name) for name in LAUNCHER_SOURCES}
+        return (dex.is_file() and saved.get("sources") == sources and saved.get("stubs") == launcher_stub_hashes()
+                and saved.get("dex") == file_hash(dex))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def launcher_dex(directory):
+    if not launcher_current(directory):
+        # An installed copy has no compiler inputs to rebuild from; a checkout rebuilds what changed.
+        fix = ("install Asgard again from its checkout: make install-asgard" if (ROOT / ".asgard-install").is_file()
+               else "run make android-provision (it rebuilds only what changed)")
+        raise ValueError(f"The managed launcher is missing or does not match its sources; {fix}")
+    return directory / "classes.dex"
 
 
 def installed_arguments(metadata, code):
@@ -1418,5 +1429,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("build",))
     parser.add_argument("--output", type=Path, default=ROOT / "build/android-managed-launcher")
+    parser.add_argument("--force", action="store_true", help="build even when the launcher matches its sources")
     args = parser.parse_args()
-    build_launcher(args.output)
+    if not args.force and launcher_current(args.output):
+        print(f"Managed launcher is up to date: {args.output}")
+    else:
+        build_launcher(args.output)

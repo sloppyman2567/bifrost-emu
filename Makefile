@@ -471,15 +471,19 @@ deb:
 # Scripts/Setup/install-rootfs.sh once as your user first (or fetch the
 # toolchains yourself).
 # Asgard (the Android layer) goes to $(PREFIX)/share/bifrost/asgard with a `asgard`
-# command in $(PREFIX)/bin. Run it again after updating the checkout: only the files
-# that differ are copied. The checkout must already be provisioned for Android, apart from
-# the microG APKs, which the installer downloads when they are missing or the wrong size.
+# command in $(PREFIX)/bin. install-asgard first builds what the checkout lacks or has out of date
+# (the app launcher after its Java changed, the adapters after theirs, a framework tree older than its
+# scripts, anything not yet downloaded: the steps of android-provision, each of which keeps what is
+# current), as the checkout's owner when make runs as root so that root owns no build files. Then
+# only the files that differ are copied. To update: `git pull`, `make`, `sudo make install-asgard`.
+# The microG APKs are downloaded by the installer when they are missing or the wrong size.
+# Scripts/Setup/install-asgard.py --no-build installs only what is already built.
 #
 # provision-asgard does everything from a fresh clone: about 1.5 GB of pinned downloads and
 # the builds (android-provision), then the install. Each step keeps what is already verified, so
 # it can be run again. The default PREFIX, /usr/local, needs root, and that is checked first.
-# So that root does not fetch or own the build trees, prefer `make android-provision` as your
-# user followed by `sudo make install-asgard`; or install for yourself with PREFIX=$(HOME)/.local.
+# `make android-provision` alone builds everything Android needs in the checkout (and rebuilds only
+# what changed); install for yourself with PREFIX=$(HOME)/.local.
 # android_framework.py builds ART only with the framework tree; the [ -f ] covers a tree left without ART.
 #
 # bootstrap is the one command for a fresh clone: the host packages (deps), the emulator, then
@@ -798,6 +802,7 @@ ANDROID_WINDOW_PLUGIN := $(OBJDIR)/plugins/android-window-sdl.so
 
 .PHONY: android-runtime-adapters test-android-package
 .PHONY: android-managed-launcher
+# Both builds below skip when their output matches the sources; add --force to the script to rebuild anyway.
 android-managed-launcher:
 	python3 Scripts/Android/android_managed.py build
 

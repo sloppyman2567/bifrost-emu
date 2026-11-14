@@ -51,15 +51,17 @@ From a fresh clone, one target does all of the provisioning and the install, wit
 make provision-asgard PREFIX=$HOME/.local       # for your user, no root needed
 asgard --help                                   # with ~/.local/bin on PATH
 
-make android-provision                          # or system-wide: provision as your user...
-sudo make install-asgard                        # ...then install under $(PREFIX), default /usr/local
+sudo make install-asgard                        # or system-wide: builds what is needed, then installs under $(PREFIX), default /usr/local
+make android-provision                          # the building alone, as your user (nothing is installed)
 ```
 
 `PREFIX` and `DESTDIR` work as for `make install`. The default `PREFIX`, `/usr/local`, needs root: `make
 provision-asgard` checks first that it can write to the prefix, so it fails before downloading anything rather than
-at the end. `sudo make provision-asgard` also works, but then root downloads everything and owns the checkout's build
-trees, which is why the two steps above are better. Run the target again at any time: each step keeps what it has
-already verified, and the install copies only what differs. It does not build `bifrost-emu` itself (`make`, `make install`).
+at the end. `sudo make install-asgard` builds what the checkout lacks or has out of date before it copies anything, and runs
+that building as the checkout's owner, so root owns no build files and downloads nothing as root (`sudo make
+provision-asgard` does not take that care: root then downloads everything and owns the checkout's build trees). Run the
+target again at any time: each step keeps what it has already verified, and the install copies only what differs.
+`Scripts/Setup/install-asgard.py --no-build` installs only what is already built and stops at what is missing. It does not build `bifrost-emu` itself (`make`, `make install`).
 It does not install host packages either: `make deps` does (see above), including PyQt6, which only the desktop launcher
 (`asgard launcher`) needs. The install says so when PyQt6 is missing. Running apps from the command line works without it.
 `make bootstrap` runs `make deps`, builds and installs the emulator and then runs this target, under `~/.local` unless you give a `PREFIX`.
@@ -67,8 +69,8 @@ It has not yet been confirmed end to end.
 
 A new prefix means a second install, because the installers do not look for other copies. With both `/usr/local` and `~/.local`,
 whichever `bin` comes first on `PATH` runs, and `bifrost-emu` uses the Asgard beside it. App state is separate from both, so they
-share it. To update an install that already exists, use its own prefix: for `/usr/local`, `make android-provision` and then
-`sudo make install-asgard`.
+share it. To update an install that already exists, use its own prefix: after a `git pull`, `sudo make install-asgard` for
+`/usr/local` rebuilds the launcher, adapters and framework additions that the new sources changed and copies the result.
 
 It runs these steps, which can also be run by hand:
 
@@ -215,8 +217,11 @@ to an older app's schema; use `clear-data` only if you intend to discard them.
 ### Setting up from the library, and `asgard setup`
 
 `make android-provision` is the whole recipe; `Scripts/Android/android_provisioning.py` names its steps (runtime, APK tools,
-adapters, launcher, framework, ART image, microG) and checks each one's result. `asgard setup --check` lists what a tree
-lacks (`--json` for the library, exit status 0), and `asgard setup` runs the missing steps in order after
+adapters, launcher, framework, ART image, microG) and checks each one's result. In a checkout a step also counts as missing
+when what it built no longer matches its sources: the launcher records a hash of every Java source and stub, the adapters a
+digest of everything their build reads (`inputs` in `adapters.json`), and the framework tree is checked for files its scripts
+add in place. Both builders skip when current (`--force` rebuilds), so the recipe is quick to repeat. `asgard setup --check`
+lists what a tree lacks or has out of date (`--json` for the library, exit status 0), and `asgard setup` runs those steps in order after
 `find-host-tools.sh` has found the host tools, stopping at the first failure; steps already done are skipped and an
 interrupted download resumes. The library asks the check once at start. When a checkout lacks something, a notice offers
 **Set up…** (also in the gamepad menu): it says what will be downloaded and built, runs `asgard setup` and shows each step,

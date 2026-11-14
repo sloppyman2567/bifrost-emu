@@ -497,7 +497,7 @@ COMMANDS = {
     "config": "show or change an app's saved settings",
     "uninstall": "remove an app with its code and all its data",
     "clear-data": "reset an app's saves and settings; it stays installed",
-    "setup": "download and build what Asgard needs, in a source checkout (--check lists what is missing)",
+    "setup": "download and build what Asgard needs or has out of date, in a source checkout (--check lists it)",
     "launcher": "open the desktop app library",
     "desktop": "put installed apps in the desktop's application menu, or take them out",
     "refresh-icons": "read icons of apps installed by an older version",

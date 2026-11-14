@@ -3,14 +3,17 @@
 
 `make android-provision` is the full recipe. This module names each of its steps so that the library and
 `asgard setup` can say what is missing in plain words and run just the missing steps, instead of failing at
-the first one with a command line to type. An installed tree (Scripts/Setup/install-asgard.py) is a complete
-copy with no sources to build from, so for it a missing step means "install again", never a command here.
+the first one with a command line to type. A step whose result no longer matches the sources it was built from
+(the launcher after its Java changed, the adapters after theirs, a framework tree older than its scripts) counts
+as missing too, in a checkout. An installed tree (Scripts/Setup/install-asgard.py) is a complete copy with no
+sources to build from, so for it a missing step means "install again", never a command here.
 
   asgard setup                # run the missing steps, each one resumes where an interrupted download stopped
   asgard setup --check        # list what is missing; exit status 1 when anything is
   asgard setup --check --json # the same for the library window
 """
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -24,10 +27,12 @@ HOST_TOOLS = ("python3", "java", "javac", "keytool", "clang", "ld.lld", "debugfs
 
 
 class Step:
-    """One part of the setup: `outputs` are paths below the root that exist when it is done; `commands` make them."""
+    """One part of the setup: `outputs` are paths below the root that exist when it is done; `commands` make them.
+    `stale(root)`, when given, says whether outputs that exist no longer match the sources they were built from."""
 
-    def __init__(self, key, title, why, outputs, commands):
+    def __init__(self, key, title, why, outputs, commands, stale=None):
         self.key, self.title, self.why, self.outputs, self.commands = key, title, why, tuple(outputs), tuple(commands)
+        self.stale = stale
 
     def command_line(self):
         return " && ".join(" ".join(["python3" if part == sys.executable else part for part in command])
@@ -35,6 +40,43 @@ class Step:
 
 
 PY = sys.executable
+
+
+def load(root, relative, name):
+    """A module of the tree at `root`, imported from its path (the build scripts have names Python cannot import)."""
+    root = Path(root)
+    paths = [str(root / "Tools/Android"), str(root / "Scripts/Android")]  # the module's own imports come from its tree
+    sys.path[:0] = paths
+    try:
+        spec = importlib.util.spec_from_file_location(name, root / relative)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for path in paths:
+            sys.path.remove(path)
+
+
+def launcher_stale(root):
+    return not load(root, "Scripts/Android/android_managed.py", "bifrost_managed_currency").launcher_current(
+        Path(root) / "build/android-managed-launcher")
+
+
+def adapters_stale(root):
+    module = load(root, "Tools/Android/build-android-adapters.py", "bifrost_adapters_currency")
+    return not module.current(Path(root) / "build/android-adapters", Path(root))
+
+
+def framework_stale(root):
+    """The tree lacks files this version's scripts add in place (see android_framework.missing_additions), or its
+    manifest cannot be read: the step's tool adds them, or says why it will not."""
+    tree = Path(root) / "build/android-framework/rootfs"
+    try:
+        return bool(load(root, "Tools/Android/android_framework.py", "bifrost_framework_currency").missing_additions(tree))
+    except (OSError, ValueError, KeyError):
+        return True
+
+
 # In the order of the Makefile's android-provision.
 STEPS = (
     Step("runtime", "Android runtime", "the Android C library (Bionic) every app runs on",
@@ -45,13 +87,13 @@ STEPS = (
          [[PY, "Tools/Android/fetch-aapt2.py"], [PY, "Tools/Android/fetch-android-package-tools.py"]]),
     Step("adapters", "Runtime adapters", "the small native pieces that connect an app to the emulator",
          ["build/android-adapters/adapters.json"],
-         [[PY, "Tools/Android/build-android-adapters.py"]]),
+         [[PY, "Tools/Android/build-android-adapters.py"]], stale=adapters_stale),
     Step("launcher", "App launcher", "the Java program that starts an app's Activity",
          ["build/android-managed-launcher/classes.dex"],
-         [[PY, "Scripts/Android/android_managed.py", "build"]]),
+         [[PY, "Scripts/Android/android_managed.py", "build"]], stale=launcher_stale),
     Step("framework", "Android framework", "the Android 15 framework and runtime (ART) apps run on",
          ["build/android-framework/rootfs/bifrost-framework.json"],
-         [[PY, "Tools/Android/android_framework.py"]]),
+         [[PY, "Tools/Android/android_framework.py"]], stale=framework_stale),
     Step("art", "Android runtime (ART) image", "the compiled Java runtime image",
          ["build/android-art/rootfs/bifrost-art.json"],
          [[PY, "Tools/Android/android_art.py"]]),
@@ -84,9 +126,22 @@ def done(step, root):
     return all((root / output).exists() for output in step.outputs)
 
 
+def out_of_date(step, root):
+    """Whether a finished step's result no longer matches its sources. Only a checkout can say: an installed copy has
+    no sources, and a check that cannot run counts as out of date, so that the step's own tool explains."""
+    if step.stale is None or not done(step, root) or not can_run(root):
+        return False
+    try:
+        return bool(step.stale(root))
+    except Exception as error:  # the step's own tool then runs and stops or explains, so say what stopped the check
+        print(f"note: could not tell whether {step.title} is current ({type(error).__name__}: {error}); "
+              "treating it as out of date", file=sys.stderr)
+        return True
+
+
 def missing(root=ROOT):
-    """The steps whose results are not there yet, in the order to run them."""
-    return [step for step in STEPS if not done(step, root)]
+    """The steps whose results are not there yet or are out of date, in the order to run them."""
+    return [step for step in STEPS if not done(step, root) or out_of_date(step, root)]
 
 
 def can_run(root=ROOT):
@@ -96,8 +151,8 @@ def can_run(root=ROOT):
 
 def status(root=ROOT):
     todo = missing(root)
-    return {"missing": [{"id": step.key, "title": step.title, "why": step.why, "command": step.command_line()}
-                        for step in todo],
+    return {"missing": [{"id": step.key, "title": step.title, "why": step.why, "command": step.command_line(),
+                         "state": "out of date" if done(step, root) else "missing"} for step in todo],
             "can_set_up": bool(todo) and can_run(root), "installed": installed(root)}
 
 
@@ -126,7 +181,7 @@ def run_setup(root=ROOT, out=print, runner=subprocess.run):
             "manager, then run the setup again.")
         return 1
     for step in todo:
-        out(f"== {step.title}: {step.why}")
+        out(f"== {step.title}" + (" (out of date, rebuilding)" if done(step, root) else "") + f": {step.why}")
         for command in step.commands:
             result = runner(command, cwd=root, env=env)
             if result.returncode:
@@ -136,6 +191,9 @@ def run_setup(root=ROOT, out=print, runner=subprocess.run):
                 return 1
         if not done(step, root):
             out(f"{step.title} did not appear after its setup finished; the output above shows why.")
+            return 1
+        if out_of_date(step, root):
+            out(f"{step.title} is still out of date after its setup finished; the output above shows why.")
             return 1
     out("Asgard is set up.")
     return 0
@@ -158,7 +216,7 @@ def main(argv=None, root=ROOT):
             return 0
         print("Not set up yet:")
         for item in report["missing"]:
-            print(f"  {item['title']}: {item['why']}")
+            print(f"  {item['title']}" + (" (out of date)" if item["state"] == "out of date" else "") + f": {item['why']}")
         print("Run: python3 Scripts/Android/asgard.py setup" if report["can_set_up"]
               else "Install Asgard again from the source checkout: make install-asgard")
         return 1
