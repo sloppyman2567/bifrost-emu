@@ -67,6 +67,8 @@ typedef unsigned char (*glUnmapBuffer_t)(unsigned);
 typedef void (*glFlushMappedBufferRange_t)(unsigned, uintptr_t, uintptr_t);
 typedef void (*glGetBufferParameteriv_t)(unsigned, unsigned, int*);
 typedef unsigned (*glGetError_t)(void);
+typedef void (*glGetIntegerv_t)(unsigned, int*);
+typedef const unsigned char* (*glGetStringi_t)(unsigned, unsigned);
 
 #if defined(__aarch64__)
 static uint64_t load_library(const char* path) {
@@ -100,6 +102,22 @@ static uint64_t load_symbol(uint64_t handle, const char* name) {
 } while (0)
 
 static int checks = 0;
+
+/* glBufferStorage and persistent mapping: GL 4.4, or ARB_buffer_storage on an older context. Mesa raises GL_INVALID_VALUE
+ * for the persistent bit without it, and a virtual GPU or a driver without the extension cannot run those checks. */
+static int has_buffer_storage(glGetIntegerv_t glGetIntegerv, glGetStringi_t glGetStringi) {
+    int major = 0, minor = 0, count = 0;
+    glGetIntegerv(0x821B /* GL_MAJOR_VERSION */, &major);
+    glGetIntegerv(0x821C /* GL_MINOR_VERSION */, &minor);
+    if (major > 4 || (major == 4 && minor >= 4)) return 1;
+    if (!glGetStringi) return 0;
+    glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &count);
+    for (int i = 0; i < count; i++) {
+        const unsigned char* name = glGetStringi(0x1F03 /* GL_EXTENSIONS */, (unsigned)i);
+        if (name && strcmp((const char*)name, "GL_ARB_buffer_storage") == 0) return 1;
+    }
+    return 0;
+}
 static void chk(int ok, const char* what) {
     checks++;
     printf("  %s %s\n", ok ? "PASS" : "FAIL", what);
@@ -152,6 +170,8 @@ int main(int argc, char** argv) {
     glFlushMappedBufferRange_t glFlushMappedBufferRange;
     glGetBufferParameteriv_t glGetBufferParameteriv;
     glGetError_t glGetError;
+    glGetIntegerv_t glGetIntegerv;
+    glGetStringi_t glGetStringi;
     LOAD(hgl, glGenBuffers_t, glGenBuffers);
     LOAD(hgl, glBindBuffer_t, glBindBuffer);
     LOAD(hgl, glDeleteBuffers_t, glDeleteBuffers);
@@ -164,6 +184,8 @@ int main(int argc, char** argv) {
     LOAD(hgl, glFlushMappedBufferRange_t, glFlushMappedBufferRange);
     LOAD(hgl, glGetBufferParameteriv_t, glGetBufferParameteriv);
     LOAD(hgl, glGetError_t, glGetError);
+    LOAD(hgl, glGetIntegerv_t, glGetIntegerv);
+    glGetStringi = (glGetStringi_t)(uintptr_t)load_symbol(hgl, "glGetStringi");  /* absent before GL 3.0: no storage */
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         printf("test_sdl_gl_mapbuffer: SKIP (SDL_Init: %s)\n",
@@ -234,6 +256,16 @@ int main(int argc, char** argv) {
     glUnmapBuffer(GL_ARRAY_BUFFER);
     chk(glGetError() == GL_INVALID_OPERATION,
         "unmap of an unmapped buffer raises GL_INVALID_OPERATION");
+
+    const int storage = has_buffer_storage(glGetIntegerv, glGetStringi);
+    if (!storage) {
+        glDeleteBuffers(1, &buf);
+        printf("  SKIP persistent mapping and immutable storage: the driver lacks ARB_buffer_storage\n");
+        printf("test_sdl_gl_mapbuffer: ALL PASS (%d checks, buffer-storage checks skipped)\n", checks);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return 0;
+    }
 
     /* Persistent mapping needs immutable storage created with it. */
     chk(glMapBufferRange(GL_ARRAY_BUFFER, 0, 64, GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT) == NULL,

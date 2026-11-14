@@ -83,11 +83,12 @@ int main(void) {
         printf("SKIP: SDL video driver %s has no Vulkan surfaces\n", driver);
         return 77;
     }
+    /* SDL_Vulkan_CreateSurface needs SDL_WINDOW_VULKAN; SDL fails the window when no Vulkan driver loads. */
     void* win = SDL_CreateWindow("Bifrost Vulkan texture test",
                                  100, 100, 640, 480,
-                                 0x00000002u /*SHOWN*/ | 0x00000004u /*RESIZABLE*/);
-    CHECK(win != NULL, "SDL_CreateWindow");
-    if (!win) return 1;
+                                 0x10000000u /*VULKAN*/ | 0x00000004u /*SHOWN*/ | 0x00000020u /*RESIZABLE*/);
+    if (!win) { printf("SKIP: SDL cannot create a Vulkan window here\n"); return 77; }
+    CHECK(win != NULL, "SDL_CreateWindow (Vulkan)");
 
     /* ── Vulkan instance ──────────────────────────────────────────── */
     void* vk = dlopen_bf("libvulkan.so.1", 1);
