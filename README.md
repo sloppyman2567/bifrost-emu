@@ -284,8 +284,9 @@ sudo make install-asgard                       # or system-wide: /usr/local need
 To update after a `git pull`, run the install again: it builds whatever changed first (see [Install and update](Docs/INSTALL.md)).
 
 The desktop launcher (`asgard launcher`) also needs PyQt6, which `make deps` and `make bootstrap` install;
-`bifrost-emu app.apk` works without it. Run the command again after an update: only the files that changed are copied. `./Scripts/Setup/install-asgard.py` is the
-install step alone, for a checkout that is already provisioned; the [APK guide](Docs/Android/ANDROID_APK.md) has the details.
+`bifrost-emu app.apk` works without it. `./Scripts/Setup/install-asgard.py` is the install step alone: it builds what is
+missing or out of date first (`--no-build` skips that) and copies only the files that changed; the
+[APK guide](Docs/Android/ANDROID_APK.md) has the details.
 
 `--guest-ld` (experimental, not the default) runs dynamic programs under the rootfs's own `ld.so`, as a kernel exec
 would, instead of the built-in linker. It needs the `ld.so.cache` that the rootfs setup writes. Thunked libraries (GL,

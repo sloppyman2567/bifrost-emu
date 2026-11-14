@@ -78,15 +78,23 @@ When an update makes the Android framework or runtime image unusable, the instal
 (`--replace-obsolete`; it downloads the Android image again, 734 MiB). It only ever does that to a tree whose own manifest says
 it cannot be used.
 
-It runs these steps, which can also be run by hand:
+`make android-provision` runs these steps, which can also be run by hand (each keeps what is already current):
 
 ```bash
-make -j6 USE_SDL2=1 USE_SDL3=1 USE_THUNK_GL=1
 python3 Tools/Android/fetch-android-runtime.py
 python3 Tools/Android/fetch-aapt2.py
 python3 Tools/Android/fetch-android-package-tools.py
-make android-runtime-adapters android-window-plugin
+python3 Tools/Android/build-android-adapters.py
+python3 Scripts/Android/android_managed.py build
+python3 Tools/Android/android_framework.py --replace-obsolete
+python3 Tools/Android/android_art.py --replace-obsolete
+python3 Tools/Android/android_microg.py
+```
 
+With the emulator built (`make -j6 USE_SDL2=1 USE_SDL3=1 USE_THUNK_GL=1`), install and run an app from the checkout:
+
+```bash
+make android-window-plugin                      # only for --android-window-plugin below
 python3 Scripts/Android/android_package.py install /path/to/package.apkm
 python3 Scripts/Android/android_package.py run org.example.package
 
