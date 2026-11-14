@@ -47,6 +47,11 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (signing in to Google on a new Asgard folder)
+
+- The first Google sign-in in an Asgard folder closed microG's window with no message, because Android's call for the system's
+  shared libraries was not implemented. It is now, so a new folder can add an account.
+
 ### Added (Family Island in the list of games)
 
 - Family Island is in the README's table and gallery as user-reported stable play, with three screenshots from 2026-11-14. One

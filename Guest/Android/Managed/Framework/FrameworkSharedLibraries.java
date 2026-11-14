@@ -54,6 +54,10 @@ final class FrameworkSharedLibraries {
 
     boolean has(String name) { return jars.containsKey(name); }
 
+    // IPackageManagerBase.getSystemSharedLibraryNames (android-15.0.0_r1): the names of the system's shared libraries,
+    // or null when it has none.
+    String[] names() { return jars.isEmpty() ? null : jars.keySet().toArray(new String[0]); }
+
     // The libraries an app gets, name -> jar path, required ones first: what PackageManagerService records. A
     // required library the image lacks fails the install there; here the app still starts (it ran before libraries
     // existed), with the gap named in the log.

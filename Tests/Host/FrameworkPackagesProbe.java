@@ -169,6 +169,10 @@ public final class FrameworkPackagesProbe {
         // The client turns IPackageManager's "Unknown target package" into NameNotFoundException; YouTube asks from onStop.
         check(!pm.isPackageSuspended(NAME), "installed package reported suspended");
         missing(() -> pm.isPackageSuspended(NAME + ".missing"));
+        // microG's first check-in asks for the system's shared libraries; the image declares these two.
+        java.util.List<String> libraries = java.util.Arrays.asList(pm.getSystemSharedLibraryNames());
+        check(libraries.contains("org.apache.http.legacy") && libraries.contains("android.test.base"),
+                "system shared libraries: " + libraries);
         missing(() -> pm.getReceiverInfo(new ComponentName(NAME, NAME + ".Missing"), 0));
         missing(() -> pm.getProviderInfo(new ComponentName(NAME, NAME + ".Missing"), 0));
         check(pm.resolveContentProvider(NAME + ".missing", 0) == null, "unknown authority found");

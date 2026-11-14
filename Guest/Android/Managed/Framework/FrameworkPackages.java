@@ -478,6 +478,12 @@ final class FrameworkPackages {
                     if (!packageMatches((String) a[0], 0, (Integer) a[1]))
                         throw new IllegalArgumentException("Unknown target package: " + a[0]);
                     return false;
+                // microG's first device check-in (DeviceConfiguration) asks, so the call ended the sign-in window.
+                case "getSystemSharedLibraryNames":
+                    synchronized (this) {
+                        if (sharedLibraries == null) sharedLibraries = FrameworkSharedLibraries.system();
+                        return sharedLibraries.names();
+                    }
                 default: throw new UnsupportedOperationException("package." + method);
             }
         });
