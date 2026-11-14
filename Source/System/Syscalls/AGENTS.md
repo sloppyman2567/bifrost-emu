@@ -16,6 +16,9 @@
 - Thread `exit` writes only `clear_child_tid`, as the kernel's `mm_release` does, and that is the last guest write of the
   thread: a joiner wakes on it, frees the stack and TLS, and another thread may reuse them at once. `munmap` drops
   `clear_child_tid` when a thread frees its page. `test_thread_exit_unmapped_tls` covers both.
+- `munmap` returns its range to the allocator before it drops the JIT translations, so a racing `mmap` can be handed an
+  address whose old code is still translated; a file mapping runs without cache maintenance. Non-fixed and
+  `MAP_FIXED_NOREPLACE` `mmap` therefore invalidate their range before returning. `jit_unmap_reuse_race` covers it.
 - `exit_group` uses Emulator::group_exit, waking blocked CPUs and preserving
   the successful exit code through native JIT callers. kill/tkill/tgkill
   default-fatal signals use Emulator::signal_exit, never `group_exit(128+n)`

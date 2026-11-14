@@ -328,6 +328,7 @@ UNIT_TESTS=(
     "jit_tier2_rate|Scripts/Testing/test_jit_tier2_rate.sh||90|jit_tier2_rate: a slow head settles, a fast one reaches a trial PASS|HOST_JIT"
     "jit_cache_invalidation|Tests/Unit/jit_cache_invalidation.elf||15|jit_cache_invalidation: ALL PASS"
     "jit_dispatch_cache_growth|Tests/Unit/jit_dispatch_cache_growth.elf||15|jit_dispatch_cache_growth: ALL PASS"
+    "jit_unmap_reuse_race|Tests/Unit/jit_unmap_reuse_race.elf||30|jit_unmap_reuse_race: ALL PASS"
     "jit_selfloop_writeback|Tests/Unit/jit_selfloop_writeback.elf||15|jit_selfloop_writeback: ALL PASS"
     "jit_selfloop_pins|Tests/Unit/jit_selfloop_pins.elf||15|jit_selfloop_pins: ALL PASS"
     "jit_dispatch_cache|Tests/Unit/jit_dispatch_cache.elf||15|jit_dispatch_cache: ALL PASS"

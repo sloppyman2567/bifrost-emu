@@ -157,6 +157,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                     return 0;
                 }
+                // The range may be one a racing munmap has released but not yet invalidated.
+                emu.invalidate_jit_range(addr, length, CodeInvalidation::Map);
                 ret_host(addr);
                 return 0;
             }
@@ -278,6 +280,10 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
             }
+            // munmap returns its range to the allocator before it drops the translations, so another
+            // thread can be handed an address whose old code is still translated. A file mapping runs
+            // without cache maintenance: drop the stale translations before the guest sees the address.
+            if (!(flags & BIFROST_MAP_FIXED)) emu.invalidate_jit_range(mapped, length, CodeInvalidation::Map);
             ret_host(mapped);
             return 0;
         }

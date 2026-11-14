@@ -53,6 +53,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   at fault, not the JIT: one thread freed a page and remapped it at the same address while another thread's `mmap` could be given
   that page. The test now keeps its page reserved. Nothing in the emulator changed.
 
+### Fixed (stale code after one thread unmaps a page and another maps the same address)
+
+- With two threads, `munmap` could free an address before the translations of the code there were dropped. A thread that mapped
+  the address in that moment, such as a program loading a library, could run the old code. `mmap` now drops the translations of
+  the range it returns. A new test, `jit_unmap_reuse_race`, failed on every run before and passes now.
+
 ### Fixed (graphics tests skip what the driver cannot do)
 
 - `sdl_gl_mapbuffer` skips its persistent-mapping and immutable-storage checks, and passes the rest, when the driver has no
