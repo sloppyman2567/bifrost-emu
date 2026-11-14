@@ -572,7 +572,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // Range: BIFROST_MEMFULL_START/BIFROST_MEMFULL_END (guest VAs,
         // default 0x10000000..0x14000000 = the low guest heap band).
         // Cost: ~3 passes over the range per verified dispatch — keep
-        // VERIFY_EVERY modest. Snapshot here (pre-JIT); compare+restore
+        // BIFROST_JIT_VERIFY_EVERY modest. Snapshot here (pre-JIT); compare+restore
         // at the memverify site after both executions.
         static bool memfull_ = (getenv("BIFROST_JIT_VERIFY_MEMFULL") != nullptr);
         static uint64_t mf_start_ = [] {

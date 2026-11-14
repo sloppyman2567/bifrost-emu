@@ -167,7 +167,7 @@ void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
     }
 }
 // Bounds-check helper: ensures vreg index is within the fixed-size arrays.
-// If a block exceeds MAX_VREGS, we'd have a buffer overflow. This check
+// If a block needs more than the 4096 vregs the fixed-size arrays hold, we'd have a buffer overflow. This check
 // catches it at the earliest point (vreg allocation) instead of silently
 // corrupting memory.
 //

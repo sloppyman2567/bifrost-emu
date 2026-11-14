@@ -127,7 +127,7 @@ void FrostJIT::record_verification_stores(const IRBlock& ir_block, uint64_t star
             } else if (inst.op == IROp::SIMD_ST16) {
                 // 16-byte vector store (LDR/STR Q, LDP/STP Q, LD1/ST1).
                 // Track it like STORE_MEM so the verify save/restore +
-                // VERIFY_MEM diff cover vector stores: a wrong-address or
+                // BIFROST_JIT_VERIFY_MEM diff cover vector stores: a wrong-address or
                 // wrong-data `stp q` corrupts the guest heap while leaving
                 // every register intact — invisible to register verify
                 // (the inflate copy loop's stp q29,q28 was exactly this).

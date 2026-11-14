@@ -134,7 +134,7 @@ static bool is_pure(IROp op) {
         case IROp::BRCOND_BIT:
             return false;
         // Newer ops (UDIV/SDIV/SMADDL/UMADDL/SMULH/UMULH/SMSUBL/UMSUBL,
-        // FCVT_S2D/FCVT_D2S/FRINT/FCMP/FP_UNOP2/FMADD/FMSUB, MRS/MSR)
+        // FCVT_S2D/FCVT_D2S/FRINT/FP_CMP/FP_UNOP/FMADD/FMSUB, MRS/MSR)
         // are not pure (side effects on pstate or system regs) — never DCE.
         default:
             return false;

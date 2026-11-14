@@ -32,8 +32,8 @@
 #pragma once
 #include <cstdint>
 namespace arm64emu {
-// Bit flags for detected x86 features. Picked to be powers of two so
-// callers can test `(features & HAS_FMA3)` cheaply.
+// Detected x86 features, one bit-field per feature: callers test
+// `features.fma3` cheaply.
 //
 // Ordering: most-impactful first (FMA3 is what we use most; AVX512
 // is nice-to-have but rarely worth the code-size cost in the JIT).

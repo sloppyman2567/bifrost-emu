@@ -1241,7 +1241,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // point). Blocks without inlined leaves keep the cheap formula.
         uint64_t next_pc = has_inlined_leaf ? cur_pc : start_pc + ir_block.count * 4;
         late_fall_pc_ = next_pc;  // loaded below, on the right side of the slot
-        // Fall-through (MAX_BLOCK hit before any block-ender): the next
+        // Fall-through (the block limit, dbg().jit_block_limit, hit before any block-ender): the next
         // PC is statically known, so this block is chainable to it.
         if (!unchainable_end_ && chain_target_pc_ == 0) {
             chain_target_pc_ = next_pc;
