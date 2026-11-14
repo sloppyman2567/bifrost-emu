@@ -57,10 +57,15 @@ make bootstrap</code></pre>
 
 <section id="update" aria-labelledby="update-title">
   <h2 id="update-title">Updating and removing</h2>
-  <p class="lead">After pulling new code, run the same <code>make bootstrap</code> again: only the files that changed are copied. The
-  <a href="$repo/blob/main/Docs/Android/ANDROID_APK.md">APK guide</a> covers updates, per-app settings and
-  <code>asgard</code> commands. If Bifrost is already installed elsewhere, such as <code>/usr/local</code>, bootstrap makes a
-  second copy that takes over when <code>~/.local/bin</code> comes first on your <code>PATH</code>.</p>
+  <p class="lead">Pull the new code, then repeat the install you used. For <code>make bootstrap</code> that is
+  <code>make bootstrap</code> again. For a system-wide install it is <code>make</code> as yourself, then
+  <code>sudo make install</code> and <code>sudo make install-asgard</code>; the second one rebuilds whatever the update changed.
+  Updating only one of the emulator and Asgard makes Asgard print a warning. The steps, with removing and what to do when
+  something goes wrong, are in <a href="$repo/blob/main/Docs/INSTALL.md">Install and update</a>.</p>
+  <p class="small">Per-app settings and <code>asgard</code> commands are in the
+  <a href="$repo/blob/main/Docs/Android/ANDROID_APK.md">APK guide</a>. If Bifrost is already installed elsewhere, such as
+  <code>/usr/local</code>, bootstrap makes a second copy that takes over when <code>~/.local/bin</code> comes first on your
+  <code>PATH</code>.</p>
   <p class="small">Full details, including building only the emulator and every option, are in the
   <a href="$repo#quick-start">README quick start</a>. Something not working? See the
   <a href="${url}games/">games list</a> for what has run, and open an <a href="$repo/issues">issue</a>.</p>

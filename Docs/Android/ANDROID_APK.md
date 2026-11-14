@@ -55,29 +55,28 @@ sudo make install-asgard                        # or system-wide: builds what is
 make android-provision                          # the building alone, as your user (nothing is installed)
 ```
 
-`PREFIX` and `DESTDIR` work as for `make install`. The default `PREFIX`, `/usr/local`, needs root: `make
-provision-asgard` checks first that it can write to the prefix, so it fails before downloading anything rather than
-at the end. `sudo make install-asgard` builds what the checkout lacks or has out of date before it copies anything, and runs
-that building as the checkout's owner, so root owns no build files and downloads nothing as root (`sudo make
-provision-asgard` does not take that care: root then downloads everything and owns the checkout's build trees). Run the
-target again at any time: each step keeps what it has already verified, and the install copies only what differs.
-`Scripts/Setup/install-asgard.py --no-build` installs only what is already built and stops at what is missing. It does not build `bifrost-emu` itself (`make`, `make install`).
-It does not install host packages either: `make deps` does (see above), including PyQt6, which only the desktop launcher
-(`asgard launcher`) needs. The install says so when PyQt6 is missing. Running apps from the command line works without it.
-`make bootstrap` runs `make deps`, builds and installs the emulator and then runs this target, under `~/.local` unless you give a `PREFIX`.
-It has not yet been confirmed end to end.
+`PREFIX` and `DESTDIR` work as for `make install`. The default `PREFIX`, `/usr/local`, needs root, so `make
+provision-asgard` checks first that it can write there and fails before downloading anything. Running it again is always
+safe: each step keeps what it already verified, and the install copies only what differs.
 
-A new prefix means a second install, because the installers do not look for other copies. With both `/usr/local` and `~/.local`,
-whichever `bin` comes first on `PATH` runs, and `bifrost-emu` uses the Asgard beside it. App state is separate from both, so they
-share it. To update an install that already exists, use its own prefix: after a `git pull`, `sudo make install-asgard` for
-`/usr/local` rebuilds the launcher, adapters and framework additions that the new sources changed and copies the result.
-The install records which emulator build it belongs with (the one `make install` copies, or the package's), and `asgard`
-prints one warning line when it is started with a different build: update both (`make && sudo make install && sudo make
-install-asgard`). It never blocks, a checkout's own Asgard is not judged, and `BIFROST_NO_PAIRING_WARNING=1` silences it.
-A framework or ART tree that an update made unusable (another Android image, an older manifest format, changed codec
-adapters) is deleted and provisioned again (`--replace-obsolete`, which only ever acts on a tree whose manifest says it
-cannot be used); that downloads the Android image again, 734 MiB. `sudo make install` for the emulator itself likewise
-needs `make` run first as your user: root does not compile in a checkout you own (`ALLOW_ROOT_BUILD=1` overrides).
+- `sudo make install-asgard` builds whatever is missing or out of date first (as the checkout's owner, so root downloads
+  nothing and owns no build files), then installs. `Scripts/Setup/install-asgard.py --no-build` skips the building and stops
+  at what is missing.
+- It does not build `bifrost-emu` (`make`, then `sudo make install`) and does not install host packages (`make deps`,
+  which also installs PyQt6, needed only by `asgard launcher`).
+- `make bootstrap` runs `make deps`, builds and installs the emulator, then runs this target, under `~/.local` unless you give a
+  `PREFIX`. It has not yet been confirmed end to end.
+
+Two installs, for example `/usr/local` and `~/.local`, are separate copies: whichever `bin` comes first on `PATH` runs, and
+`bifrost-emu` uses the Asgard beside it. App data is shared. To update an install, use its own prefix; the steps are in
+[Install and update](../INSTALL.md).
+
+Asgard remembers which `bifrost-emu` build it was installed for and prints one warning if it is started with another one.
+Update both to clear it. The warning never blocks anything, and `BIFROST_NO_PAIRING_WARNING=1` silences it.
+
+When an update makes the Android framework or runtime image unusable, the install deletes and rebuilds it by itself
+(`--replace-obsolete`; it downloads the Android image again, 734 MiB). It only ever does that to a tree whose own manifest says
+it cannot be used.
 
 It runs these steps, which can also be run by hand:
 

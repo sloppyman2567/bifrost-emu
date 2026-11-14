@@ -9,6 +9,8 @@ graphics/audio adapters.
 - [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md): source layout, subsystem ownership and entry points. Start here.
 - [Docs/JIT.md](Docs/JIT.md): **read before any JIT, shared decoder or IR work.**
 - [Docs/TESTS.md](Docs/TESTS.md), [Docs/ROOTFS.md](Docs/ROOTFS.md), `Docs/Android/`: tests, guest rootfs, Android runtime.
+- [Docs/INSTALL.md](Docs/INSTALL.md): the plain install, update and remove steps for people; keep it in step with the README quick start
+  and the site's Install page (`Tools/Site/install.html`).
 - `Docs/archive/`: dated history, not required reading.
 - `Source/` (headers beside sources), `Include/Bifrost/` (public headers), `Include/Generated/` (generated tables),
   `Guest/` (guest-side code), `Scripts/` and `Tools/` (setup, launcher, site).

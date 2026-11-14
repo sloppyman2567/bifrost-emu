@@ -51,91 +51,47 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
-### Fixed (instructions the JIT and the interpreter ran differently from QEMU and the Arm manual)
+### Fixed (instructions that ran differently from a real ARM CPU)
 
-- A new differential fuzzer, `Scripts/Testing/sequence_fuzz.py`, runs random straight-line A64 sequences (data processing
-  with immediates, data processing with registers, scalar FP and Advanced SIMD) under QEMU, the JIT and the interpreter and
-  compares every register. `make verify` compares only the JIT with the interpreter, which share one decoder, so it could
-  not see these. Each finding below but the last has a named regression, and each of them passes under QEMU, the JIT and
-  `--no-jit` (2026-11-13).
-- `ADDS`, `SUBS`, `CMP` and `CMN` with an immediate now read SP for register 31, as Arm defines; the decoder, the
-  interpreter and the JIT all read XZR (`adds x1, sp, #0x1ac` gave 0x1ac). Add/subtract immediate words with bit 23 set
-  (ADDG and SUBG, FEAT_MTE) raise SIGILL, as MTE is not advertised. Test: `jit_addsub_sp_operand`.
-- `CSEL`, `CSINC`, `CSINV` and `CSNEG` with the AL or NV condition now give Rn whatever the flags hold; the JIT selected
-  on Z. Test: `jit_csel`.
-- `SCVTF` and `UCVTF` from WZR or XZR, plain and fixed-point, now give +0.0 with the rest of the register cleared; the JIT read
-  register 31 as SP (`ucvtf d23, xzr, #30` gave 2^34). Test: `jit_int_fp_conv`.
-- Encodings of features Bifrost does not advertise now raise SIGILL instead of running as another instruction: ADC and SBC
-  with bits 15:10 set (RMIF, SETF8 and SETF16 are FEAT_FlagM), CCMP and CCMN with the reserved bits 10 or 4 set, scalar
-  fixed-point converts with a half-precision or reserved `immh`, and the FP8 `BF1CVTL`/`F2CVTL` forms that ran as `SQNEG`.
-  Tests: `jit_unallocated_dp_register`, `jit_simd_reserved_forms`.
-- The alternate signal stack is "in use" when SP is inside it, as in Linux, not when a flag set at delivery says so. A handler
-  that leaves through `siglongjmp` never runs `rt_sigreturn`, so the flag stayed set and the next `SA_ONSTACK` signal ran on the
-  ordinary stack. The frame's `uc_stack.ss_flags` and `sigaltstack()` report the same state. Test: `test_sigaltstack`.
-- `execve` passes the same `AT_HWCAP` as a first start, one shared constant (it passed 0x3ff, a different profile from
-  startup's FP, ASIMD, CRC32 and atomics), and an `AT_HWCAP2` of 0.
-- Limits: QEMU is a reference, not the Arm manual. The sequences hold no loads, stores or branches, and only words that
-  QEMU and Bifrost both execute are used, so a clean run proves nothing about other encodings. The IEEE cumulative exception
-  flags of FPSR are left out of the comparison by default (Bifrost does not raise them).
+- A new script, `Scripts/Testing/sequence_fuzz.py`, runs random instruction sequences under QEMU, the JIT and the interpreter
+  and compares the results. It found these bugs (2026-11-13), all fixed and each covered by a test:
+  - `ADDS`, `SUBS`, `CMP` and `CMN` with an immediate read the zero register instead of the stack pointer.
+  - `CSEL`, `CSINC`, `CSINV` and `CSNEG` with the AL or NV condition picked the wrong value in the JIT.
+  - `SCVTF` and `UCVTF` from `xzr` or `wzr` gave a wrong result in the JIT.
+  - Instructions of CPU features Bifrost does not offer (MTE, FlagM, FP16, FP8) ran as other instructions. They now fault, as
+    on hardware without those features.
+  - After a signal handler left through `siglongjmp`, the alternate signal stack stayed marked as in use.
+  - A program started with `execve` saw different CPU features than a first start.
+- QEMU is a reference, not the Arm manual, and the sequences contain no memory accesses or branches, so a clean run proves
+  little about other instructions.
 
-### Added (a warning when Asgard and the emulator are from different builds)
+### Added (a warning when Asgard and the emulator are different builds)
 
-- An installed Asgard now warns when the emulator running it is not the build it was installed for (2026-11-13). Updating
-  only one of the two used to fail later and obscurely (a flag the emulator does not know, a launcher it does not expect).
-  `install-asgard.py` records the SHA-256 of the emulator it belongs with: the build `make install` copies (the Makefile
-  exports its target as `BIFROST_BUILT_EMULATOR`), the package's `/usr/bin/bifrost-emu` in `asgard-setup`, or the
-  checkout's own `bifrost-emu`. `asgard` compares that with the `--emu` it was started with, which `bifrost-emu app.apk` passes,
-  and prints one line naming both digests and the update command. Recording the built emulator, not the installed one,
-  means updating only Asgard is caught as well as only the emulator.
-- It warns and never blocks, because a different build is not always an incompatible one. Installs made without an emulator
-  or before this check, a checkout's own Asgard and an unreadable emulator are not judged; `BIFROST_NO_PAIRING_WARNING=1`
-  silences it. Installing also notes an emulator older than the C/C++ sources (make first). Limit: the digest names a
-  build, not a contract, so a rebuild with unrelated changes warns until Asgard is installed again.
+- An installed Asgard now prints one warning when it is started with a different `bifrost-emu` build than the one it was
+  installed for, so a forgotten update is easy to see. Update both with `make && sudo make install && sudo make install-asgard`.
+  It never blocks, and `BIFROST_NO_PAIRING_WARNING=1` silences it. If you rebuild the emulator often, expect it until you
+  install Asgard again.
 
 ### Fixed (installing and updating)
 
-- Found by auditing the install and update paths for the same kind of fault as the stale launcher (2026-11-13); each was
-  reproduced first.
-- `sudo make install` after a `git pull` compiled the whole tree as root, leaving root-owned objects in `build/` and a
-  root-owned `bifrost-emu` that the next plain `make` could not replace. Run as root in a checkout another user owns, it now
-  installs a build that is current and otherwise stops and says to run `make` first (`ALLOW_ROOT_BUILD=1` builds anyway; a
-  checkout root owns builds as before). The check compares C/C++ sources and headers with the binary's time: it cannot ask
-  `make`, whose dry run lists every compile because of its always-checked stamp rules.
-- A framework or ART tree that an update made unusable (another Android image, an older manifest format, or changed codec
-  adapters: the fingerprint covers `android_codecs.py`, four launcher sources and `android_bionic_start.S`) stopped the install
-  with "provision a fresh directory" and left deleting a read-only tree to the user. `android_framework.py` and `android_art.py`
-  take `--replace-obsolete`, which deletes such a tree and provisions it again, and `make android-provision`,
-  `asgard setup`, `install-asgard` and `asgard-setup` pass it. It judges from the manifest only and never deletes a current,
-  modified or installed tree or a link. The rebuild downloads the Android image again (734 MiB).
-- `fetch-sdl3.py` called any built `Tools/sdl3` current. It now compares the release in `sdl3.pc` with the pin and builds again
-  over an older copy (kept aside and restored if the build fails), unless the system has SDL3, which makes the built copy unused.
+- `sudo make install` no longer compiles as root. If the build is out of date it stops and asks you to run `make` first, so root
+  never leaves files in `build/` that your next `make` cannot replace.
+- An update that made the Android framework or runtime image unusable used to need a manual `rm -rf`. It is now deleted and
+  rebuilt automatically, which downloads the Android image again (734 MiB).
+- A built SDL3 from an older pinned release is now rebuilt instead of being reported as current.
 
 ### Changed (installing Asgard builds what changed)
 
-- `sudo make install-asgard` now builds what the checkout lacks or has out of date before it copies anything (2026-11-13),
-  so updating after a `git pull` is `make` and `sudo make install-asgard`. Updating from a build older than the Zygote
-  work needed a separate `make android-managed-launcher` (reported): the install copied whatever the checkout had built,
-  and launching an app stopped with "run make android-managed-launcher" when that no longer matched the Java sources.
-  The build runs as the checkout's owner when make runs as root, so root owns no build files.
-- A step counts as out of date, in a checkout, when the launcher's Java or stubs changed since its build, when the adapters'
-  inputs changed (`adapters.json` records a digest of everything their build reads; a build from before that is rebuilt
-  once), or when the framework tree lacks files the scripts add in place. `asgard setup` and the library's Set up…
-  use the same check. The launcher and adapter builds skip when current (`--force` rebuilds): on this tree the adapters
-  took 5 s to build and 0.1 s to skip. `install-asgard.py --no-build` keeps the old behaviour of stopping at what is missing.
-- Checked with unit tests for the currency rules, the build step and the as-root options, and a real adapter build in
-  a scratch directory (bit-identical to the existing one). Not run as root, and not run from a checkout that
-  `git pull` has just changed.
+- `sudo make install-asgard` now builds whatever is out of date (the app launcher, the adapters, the framework files) before it
+  installs, as the checkout's owner. Updating is `git pull`, `make`, `sudo make install`, `sudo make install-asgard`; see
+  [Install and update](INSTALL.md). Before, an update could leave a launcher that no longer matched its sources, and every app
+  launch stopped with "run make android-managed-launcher".
+- Tested with unit tests and a real install into a scratch directory; not tested as real root.
 
-### Fixed (stale source comments and a broken import)
+### Fixed (stale comments and a broken script)
 
-- Comments that named files, functions and generators that no longer exist now name the current ones (the interpreter and
-  JIT dispatch notes, the generated-table includes, `compile_ir_inst`, `top_up_queue`, `IRInst::make_bf`, the config loader),
-  and history-style notes in the integer translator, thread creation, fd allocation, `sbfiz` and the FCVTZU clamp state the
-  present contract; a few file headers named the wrong file (2026-11-13). Found by a
-  scripted check of comment paths, `BIFROST_*` names and `name()` references; it does not catch a comment that is wrong in
-  prose.
-- `Scripts/Testing/check_doom3_gl.py` imported `glxmlcheck` through a `Tools/opgen` path that no longer exists, so it
-  failed at import; it uses `Tools/CodeGen` now (it starts and prints its help; not run against a dhewm3 source tree).
+- Comments that named files or functions that no longer exist now name the current ones. `check_doom3_gl.py` failed at start
+  because of a wrong module path and works again.
 
 ### Fixed (an app's pointer icons show)
 
