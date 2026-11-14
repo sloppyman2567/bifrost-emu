@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
-Status: in progress. The current pre-release is **2.0.0-beta.1** (November 3, 2026), a version label: its own scope is
-only partly met. Updated November 8, 2026.
+Status: in progress. The current pre-release is **2.0.0-beta.2** (November 14, 2026): its scope is
+only partly met. Updated November 14, 2026.
 
 Everything below is a development target, not a compatibility guarantee or a release date. "Done" means the contract is
 implemented and checked as the linked document says, not that every app using it works. Dated checkpoints, measurements
@@ -41,8 +41,9 @@ Not the focus: games behind attestation or anti-cheat, and compatibility sweeps 
 | 2.0.0-alpha.2 (2026-10-21) | Released; goals partly met | Toasts, `NsdManager`, all of `IAppOpsService`, declined Settings intents, scaled fixed-size apps |
 | 2.0.0-alpha.3 (2026-11-01) | Released; WebView, media and ad scope mostly open | `media.extractor`, POSIX timers, installable Asgard and rootfs, `bifrost-emu app.apk`, window stats |
 | 2.0.0-beta.1 (2026-11-03) | Released as a label; scope partly met | Library cards, per-app settings, clear-data/uninstall, run-ended cards; app Keystore, WebView GPU fences, Vulkan for apps through a guest HAL, a faster Tier-1 JIT |
+| 2.0.0-beta.2 (2026-11-14) | Current; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns, NativeActivity games |
 
-**Since the beta.1 label (in the tree, not released):** the desktop library can be driven with a gamepad (a gamepad layout, menus,
+**In 2.0.0-beta.2, since the beta.1 label:** the desktop library can be driven with a gamepad (a gamepad layout, menus,
 confirmations and the settings page drawn inside its window); per-app `window_mode` and `controller` settings, with a touch
 cursor driven by a pad; fixed-size apps can be tiled to a half or a corner; the Android setup's main downloads (the system image, microG, AAPT2, the Bionic runtime, the package tools, SDL3) resume
 when interrupted, and `make bootstrap` finds host tools and libraries without root, building SDL3 where the distribution has none; a minimised or hidden game window pauses the app, F11 toggles fullscreen and the size is remembered, Activities are relaunched on a resize they do not handle, the library offers **Set up…**, packages up to 4 GiB install, a realm with no app ends after 10 minutes, and the JIT has native NEON structure loads and stores and cheaper FP compares. All of it was checked with fakes, on Qt's
@@ -116,7 +117,7 @@ app exit leaves the library and the other apps usable.
 - Investigate supported rewarded and interstitial ad SDKs with their test creatives; never synthesize reward success.
 - Answer what an ad's WebView asks of the device so that it never throws out of the app: done for the gamepad `hasKeys`
   call (the cause of Geometry Dash Lite's crash); the next unsupported call shows in the session log.
-- Activity relaunch on a host resize: done in the tree, unreleased (an Activity that does not declare the change is relaunched
+- Activity relaunch on a host resize: done in 2.0.0-beta.2 (an Activity that does not declare the change is relaunched
   as Android does; [details](Android/ANDROID_RUNTIME_REFERENCE.md#activity-relaunch-2026-11-07)), checked with a fixture on the real
   runtime, not with a real app that needs it. It does not explain YouTube, which declares orientation, size and layout in
   `configChanges` and so is never relaunched. Open: trace why YouTube keeps its landscape layout when narrowed (what its
@@ -128,13 +129,13 @@ app exit leaves the library and the other apps usable.
   opens a WebView (53 episodes, median 1.7 s). Creating a hidden WebView during the loading screen is untried; the stall
   log shows whether the median drops.
 - Tell the app about its window. The window plugin has seven events (close, resize, key, pointer, text, gamepad,
-  visibility). Done in the tree, unreleased: a window the desktop minimises, hides or covers stops the app's Activities
+  visibility). Done in 2.0.0-beta.2: a window the desktop minimises, hides or covers stops the app's Activities
   and resumes them when it is visible again ([visibility](Android/ANDROID_RUNTIME_REFERENCE.md#window-visibility-2026-11-07));
   checked against a fake SDL, not on a real compositor. Open: whether KWin and other Wayland compositors suspend a
   minimised window (without that, a minimised game on Wayland keeps running), focus loss (traced, not delivered, and
   Android keeps an unfocused app resumed), and idle CPU of a stopped game before and after.
-- Game windows: F11 toggles fullscreen and the size is remembered per app, with no setting for either (done in the tree,
-  unreleased, checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)).
+- Game windows: F11 toggles fullscreen and the size is remembered per app, with no setting for either (done in 2.0.0-beta.2,
+  checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)).
   Position and fullscreen are deliberately not remembered (a Wayland client cannot place its window). Open: a real
   compositor check, including whether the window visibly resizes once at launch. `--fullscreen` still belongs to the library.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested

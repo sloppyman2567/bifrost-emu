@@ -8,29 +8,25 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [2.0.0-beta.1] — app keystore, Vulkan for Android apps, WebView fences and a faster JIT (2026-11-03)
+## [2.0.0-beta.2] — installing and updating that rebuild what changed, a fresh-machine test run, Zygote, shared Android and a faster JIT (2026-11-14)
 
-**2.0.0-beta.1** collects the changes made after 2.0.0-alpha.3 (2026-11-01): an Android Keystore so apps such as PolyTrack
-can save, real GPU fences for WebView, cheaper guest memory barriers, and a series of Tier-1 JIT changes (shared cold paths,
-tighter exits and flags, native scalar and vector FP by element and LD1R, loop bodies kept in one block, lighter Q-register
-accesses). It also gives Android apps a Vulkan device through a guest HAL over the host thunk, with placed memory maps and
-deep-marshalled Vulkan structs, gamepads for Android apps, records Zenless Zone Zero and Doki Doki Literature Club as
-playable, and fixes the CI-only test failures. It is the first beta label, not a completed beta scope: the [v2.0 goals](roadmap.md) and the beta.1 items still open
-there (guided provisioning, update/reinstall) remain in progress. Changes made after the 2026-11-03 label are listed below
-under their own headings: game-window visibility, fullscreen and a remembered size, Activity relaunch on a resize, setting up
-from the library, built-in per-app settings, 4 GiB packages, a realm idle timeout, the AAudio write fix, NEON `LD2` to `LD4` and
-`ST2` to `ST4` in the block, the project site, ASTC textures through BC7 on hosts without ASTC (with a lowest-priority,
-cached transcoder), a swapchain acquire that no longer re-uploads the frame, a faster `/proc/self/pagemap`, a crash line that
-names the library, ASTC transcoding about four times faster in a real game, fewer host instructions per JIT block, Tier-2
-regions through calls and returns, fork children that keep the JIT, a session Zygote for an app's helper processes, microG
-in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and SoundPool, one
-shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every process,
-NativeActivity games on the managed path that get their window and input, input delivered through each window's input
-channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffers and an app's pointer icons.
+**2.0.0-beta.2** collects the changes made after 2.0.0-beta.1: installing and updating that rebuild what changed (the app
+launcher, the adapters and the framework, with a warning when Asgard and the emulator are different builds), `make check-fresh`
+to run the whole test suite on a fresh machine, instructions that now match a real ARM CPU, and graphics tests that skip
+what a driver cannot do. It also adds game-window visibility, fullscreen and a remembered size, Activity relaunch on a
+resize, setting up from the library, built-in per-app settings, 4 GiB packages, a realm idle timeout, the AAudio write fix,
+NEON `LD2` to `LD4` and `ST2` to `ST4` in the block, the project site, ASTC textures through BC7 on hosts without ASTC (with a
+lowest-priority, cached transcoder), a swapchain acquire that no longer re-uploads the frame, a faster `/proc/self/pagemap`,
+a crash line that names the library, ASTC transcoding about four times faster in a real game, fewer host instructions per JIT
+block, Tier-2 regions through calls and returns, fork children that keep the JIT, a session Zygote for an app's helper
+processes, microG in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and
+SoundPool, one shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every
+process, NativeActivity games on the managed path that get their window and input, input delivered through each window's
+input channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffers and an app's pointer icons. It is
+not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
 
-- The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
-  the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
-  pages, CoreMark tables, screenshots) keep that label.
+- The version is 2.0.0-beta.2 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
+  the generated rootfs `os-release` and the C API comment. Measurements recorded on earlier versions keep their label.
 - Oddmar is recorded as playable (2026-11-08): the maintainer reports the first level plays very well with no stutter noticed,
   and a frame from their screen recording shows level gameplay. Later levels are not confirmed and stutter was not measured.
 - The project site has a sidebar and separate pages: Home, Install (one-command bootstrap, Debian/Ubuntu packages, Bazzite and
@@ -50,6 +46,12 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
+
+### Fixed (graphics tests skip what the driver cannot do)
+
+- `sdl_gl_mapbuffer` skips its persistent-mapping and immutable-storage checks, and passes the rest, when the driver has no
+  `ARB_buffer_storage` (a virtual GPU, for one). `vulkan_texture` now asks SDL for a Vulkan window, as `SDL_Vulkan_CreateSurface`
+  requires, and skips when SDL cannot make one. `xwayland_wire` is an optional fixture in `make check-fresh`, as it is in CI.
 
 ### Added (run the whole test suite on a fresh machine)
 
@@ -410,20 +412,6 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   package: …")` (a `NameNotFoundException` to the client) for another. `FrameworkPackagesProbe` checks both on the real runtime and
   fails on the old code. Not run in YouTube itself.
 
-### Added (gamepads)
-
-- Android apps see host gamepads as Android 15 does an Xbox 360 pad. The SDL3 window opens SDL's gamepads with
-  hotplug and reports them through a new optional plugin callback, `poll_gamepad` (`BIFROST_WINDOW_GAMEPAD`
-  events): `KEYCODE_BUTTON_*` keys, sticks X/Y and Z/RZ, triggers and the d-pad as hat axes, released and centered
-  when the window loses focus. Each pad gets an Android device id and controller number; buttons arrive as
-  `KEYBOARD|GAMEPAD` keys and axes as `SOURCE_JOYSTICK` motion (batched, with `AMotionEvent_getAxisValue`).
-  The managed launcher lists each pad in InputManager with an `InputDevice` (sources, `Generic.kcm`, motion ranges),
-  notifies InputManager's listener on connection and removal, falls back through `Generic.kcm` for unhandled buttons
-  (B is Back), repeats held buttons and turns unhandled stick and hat motion into d-pad keys like
-  `ViewRootImpl.SyntheticJoystickHandler`. `generate-key-layout.py` now also generates `Generic.kcm`'s table.
-  Using a pad hides the pointer until the mouse moves, as Steam does. The maintainer plays Subway Surfers with the 2026
-  Steam Controller (2026-11-06). Rumble, back paddles and remapping are not implemented.
-
 ### Added (touch cursor for gamepads)
 
 - Fixed: an app with a WebView (an ad in Geometry Dash Lite) died with `UnsupportedOperationException: input.hasKeys` while a
@@ -720,6 +708,94 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   swapchain's size, and plays a CC0 cat meow once through the ALSA arm. Both sources (Wikimedia Commons, CC0 1.0) are
   named in `vulkan_texture_cat.h` and `vulkan_texture_meow.h`. The removed files remain in the repository's history.
 
+### Changed (compatibility records)
+
+- Hungry Shark Evolution 14.5.0 and Hungry Shark World 8.2.6 are playable on the maintainer's report of stable gameplay
+  (2026-11-06), with no capture; both only ran bounded sessions before. The badge reads 15 playable of 19. Hungry Shark
+  World's Play Games sign-in still does not complete.
+- Umamusume's 30 FPS is recorded as the game's own frame cap (maintainer's report, 2026-11-07), not an open question:
+  its page, the README table and `compatibility.json` say so, and finding the cap's source is no longer remaining work.
+
+### Fixed (smaller changes)
+
+- **A `/proc/self/pagemap` scan rebuilt every mapping on each read.** `ProcMemoryNode` built the whole `/proc/self/maps` list
+  (a walk of the per-page file tree) for every `read()`, so a guest that reads pagemap one entry at a time spent a thread on it:
+  a live profile of Zenless Zone Zero showed 21 % of the process, one guest thread at 88 % CPU, in `Memory::mappings_snapshot()`.
+  The node now asks `Memory::page_kinds` (one lock, a walk of only the pages read, unmapped gaps skipped) through
+  `Yggdrasil::set_pagemap_provider`; a 20,000-read fixture went from 1,240 µs to 0.1 µs per read. `test_proc_mem_pagemap` also
+  checks a range read across a hole.
+- **ASTC LDR textures for Vulkan guests on a host without ASTC.** The RX 7600's driver (RADV) reports no
+  `textureCompressionASTC_LDR` but has BC7, so an Android engine such as Zenless Zone Zero's Unity fell back to
+  uncompressed textures. When the host has BC7 and no ASTC the thunk now tells the guest ASTC works, keeps each ASTC
+  image as a BC7 image, and transcodes the guest's blocks when the upload is submitted (`VulkanAstc.cpp`; decoder,
+  encoder and strip transcoder in `Source/System/Graphics/TextureCodec`). BC7 is the same 8 bits per texel as ASTC 4x4
+  and 2.2 to 4 times the size of ASTC 6x6 to 8x8; it is about a quarter of RGBA8. The encoder runs at roughly 4.5 to
+  5.5 Mpix/s per thread (half the cores by default, `BIFROST_ASTC_THREADS`) at 46 to 52 dB against the decoded source on
+  game screenshots; `BIFROST_VK_NO_ASTC=1` turns the feature off. Checked: a host test (hand-built ASTC blocks,
+  table properties, fuzz, every BC7 mode through an independent decoder, the transcoder over all 14 footprints);
+  a guest test through the thunk on the real GPU (`vulkan_astc`: queries, both device-creation forms, four footprints
+  with mips and edge blocks, staging memory mapped and unmapped); and the GPU's own BC7 decode of 2,232 blocks in
+  modes 0, 1, 2, 3, 6 and 7 across all 64 partitions, which matches the independent decoder exactly. Not checked: ARM's
+  reference ASTC decoder (none was available to run, so multi-partition and dual-plane blocks are checked only for
+  self-consistency) or any game. Not covered: reading back, copying or blitting an ASTC image, 3D and HDR ASTC, and the
+  GL/GLES path.
+- **`vkGetPhysicalDeviceImageFormatProperties2` took the `Properties2` shortcut.** The hand arm for the
+  `vkGetPhysicalDevice*Properties2` and `*Features2` queries matched by name and passed two arguments to the host, but
+  this command takes three. It now takes only the two-argument commands; the rest go through their own plans.
+- **The crash line named no library for an Android app.** `[crash] ... pc=0x7153f5c0` found its module only through the
+  emulator's own dynamic linker, and an Android app's libraries are mapped by Bionic's linker inside the guest, so a
+  crash in `libil2cpp.so` or `libunity.so` showed bare addresses (an intermittent Zenless Zone Zero crash could not be
+  placed). The line now names the file and offset of both `pc` and `x30` from the guest's own mappings.
+- **The ASTC transcoder took about 60% of Zenless Zone Zero's CPU during story scenes.** A passive profile of a play
+  session (cel-shaded scenes keep streaming character textures) put BC7 encoding and ASTC decoding at roughly 60 to 70%
+  of the game's samples. The transcoder's helper threads now run at nice 19 (they take only idle cycles; the calling
+  thread keeps its priority), and finished transcodes are cached under a hash of the ASTC blocks (`Bc7Cache`, 256 MiB,
+  `BIFROST_ASTC_CACHE_MB`), so a texture uploaded again is copied, not encoded. `BIFROST_ASTC_STATS=1` logs the
+  hit rate. Cache effect in a real session is not yet measured; the in-memory cache does not survive a restart.
+- **Every swapchain frame of an Android Vulkan app was copied through staging in both directions.**
+  `vkAcquireImageANDROID` uploaded the whole gralloc frame (a CPU `memcpy` into staging, then a GPU copy into the image)
+  and `vkQueueSignalReleaseImageANDROID` read it back (a GPU copy, a wait for the GPU, a CPU `memcpy`). The host image
+  already holds exactly what the last release wrote and the compositor only reads the buffer, so the acquire upload is
+  now skipped after an image's first release; an empty submission signals the loader's semaphore and fence. At 3440x1384
+  that is 18 MiB of copying and one GPU round trip less per frame. Built and checked to compile only: the path runs
+  only inside an Android app, so it needs a ZZZ relaunch (`APP_SURFACE_FRAMES present_ms`) to confirm. The release
+  read-back, its wait and the copy into the window remain.
+- **Subway Surfers recorded on a Steam Deck (2026-11-08, Desktop mode).** The maintainer ran it on SteamOS at 20 to 40 FPS (mostly 30
+  to 40), stable, with stutters, a hot CPU and close to 30 W of system power: the first run on a CPU other than the development
+  desktop's. Found at the same time, none fixed: Game Mode shows a black screen, and the library cannot be added as a plain non-Steam game
+  because Steam's environment variables have to be unset first. After quitting from the game's own dialog the window did not come
+  back on Return to app; the maintainer's conclusion is that this was the Deck's CPU being slow to open and close windows, not a bug
+  (not traced here). Details are in the compatibility record, the support matrix and the
+  roadmap.
+
+## [2.0.0-beta.1] — app keystore, Vulkan for Android apps, WebView fences and a faster JIT (2026-11-03)
+
+**2.0.0-beta.1** collects the changes made after 2.0.0-alpha.3 (2026-11-01): an Android Keystore so apps such as PolyTrack
+can save, real GPU fences for WebView, cheaper guest memory barriers, and a series of Tier-1 JIT changes (shared cold paths,
+tighter exits and flags, native scalar and vector FP by element and LD1R, loop bodies kept in one block, lighter Q-register
+accesses). It also gives Android apps a Vulkan device through a guest HAL over the host thunk, with placed memory maps and
+deep-marshalled Vulkan structs, gamepads for Android apps, records Zenless Zone Zero and Doki Doki Literature Club as
+playable, and fixes the CI-only test failures. It is the first beta label, not a completed beta scope: the [v2.0 goals](roadmap.md) and the beta.1 items still open
+there (guided provisioning, update/reinstall) remain in progress.
+
+- The version is 2.0.0-beta.1 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
+  the generated rootfs `os-release`, the C API comment and the stats-overlay test. Measurements recorded on 2.0.0-alpha.3 (app
+  pages, CoreMark tables, screenshots) keep that label.
+
+### Added (gamepads)
+
+- Android apps see host gamepads as Android 15 does an Xbox 360 pad. The SDL3 window opens SDL's gamepads with
+  hotplug and reports them through a new optional plugin callback, `poll_gamepad` (`BIFROST_WINDOW_GAMEPAD`
+  events): `KEYCODE_BUTTON_*` keys, sticks X/Y and Z/RZ, triggers and the d-pad as hat axes, released and centered
+  when the window loses focus. Each pad gets an Android device id and controller number; buttons arrive as
+  `KEYBOARD|GAMEPAD` keys and axes as `SOURCE_JOYSTICK` motion (batched, with `AMotionEvent_getAxisValue`).
+  The managed launcher lists each pad in InputManager with an `InputDevice` (sources, `Generic.kcm`, motion ranges),
+  notifies InputManager's listener on connection and removal, falls back through `Generic.kcm` for unhandled buttons
+  (B is Back), repeats held buttons and turns unhandled stick and hat motion into d-pad keys like
+  `ViewRootImpl.SyntheticJoystickHandler`. `generate-key-layout.py` now also generates `Generic.kcm`'s table.
+  Using a pad hides the pointer until the mouse moves, as Steam does. The maintainer plays Subway Surfers with the 2026
+  Steam Controller (2026-11-06). Rumble, back paddles and remapping are not implemented.
+
 ### Fixed (system calls)
 
 - `ioctl(fd, FIOCLEX/FIONCLEX, NULL)` returned EFAULT: the terminal helper rejected every NULL argument before
@@ -863,11 +939,6 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   before. Each carries its known defects: Zenless Zone Zero's very low-resolution textures, heavy lag and a progress bar
   that freezes while the window is maximized, and Doki Doki Literature Club's corrupted audio and graphics that break when
   the window is resized. The causes are not established.
-- Hungry Shark Evolution 14.5.0 and Hungry Shark World 8.2.6 are playable on the maintainer's report of stable gameplay
-  (2026-11-06), with no capture; both only ran bounded sessions before. The badge reads 15 playable of 19. Hungry Shark
-  World's Play Games sign-in still does not complete.
-- Umamusume's 30 FPS is recorded as the game's own frame cap (maintainer's report, 2026-11-07), not an open question:
-  its page, the README table and `compatibility.json` say so, and finding the cap's source is no longer remaining work.
 
 ### Apps get their own network security config (2026-11-05)
 
@@ -1169,55 +1240,6 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   while an ART compaction has software checks on (2.5 to 4.3 ns per four accesses in a loop).
 - **Smaller encodings and less hot work.** No bare REX prefixes or zero displacements, no RAX save around the flag commit
   on conditional exits, and no stack store for each CSEL result. `jit_guard_stubs` is the new regression test.
-- **A `/proc/self/pagemap` scan rebuilt every mapping on each read.** `ProcMemoryNode` built the whole `/proc/self/maps` list
-  (a walk of the per-page file tree) for every `read()`, so a guest that reads pagemap one entry at a time spent a thread on it:
-  a live profile of Zenless Zone Zero showed 21 % of the process, one guest thread at 88 % CPU, in `Memory::mappings_snapshot()`.
-  The node now asks `Memory::page_kinds` (one lock, a walk of only the pages read, unmapped gaps skipped) through
-  `Yggdrasil::set_pagemap_provider`; a 20,000-read fixture went from 1,240 µs to 0.1 µs per read. `test_proc_mem_pagemap` also
-  checks a range read across a hole.
-- **ASTC LDR textures for Vulkan guests on a host without ASTC.** The RX 7600's driver (RADV) reports no
-  `textureCompressionASTC_LDR` but has BC7, so an Android engine such as Zenless Zone Zero's Unity fell back to
-  uncompressed textures. When the host has BC7 and no ASTC the thunk now tells the guest ASTC works, keeps each ASTC
-  image as a BC7 image, and transcodes the guest's blocks when the upload is submitted (`VulkanAstc.cpp`; decoder,
-  encoder and strip transcoder in `Source/System/Graphics/TextureCodec`). BC7 is the same 8 bits per texel as ASTC 4x4
-  and 2.2 to 4 times the size of ASTC 6x6 to 8x8; it is about a quarter of RGBA8. The encoder runs at roughly 4.5 to
-  5.5 Mpix/s per thread (half the cores by default, `BIFROST_ASTC_THREADS`) at 46 to 52 dB against the decoded source on
-  game screenshots; `BIFROST_VK_NO_ASTC=1` turns the feature off. Checked: a host test (hand-built ASTC blocks,
-  table properties, fuzz, every BC7 mode through an independent decoder, the transcoder over all 14 footprints);
-  a guest test through the thunk on the real GPU (`vulkan_astc`: queries, both device-creation forms, four footprints
-  with mips and edge blocks, staging memory mapped and unmapped); and the GPU's own BC7 decode of 2,232 blocks in
-  modes 0, 1, 2, 3, 6 and 7 across all 64 partitions, which matches the independent decoder exactly. Not checked: ARM's
-  reference ASTC decoder (none was available to run, so multi-partition and dual-plane blocks are checked only for
-  self-consistency) or any game. Not covered: reading back, copying or blitting an ASTC image, 3D and HDR ASTC, and the
-  GL/GLES path.
-- **`vkGetPhysicalDeviceImageFormatProperties2` took the `Properties2` shortcut.** The hand arm for the
-  `vkGetPhysicalDevice*Properties2` and `*Features2` queries matched by name and passed two arguments to the host, but
-  this command takes three. It now takes only the two-argument commands; the rest go through their own plans.
-- **The crash line named no library for an Android app.** `[crash] ... pc=0x7153f5c0` found its module only through the
-  emulator's own dynamic linker, and an Android app's libraries are mapped by Bionic's linker inside the guest, so a
-  crash in `libil2cpp.so` or `libunity.so` showed bare addresses (an intermittent Zenless Zone Zero crash could not be
-  placed). The line now names the file and offset of both `pc` and `x30` from the guest's own mappings.
-- **The ASTC transcoder took about 60% of Zenless Zone Zero's CPU during story scenes.** A passive profile of a play
-  session (cel-shaded scenes keep streaming character textures) put BC7 encoding and ASTC decoding at roughly 60 to 70%
-  of the game's samples. The transcoder's helper threads now run at nice 19 (they take only idle cycles; the calling
-  thread keeps its priority), and finished transcodes are cached under a hash of the ASTC blocks (`Bc7Cache`, 256 MiB,
-  `BIFROST_ASTC_CACHE_MB`), so a texture uploaded again is copied, not encoded. `BIFROST_ASTC_STATS=1` logs the
-  hit rate. Cache effect in a real session is not yet measured; the in-memory cache does not survive a restart.
-- **Every swapchain frame of an Android Vulkan app was copied through staging in both directions.**
-  `vkAcquireImageANDROID` uploaded the whole gralloc frame (a CPU `memcpy` into staging, then a GPU copy into the image)
-  and `vkQueueSignalReleaseImageANDROID` read it back (a GPU copy, a wait for the GPU, a CPU `memcpy`). The host image
-  already holds exactly what the last release wrote and the compositor only reads the buffer, so the acquire upload is
-  now skipped after an image's first release; an empty submission signals the loader's semaphore and fence. At 3440x1384
-  that is 18 MiB of copying and one GPU round trip less per frame. Built and checked to compile only: the path runs
-  only inside an Android app, so it needs a ZZZ relaunch (`APP_SURFACE_FRAMES present_ms`) to confirm. The release
-  read-back, its wait and the copy into the window remain.
-- **Subway Surfers recorded on a Steam Deck (2026-11-08, Desktop mode).** The maintainer ran it on SteamOS at 20 to 40 FPS (mostly 30
-  to 40), stable, with stutters, a hot CPU and close to 30 W of system power: the first run on a CPU other than the development
-  desktop's. Found at the same time, none fixed: Game Mode shows a black screen, and the library cannot be added as a plain non-Steam game
-  because Steam's environment variables have to be unset first. After quitting from the game's own dialog the window did not come
-  back on Return to app; the maintainer's conclusion is that this was the Deck's CPU being slow to open and close windows, not a bug
-  (not traced here). Details are in the compatibility record, the support matrix and the
-  roadmap.
 
 ## [2.0.0-alpha.3] — installable runtime, fork and memory fixes, smaller JIT code, video through Android's media extractor (2026-11-01)
 

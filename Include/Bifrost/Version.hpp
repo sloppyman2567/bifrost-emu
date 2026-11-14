@@ -240,6 +240,10 @@ namespace arm64emu {
 //   fences, Vulkan for apps through a guest HAL, cheaper guest barriers and a faster Tier-1 JIT (shared cold
 //   paths, native by-element FP and LD1R, loop blocks, lighter Q accesses);
 //   see CHANGELOG.md. The v2.0 goals in Docs/roadmap.md are still not complete.
-constexpr const char* VERSION  = "2.0.0-beta.1";
+// 2.0.0-beta.2 (2026-11-14): installs and updates that rebuild what changed, `make check-fresh`, a session Zygote,
+//   one shared Android runtime image, Tier-2 through calls and returns, a JIT disk cache that holds less memory, gamepad
+//   control of the library and a touch cursor, NativeActivity games on the managed path; see CHANGELOG.md. The v2.0
+//   goals in Docs/roadmap.md are still not complete.
+constexpr const char* VERSION  = "2.0.0-beta.2";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

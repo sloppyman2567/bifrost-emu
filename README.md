@@ -10,7 +10,7 @@
  | |_) || |_| |    | | \ \| |__| |____) |  | |
  |____/_____|_|    |_|  \_\\____/|_____/   |_|
 
-  bifrost-emu  v2.0.0-beta.1
+  bifrost-emu  v2.0.0-beta.2
   x86_64 ◄─────────────────► ARM64
 ```
 
@@ -25,7 +25,7 @@ and how to install.
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](Docs/SUPPORT.md)
-[![Version: 2.0.0-beta.1](https://img.shields.io/badge/version-2.0.0--beta.1-orange.svg)](Docs/CHANGELOG.md)
+[![Version: 2.0.0-beta.2](https://img.shields.io/badge/version-2.0.0--beta.2-orange.svg)](Docs/CHANGELOG.md)
 [![Games: 16 playable of 19](https://img.shields.io/badge/games-16%20playable%20of%2019-brightgreen.svg)](#what-runs)
 
 ---
@@ -125,7 +125,7 @@ from October 2 to 4. More are in the
 
 ## Progress
 
-**2.0.0-beta.1** (2026-11-03) is the current pre-release, and the work after it is in the tree and listed below. The goals
+**2.0.0-beta.2** (2026-11-14) is the current pre-release; the work since 2.0.0-beta.1 is listed below. The goals
 for it and what follows are in the [roadmap](Docs/roadmap.md), which has a
 progress table and the known blockers; everything that changed is in the
 [changelog](Docs/CHANGELOG.md). Since 2.0.0-alpha.2:
@@ -145,29 +145,29 @@ progress table and the known blockers; everything that changed is in the
 - **Android apps (beta.1):** a Vulkan device through a guest HAL over the host
   thunk, an app Keystore (PolyTrack saves) and real GPU fences for WebView; Zenless
   Zone Zero and Doki Doki Literature Club are recorded as playable.
-- **ASTC textures on GPUs without them (after the beta.1 label, in the tree):** a host with BC7 but no ASTC, such as AMD's
+- **ASTC textures on GPUs without them (2.0.0-beta.2):** a host with BC7 but no ASTC, such as AMD's
   desktop drivers, is presented to Vulkan apps as having ASTC LDR; the thunk keeps those textures as BC7 and converts the blocks
   on the CPU at upload (`BIFROST_VK_NO_ASTC=1` turns it off). Checked headless on an RX 7600 and by a GPU decode of every BC7
   mode; not compared with ARM's decoder, and not yet measured in a game for memory or load time. The conversion's helper threads
   run at the lowest priority and finished conversions are cached (`BIFROST_ASTC_CACHE_MB`), because it took most of one game's CPU
   during story scenes.
-- **Frames, crashes and `/proc` (after the beta.1 label, in the tree):** an Android Vulkan app's swapchain no longer re-uploads
+- **Frames, crashes and `/proc` (2.0.0-beta.2):** an Android Vulkan app's swapchain no longer re-uploads
   the frame on every acquire after its first release (not yet run in a game; the read-back on release and the copy into the window
   remain), the one-line `[crash]` report names the library and offset of the failing address and its caller, and reading
   `/proc/self/pagemap` one entry at a time no longer rebuilds every mapping on each read (one game's guest thread spent most of a
   core there). The [host guide](Docs/HOST_INTEGRATION.md#diagnostic-switches) now lists every diagnostic switch.
-- **Game windows (after the beta.1 label, in the tree):** a window the desktop minimises or hides pauses the app and resumes it
+- **Game windows (2.0.0-beta.2):** a window the desktop minimises or hides pauses the app and resumes it
   when shown, F11 toggles fullscreen, the window's size is remembered per app, and an Activity that does not handle a resize
   is relaunched as Android does. Checked with fakes and fixtures, not yet on a real compositor or in a game.
-- **Library and install (in the tree):** the library offers **Set up…** for what a checkout still lacks, packages up to 4 GiB
+- **Library and install (2.0.0-beta.2):** the library offers **Set up…** for what a checkout still lacks, packages up to 4 GiB
   install, a realm with no app ends after 10 minutes, built-in per-app settings let Doki Doki Literature Club open with its
   window mode that avoids a resize corruption, and an AAudio write fix removed clicks in its music.
-- **JIT (in the tree):** native NEON `LD2` to `LD4` and `ST2` to `ST4`, FP compares kept in the host flags, and scalar FP
+- **JIT (2.0.0-beta.2):** native NEON `LD2` to `LD4` and `ST2` to `ST4`, FP compares kept in the host flags, and scalar FP
   special cases moved out of the hot path. On November 10 and 11: guest flags stored as the host leaves them, block edges
   without PC stores, loop registers kept across iterations, one 16-byte slot per vector register and `ccmp` flags left in
   the host (CoreMark 11.9% fewer host instructions, vector-heavy kernels 35-42% fewer cycles; no game measured), a fork
   child that keeps its parent's JIT, and opt-in Tier-2 regions that follow calls and returns.
-- **Android launches (November 11, in the tree):** an app's helper processes fork from a session Zygote (WebView ready in
+- **Android launches (2.0.0-beta.2, November 11):** an app's helper processes fork from a session Zygote (WebView ready in
   about 0.8 s instead of 3.4 s on Battle Cats) and microG maps a compiled vdex (under a second); games link one shared
   read-only copy of Android (Subway Surfers' own folder 677 MB instead of 1.6 GB); launch preparation reuses file hashes
   and moves dexopt after the session (0.3-0.65 s instead of about 5.5 s); the package parse cache survives an update;
@@ -234,7 +234,7 @@ On Debian and Ubuntu (25.10 or newer for Android windows) the quickest install i
 ```bash
 sudo apt install build-essential debhelper pkg-config libavcodec-dev libavutil-dev libswscale-dev \
      libegl-dev libffi-dev libgl-dev libsdl3-dev libsdl2-dev libwayland-dev libx11-dev
-make deb                                  # writes ../bifrost-emu_2.0.0~beta.1_amd64.deb
+make deb                                  # writes ../bifrost-emu_2.0.0~beta.2_amd64.deb
 sudo apt install ../bifrost-emu_*.deb
 bifrost-emu --setup-rootfs                # once: downloads the toolchains and builds the guest rootfs
 ```
@@ -540,7 +540,7 @@ adapter.
 
 ## Documentation
 
-The current version is **2.0.0-beta.1**, the first beta pre-release toward the
+The current version is **2.0.0-beta.2**, the second beta pre-release toward the
 [v2.0 roadmap](Docs/roadmap.md); its goals are not complete yet.
 
 | Topic | Document |
