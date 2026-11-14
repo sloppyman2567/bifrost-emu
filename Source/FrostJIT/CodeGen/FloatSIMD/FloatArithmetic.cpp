@@ -708,12 +708,9 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                     //   mov eax, 0                 ; clamp negative to 0
                     // done:
                     //
-                    // The previous code had a bug: `after_neg_target` was set
-                    // BEFORE the negative path's `mov eax, 0` was emitted, so
-                    // it pointed AT the negative path. The `jmp_past_neg`
-                    // (intended to skip the negative path) landed ON it,
-                    // causing every non-negative result to be overwritten
-                    // with 0. This was the "first FCVTZU produces 0" bug.
+                    // The `done` target is bound AFTER the negative path's
+                    // `mov eax, 0`: a jump that landed on it would overwrite
+                    // every non-negative result with 0.
                     emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0);  // test rax, rax
                     size_t js_patch = emit_jcc_rel32_placeholder(0x8);  // JS (negative)
                     // Non-negative: cmp rax, 0xFFFFFFFF; jbe ok; else clamp.

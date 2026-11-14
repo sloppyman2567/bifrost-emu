@@ -458,14 +458,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     // (datasize - immr) to place them at the correct
                     // position in the result.
                     //
-                    // fix: the previous code used `high_mask`
-                    // (top bits) which was correct for LSL but WRONG for
-                    // SBFIZ/UBFIZ where the field is NOT at the top of
-                    // the register. This broke musl's smoothsort which
-                    // uses `sbfiz x3, x19, #3, #32` to compute
-                    // pshift * 8 for lp[] indexing — the result was 0
-                    // instead of the correct value, causing qsort to
-                    // produce wrong output for n >= 8.
+                    // The field lands at bit (datasize - immr), not at the
+                    // top of the register: musl's smoothsort computes
+                    // pshift * 8 with `sbfiz x3, x19, #3, #32`.
                     int width = imms + 1;
                     int lsb = datasize - immr;
                     uint64_t field = src & ((width >= 64) ? ~0ULL : ((1ULL << width) - 1));

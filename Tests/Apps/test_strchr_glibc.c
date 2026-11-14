@@ -1,4 +1,4 @@
-// test_strchr.c — test strchr/strlen/memcmp under glibc dynamic
+// test_strchr_glibc.c — test strchr/strlen/memcmp under glibc dynamic
 #include <stdio.h>
 #include <string.h>
 

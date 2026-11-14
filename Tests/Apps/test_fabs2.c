@@ -1,6 +1,6 @@
 /* test_fabs2.c — narrow the fabsf-on-subtraction anomaly.
  *
- * test_fabs showed fabsf works on literals/stored values. The GL test
+ * An earlier probe showed fabsf works on literals/stored values. The GL test
  * showed fabsf(cv[0]-0.1f) returns garbage (0xfffffaa0) even though the
  * subtraction yields +0.0f. This tests whether the bug is the inline
  * "fabsf(a - b)" call pattern vs a stored intermediate.

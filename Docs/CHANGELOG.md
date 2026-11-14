@@ -82,7 +82,8 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
 
 - Comments that named files, functions and generators that no longer exist now name the current ones (the interpreter and
   JIT dispatch notes, the generated-table includes, `compile_ir_inst`, `top_up_queue`, `IRInst::make_bf`, the config loader),
-  and history-style notes in the integer translator and thread creation state the present contract (2026-11-13). Found by a
+  and history-style notes in the integer translator, thread creation, fd allocation, `sbfiz` and the FCVTZU clamp state the
+  present contract; a few file headers named the wrong file (2026-11-13). Found by a
   scripted check of comment paths, `BIFROST_*` names and `name()` references; it does not catch a comment that is wrong in
   prose.
 - `Scripts/Testing/check_doom3_gl.py` imported `glxmlcheck` through a `Tools/opgen` path that no longer exists, so it

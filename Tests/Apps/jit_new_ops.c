@@ -1,4 +1,4 @@
-/* jit_new_ops_test.c — test new JIT native instructions.
+/* jit_new_ops.c — test new JIT native instructions.
  * Tests: UDIV, SDIV, SMULH, UMULH, SMADDL, UMADDL, SMSUBL, UMSUBL,
  *        FCVT, FRINT, FABS, FNEG, FSQRT, FMADD, FMSUB
  * Run under both interpreter and JIT, compare outputs.

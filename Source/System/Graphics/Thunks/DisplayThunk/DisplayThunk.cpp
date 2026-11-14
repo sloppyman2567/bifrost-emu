@@ -1,10 +1,10 @@
 #include "System/Graphics/Display/WindowStats.hpp"
-// frost_graphics/display_thunk.cpp — DisplayThunk implementation.
+// DisplayThunk.cpp — DisplayThunk implementation.
 //
 // See Source/System/Graphics/Thunks/DisplayThunk.hpp for the design overview. This file
 // implements the DisplayThunk class for Vulkan / Wayland / X11 / GBM.
 //
-// DisplayThunk now uses the same full dispatch logic as
+// DisplayThunk uses the same full dispatch logic as
 // GraphicThunk (stack args, float args, string returns, GetProcAddress,
 // mixed int+float) and integrates DisplayProxy for X11/Wayland fallback
 #include "System/Graphics/Thunks/DisplayThunk/DisplayThunkInternal.hpp"

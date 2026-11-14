@@ -501,7 +501,7 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
                     static_cast<int>(tb.ir.insts.size() - 1);
             }
         }
-        // Same per-op contract check as the tier-1 path (jit_translate):
+        // Same per-op contract check as the tier-1 path (BlockCompiler.cpp):
         // runs whether or not the optimizer ran, validating what the
         // region compiler is about to consume.
         if (dbg().ir_validate) validate_ir_block(tb.ir);

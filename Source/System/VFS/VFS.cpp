@@ -95,13 +95,11 @@ FdTable::FdTable() {
     table_[2] = std::make_shared<StdioNode>(2, O_WRONLY);
 }
 int FdTable::allocate(std::shared_ptr<Node> node) {
-    // POSIX: open()/dup() return the *lowest* available fd. The old
-    // implementation used a monotonic `next_fd_` counter and never
-    // recycled closed fds, so a guest that closed stdin/stdout/stderr
-    // and re-opened a file expected to get fd 0/1/2 (a common shell
-    // idiom) but got a higher fd instead. Fix: scan from 0 upward and
-    // return the first fd not in table_. (0/1/2 are pre-populated, so
-    // in the common case the scan returns 3 immediately.)
+    // POSIX: open()/dup() return the *lowest* available fd, so a guest that
+    // closed stdin/stdout/stderr and re-opens a file (a common shell idiom)
+    // gets fd 0/1/2 again. Scan from 0 upward and return the first fd not in
+    // table_. (0/1/2 are pre-populated, so in the common case the scan
+    // returns 3 immediately.)
     std::lock_guard<std::mutex> g(mu_);
     int fd = 0;
     while (table_.count(fd)) fd++;
