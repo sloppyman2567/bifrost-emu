@@ -35,8 +35,10 @@ SpongeBob: Krusty Cook-Off. Azur Lane and Umamusume Global are playable on the
 maintainer's report, with screenshots on their pages; The Battle Cats, Subway Surfers
 and Geometry Dash Lite on the report alone, with no capture. Zenless Zone Zero and
 Doki Doki Literature Club are playable on the maintainer's report (2026-11-06): the first with
-very low-resolution textures and heavy lag, the second with corrupted audio and graphics
-that break when the window is resized. On 2026-11-08 the maintainer played Zenless Zone Zero's story scenes with the
+very low-resolution textures and heavy lag. The second's audio popped until the AAudio write fix
+(clean, user-confirmed 2026-11-08), and its images blacked out when the window was resized (Ren'Py's own
+resize path); it now opens with Window set to "Keep the app's shape", which avoids that (user-confirmed
+2026-11-08). On 2026-11-08 the maintainer played Zenless Zone Zero's story scenes with the
 ASTC-to-BC7 path (the overlay read 29 to 30 FPS at 3440x1384); the models are still very low resolution, which the
 maintainer says they always were, and a session ended on a guest null dereference once (not reproduced in the next
 7-minute session). Hungry Shark Evolution 14.5.0 and Hungry Shark World 8.2.6 have stable
