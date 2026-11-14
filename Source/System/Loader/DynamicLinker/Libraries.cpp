@@ -243,15 +243,9 @@ uint64_t DynamicLinker::load_shared_library(CPU& cpu,
         }
         return 0;
     }
-    // Allocate a fresh base address via the Memory's mmap_alloc().
-    // (mmap_alloc's base is MMAP_BASE_MIN in the low region — the SAME
-    // region where the thunk trampolines and
-    // string caches are allocated. The allocator tracks ALL allocations
-    // so library bases can't collide with the trampolines; that was the
-    // bug this comment documents: the old code used a separate counter
-    // starting at 0x5000000000, which could collide with the thunk's
-    // trampoline page → "decode error at pc=0x5000000020". The fix is
-    // using mem_.mmap_alloc() for library bases.)
+    // Allocate a fresh base address via the Memory's mmap_alloc(). Its base is MMAP_BASE_MIN in the low region, the SAME
+    // region where the thunk trampolines and string caches are allocated, and the allocator tracks ALL allocations, so
+    // library bases cannot collide with the trampolines (a separate counter could: "decode error at pc=0x5000000020").
     uint64_t max_end = 0;
     if (data.size() >= 56) {
         uint64_t e_phoff;

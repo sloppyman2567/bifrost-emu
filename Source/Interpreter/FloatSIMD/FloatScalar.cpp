@@ -366,8 +366,6 @@ void Emulator::exec_fp_scalar(const DecodedInst& d, CPU& cpu) {
     // Per ARMv8 ARM C4.2.28:
     //   0x0=FMUL, 0x1=FDIV, 0x2=FADD, 0x3=FSUB,
     //   0x4=FMAX, 0x5=FMIN, 0x6=FMAXNM, 0x7=FMINNM, 0x8=FNMUL
-    // BUGFIX: opcode 0x6 was FNMUL (should be FMAXNM), 0x7 was
-    // missing (FMINNM), 0x8 (FNMUL) fell through to default=0.
     if ((op & 0xFF200000) == 0x1E200000 && ((op >> 21) & 1) == 1
         && ((op >> 10) & 0x3) == 0x2) {
         uint8_t opcode = (op >> 12) & 0xF;

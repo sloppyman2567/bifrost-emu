@@ -631,16 +631,9 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // The stub calls our dladdr() implementation via syscall 0x1005,
     // which fills in the Dl_info struct and returns 1 (found) or 0.
     //
-    // History: this override was previously disabled because an earlier
-    // attempt crashed glibc startup (the versioned-symbol override
-    // conflicted with glibc's internal _dl_addr path). The dlfcn_hook
-    // wiring (hook+40 → OFF_DLADDR) was added later and made the
-    // user-facing dladdr() work, but the symbol itself stayed
-    // unresolved-to-glibc. Re-enabling the symbol override now routes
-    // ALL dladdr calls (including _dl_addr's internal use) through our
-    // stub, which returns 0 gracefully for unknown addresses — so
-    // glibc's internal callers see "not found" and skip link_map
-    // validation, which is safe.
+    // The override routes ALL dladdr calls (including _dl_addr's internal use) through our stub, which returns 0
+    // gracefully for unknown addresses, so glibc's internal callers see "not found" and skip link_map validation, which
+    // is safe.
     symbols_["dladdr"] = SymEntry{code_base + OFF_DLADDR, STB_GLOBAL_};
     versioned_symbols_["dladdr@GLIBC_2.34"] = SymEntry{code_base + OFF_DLADDR, STB_GLOBAL_};
     versioned_symbols_["dladdr@GLIBC_2.0"] = SymEntry{code_base + OFF_DLADDR, STB_GLOBAL_};

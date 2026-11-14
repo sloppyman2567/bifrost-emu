@@ -77,11 +77,8 @@ int64_t syscall_wait(Emulator& emu, CPU& cpu, uint64_t num) {
     switch (num) {
         case 153: { // times(struct tms *buf) — AArch64 153
             // times() returns the number of clock ticks since an arbitrary
-            // point in the past, and fills struct tms.
-            // even on error. The old code returned ret_errno() without
-            // writing, leaving the guest's struct tms uninitialized with
-            // deterministic stack garbage. Now we zero-fill first, then
-            // try host times(). If it fails, the guest gets zeros.
+            // point in the past, and fills struct tms. The guest's struct is written even on error: zero-filled first, then
+            // filled by the host times(), so a failure leaves zeros, never uninitialized stack.
             struct tms t;
             memset(&t, 0, sizeof(t));
             clock_t r = ::times(a0 ? &t : nullptr);
@@ -124,13 +121,8 @@ int64_t syscall_wait(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 260: { // wait4(pid, wstatus, options, rusage) — aarch64 260
-            // wstatus, a3 rusage) even on error. The old code returned
-            // ret_errno() without writing, leaving the guest's struct
-            // rusage uninitialized with deterministic stack garbage.
-            // This was the ACTUAL root cause of `toybox time` showing
-            // "user 549755811552.42" — wait4 failed (ECHILD or EINTR),
-            // the rusage buffer was never written, and the guest read
-            // its uninitialized stack.
+            // wait4 writes the guest's wstatus (a1) and rusage (a3) even on error, zero-filled first, so a failure (ECHILD or
+            // EINTR) leaves zeros, never uninitialized stack (which made `toybox time` print "user 549755811552.42").
             pid_t pid = (pid_t)a0;
             int options = static_cast<int>(a2);
             int status = 0;

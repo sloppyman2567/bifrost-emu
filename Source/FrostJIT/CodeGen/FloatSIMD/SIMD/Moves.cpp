@@ -86,9 +86,8 @@ bool FrostJIT::compile_simd_moves_(const IRInst& inst) {
                 // s == RAX: the shift-replicate chain destroys src1's value
                 // in RAX while RAX is still mapped to src1. Drop the mapping
                 // (spilling if dirty) BEFORE the chain so later readers of
-                // src1 reload from its home instead of the broadcast. (For
-                // Q=0 the old code's trailing clobber masked this when src1
-                // was clean, but a dirty src1 — or Q=1 — corrupted it.)
+                // src1 reload from its home instead of the broadcast. (A dirty
+                // src1, or Q=1, would otherwise be corrupted.)
                 clobber_host_reg(RAX);
             }
             emit_dup_qword();

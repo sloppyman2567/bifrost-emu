@@ -177,21 +177,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // We support two paths:
             //   1. CLONE_VM | CLONE_THREAD: spawn a vCPU on a host thread.
             //   2. No CLONE_VM (fork): host fork() with CoW memory.
-            // AArch64 clone() syscall argument order (per the kernel's
-            // SYSCALL_DEFINE5(clone, flags, newsp, parent_tidptr, tls,
-            // child_tidptr) in arch/arm64/kernel/process.c):
-            //   x0 = flags
-            //   x1 = stack (newsp)
-            //   x2 = parent_tidptr (ptid)
-            //   x3 = tls              ← NOT ctid!
-            //   x4 = child_tidptr (ctid)  ← NOT tls!
             //
-            // BUGFIX: the old code had ctid/tls swapped (ctid=a3, tls=a4).
-            // This is the OPPOSITE of x86_64's clone ABI. On AArch64,
-            // x3=tls and x4=ctid. The swap meant spawned threads got the
-            // wrong TPIDR_EL0 (set to the ctid address instead of the TLS
-            // pointer), breaking pthread_join which computes the pthread
-            // struct base as TPIDR_EL0 - 0xc8.
+            // The argument order is the kernel's SYSCALL_DEFINE5(clone, flags, newsp, parent_tidptr, tls, child_tidptr) in
+            // arch/arm64/kernel/process.c: x3 is tls and x4 is ctid, the OPPOSITE of x86_64's clone ABI. Swapping them would set
+            // TPIDR_EL0 to the ctid address and break pthread_join, which computes the pthread struct base as TPIDR_EL0 - 0xc8.
             uint64_t flags = a0;
             uint64_t stack = a1;
             uint64_t ptid_ptr = a2;
@@ -227,12 +216,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // the parent gets x0=child_tid. The child then checks x0 and
             // branches to the thread function.
             //
-            // BUGFIX: the old code used cpu.regs[30] (LR) as the entry
-            // point, but LR is the return address of __clone's CALLER
-            // (e.g., pthread_create's internal function), not the
-            // instruction after SVC. The child must start at SVC+4 so it
-            // falls through to the "cbnz x0, parent_return" / "ldr fn/arg
-            // / blr fn" sequence in musl's __clone wrapper.
+            // The child must start at SVC+4 (not at LR, the return address of __clone's caller) so it falls through to the
+            // "cbnz x0, parent_return" / "ldr fn/arg / blr fn" sequence in musl's __clone wrapper.
             //
             // NOTE: The interpreter's SVC_IMM handler advances cpu.pc to
             // SVC+4 BEFORE calling syscall(), so cpu.pc is already the
@@ -377,9 +362,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     bool absolute = (op == 9);
                     // Always check *uaddr == val BEFORE any fast-path
                     // return. The kernel returns -EAGAIN if *uaddr != val,
-                    // regardless of whether other threads are alive. The
-                    // old single-threaded fast-path returned 0 without
-                    // checking, breaking try-lock patterns (where the
+                    // regardless of whether other threads are alive. Returning 0
+                    // without checking would break try-lock patterns (where the
                     // guest expects -EAGAIN when the lock is held by the
                     // current thread).
                     uint32_t cur = mem_.load<uint32_t>(uaddr);
@@ -549,20 +533,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         uint64_t nsec = mem_.load<uint64_t>(timeout_ptr + 8);
                         if (absolute) {
                             // FUTEX_WAIT_BITSET: timeout is an ABSOLUTE deadline.
-                            // BUGFIX: the previous code computed
-                            //   deadline = now_mono + (sec + nsec) - now_mono
-                            //          = (sec + nsec) as a RELATIVE duration,
-                            // which is wrong. If the guest's monotonic clock
-                            // reads 1000s and the deadline is 1010s, the
-                            // previous code waited 1010s instead of 10s,
-                            // breaking pthread_cond_timedwait(CLOCK_MONOTONIC).
-                            //
-                            // The fix: treat (sec, nsec) as a steady_clock
-                            // time_point directly. The guest's CLOCK_MONOTONIC
-                            // and the host's steady_clock both count from
-                            // boot, so their origins coincide closely enough
-                            // for futex deadlines. For CLOCK_REALTIME we use
-                            // system_clock instead.
+                            // (sec, nsec) is used as a steady_clock time_point directly. The guest's CLOCK_MONOTONIC and the host's
+                            // steady_clock both count from boot, so their origins coincide closely enough for futex deadlines (a relative
+                            // computation would wait the whole clock reading again and break pthread_cond_timedwait(CLOCK_MONOTONIC)).
+                            // For CLOCK_REALTIME we use system_clock instead.
                             if (clock_realtime) {
                                 // Build absolute system_clock time_point and
                                 // convert to steady_clock-relative duration

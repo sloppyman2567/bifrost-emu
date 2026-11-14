@@ -356,14 +356,11 @@ public:
     // its callback on its own CPU instead of racing on main_cpu_.
     int iterate_phdr(CPU& cpu, uint64_t callback_ptr, uint64_t data_ptr);
     // ── ifunc resolver callback ────────────────────────────────────
-    // BUGFIX: the old IRELATIVE handler just stored `base + A` (the
-    // resolver ADDRESS) instead of calling the resolver to get the
-    // actual function pointer. This silently corrupted any program
-    // using ifuncs (e.g., glibc memcpy variants selected at load time
-    // based on CPU features). Now the Emulator registers a callback
-    // that runs the resolver function in a scratch CPU and returns X0.
-    // The callback returns 0 on failure (which leaves the GOT slot 0,
-    // and the guest will crash on the first call — visible, not silent).
+    // The IRELATIVE handler must call the resolver to get the actual function pointer: storing `base + A` (the resolver
+    // ADDRESS) would silently corrupt any program using ifuncs (e.g., glibc memcpy variants selected at load time based on
+    // CPU features). The Emulator registers a callback that runs the resolver function in a scratch CPU and returns X0.
+    // The callback returns 0 on failure (which leaves the GOT slot 0, and the guest will crash on the first call —
+    // visible, not silent).
     void set_ifunc_resolver(std::function<uint64_t(CPU&, uint64_t)> cb) {
         ifunc_resolver_ = std::move(cb);
     }

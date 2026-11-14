@@ -447,20 +447,12 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 //     jnz retry                  ; else RAX = [R9] (new old), retry
                 //   dest = RAX (old value)
                 //
-                // BUGFIX 1: previously `R8 = old OP src` was computed ONCE before
-                //   the loop. On CAS failure, RAX was updated to the new [mem]
-                //   but R8 was not recomputed — the retrying cmpxchg wrote the
-                //   ORIGINAL old OP src instead of the CURRENT old OP src. Under
-                //   multi-threaded contention this produced silently wrong RMW
-                //   results for LDCLR/LDEOR/LDSET (e.g. broken atomic flags).
+                // R8 is recomputed from the CURRENT old value on every retry: on CAS failure RAX holds the new [mem], so a value
+                // computed once before the loop would make the retrying cmpxchg write the ORIGINAL old OP src (silently wrong RMW
+                // results for LDCLR/LDEOR/LDSET under multi-threaded contention).
                 //
-                // BUGFIX 2: the original AND/XOR/OR opcodes used REX prefix
-                //   0x4D (W,R,B all set), but REX.R=1 extends the reg field
-                //   from rcx (1) to r9 (9). The intended instruction was
-                //   `and r8, rcx` but the bytes encoded `and r8, r9`. Since
-                //   R9 held the host address (a pointer, not the operand),
-                //   the result was garbage. The correct REX is 0x49 (W=1,
-                //   R=0, B=1) so reg stays rcx and rm extends to r8.
+                // The AND/XOR/OR opcodes use REX 0x49 (W=1, R=0, B=1), so the reg field stays rcx and rm extends to r8:
+                // `and r8, rcx`. REX 0x4D would set REX.R and encode `and r8, r9`, and R9 holds the host address, not the operand.
                 emit_mov_reg(R9, RAX);  // R9 = host addr
                 // For LDCLR, precompute ~src into RDX (preserved across iterations).
                 // RDX is already invalidated above and clobbered by idiv; safe to use.

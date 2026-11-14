@@ -559,11 +559,8 @@ if (demote_interp) {
     // fixed stack slot. This avoids the lazy allocation mismatch between
     // the pre-computed stack size and the runtime slot counter.
     //
-    // the previous code limited max_vreg to < 200,
-    // but blocks with many ARM instructions (e.g., __multf3's 82-instr
-    // block) can have vregs up to 317+. Vregs >= 200 would get stack
-    // slots via lazy allocation that extend BEYOND the pre-allocated
-    // stack frame, causing stack corruption.
+    // max_vreg is not capped: blocks with many ARM instructions (e.g., __multf3's 82-instr block) have vregs up to 317+,
+    // and a vreg whose slot is allocated lazily beyond the pre-allocated stack frame would corrupt the stack.
     int max_vreg = 33;
     for (auto& inst : ir_block.insts) {
         if (inst.dest > max_vreg) max_vreg = inst.dest;

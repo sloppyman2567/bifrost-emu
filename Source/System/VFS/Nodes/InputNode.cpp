@@ -84,9 +84,8 @@ int InputNode::fstat(struct stat* st) {
 }
 int InputNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
     if (!input_) return -ENODEV;
-    // Every handled request writes through argp (FIONREAD included), so a
-    // NULL argument must be EFAULT — the old code exempted FIONREAD and
-    // then stored to guest address 0.
+    // Every handled request writes through argp (FIONREAD included), so a NULL argument must be EFAULT; otherwise it would
+    // store to guest address 0.
     if (argp == 0) return -EFAULT;
     if (request == ioctl_num::REQ_FIONREAD) {
         int n = static_cast<int>(pending_bytes(input_, dev_));

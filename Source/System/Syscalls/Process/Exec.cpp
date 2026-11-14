@@ -382,11 +382,6 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     // at startup). This propagates TZ, LANG, LC_*, etc. from the
     // host so locale-aware programs work correctly in the new
     // process image too.
-    //
-    // BUGFIX: the old code only pushed "PATH=..." here, dropping
-    // TZ and all locale vars in execve'd processes. This meant
-    // `toybox sh -c 'uptime'` showed UTC time even when the
-    // parent shell had TZ set correctly.
     uint64_t sp;
     if (emu.android_runtime_) {
         emu.vdso_base_ = emu.vdso_size_ = 0;

@@ -340,13 +340,9 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
         // value is NOT modified by the store, so we keep src1's mapping
         // intact for later readers.
         //
-        // BUGFIX: if src1 is cached in a reg OTHER than RAX, the old code
-        // did `emit_mov_reg(RAX, s)` which silently overwrote whatever
-        // dirty vreg was in RAX — losing its value. This caused
-        // printf("%f", 3.14) → "2.000000" under BIFROST_ENABLE_FWD=1
-        // because v46 (the bfxil result holding x1's low 48 bits) was
-        // in RAX and got clobbered by the FMOV_G2F that copies x9 to
-        // v[0].lo. Fix: spill RAX's occupant BEFORE overwriting it.
+        // If src1 is cached in a reg OTHER than RAX, RAX's occupant (possibly a dirty vreg) must be spilled BEFORE
+        // `emit_mov_reg(RAX, s)` overwrites it: losing it printed printf("%f", 3.14) as "2.000000" under BIFROST_ENABLE_FWD=1
+        // (the bfxil result holding x1's low 48 bits sat in RAX and was clobbered by the FMOV_G2F that copies x9 to v[0].lo).
         int s = ensure_vreg(src1, RAX);
         // ── FP-cache path (FMOV_G2F only — lo half): ────────────────
         // Store the GPR value into the pinned XMM (reg-reg) instead of
@@ -402,13 +398,9 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
 }
 // ── emit_call_interp ───────────────────────────────────────────────────
 void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
-    // flush ALL dirty vregs BEFORE materializing flags.
-    // The previous code called emit_materialize_flags FIRST, which
-    // clobbers RAX/RCX/RDX — if those held dirty vregs, their values
-    // were lost before flush_all_vregs could spill them. This caused
-    // state corruption in __multf3 (128-bit softfloat) blocks where
-    // a dirty vreg in RAX was silently dropped, producing wrong FP
-    // results (e.g. printf("%f", 3.14) → "2.000000").
+    // flush ALL dirty vregs BEFORE materializing flags: emit_materialize_flags clobbers RAX/RCX/RDX, and if those held
+    // dirty vregs their values would be lost before flush_all_vregs could spill them (state corruption in __multf3 blocks
+    // printed printf("%f", 3.14) as "2.000000").
     flush_all_vregs();
     // Materialize host flags to pstate if valid.
     if (flags_in_host_) {

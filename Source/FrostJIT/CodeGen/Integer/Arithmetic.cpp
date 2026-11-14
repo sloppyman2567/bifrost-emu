@@ -546,14 +546,10 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             return 0;
         }
         case IROp::CLZ: {
-            // lzcnt rax, rax overwrites RAX, destroying
-            // src1's cached value. If src1 is a scratch vreg holding a snapshot
-            // of an arch reg (from LOAD_REG), later readers would reload from
-            // an uninitialized stack slot. Use the same fix as REV64: allocate
-            // a separate dest reg and copy src1 there BEFORE lzcnt.
-            //
-            // The previous code did `vreg_home_[inst.src1] = -1; vreg_dirty_[inst.src1] = false`
-            // which silently dropped a dirty src1 — same bug class as REV64.
+            // lzcnt rax, rax overwrites RAX, destroying src1's cached value. If src1 is a scratch vreg holding a snapshot
+            // of an arch reg (from LOAD_REG), later readers would reload from an uninitialized stack slot. So, as for REV64,
+            // allocate a separate dest reg and copy src1 there BEFORE lzcnt: a dirty src1 must be spilled, never dropped from
+            // vreg_home_/vreg_dirty_.
             clobber_flags();  // lzcnt doesn't clobber flags, but sub does (32-bit path)
             force_vreg_to_reg(inst.src1, RAX);
             int d = alloc_reg_for(inst.dest, RAX);
@@ -585,18 +581,11 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         case IROp::REV64: {
             // Force src1 into RAX (properly evicts old RAX occupant).
             force_vreg_to_reg(inst.src1, RAX);
-            // bswap modifies RAX in place, which
-            // destroys v(src1)'s value. If dest != src1, we must preserve
-            // src1's value for potential later readers. Allocate a separate
-            // dest reg and copy src1 there BEFORE bswap, so src1 stays
-            // cached in RAX (or gets reloaded from cpu.regs[]/stack later).
-            //
-            // The previous code did `bswap eax; store_vreg(dest, RAX)` which
-            // silently dropped src1's value if src1 was a scratch vreg
-            // (v > 31) — store_vreg cleared src1's dirty flag without
-            // spilling, and a later force_vreg_to_reg(src1) loaded from an
-            // uninitialized stack slot. This caused jit_simd.elf's
-            // `cmp w0, w5` to compute wrong flags and crash.
+            // bswap modifies RAX in place, which destroys v(src1)'s value. If dest != src1, src1's value must be preserved for
+            // later readers: allocate a separate dest reg and copy src1 there BEFORE bswap, so src1 stays cached in RAX (or gets
+            // reloaded from cpu.regs[]/stack later). Storing the bswapped RAX straight into dest would clear src1's dirty flag
+            // without spilling it when src1 is a scratch vreg (v > 31), and a later force_vreg_to_reg(src1) would load an
+            // uninitialized stack slot (it made jit_simd.elf's `cmp w0, w5` compute wrong flags).
             int d = alloc_reg_for(inst.dest, RAX);
             if (d != RAX) {
                 // Copy src1 to d, then bswap d (preserving src1 in RAX).
@@ -1200,10 +1189,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             }
             // imul rax, rcx (64-bit multiply — result in RAX, no RDX needed)
             emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);
-            // (inst.aux), not directly from cpu.regs[]. The old code read
-            // cpu.regs[inst.cond] which bypassed the vreg cache and could
-            // read stale values if the accumulator was modified earlier
-            // in the same block.
+            // The accumulator is read through the vreg cache (inst.aux), not directly from cpu.regs[]: reading
+            // cpu.regs[inst.cond] would bypass the cache and see stale values if the accumulator was modified earlier in the
+            // same block.
             load_vreg_to_reg(RDX, inst.aux);
             // add rax, rdx
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xD0);

@@ -186,8 +186,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 unordered = emit_jcc_rel32_placeholder(0xA);         // JP: a NaN input
             }
             // Execute SSE2 op: ADDSD/MULSD/etc xmm0, xmm1 → xmm0 = xmm0 OP xmm1
-            // BUGFIX: must use modrm(3, 0, 1) → reg=xmm0, rm=xmm1
-            // ADDSD xmm1, xmm0 (result in xmm1) but stored xmm0 (stale).
+            // Uses modrm(3, 0, 1) → reg=xmm0, rm=xmm1, so the result lands in xmm0 (which is what gets stored).
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(sse_op);
             emit_byte(modrm(3, 0, 1));  // xmm0, xmm1

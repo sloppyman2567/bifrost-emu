@@ -108,14 +108,9 @@ int Emulator::run() {
     uint64_t recent_pcs[LOOP_DETECT_WINDOW] = {};
     uint64_t pc_index = 0;
     uint64_t tight_loop_count = 0;
-    // BUGFIX: the old watchdog sampled ONLY x2 as the progress
-    // indicator. x2 is the third argument register and is routinely
-    // unchanged in legitimate tight compute loops (e.g., a hot inner
-    // loop using x0/x1 only). The new scheme samples a hash of x0+x1+x2
-    //+x3+x19+x20+x21+x22+x23+x24+x25+x26+x27+x28 + sp + pc. Any of
-    // those changing means the loop is making progress. This eliminates
-    // false positives while still catching true linked-list-cycle /
-    // infinite-spin bugs.
+    // The watchdog samples a hash of x0+x1+x2+x3+x19+x20+x21+x22+x23+x24+x25+x26+x27+x28 + sp + pc as its progress
+    // indicator. Any of those changing means the loop is making progress (x2 alone is routinely unchanged in legitimate
+    // tight compute loops), which avoids false positives while still catching true linked-list-cycle / infinite-spin bugs.
     uint64_t last_progress_hash = 0;
     // ── Periodic reporter thread (BIFROST_STATS_PERIOD=seconds) ────────
     // MUST be a background thread, not an in-loop check: games park their
@@ -306,13 +301,8 @@ int Emulator::run() {
                 if ((pc_index % LOOP_DETECT_WINDOW) == 0) {
                     std::set<uint64_t> unique_pcs(recent_pcs, recent_pcs + LOOP_DETECT_WINDOW);
                     if (unique_pcs.size() <= 4) {
-                        // Compute a progress hash from the most volatile
-                        // registers. We pick x0-x3 (argument registers) and
-                        // x19-x28 (callee-saved scratch) plus sp and pc —
-                        // any of those changing means the loop is making
-                        // progress. The old code only checked x2, which is
-                        // the third argument register and routinely
-                        // unchanged in legitimate tight compute loops.
+                        // Compute a progress hash from the most volatile registers: x0-x3 (argument registers) and x19-x28 (callee-saved
+                        // scratch) plus sp and pc. Any of those changing means the loop is making progress.
                         uint64_t current_hash =
                               main_cpu_.regs[0] ^ main_cpu_.regs[1]
                             ^ main_cpu_.regs[2] ^ main_cpu_.regs[3]

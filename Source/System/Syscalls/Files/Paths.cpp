@@ -177,11 +177,8 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 33: { // mknodat(dirfd, path, mode, dev) — AArch64 33
-            // BUGFIX: previously implemented as dup2 (which doesn't exist
-            // on AArch64). The real syscall at 33 is mknodat. Forward to
-            // host mknodat.
-            // Confined via open_parent: the parent traversal goes through
-            // RESOLVE_IN_ROOT when sandboxed, so a symlink/.. in the path
+            // AArch64 syscall 33 is mknodat (there is no dup2). Forward to host mknodat.
+            // Confined via open_parent: the parent traversal goes through RESOLVE_IN_ROOT when sandboxed, so a symlink/.. in the path
             // cannot escape BIFROST_ROOT.
             std::string guest = yggdrasil::Yggdrasil::read_path(mem_, a1);
             int hfd = resolve_dirfd(fds_, a0);
@@ -344,13 +341,9 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 36: { // symlinkat(old, newdirfd, new) — AArch64 36
-            // AArch64 syscall 36 is symlinkat, NOT unlinkat (which is 35).
-            // (toybox calls symlinkat() via musl). unlinkat is correctly
-            // handled at syscall 35 in FileSystem.cpp.
-            // The target (oldp) is stored verbatim — never resolved now —
-            // so it needs no remap. The link CREATION (newp) is confined
-            // via open_parent; the guest dirfd is resolved through FdTable
-            // (it was previously passed raw to the host).
+            // AArch64 syscall 36 is symlinkat, NOT unlinkat (which is 35, handled in FileSystem.cpp); toybox calls
+            // symlinkat() via musl. The target (oldp) is stored verbatim, never resolved, so it needs no remap. The link CREATION
+            // (newp) is confined via open_parent; the guest dirfd is resolved through FdTable.
             std::string oldp = Yggdrasil::read_path(mem_, a0);
             std::string new_guest = Yggdrasil::read_path(mem_, a2);
             // Absolute newpath ignores dirfd per POSIX (mirror the FileSystem.cpp
@@ -464,12 +457,9 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 48: { // faccessat(dirfd, path, mode, flags) — AArch64 48
-            // BUGFIX: the RAW faccessat syscall takes only 3 arguments
-            // (dfd, path, mode); the kernel ignores the 4th (flags).
-            // glibc's access()/faccessat() wrappers only set x0-x2+x8, so
-            // x3 holds caller garbage. Forwarding it to the host faccessat
-            // as `flags` made every access() fail with EINVAL, breaking
-            // fontconfig's FcConfigFilename existence checks.
+            // The RAW faccessat syscall takes only 3 arguments (dfd, path, mode); the kernel ignores the 4th (flags).
+            // glibc's access()/faccessat() wrappers set only x0-x2+x8, so x3 holds caller garbage. It is not forwarded to the host
+            // faccessat as `flags`: that made every access() fail with EINVAL, breaking fontconfig's FcConfigFilename existence checks.
             std::string raw_path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             struct stat device_stat;
             if (yggdrasil::Yggdrasil::binder_device_stat(raw_path, &device_stat) ||
@@ -488,9 +478,8 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 50: { // fchdir(fd) — AArch64 50
-            // BUGFIX: previously called ::fchdir(guest_fd, ...) directly,
-            // bypassing FdTable. Resolve via FdTable so virtual fds work.
-            // return EBADF instead of passing the guest fd index to the host.
+            // Resolved via FdTable so virtual fds work; an unknown fd returns EBADF instead of passing the guest fd index
+            // to the host.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_err(EBADF); return 0; }
             int hfd = node->host_fd();
@@ -576,11 +565,8 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 17: { // getcwd(buf, size) — AArch64 syscall 17
-            // BUGFIX: the old code always returned "/" regardless of
-            // chdir() calls. Now we track the guest cwd in the VFS
-            // (updated by chdir/fchdir) and return the real path here.
-            // The host cwd is meaningless because BIFROST_ROOT sandboxing
-            // decouples them.
+            // getcwd returns the guest cwd tracked in the VFS (updated by chdir/fchdir). The host cwd is meaningless
+            // because BIFROST_ROOT sandboxing decouples them.
             std::string cwd = emu.vfs().get_cwd();
             size_t need = cwd.size() + 1;  // include NUL terminator
             if (a1 < need) { ret_err(ERANGE); return 0; }
@@ -593,9 +579,8 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 51: { // chroot(path) — AArch64 51
-            // BUGFIX: was previously labeled "fchmod" but fchmod is at 52
-            // (handled in FileSystem.cpp). The real syscall at 51 is chroot. We
-            // don't support chroot; return -EPERM (requires CAP_SYS_CHROOT).
+            // fchmod is syscall 52 (FileSystem.cpp); this one, 51, is chroot. chroot is not supported:
+            // return -EPERM (requires CAP_SYS_CHROOT).
             cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EPERM));
             return 0;
         }
@@ -616,11 +601,7 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 40: { // mount(source, target, fstype, flags, data) — AArch64 40
-            // BUGFIX: previously implemented as sendfile (which is at 71,
-            // already handled in Miscellaneous.cpp). The old code dereferenced
-            // `fstype` (a string pointer) as an `off_t*` and passed
-            // `source`/`target` (string pointers) as fds to ::sendfile.
-            // We don't support mount; return -ENOSYS (or -EPERM).
+            // mount is not supported: return -EPERM. (sendfile is syscall 71, in Miscellaneous.cpp.)
             cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EPERM));
             return 0;
         }
@@ -633,20 +614,14 @@ int64_t syscall_fs_paths(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 41: { // pivot_root(new_root, put_old) — AArch64 41
-            // AArch64 syscall 41 is pivot_root, NOT link (which is
-            // linkat at syscall 37). The old code dispatched 41 to
-            // link(), but musl's link() wrapper calls syscall 37
-            // (linkat). linkat is now correctly handled above.
-            // pivot_root is rarely used by user-space programs; return
-            // EPERM (requires CAP_SYS_ADMIN).
+            // AArch64 syscall 41 is pivot_root, NOT link: musl's link() wrapper calls syscall 37 (linkat), handled above.
+            // pivot_root is rarely used by user-space programs; return EPERM (requires CAP_SYS_ADMIN).
             cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EPERM));
             return 0;
         }
         case 42: { // nfsservctl — AArch64 42 (unimplemented, returns ENOSYS)
-            // AArch64 syscall 42 is nfsservctl, NOT link. The old code
-            // dispatched 42 to link(), but musl's link() wrapper calls
-            // syscall 37 (linkat). linkat is now correctly handled at
-            // syscall 37 in FileSystem.cpp.
+            // AArch64 syscall 42 is nfsservctl, NOT link: musl's link() wrapper calls syscall 37 (linkat), handled in
+            // FileSystem.cpp.
             ret_err(ENOSYS);
             return 0;
         }

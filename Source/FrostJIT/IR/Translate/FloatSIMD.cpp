@@ -281,32 +281,17 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             //   0x1E = FP 2-source (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL)
             //   0x1F = FMA 3-source (FMADD/FMSUB/FNMADD/FNMSUB)
             //
-            // Both have bit[21]=1. The bits[11:10]=0b10 check was meant to
-            // distinguish 2-source from FCVTZS/SCVTF (which have
-            // bits[11:10]=0b00). But it ALSO matches FMA instructions when
-            // Ra's low 2 bits happen to be 0b10 (e.g. Ra=2, 6, 10, ...).
-            // This caused FNMADD with Ra=2 to be misdecoded as FP_BINOP
-            // (FMUL), silently producing a*b instead of -a*b+c.
-            //
-            // The fix: also require bits[31:24]=0x1E, excluding the FMA
-            // encoding space (0x1F). FMA instructions are handled by the
-            // dedicated check further below.
-            //
-            // The old check only excluded bits[15:10] in {0x04, 0x08, 0x10,
-            // 0x14} (FMOV imm / FCMP / FP 1-source / FMOV imm alternate) —
-            // but those all have bit[21]=0, so the bit[21]=1 check already
-            // excluded them. The real collision was with FCVTZS/SCVTF,
-            // which have bit[21]=1 AND bits[15:10]=0x00, matching the old
-            // check and causing `fcvtzs w1, d0` (0x1e780001) to be
-            // misdecoded as `fmul d1, d0, d24`. The fix is to require
-            // bits[11:10]=0b10, which is the architectural encoding for
-            // 2-source ops.
+            // Both have bit[21]=1. bits[11:10]=0b10 separates 2-source from
+            // FCVTZS/SCVTF (bits[11:10]=0b00): without it `fcvtzs w1, d0` (0x1e780001)
+            // would decode as `fmul d1, d0, d24`. It ALSO matches FMA instructions when
+            // Ra's low 2 bits happen to be 0b10 (e.g. Ra=2, 6, 10, ...), so FNMADD with
+            // Ra=2 would decode as FP_BINOP (FMUL) and silently produce a*b instead of
+            // -a*b+c. Requiring bits[31:24]=0x1E excludes the FMA space; FMA instructions
+            // are handled by the dedicated check further below.
             if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10
                 && (op & 0xFF000000) == 0x1E000000) {
                 // FADD=0x2, FSUB=0x3, FMUL=0x0, FDIV=0x1, FMAX=0x4, FMIN=0x5,
                 // FMAXNM=0x6, FMINNM=0x7, FNMUL=0x8.
-                // BUGFIX: 0x6 was labeled FNMUL (actually FMAXNM); 0x7
-                // (FMINNM) and 0x8 (FNMUL) were missing.
                 if (opcode <= 8 && ftype <= 1) {
                     FpBinopParams bp;
                     bp.opcode = opcode;
@@ -670,11 +655,8 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
-            // FCVT check was moved above SCVTF.
-            // The old FCVT check here is removed — it was unreachable because
-            // the SCVTF mask caught FCVT first.
-            // FRINT* is now handled earlier (in the is_fp_1source block above).
-            // The old FRINT block here used a mask that only matched FRINTN.
+            // FCVT is checked above SCVTF (the SCVTF mask would catch it first);
+            // FRINT* is handled earlier, in the is_fp_1source block above.
             // FCSEL (FP conditional select).
             // Encoding: (op & 0xFF200C00) == 0x1E200C00, cond in bits[15:12].
             // FCSEL Sd/Dd, Sn, Sm, cond → if cond: dest = n else dest = m.

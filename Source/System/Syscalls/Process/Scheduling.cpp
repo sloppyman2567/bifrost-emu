@@ -35,21 +35,16 @@ int64_t syscall_scheduling(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 124: { // sched_yield — AArch64 124
-            // BUGFIX: was previously labeled "sched_setaffinity" but
-            // sched_setaffinity is 122, not 124. The actual syscall at
-            // 124 is sched_yield. The old code returned 0 without
-            // yielding, causing concurrent threads that rely on
-            // sched_yield() to spin-lock.
+            // sched_yield (124; sched_setaffinity is 122) really yields to the host scheduler: threads that rely on
+            // sched_yield() must not spin-lock.
             int r = ::sched_yield();
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
         case 122: { // sched_setaffinity(pid, cpusetsize, mask) — no-op
-            // AArch64 122. We accept any affinity mask and pretend it
-            // succeeded. The guest is a single-process sandbox; we don't
-            // enforce CPU affinity.
-            // later. The old code didn't even read a1/a2.
+            // We accept any affinity mask and pretend it succeeded: the guest is a single-process sandbox, so CPU affinity is
+            // not enforced. The mask pointer is still validated (EFAULT).
             if (a2 != 0 && a1 > 0) {
                 // Touch the mask to validate the pointer.
                 try { (void)mem_.load<uint8_t>(a2); }
@@ -86,9 +81,7 @@ int64_t syscall_scheduling(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 125: { // sched_get_priority_max(policy) — AArch64 125
-            // BUGFIX: previously labeled "truncate (legacy)" but AArch64
-            // has no legacy truncate (it's truncate at 45). The real
-            // syscall at 125 is sched_get_priority_max.
+            // AArch64 has no legacy truncate (truncate is 45); this case, 125, is sched_get_priority_max.
             ret_host(99);  // SCHED_FIFO max priority
             return 0;
         }
@@ -97,17 +90,13 @@ int64_t syscall_scheduling(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 140: { // setpriority — AArch64 140
-            // BUGFIX: previously labeled "chown (legacy)" but AArch64
-            // has no legacy chown. Real syscall at 140 is setpriority.
-            // We accept but ignore priority changes.
+            // AArch64 has no legacy chown; this case, 140, is setpriority. We accept but ignore priority changes.
             ret_host(0);
             return 0;
         }
         case 141: { // getpriority — AArch64 141
-            // BUGFIX: previously labeled "fchown (legacy)". Real syscall
-            // is getpriority. Return priority 20 (default nice value).
-            // Note: getpriority returns the value in [0, 40] (priority+20),
-            // or -1 on error; we return 20 (priority 0).
+            // This case is getpriority. Return priority 20 (the default nice value): getpriority returns the value in
+            // [0, 40] (priority+20), or -1 on error; we return 20 (priority 0).
             ret_host(20);
             return 0;
         }
@@ -125,12 +114,7 @@ int64_t syscall_scheduling(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 168: { // getcpu(cpu, node, tcache) — AArch64 168
-            // BUGFIX: previously implemented as ppoll, but AArch64 168 is
-            // getcpu (ppoll is at 73). The old code dereferenced `cache`
-            // (a3) as a `timespec*` and called ::poll with `node` (a1, a
-            // pointer) as nfds — corrupting memory and crashing. We now
-            // implement getcpu: write CPU=0 and NUMA node=0 (we have one
-            // of each in the guest).
+            // AArch64 168 is getcpu (ppoll is at 73). getcpu writes CPU=0 and NUMA node=0 (the guest has one of each).
             if (a0 != 0) {
                 try { mem_.store<uint32_t>(a0, 0); }
                 catch (...) { ret_err(EFAULT); return 0; }

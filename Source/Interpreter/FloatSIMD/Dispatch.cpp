@@ -48,11 +48,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             int total_bytes = Q ? 16 : 8;
             uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
             // (e.g. LD1 {Vt.S}[idx]) loads/stores ONE element at a
-            // specific lane index, not a whole register. The old code
-            // treated it as multi-structure (reading simd_count whole
-            // registers), silently corrupting memory for any guest
-            // using single-structure LD1/ST1 (matrix transpose, RGBA
-            // channel interleaving, etc.).
+            // specific lane index, not a whole register: treating it as
+            // multi-structure (reading simd_count whole registers) would
+            // silently corrupt memory for any guest using single-structure
+            // LD1/ST1 (matrix transpose, RGBA channel interleaving, etc.).
             //
             // Single-structure LD1/ST1 1-element variant encoding
             // (per ARM ARM C4.1.66). The decoder sets d.is_single_struct

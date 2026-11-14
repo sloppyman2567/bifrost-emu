@@ -119,13 +119,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             // ── MAP_FIXED_NOREPLACE ─────────────────────────────────────
-            // BUGFIX: previously MAP_FIXED_NOREPLACE was silently ignored
-            // (treated as a non-FIXED mmap), so the kernel could place the
-            // mapping at a different address than requested. The Linux
-            // kernel guarantees MAP_FIXED_NOREPLACE either returns the
-            // exact requested address or -EEXIST if it overlaps an existing
-            // allocation. Game engines and allocators use this flag to
-            // reserve address ranges without overwriting mappings.
+            // MAP_FIXED_NOREPLACE returns the exact requested address, or -EEXIST if it overlaps an existing allocation, as Linux
+            // does. Game engines and allocators use it to reserve address ranges without overwriting mappings.
             if (flags & BIFROST_MAP_FIXED_NOREPLACE) {
                 std::lock_guard<std::mutex> brk_lock(brk_mu_);
                 if (addr < brk_ && brk_start_ < addr + length) {
@@ -244,12 +239,9 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (!mapped) mapped = mem_.mmap_alloc(length, 0, virt_reserve,
                     Memory::GUEST_PROT_READ | Memory::GUEST_PROT_WRITE);
             }
-            // BUGFIX: mmap_alloc returns 0 on failure (size cap, invalid
-            // range, or OOM page-limit). Returning that 0 to the guest
-            // reads as a *successful* mapping at address 0 (musl only
-            // treats -1/MAP_FAILED as failure), so mallocng built its
-            // arena at address 0 and free() crashed with BRK #1000.
-            // Translate to a proper negative errno → guest MAP_FAILED.
+            // mmap_alloc returns 0 on failure (size cap, invalid range, or OOM page-limit). That 0 would read as a successful
+            // mapping at address 0 (musl treats only -1/MAP_FAILED as failure, so mallocng would build its arena there and free()
+            // would crash with BRK #1000), so it is translated to a negative errno, which the guest sees as MAP_FAILED.
             if (mapped == 0) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
@@ -290,15 +282,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 215: { // munmap - reclaim the pages and address range
-            // BUGFIX: the old code only removed the allocation from the
-            // tracking map ("no-op OK"). That made mmap_alloc a pure bump
-            // allocator: guest malloc/free churn (the game's 18 MB chunk
-            // meshes every frame) marched the heap pointer until mmap
-            // started returning 0 — which the guest treated as a valid
-            // mapping at address 0, so musl mallocng built its arena
-            // there and free() crashed with BRK #1000 (get_meta). Now
-            // munmap unmaps the pages and returns the address range to
-            // the free list for reuse.
+            // munmap unmaps the pages and returns the address range to the free list for reuse, so guest malloc/free churn
+            // (an 18 MB chunk mesh every frame) does not march the heap pointer until mmap_alloc fails.
             if (dbg().trace_mmap) {
                 fprintf(stderr, "[munmap(0x%llx, %lu)]\n",
                         (unsigned long long)a0,
@@ -366,21 +351,11 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             //      mremap with MREMAP_MAYMOVE here; older versions
             //      fall back to a fresh mmap on failure.
             //
-            // The previous implementation always grew in place by
-            // calling map_range() on the additional pages. That is
-            // a no-op when those pages are already mapped — which is
-            // exactly what happens when a subsequent mmap() (e.g. for
-            // a small malloc group) has been placed right after the
-            // big allocation by our bump pointer. The result was
-            // silent corruption: musl thought the grown range was its
-            // own, but the pages actually contained data from another
-            // allocation. This broke sort.c at ~17K lines.
-            //
-            // The fix is in Memory::mremap_grow(): we now track every
-            // mmap'd region and detect collisions. If growing in place
-            // would overlap a later allocation, we move the mapping to
-            // a fresh region and copy the old data — which musl handles
-            // correctly thanks to MREMAP_MAYMOVE.
+            // Growing in place is only valid when the pages after the region are free: map_range() on pages that are already
+            // mapped is a no-op, so an mmap() placed right after the big allocation would leave musl believing it owns pages
+            // that hold another allocation (silent corruption; sort.c broke at ~17K lines). Memory::mremap_grow() tracks every
+            // mmap'd region and detects the collision: if growing in place would overlap a later allocation, the mapping moves
+            // to a fresh region and the old data is copied, which musl handles correctly thanks to MREMAP_MAYMOVE.
             uint64_t old_addr = a0;
             uint64_t old_size = a1;
             uint64_t new_size = a2;

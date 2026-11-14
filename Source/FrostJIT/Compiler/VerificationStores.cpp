@@ -38,11 +38,9 @@ void FrostJIT::record_verification_stores(const IRBlock& ir_block, uint64_t star
         std::vector<uint8_t> vreg_base(4096, 0xFF);
         std::vector<int64_t> vreg_off(4096, 0);
         uint32_t modified_so_far = 0;  // bit i set if ARM reg i has been STORE_REG'd SO FAR
-        // When a STORE_MEM's base reg was modified, we can still record it if we know
-        // the new absolute value. This fixes the curl URL parse divergence where
-        // x19 was set to a high address (0x571c67a000) via IMM, then used as a
-        // STORE_MEM base. The old code skipped this store, causing the interpreter
-        // to see the JIT's modification — a false-positive PC divergence.
+        // When a STORE_MEM's base reg was modified, the store can still be recorded if the new absolute value is known (e.g. x19
+        // set to a high address (0x571c67a000) via IMM, then used as a STORE_MEM base). Skipping it would make the interpreter see
+        // the JIT's modification, a false-positive PC divergence (the curl URL parse divergence).
         std::vector<bool> arm_reg_known(32, false);
         std::vector<uint64_t> arm_reg_val(32, 0);
         // MEMFULL cannot verify blocks that CALL the interpreter or dispatch a

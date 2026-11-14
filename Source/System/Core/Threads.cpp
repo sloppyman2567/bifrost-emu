@@ -378,10 +378,8 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
         gt->cpu.tpidrro_el0 = tls;
     }
     // For CLONE_CHILD_CLEARTID/CLONE_CHILD_SETTID, the ctid pointer is
-    // in x4 (a4) of the parent's clone() call on AArch64.
-    // BUGFIX: the old code read ctid from regs[3] (x3), but on AArch64
-    // x3=tls and x4=ctid (opposite of x86_64). The syscall handler
-    // passes tls correctly (from a3); here we read ctid from regs[4].
+    // in x4 (a4) of the parent's clone() call on AArch64 (x3 is tls: the opposite of x86_64).
+    // The syscall handler passes tls from a3; here ctid is read from regs[4].
     uint64_t ctid_ptr = parent_cpu.regs[4];
     if (flags & BIFROST_CLONE_CHILD_CLEARTID) {
         gt->cpu.clear_child_tid = ctid_ptr;
@@ -702,9 +700,7 @@ void Emulator::stop_sdl_threads() {
 }
 void Emulator::reap_retired_sdl_threads() {
     // Join detached threads that have finished and free their guest
-    // resources. Keeps a detached thread's stack/handle/record from leaking
-    // (the old detach release()d + leaked the record and never reclaimed the
-    // guest stack).
+    // resources. Keeps a detached thread's stack/handle/record from leaking.
     std::vector<std::shared_ptr<SdlThread>> ready;
     {
         std::lock_guard<std::mutex> g(sdl_threads_mu_);

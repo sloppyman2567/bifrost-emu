@@ -202,16 +202,10 @@ void FrostJIT::note_profile_sections(size_t begin, size_t hot_end, size_t cold_b
 }
 
 void FrostJIT::flush_cache() {
-    // Clear block metadata. We don't need writable access for this —
-    // blocks_/back_refs_/hot_pc_counts_ are STL containers, not the code
-    // buffer. The old code called make_writable() here, leaving
-    // wex_write_depth_=1 (unbalanced). The next translate_block would
-    // then run with the buffer in RW state until its make_executable()
-    // at the end — a security hole (W^X violated during execution).
-    //
-    // Fix: don't touch wex_write_depth_ here. translate_block calls
-    // make_writable() at entry and make_executable() at exit, keeping
-    // the buffer RX whenever JIT code might run.
+    // Clear block metadata. No writable access is needed: blocks_/back_refs_/hot_pc_counts_ are STL containers, not the code
+    // buffer. wex_write_depth_ is left alone here: translate_block calls make_writable() at entry and make_executable() at
+    // exit, keeping the buffer RX whenever JIT code might run (an unbalanced make_writable() here would leave it RW through
+    // the next translation: W^X violated during execution).
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     blocks_.clear();
     tier2_block_limits_.clear();

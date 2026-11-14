@@ -51,8 +51,8 @@ uint64_t DisplayProxy::wl_display_connect(const char* name) {
     if (!guest) return 0;
     // Prefer a real host compositor connection first — this needs no SDL
     // window. Only fall back to the SDL stub (which needs a window) when
-    // headless. Old code required ready() up front, spawning a phantom SDL
-    // window for every bridged wayland guest that was never pumped.
+    // headless: requiring ready() up front would spawn a phantom SDL
+    // window for every bridged wayland guest that is never pumped.
     if (wl_bridge_init_()) {
         using ConnectFn = void* (*)(const char*);
         void* host = reinterpret_cast<ConnectFn>(wlfn_connect_)(name);

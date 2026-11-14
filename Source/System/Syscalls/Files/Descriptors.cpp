@@ -156,12 +156,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         // ── dup / dup3 — VFS-aware ─────────────────────────────
-        // BUGFIX: AArch64 has NO dup2 syscall (only dup3 at 24). The old
-        // case 33 was labeled "dup2" but 33 is actually mknodat — when
-        // the guest called mknodat(dirfd, path, mode, dev), the code
-        // called fds_.dup2(dirfd, (int)path_ptr), treating the path
-        // pointer as an fd. Removed the dup2-at-33 handler; dup is at 23
-        // and dup3 is at 24 (both kept).
+        // AArch64 has no dup2 syscall: dup is 23 and dup3 is 24 (33 is mknodat).
         case 23: { // dup
             int r = fds_.dup(static_cast<int>(a0));
             if (dbg().xtrace)
@@ -170,9 +165,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 24: { // dup3(oldfd, newfd, flags) — AArch64 24
-            // BUGFIX: AArch64 has no dup2, only dup3. dup3 requires
-            // oldfd != newfd (returns -EINVAL otherwise) and honors
-            // O_CLOEXEC in flags.
+            // dup3 requires oldfd != newfd (-EINVAL otherwise) and honors O_CLOEXEC in flags.
             if (static_cast<int>(a0) == static_cast<int>(a1)) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINVAL));
                 return 0;
@@ -191,11 +184,8 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 59: { // pipe2(pipefd, flags) — AArch64 59
-            // BUGFIX: previously wrote raw host fds directly to guest
-            // memory without registering them in FdTable. Subsequent
-            // read/write/close calls on those fds went through FdTable::get()
-            // → nullptr → -EBADF. Fix: wrap each pipe end in a yggdrasil::HostNode
-            // and register via FdTable::allocate, returning the guest fds.
+            // Each pipe end is wrapped in a yggdrasil::HostNode and registered with FdTable::allocate; the guest
+            // fds returned are table entries, which read/write/close resolve through FdTable (a raw host fd would be -EBADF).
             int hfds[2];
             int r = ::pipe2(hfds, open_flags_to_host(static_cast<int>(a1)));
             if (r < 0) { ret_errno(); return 0; }
@@ -213,10 +203,8 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 66: { // writev(fd, iov, iovcnt) — AArch64 66
             // a0=fd, a1=iovec ptr, a2=count
-            // BUGFIX: previously called ::write(guest_fd, ...) directly,
-            // bypassing FdTable. Resolve via FdTable so virtual fds
-            // (memfd-backed /proc/*, /dev/fb0) work. Also cap iovcnt
-            // at IOV_MAX (1024) to prevent OOM from a corrupted count.
+            // Resolved via FdTable so virtual fds (memfd-backed /proc/*, /dev/fb0) work. iovcnt is capped at
+            // IOV_MAX (1024) so a corrupted count cannot exhaust memory.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             if (node->host_fd() >= 0) {
@@ -338,9 +326,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 65: { // readv(fd, iov, iovcnt) — AArch64 65
-            // BUGFIX: previously called ::read(guest_fd, ...) directly,
-            // bypassing FdTable. Resolve via FdTable. Also cap iovcnt
-            // at IOV_MAX (1024).
+            // Resolved via FdTable. iovcnt is capped at IOV_MAX (1024).
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             uint64_t iov = a1;
@@ -383,12 +369,8 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 67: { // pread64(fd, buf, count, offset) — AArch64 67
-            // BUGFIX: previously implemented as preadv64 (iovec array),
-            // but 67 is pread64 (single buffer). The old code interpreted
-            // the guest's `buf` pointer as an iovec array, reading garbage
-            // memory as (base, len) pairs. Fix: read into a single buffer.
-            // Also: resolve via FdTable so virtual fds (memfd-backed
-            // /proc/*, /dev/fb0) work correctly.
+            // pread64 (67) reads into a single buffer (preadv64 is the iovec form). Resolved via FdTable so
+            // virtual fds (memfd-backed /proc/*, /dev/fb0) work.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             if (a2 == 0) { ret_host(0); return 0; }
@@ -503,8 +485,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 68: { // pwrite64(fd, buf, count, offset) — AArch64 68
-            // BUGFIX: previously called ::pwrite(guest_fd, ...) directly,
-            // bypassing FdTable. Resolve via FdTable so virtual fds work.
+            // Resolved via FdTable so virtual fds work.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             if (a2 == 0) { ret_host(0); return 0; }
@@ -517,21 +498,16 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r)); return 0;
         }
         case 25: { // fcntl(fd, cmd, arg) — AArch64 25
-            // BUGFIX: previously a no-op stub returning 0. This broke
-            // F_GETFL/F_SETFL (O_NONBLOCK never applied), F_GETFD/F_SETFD
-            // (FD_CLOEXEC never tracked), and F_DUPFD. We now implement
-            // the common cmds by forwarding to the host fd (resolved via
-            // FdTable) when one exists.
+            // F_GETFL/F_SETFL (O_NONBLOCK), F_GETFD/F_SETFD (FD_CLOEXEC) and F_DUPFD are implemented by forwarding to
+            // the host fd, resolved via FdTable, when one exists.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             int cmd = static_cast<int>(a1);
             int hfd = node->host_fd();
             switch (cmd) {
                 case F_DUPFD: {  // 0 — duplicate fd, new fd >= arg
-                    // in a2. The old code ignored it and always allocated
-                    // the lowest available fd, breaking programs that rely
-                    // on F_DUPFD returning a fd >= the requested minimum
-                    // (e.g., Python's os.dup(fd, min_fd=3)).
+                    // F_DUPFD returns the lowest free fd >= the minimum in a2 (programs such as Python's os.dup(fd, min_fd=3)
+                    // rely on it).
                     int min_fd = static_cast<int>(a2);
                     if (min_fd < 0) min_fd = 0;
                     int r = fds_.dup(static_cast<int>(a0), min_fd);
@@ -678,17 +654,14 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 default:
-                    // Unknown cmd — return -EINVAL (not 0!) so the guest
-                    // knows the cmd is unsupported. The old code returned 0
-                    // (success), which made F_DUPFD_CLOEXEC silently return
-                    // "fd 0" (stdin) — corrupting stdin for Python/Java.
+                    // Unknown cmd: return -EINVAL, not 0, so the guest knows the cmd is unsupported (a 0 from F_DUPFD_CLOEXEC
+                    // would read as fd 0, stdin).
                     ret_err(EINVAL);
                     return 0;
             }
         }
         case 46: { // ftruncate(fd, length) — AArch64 46
-            // BUGFIX: previously called ::ftruncate(guest_fd, ...) directly,
-            // bypassing FdTable. Resolve via FdTable so virtual fds work.
+            // Resolved via FdTable so virtual fds work.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_err(EBADF); return 0; }
             int hfd = node->host_fd();
@@ -699,11 +672,8 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 47: { // fallocate(fd, mode, offset, len) — aarch64 47
-            // BUGFIX: previously rejected any mode != 0, but
-            // FALLOC_FL_KEEP_SIZE (0x01) is a commonly-supported mode that
-            // we can pass through safely. Also: resolve via FdTable so
-            // virtual fds work. Only punch-hole / collapse-range /
-            // zero-range / insert-range / collate-range modes are rejected.
+            // FALLOC_FL_KEEP_SIZE (0x01) passes through to the host. Resolved via FdTable so virtual fds work.
+            // Only punch-hole / collapse-range / zero-range / insert-range / collate-range modes are rejected.
             auto node = fds_.get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
             int mode = static_cast<int>(a1);
@@ -728,10 +698,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         // ── close_range (syscall 436) ────────────────────────────────
-        // BUGFIX: cap iteration to the actually-open fd range. The previous
-        // loop iterated from a0 to a1 inclusive; if a1 was INT_MAX, this
-        // looped 2 billion times calling fds_.close() on every integer.
-        // We now iterate only over the FdTable's open entries.
+        // Iterates only over the FdTable's open entries, so a1 = INT_MAX does not loop two billion times.
         case 436: { // close_range(first, last, flags)
             int first = static_cast<int>(a0);
             int last  = static_cast<int>(a1);
@@ -740,9 +707,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 32: { // flock(fd, operation) — AArch64 32
-            // BUGFIX: was previously at case 149 (wrong number). Real
-            // AArch64 flock is at 32. Forward to host flock on the
-            // underlying host fd (resolve via FdTable).
+            // flock is syscall 32 on AArch64. Forwarded to host flock on the underlying host fd (resolved via FdTable).
             auto node = fds_.get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
             int r = ::flock(hfd, static_cast<int>(a1));
@@ -753,8 +718,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             ::sync(); ret_host(0); return 0;
         }
         case 82: { // fsync(fd) — AArch64 82
-            // BUGFIX: previously called ::fsync(guest_fd) directly. Resolve
-            // via FdTable.
+            // Resolved via FdTable.
             auto node = fds_.get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
             int r = ::fsync(hfd);
@@ -762,7 +726,7 @@ int64_t syscall_fs_descriptors(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0); return 0;
         }
         case 83: { // fdatasync(fd) — AArch64 83
-            // BUGFIX: previously called ::fdatasync(guest_fd) directly.
+            // Resolved via FdTable.
             auto node = fds_.get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
             int r = ::fdatasync(hfd);

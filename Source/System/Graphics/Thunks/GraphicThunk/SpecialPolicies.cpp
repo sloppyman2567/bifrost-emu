@@ -212,8 +212,7 @@ std::optional<int64_t> GraphicThunk::dispatch_special_policies_(CPU& cpu, const 
                     uint64_t oldp = cpu.regs[0], newsz = cpu.regs[1];
                     ret = impl_->mem->mmap_alloc(newsz);
                     if (oldp && ret) {
-                        // Point lookup — the old code copied the whole
-                        // allocation map per call (O(live allocs)).
+                        // Point lookup, not a copy of the whole allocation map per call (that would cost O(live allocs)).
                         auto [found, oldsz] = impl_->mem->find_allocation(oldp);
                         if (found) {
                             uint64_t n = std::min(oldsz, newsz);

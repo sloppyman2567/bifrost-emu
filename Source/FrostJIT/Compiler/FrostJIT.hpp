@@ -215,13 +215,9 @@ public:
     bool in_vdso(uint64_t pc) const {
         return vdso_base_ != 0 && pc >= vdso_base_ && pc < vdso_base_ + vdso_size_;
     }
-    // BUGFIX: SSE4.1 opcodes (pmulld, pminud, pmaxud, pminsb, pmaxsb,
-    // pminsd, pmaxsd, pcmpeqq, roundsd, roundss) were emitted
-    // unconditionally without a runtime guard. They would SIGILL on
-    // pre-Westmere CPUs (2009 and earlier). The detection has always
-    // existed in CpuFeatures; we just weren't querying it at the
-    // codegen sites. Now we do, falling back to CALL_INTERP on hosts
-    // without SSE4.1.
+    // SSE4.1 opcodes (pmulld, pminud, pmaxud, pminsb, pmaxsb, pminsd, pmaxsd, pcmpeqq, roundsd, roundss) are guarded by a
+    // runtime check of CpuFeatures: they would SIGILL on pre-Westmere CPUs (2009 and earlier), so hosts without SSE4.1
+    // fall back to CALL_INTERP.
     bool has_sse41() const { return cpu_features_.has_sse41(); }
     // SSSE3 gating (pshufb for the native TBL/TBX table
     // lookup). Same runtime-guard pattern as has_sse41() — pshufb would
@@ -931,10 +927,8 @@ public:
     // non-W^X mode, so the buffer is RWX). Implemented in Tier2/Promotion.cpp.
     void tier2_counter_disable(size_t counter_off, size_t counter_len, bool legacy_transition = false);
     // Total number of host GPRs (RAX..R15). Used by the register
-    // allocator's bounds checks and the dirty_host_regs_ bitmask. The
-    // old code hardcoded `16` in multiple places (RegisterAllocator.cpp:66,
-    // Profiler.cpp:87, FrostJIT.cpp:2817) — centralizing here means
-    // a future change (e.g. adding XMM regs to the allocator) only
+    // allocator's bounds checks and the dirty_host_regs_ bitmask. One
+    // constant, so a future change (e.g. adding XMM regs to the allocator)
     // needs one edit.
     static constexpr int NUM_HOST_REGS = 16;
     // Dirty-bitmask width must match NUM_HOST_REGS. uint16_t holds 16 bits.

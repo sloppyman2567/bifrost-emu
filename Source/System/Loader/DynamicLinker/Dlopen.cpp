@@ -559,10 +559,8 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                 // reloc vaddr; bitmap entries (bit0=1) cover 63 slots
                 // starting from the seeded address. Each slot reads its
                 // addend from [base+vaddr] and writes base+addend back.
-                // This mirrors apply_relr_relocations_() (startup path) —
-                // the old code here mixed guest memory addresses with
-                // reloc vaddrs (cur = addr - 16), corrupting the RELR
-                // section and never relocating the real slots.
+                // This mirrors apply_relr_relocations_() (startup path); the running address is a reloc vaddr, never a guest memory
+                // address (mixing them corrupts the RELR section and leaves the real slots unrelocated).
                 uint64_t reloc_addr = 0;
                 auto relr_apply_one = [&](uint64_t vaddr) {
                     uint64_t target = nobj.base_addr + vaddr;

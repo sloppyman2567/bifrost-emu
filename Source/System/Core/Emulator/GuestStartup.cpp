@@ -385,17 +385,14 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         31, execfn_addr,     // AT_EXECFN (program name)
         7,  interp_base_,    // AT_BASE (interpreter load address, 0 if static)
         33, vdso_base_,     // AT_SYSINFO_EHDR (vDSO ELF header address)
-        // BUGFIX: AT_MINSIGSTKSZ was 0, which glibc uses to size altstacks.
-        // A zero value can cause glibc to allocate an undersized altstack
-        // and overflow into unmapped memory in signal handlers. The kernel
-        // reports ~6 KiB on AArch64; we use the same value.
+        // AT_MINSIGSTKSZ is nonzero: glibc uses it to size altstacks, and a zero value can make it allocate an undersized
+        // altstack and overflow into unmapped memory in signal handlers. The kernel reports ~6 KiB on AArch64; we use the same
+        // value.
         51, 6144,            // AT_MINSIGSTKSZ
-        // BUGFIX: missing AT_UID/AT_EUID/AT_GID/AT_EGID/AT_PLATFORM/AT_CLKTCK.
-        // glibc reads these in __libc_start_main / _dl_aux_init; musl reads
-        // AT_UID/AT_EUID to set the getuid/geteuid caches. AT_CLKTCK backs
-        // sysconf(_SC_CLK_TCK); without it, sysconf returns -1 and tools
-        // like top/ps miscompute CPU%. Android uses the installed-app
-        // credentials; the Linux profile retains its legacy auxiliary IDs.
+        // AT_UID/AT_EUID/AT_GID/AT_EGID/AT_PLATFORM/AT_CLKTCK are provided. glibc reads them in __libc_start_main /
+        // _dl_aux_init; musl reads AT_UID/AT_EUID to set the getuid/geteuid caches. AT_CLKTCK backs sysconf(_SC_CLK_TCK);
+        // without it, sysconf returns -1 and tools like top/ps miscompute CPU%. Android uses the installed-app credentials;
+        // the Linux profile retains its legacy auxiliary IDs.
         11, vfs_.process_uid(), // AT_UID
         12, vfs_.process_uid(), // AT_EUID
         13, vfs_.process_gid(), // AT_GID

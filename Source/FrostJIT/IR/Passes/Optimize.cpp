@@ -690,17 +690,13 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                     //   imms <  immr (rotate/BFI): field = src &
                     //       ones(imms+1); SBFM sign-extends from bit imms;
                     //       then shift left by (width - immr).
-                    // The old fold used ROR(a, immr) and ones(imms+1) for
-                    // the extract case. That is only correct when immr == 0
-                    // (SXTB/SXTH/SXTW), because ROR wraps the low immr bits
-                    // up to the top of the register and ones(imms+1) keeps
-                    // them: `asr w4, w2, #4` (SBFM #4,#31) of 0x88 folded
-                    // to ROR(0x88,4)=0x80000008 instead of 8, and
-                    // `sbfx w3, w2, #4, #4` (SBFM #4,#7) folded the field
-                    // 8 to +8 instead of -8 (sign-extended from bit imms=7
-                    // instead of bit imms-immr=3). Only exposed under
-                    // BIFROST_ENABLE_FWD=1 because FWD propagates the
-                    // source constant into the loop's first iteration.
+                    // A fold that used ROR(a, immr) and ones(imms+1) for the extract case
+                    // is only correct when immr == 0 (SXTB/SXTH/SXTW), because ROR wraps
+                    // the low immr bits up to the top of the register and ones(imms+1) keeps
+                    // them: `asr w4, w2, #4` (SBFM #4,#31) of 0x88 must give 8, not
+                    // ROR(0x88,4)=0x80000008, and `sbfx w3, w2, #4, #4` (SBFM #4,#7) must
+                    // sign-extend the field 8 from bit imms-immr=3 (giving -8), not from
+                    // bit imms=7 (giving +8).
                     if (imms >= immr) {
                         // Extract case (SBFX/UBFX/ASR/LSR immediate).
                         int len = imms - immr + 1;

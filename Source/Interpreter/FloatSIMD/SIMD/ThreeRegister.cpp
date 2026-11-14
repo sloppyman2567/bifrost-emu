@@ -293,9 +293,8 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     case 0x0E000400: {
         // imm5 = (index << (size+1)) | (1 << size): lowest set bit
         // gives esize, remaining high bits give the element index.
-        // The old switch only matched imm5 == {1,2,4,8} (index 0),
-        // so `dup v23.2s, v1.s[1]` (imm5=12 = (1<<3)|4) threw
-        // DecodeError inside sha256_finish.
+        // Every imm5 is valid, not just {1,2,4,8} (index 0): `dup v23.2s, v1.s[1]`
+        // (imm5=12 = (1<<3)|4) occurs in sha256_finish.
         uint8_t imm5 = (op >> 16) & 0x1F;
         // imm5 = x0000 is reserved, as is a 64-bit element without Q. The
         // old loop left esize 0 (a host divide-by-zero) or 16 (an
@@ -336,7 +335,7 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     case 0x0E001C00: {
         uint8_t imm5 = (op >> 16) & 0x1F;
         // INS (general) exists only with Q = 1; imm5 = x0000 is reserved
-        // (the old loop left esize 0, a host divide-by-zero).
+        // (esize would be 0, a host divide-by-zero).
         if ((imm5 & 0xF) == 0 || !Q) {
             dump_decode_error(cpu, mem_, op);
             throw DecodeError(cpu.pc, op);
@@ -344,10 +343,7 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         int esize = 1 << __builtin_ctz(static_cast<unsigned>(imm5)), idx = 0;
         idx = imm5 >> (esize == 1 ? 1 : (esize == 2 ? 2 : (esize == 4 ? 3 : 4)));
         uint64_t src = cpu.regs[rn];
-        // (8/esize) must write to v_hi, not v_lo. The old code
-        // always wrote to v_lo, causing out-of-bounds writes for
-        // lane indices >= 2 (32-bit) or >= 1 (64-bit). This broke
-        // INS used by MD5 to load message words into vector lanes.
+        // Lane indices >= 8/esize live in v_hi, not v_lo (INS is how MD5 loads message words into vector lanes).
         int elems_per_qword = 8 / esize;
         if (esize == 1) {
             if (idx < elems_per_qword)
@@ -917,16 +913,9 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     case 0x0E20AC00: case 0x0E60AC00: case 0x0EA0AC00: case 0x0EE0AC00:
     case 0x2E20A400: case 0x2E60A400: case 0x2EA0A400: case 0x2EE0A400:
     case 0x2E20AC00: case 0x2E60AC00: case 0x2EA0AC00: case 0x2EE0AC00: {  // UMAXP/UMINP (U=1) and SMAXP/SMINP (U=0); size 0-3
-        // bit 15. Verified by comparing UMAXP (0x6e20a400) vs UMINP
-        // (0x6e20ac00) — they differ only at bit 11. The old code
-        // used bit 15, which is part of the opcode that
-        // distinguishes pairwise ops from other SIMD ops, NOT max
-        // from min. With the wrong bit, UMAXP was treated as UMINP
-        // (C=1), computing min instead of max. This broke glibc's
-        // strchrnul: `umaxp v4.16b, v3.16b, v3.16b` computed min
-        // instead of max, so the mask-reduction returned 0 even
-        // when a match was found, preventing '%' detection in
-        // printf format strings.
+        // Max vs min is selected by bit 11 (UMAXP 0x6e20a400 and UMINP 0x6e20ac00 differ only there), not bit 15, which is part of the
+        // opcode that separates pairwise ops from other SIMD ops. glibc's strchrnul depends on it: `umaxp v4.16b, v3.16b, v3.16b`
+        // must compute the maximum for its mask reduction to detect a match (e.g. '%' in printf format strings).
         bool C = (op >> 11) & 1;   // 0=max, 1=min
         bool U = (op >> 29) & 1;   // 0=signed, 1=unsigned
         int esize = 1 << size;
@@ -1004,10 +993,8 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
         }
         int esize = 1 << esize_log2;  // bytes: 1, 2, 4, or 8
         int index = imm5 >> (esize_log2 + 1);
-        // UMOV: read from vector element, write to GPR.
-        // (8/esize) must read from v_hi, not v_lo. The old code
-        // always read from v_lo, returning wrong values for lane
-        // indices >= 2 (32-bit) or >= 1 (64-bit).
+        // UMOV: read from vector element, write to GPR. Lane indices >= 8/esize (>= 2 for 32-bit, >= 1 for 64-bit) are read
+        // from v_hi, not v_lo.
         int elems_per_qword = 8 / esize;
         uint64_t val = 0;
         if (esize == 8) {
@@ -1106,8 +1093,7 @@ bool Emulator::exec_simd_three(const SimdDpFields& f, CPU& cpu) {
     // sub_noq = 0x0E208C00 (size 0) / 0x0E608C00 (1) / 0x0EA08C00
     // (2) / 0x0EE08C00 (3). Unlike CMEQ (U=1 → 0x2E...8C00), the
     // U=0 form keeps the 0x0E prefix after Q is stripped, so CMTST
-    // gets its OWN case. (Old code assumed both U=0/U=1 map to
-    // 0x2E208C00 — that only holds for the Q=1 0x6E... variant.)
+    // gets its OWN case (U=0 and U=1 do not both map to 0x2E208C00).
     // Result per lane: all-ones if (Vn & Vm) != 0, else zero.
     case 0x0E208C00: case 0x0E608C00: case 0x0EA08C00: case 0x0EE08C00: {
         int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));

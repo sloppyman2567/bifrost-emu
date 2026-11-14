@@ -332,9 +332,8 @@ int64_t syscall_linker_services(Emulator& emu, CPU& cpu, uint64_t num) {
         // ── Bifrost-emu internal _dl_find_dso_for_object syscall ──
         // a0 (x0) = address to find the containing DSO for
         // Returns: the DSO's base address (handle), or 0 if not found.
-        // Used by glibc's dladdr and _dl_open to determine the caller's
-        // namespace. The old stub returned 0 (not found), which caused
-        // dladdr to always fail and _dl_open to skip namespace detection.
+        // Used by glibc's dladdr and _dl_open to determine the caller's namespace (a stub that always returned 0 would make
+        // dladdr always fail and _dl_open skip namespace detection).
         case 0x1006: {
             auto* dl = emu.dyn_linker();
             if (!dl || a0 == 0) { ret_host(0); return 0; }

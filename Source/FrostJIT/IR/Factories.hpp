@@ -452,8 +452,7 @@ inline IRInst IRInst::make_addsub(IROp op, uint16_t dest, uint16_t src1,
 inline AddSubParams IRInst::addsub_params() const {
     return AddSubParams{width, (flags_op & 1) != 0};
 }
-// TST (ANDS flag-set, no dest): sf only. Set directly by the factory —
-// the old post-hoc `insts.back().sf` patching is gone.
+// TST (ANDS flag-set, no dest): sf only. Set directly by the factory.
 inline IRInst IRInst::make_tst(uint16_t src1, uint16_t src2,
                                const TstParams& p, uint64_t arm_pc) {
     IRInst inst{};

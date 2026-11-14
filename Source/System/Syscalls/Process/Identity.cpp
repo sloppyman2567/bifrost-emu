@@ -107,11 +107,8 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             // struct rusage is 144 bytes on LP64, identical layout on
             // x86-64 host and AArch64 guest (both use 64-bit time_t).
             //
-            // even on error. The old code returned ret_errno() without
-            // writing, leaving the guest's stack buffer uninitialized
-            // with deterministic garbage (e.g. "user 549755811552.42").
-            // Now we zero-fill first, then try host getrusage. If it
-            // fails, the guest gets zeros (not garbage).
+            // The guest's struct is written even on error: it is zero-filled first and then filled by the host getrusage, so a
+            // failure leaves zeros, never uninitialized stack (which showed up as "user 549755811552.42").
             int who = static_cast<int>(a0);
             if (a1 == 0) { ret_err(EFAULT); return 0; }
             // Zero-fill first so the guest NEVER sees uninitialized data.
@@ -138,10 +135,8 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 166: { // umask(new_mask) — aarch64 166
-            // Track guest umask separately from host. The old code called
-            // ::umask() which modifies the host process's umask — this
-            // caused JIT verify-mode false-positives (stateful syscall run
-            // twice gives different results) and broke sandbox isolation.
+            // Guest umask is tracked separately from the host's: ::umask() would change the host process's umask, which gave JIT
+            // verify-mode false positives (a stateful syscall run twice returns different results) and broke sandbox isolation.
             mode_t old = emu.guest_umask();
             emu.set_guest_umask(static_cast<mode_t>(a0));
             ret_host(static_cast<uint64_t>(old));
@@ -355,15 +350,10 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 173: { // getppid
-            // BUGFIX: was returning the emulator's host parent PID for ALL
-            // guests. For the main process, the host ppid is the launching
-            // shell, but the guest should see init (PID 1) as its parent.
-            // For a forked child (fork_guest uses host fork), the host
-            // ppid IS the parent emulator's PID, which is the correct
-            // guest ppid — and critically, the child uses getppid() to
-            // send signals back to its parent (e.g. test_sigint_handler
-            // does `kill(getppid(), SIGINT)`), so we MUST return the
-            // real host ppid for forked children.
+            // getppid: for the main process the host ppid is the launching shell, but the guest should see init (PID 1) as its
+            // parent. For a forked child (fork_guest uses host fork) the host ppid IS the parent emulator's PID, which is the
+            // correct guest ppid: the child uses getppid() to send signals back to its parent (e.g. test_sigint_handler does
+            // `kill(getppid(), SIGINT)`), so the real host ppid must be returned for forked children.
             ret_host(static_cast<uint64_t>(emu.vfs().process_ids().ppid));
             return 0;
         }
@@ -420,8 +410,7 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             //   offset 104: mem_unit (4 bytes)
             //   offset 108: padding (4 bytes)
             if (a0 == 0) { ret_err(EFAULT); return 0; }
-            // uptime and load averages. The old code returned fake uptime=100
-            // and zero loads, which broke `toybox uptime` (showed "230961:11:19").
+            // Real uptime and load averages come from the host sysinfo (`toybox uptime` depends on them).
             struct sysinfo si;
             memset(&si, 0, sizeof(si));
             ::sysinfo(&si);
@@ -454,9 +443,7 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 213: { // readahead(fd, offset, count) — AArch64 213
-            // BUGFIX: was previously labeled "rt_sigpending" but
-            // rt_sigpending is at 136 (already correctly handled). The
-            // real syscall at 213 is readahead. Forward to host readahead;
+            // readahead is syscall 213 (rt_sigpending is 136, handled elsewhere). Forward to host readahead;
             // for non-host-fds, return 0 (pretend we read ahead).
             int fd = static_cast<int>(a0);
             (void)fd; (void)a1; (void)a2;
@@ -475,12 +462,8 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 232: { // mincore(addr, length, vec) — AArch64 232
-            // BUGFIX: previously labeled "epoll_wait" but 232 is mincore.
-            // epoll_wait does not exist on AArch64 (epoll_pwait at 22 is
-            // already correctly handled). The old code called ::epoll_wait
-            // with garbage args when the guest invoked mincore. We now
-            // return 0 (success) and write 1s to the vec bitmap, indicating
-            // all pages are in memory (which is true for our sparse memory).
+            // mincore is syscall 232 (epoll_wait does not exist on AArch64; epoll_pwait at 22 is handled). Return 0 (success)
+            // and write 1s to the vec bitmap, indicating all pages are in memory (true for our sparse memory).
             if (a2 != 0 && a1 > 0) {
                 uint64_t pages = (a1 + 4095) / 4096;
                 try {

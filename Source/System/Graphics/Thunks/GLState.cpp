@@ -860,9 +860,7 @@ void GLStateTracker::track_state_change(const std::string& name, const uint64_t 
         // glBindBufferRange(target, index, buffer, offset, size)
         // — buffer is arg 2 in BOTH (the general binding map keys by
         // target; last-index-wins is accurate enough for the glMapBuffer
-        // bounce). The old code read args[4] for Range, which is the
-        // SIZE — buffer_bindings_ then held garbage and glMapBuffer on
-        // an indexed target resolved the wrong buffer.
+        // bounce). For Range, args[4] is the SIZE, not the buffer.
         uint32_t target = static_cast<uint32_t>(args[0]);
         uint32_t buffer = static_cast<uint32_t>(args[2]);
         set_buffer_binding(target, buffer);

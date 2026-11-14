@@ -251,10 +251,7 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         // ── accept4 (syscall 242) ────────────────────────────────────
-        // NOTE: AArch64 syscall 88 is utimensat (handled in FileSystem.cpp), NOT
-        // accept4. Real accept4 is syscall 242. The old code at case 88
-        // was dead — FileSystem.cpp's utimensat handler always won the dispatch
-        // order, so this case never ran. Moved to the correct number.
+        // AArch64 syscall 88 is utimensat (handled in FileSystem.cpp), NOT accept4; accept4 is syscall 242.
         case 242: { // accept4(sockfd, addr, addrlen, flags) — AArch64 242
             // Resolve guest fd to host fd via FdTable.
             auto node = fds_.get(static_cast<int>(a0));
@@ -290,16 +287,11 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         // ── getsockname (syscall 204) ────────────────────────────────
-        // BUGFIX: AArch64 syscall numbers per asm-generic/unistd.h:
+        // AArch64 syscall numbers per asm-generic/unistd.h:
         //   198=socket 199=socketpair 200=bind 201=listen 202=accept
         //   203=connect 204=getsockname 205=getpeername
         //   206=sendto 207=recvfrom 208=setsockopt 209=getsockopt
         //   210=shutdown 211=sendmsg 212=recvmsg
-        // The previous code had all six cases 206–211 mislabeled — each
-        // function did what its comment said, but at the wrong syscall
-        // number. The renumbering below fixes that: each handler moves to
-        // its correct number, and the three previously-missing handlers
-        // (setsockopt, getsockopt, shutdown) are added.
         case 204: { // getsockname(sockfd, addr, addrlen)
             auto node = fds_.get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
@@ -539,8 +531,7 @@ int64_t syscall_sockets(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         // ── recvmsg (syscall 212) ────────────────────────────────────
-        // BUGFIX: was at case 211 (wrong — 211 is sendmsg). Moved to 212
-        // which is the correct AArch64 syscall number per asm-generic/unistd.h.
+        // recvmsg is syscall 212 on AArch64 per asm-generic/unistd.h (211 is sendmsg).
         case 212: { // recvmsg(sockfd, msg, flags)
             // Resolve guest fd to host fd via FdTable.
             auto node = fds_.get(static_cast<int>(a0));

@@ -344,14 +344,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 return 0;  // GL: map of an unbound buffer → NULL
             }
             {
-                // Reserve the buffer key with a PLACEHOLDER (bounce=0)
-                // under the lock — this is what actually makes the
-                // double-map check atomic. The old code only re-checked
-                // here and inserted much later (after mmap_alloc + host
-                // GL queries), so two threads could both pass the check,
-                // both allocate a bounce, and the second insert would
-                // silently orphan the first. Holders see bounce=0 and
-                // skip writeback/untrack until the real mapping lands.
+                // Reserve the buffer key with a PLACEHOLDER (bounce=0) under the lock: this is what makes the double-map check
+                // atomic. (Re-checking here and inserting much later, after mmap_alloc + host GL queries, would let two threads both
+                // pass the check and both allocate a bounce, and the second insert would silently orphan the first.) Holders see
+                // bounce=0 and skip writeback/untrack until the real mapping lands.
                 std::lock_guard<std::mutex> g(impl_->mu);
                 if (impl_->gl_buffer_mappings_.count(buffer)) {
                     if (dbg().thunk_trace)

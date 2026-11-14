@@ -387,8 +387,7 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
     }
     // No free reg — evict a non-excluded reg using Belady's next-use (see
     // alloc_reg): evict the vreg whose next use is furthest in the future,
-    // dead vregs first. Optimal for straight-line blocks and strictly
-    // better than the old LRU timestamps.
+    // dead vregs first. Optimal for straight-line blocks.
     int best_r = -1;
     int best_score = -1;  // furthest next use wins; dead (no next use) = INT_MAX
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
@@ -412,8 +411,8 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
     }
     // Every non-pinned alloc reg is excl1/excl2 (extreme pressure: e.g. a
     // region preheader compiled with FLAGS3 + arch pins excluded leaves a
-    // 2-reg pool, and a 2-operand op excludes both). The old fallback —
-    // `return alloc_reg()` — SILENTLY IGNORED the exclusions: alloc_reg
+    // 2-reg pool, and a 2-operand op excludes both). Falling back to
+    // `return alloc_reg()` would silently ignore the exclusions: alloc_reg
     // could hand back excl2's register, and the caller's canonical sequence
     //     mov d, excl1 ; op d, excl2
     // then read excl2 from the clobbered reg (observed as `add %r11,%r11`
@@ -479,7 +478,7 @@ int FrostJIT::ensure_vreg(int v, int preferred) {
     return r;
 }
 // ── ensure_two_vregs (ALU-emitter variant-2 fix, 2026-08-21) ──────────
-// The old emitter idiom
+// The plain emitter idiom
 //     s1 = ensure_vreg(src1); s2 = ensure_vreg(src2);
 // leaves s1 STALE when the second ensure finds every alloc reg occupied
 // and Belady evicts a DEAD-after-this-op src1 (dead evictions are
@@ -963,15 +962,12 @@ void FrostJIT::invalidate_all_vregs() {
 // ── force_vreg_to_reg ──────────────────────────────────────────────────
 // Force vreg `v` to live in host register `host_reg` (MOVE semantics).
 //
-// This replaces the manually-inlined "evict occupant of host_reg, then
-// either move v from its current home or load v from memory" boilerplate
-// that was duplicated across SHL/SHR/SAR/ROR, ADDS/SUBS, and ADCS/SBCS
-// cases (each ~50 lines). The caller now writes:
+// Callers write:
 //
 //     force_vreg_to_reg(inst.src1, RAX);
 //     force_vreg_to_reg(inst.src2, RCX);
 //
-// instead of inlining the eviction + move/load logic each time.
+// instead of inlining the eviction + move/load logic (SHL/SHR/SAR/ROR, ADDS/SUBS and ADCS/SBCS use it).
 //
 // After this call:
 //   vreg_home_[v]   == host_reg
@@ -1028,11 +1024,11 @@ void FrostJIT::force_vreg_to_reg(int v, int host_reg) {
 // keeps its single home in host_reg1 and host_reg2 gets an UNMAPPED copy.
 // Callers compute in host_reg1, so their "save src1 before overwriting
 // host_reg1" logic and their dest == src1 in-place update both see the
-// real home. The old aliasing state mapped both registers to the vreg
-// with the home in host_reg2: SUBS then overwrote host_reg1 without
-// saving the vreg, set_vreg_reg dropped its only valid home, and a later
-// reader loaded a stack slot that was never written (ART's inlined
-// Arrays.copyOf passed garbage as the System.arraycopy length).
+// real home. Mapping both registers to the vreg with the home in host_reg2
+// would let SUBS overwrite host_reg1 without saving the vreg; set_vreg_reg
+// would drop its only valid home and a later reader would load a stack slot
+// that was never written (ART's inlined Arrays.copyOf passed garbage as the
+// System.arraycopy length).
 void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
                                   int src2, int host_reg2) {
     // Force src1 into host_reg1 (MOVE semantics).

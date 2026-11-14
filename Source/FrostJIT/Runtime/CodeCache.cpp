@@ -647,10 +647,10 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
     }
     // No entry means no block's chain slot targets target_pc: every slot is
     // registered at translate time and add_back_ref never drops a live one.
-    // The old fallback scanned ALL blocks here whenever the entry was
-    // missing, which is the normal case for a fresh call or return target,
-    // so translation cost grew with the square of the block count (ART
-    // spent ~96% of its translate time in that scan).
+    // Scanning ALL blocks when the entry is missing would be costly: that is
+    // the normal case for a fresh call or return target, so translation cost
+    // would grow with the square of the block count (ART spent ~96% of its
+    // translate time in that scan).
 }
 void FrostJIT::add_back_ref(uint64_t target_pc, uint64_t src_pc) {
     // MT chaining reaches its predecessors through mt_edge_refs_ cells, and

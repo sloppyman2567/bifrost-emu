@@ -233,15 +233,10 @@ bool DynamicLinker::link(CPU& cpu,
         if (obj.dyn_addr == 0) continue;
         try {
             // Find DT_RELA / DT_RELASZ / DT_JMPREL / DT_PLTRELSZ.
-            // to the object's load base. For the main binary (non-PIE,
-            // base=0) this is already absolute. For shared libraries
-            // (PIE, base!=0) we MUST add obj.base_addr to get the
-            // absolute address. The old code used d_val directly, which
-            // worked for the main binary but read from wrong addresses
-            // for shared libs (e.g., libc's DT_JMPREL at 0x2a880 was
-            // read from low memory instead of 0x500002a880). This caused
-            // libc's PLT GOT entries to never be filled → PLT stubs
-            // jumped to PLT0 → jumped to GOT[2] (resolver) = 0 → crash.
+            // Their d_val is an offset to the object's load base. For the main binary (non-PIE, base=0) it is already absolute.
+            // For shared libraries (PIE, base!=0) obj.base_addr MUST be added to get the absolute address (libc's DT_JMPREL at
+            // 0x2a880 lives at 0x500002a880): reading low memory leaves the PLT GOT entries unfilled, so PLT stubs jump to PLT0,
+            // then to GOT[2] (the resolver) = 0, and crash.
             uint64_t rela_addr = 0, rela_size = 0;
             uint64_t jmprel_addr = 0, jmprel_size = 0;
             uint64_t relr_addr = 0, relr_size = 0;
@@ -355,19 +350,11 @@ bool DynamicLinker::link(CPU& cpu,
                         }
                         apply_tls_mirror_(obj, target, value);
                     } else if (type == R_AARCH64_IRELATIVE_) {
-                        // ifunc: call the resolver at base + A to get the
-                        // real function pointer. The resolver is a small
-                        // guest function that returns a pointer to one of
-                        // several implementations (selected by CPU
-                        // features, e.g., glibc's memcpy variants).
-                        // BUGFIX: the old code just stored `base + A` (the
-                        // resolver ADDRESS) instead of CALLING the resolver.
-                        // This silently corrupted any program using ifuncs.
-                        // Now we invoke the resolver via the Emulator's
-                        // callback (which runs it in a scratch CPU and
-                        // returns X0). If no callback is registered (e.g.,
-                        // when DynamicLinker is used standalone), fall back
-                        // to the old behavior with a warning.
+                        // ifunc: call the resolver at base + A to get the real function pointer. The resolver is a small guest function that
+                        // returns a pointer to one of several implementations (selected by CPU features, e.g., glibc's memcpy variants).
+                        // Storing `base + A` (the resolver ADDRESS) would silently corrupt any program using ifuncs, so the resolver is invoked
+                        // via the Emulator's callback (which runs it in a scratch CPU and returns X0). If no callback is registered (e.g., when
+                        // DynamicLinker is used standalone), fall back to storing base + A, with a warning.
                         uint64_t resolver_addr = obj.base_addr + A;
                         uint64_t resolved = 0;
                         if (ifunc_resolver_) {
@@ -483,18 +470,12 @@ bool DynamicLinker::link(CPU& cpu,
                 }
             }
             // PLT relocations (DT_JMPREL) — eager binding.
-            // ignored DT_JMPREL entirely. JUMP_SLOT relocations (the PLT
-            // entries that point to libc functions like printf, malloc,
-            // __libc_start_main) live in DT_JMPREL, NOT in DT_RELA. The
-            // old code's JUMP_SLOT case (inside the DT_RELA loop) never
-            // fired because JUMP_SLOTs aren't in DT_RELA. This meant
-            // dynamically-linked glibc binaries crashed at _start because
-            // the GOT entries for __libc_start_main etc. were never
-            // filled (they stayed 0, so `br x17` jumped to 0 → decode
-            // error at pc=0x0). Musl binaries happened to work because
-            // musl's ld.so does its own lazy PLT binding at runtime.
-            // The fix: process DT_JMPREL separately, eagerly binding
-            // each JUMP_SLOT relocation.
+            // JUMP_SLOT relocations (the PLT entries that point to libc functions like
+            // printf, malloc, __libc_start_main) live in DT_JMPREL, NOT in DT_RELA, so
+            // they are processed separately here. Left unbound, the GOT entries stay 0
+            // and `br x17` jumps to 0 (decode error at pc=0x0) in dynamically-linked
+            // glibc binaries. Musl binaries work either way because musl's ld.so does
+            // its own lazy PLT binding at runtime.
             if (jmprel_addr && jmprel_size) {
                 for (uint64_t off = 0; off + sizeof(Elf64_Rela) <= jmprel_size;
                      off += sizeof(Elf64_Rela)) {

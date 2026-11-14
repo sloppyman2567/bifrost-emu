@@ -82,15 +82,12 @@ uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool /*sf*/) {
     return val << shift;
 }
 // ── Decode logical immediate bitmask ────────────────────────────────────
-// UNALLOCATED encodings instead of returning 0. The old code returned 0
-// for invalid encodings (width > esize, or combined==0 with N==0), which
-// the caller then happily used as a valid bitmask immediate of 0. Real
-// hardware raises an UNALLOCATED instruction exception for these. A
-// corrupt binary or JIT-spray attacker could emit these to turn invalid
-// instructions into silent no-ops (AND x, x, #0 → x = 0).
+// Returns false for UNALLOCATED encodings (width > esize, or combined==0 with N==0). Real hardware raises an
+// UNALLOCATED instruction exception for these; returning a bitmask of 0 would turn invalid instructions into silent
+// no-ops (AND x, x, #0 → x = 0), which a corrupt binary or JIT-spray attacker could exploit.
 //
-// Now the caller checks the return value: if false, the instruction is
-// UNALLOCATED and decode() returns false (InstClass::UNKNOWN).
+// The caller checks the return value: if false, the instruction is UNALLOCATED and decode() returns false
+// (InstClass::UNKNOWN).
 static bool decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf,
                                 uint64_t* out) {
     int len = 0;
@@ -406,7 +403,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
                     case 0x0: d.simd_count = 4; d.simd_struct = 4; break;
                     default:  d.simd_count = 1; d.simd_struct = 1; break;  // 0x7
                 }
-                d.Q = (inst >> 30) & 1;  // BUGFIX: Q was missing for multi-struct!
+                d.Q = (inst >> 30) & 1;  // Q applies to multi-struct forms too
             }
             d.cls = d.is_load ? InstClass::SIMD_LD1 : InstClass::SIMD_ST1;
             return true;

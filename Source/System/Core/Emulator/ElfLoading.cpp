@@ -529,14 +529,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 }
             }
             wire_thunk_android_runner_();
-            // Register the ifunc resolver callback. BUGFIX: the old
-            // IRELATIVE handler just stored the resolver ADDRESS instead
-            // of CALLING it. Now we run the resolver in a scratch CPU
-            // state (borrowing the caller's parked CPU, which hasn't
-            // been initialized yet during startup link() — its real init
-            // happens later). The resolver is a small guest function that
-            // returns a function pointer in X0; we run it via step
-            // until it RETs to a sentinel address, then capture X0.
+            // Register the ifunc resolver callback: the IRELATIVE handler must CALL the resolver, not store its address. The
+            // resolver runs in a scratch CPU state (borrowing the caller's parked CPU, which hasn't been initialized yet during
+            // startup link(); its real init happens later). The resolver is a small guest function that returns a function
+            // pointer in X0; we run it via step until it RETs to a sentinel address, then capture X0.
             dyn_linker_->set_ifunc_resolver([this](CPU& cpu, uint64_t resolver_addr) -> uint64_t {
                 if (resolver_addr == 0) return 0;
                 // Borrow `cpu` as scratch — this is the CALLING thread's
@@ -808,14 +804,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.tpidr_el0 = dyn_linker_->thread_pointer();
                     cpu.tpidrro_el0 = cpu.tpidr_el0;
                 }
-                // Reusable scratch stack (thread-local, one per guest
-                // thread). The old code mmap'd a fresh 64 KiB stack on
-                // EVERY call and never freed it: dl_iterate_phdr-heavy
-                // guests (dlopen_mt: 8 threads × callbacks × iterations)
-                // marched the heap into OOM, and a 0 return put the
-                // guest stack at 0x10000 (wild writes). Mirrors the
-                // thread-local reuse in the static-ELF guest_call_args_
-                // below.
+                // Reusable scratch stack (thread-local, one per guest thread). A fresh 64 KiB stack per call that is never freed would
+                // march the heap into OOM for dl_iterate_phdr-heavy guests (dlopen_mt: 8 threads × callbacks × iterations), and a 0
+                // return would put the guest stack at 0x10000 (wild writes). Mirrors the thread-local reuse in the static-ELF
+                // guest_call_args_ below.
                 static thread_local uint64_t scratch_stack = 0;
                 static thread_local const Emulator* scratch_owner = nullptr;
                 if (scratch_stack == 0 || scratch_owner != this) {

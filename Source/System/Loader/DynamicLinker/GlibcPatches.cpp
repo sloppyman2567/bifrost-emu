@@ -246,16 +246,12 @@ void DynamicLinker::patch_rtld_global_ro_() {
     constexpr uint32_t PAGESIZE_OFF = 0x18;
     try {
         // ── Patch dl_pagesize (offset 0x18, stable across versions) ──
-        // BUGFIX: write unconditionally. ld-linux's .data.rel.ro carries
-        // a hardcoded initializer _dl_pagesize = EXEC_PAGESIZE = 0x10000
-        // (64 KiB) for AArch64 builds. On a real boot, ld.so's
-        // _dl_aux_init unconditionally overrides that from AT_PAGESZ
-        // (=4096, the size the kernel/emulator actually uses). Since the
-        // native dynlink never runs ld.so's startup, the stale 0x10000
-        // would otherwise survive: glibc malloc rounds mmaps to 64 KiB
-        // and munmap_chunk demands 64 KiB-aligned blocks, but the
-        // emulator's mmap_alloc only aligns to 4096 → "munmap_chunk():
-        // invalid pointer". Write 4096 (the value AT_PAGESZ reports).
+        // Write unconditionally. ld-linux's .data.rel.ro carries a hardcoded initializer _dl_pagesize = EXEC_PAGESIZE =
+        // 0x10000 (64 KiB) for AArch64 builds. On a real boot, ld.so's _dl_aux_init overrides that from AT_PAGESZ (=4096, the
+        // size the kernel/emulator actually uses). The native dynlink never runs ld.so's startup, so the stale 0x10000 would
+        // survive: glibc malloc would round mmaps to 64 KiB and munmap_chunk would demand 64 KiB-aligned blocks, but the
+        // emulator's mmap_alloc only aligns to 4096 → "munmap_chunk(): invalid pointer". Write 4096 (the value AT_PAGESZ
+        // reports).
         mem_.store<uint64_t>(rtld_ro + PAGESIZE_OFF, 4096);
         // ── Patch dl_tls_static_size and dl_tls_static_align ─────────
         // Strategy: if dynamic detection succeeded, patch exactly those

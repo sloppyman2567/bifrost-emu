@@ -327,14 +327,11 @@ int64_t syscall_event_io(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         // ── inotify_init1 (syscall 26) ───────────────────────────────
-        // BUGFIX: AArch64 syscall numbers 75/76/77 are vmsplice/splice/tee,
-        // NOT inotify. The real inotify numbers per asm-generic/unistd.h are:
+        // AArch64 syscall numbers 75/76/77 are vmsplice/splice/tee, NOT inotify. The inotify numbers per
+        // asm-generic/unistd.h are:
         //   26 = inotify_init1
         //   27 = inotify_add_watch
         //   28 = inotify_rm_watch
-        // inotify handlers (which would call host inotify with garbage
-        // args and fail). Real guest inotify_init1 (syscall 26) returned
-        // -ENOSYS. Fixed by renumbering to the correct AArch64 slots.
         case 26: { // inotify_init1(flags)
             int fd = ::inotify_init1(static_cast<int>(a0));
             if (fd < 0) { ret_errno(); return 0; }

@@ -834,16 +834,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         // top. The 32-bit and 64-bit forms have DIFFERENT
                         // widths — the 32-bit form must rotate within 32 bits.
                         //
-                        // BUGFIX: the old code called `ror64(a, b & 31)`
-                        // for the 32-bit case. ror64 does a 64-bit rotate,
-                        // so `v << (64 - r)` shifts the 32-bit value entirely
-                        // out of the low word (e.g. r=7 → <<57, bits land
-                        // at positions 57-88, all above bit 32). The result
-                        // around — e.g. ROR(0x12345678, 7) returned 0x02468acf
-                        // instead of 0xf2468acf. This broke MD5 (which uses
-                        // 32-bit rotates in every round) and any other code
-                        // using ROR — the JIT was correct, the interpreter
-                        // divergences on every ROR-heavy block.
+                        // The 32-bit case must not use a 64-bit rotate: `ror64(a, b & 31)` shifts the 32-bit value entirely out of the low
+                        // word (r=7 → <<57), so ROR(0x12345678, 7) must give 0xf2468acf, not 0x02468acf. MD5 uses 32-bit rotates in every
+                        // round, and the JIT is correct, so the interpreter must match.
                         if (width == 64) {
                             res = ror64(a, b & 63);
                         } else {

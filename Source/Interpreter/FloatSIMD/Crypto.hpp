@@ -335,8 +335,7 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
     uint8_t rn = (op >> 5) & 0x1F;
     uint8_t rm = (op >> 16) & 0x1F;
     // ── AES instructions (0x4E284800 - 0x4E287800) ─────────────────
-    // Mask: 0xFFFFCC00; bits[13:12] select AESE/AESD/AESMC/AESIMC (the
-    // old mask matched only AESE, and ran it as AESMC). AESE/AESD
+    // Mask: 0xFFFFCC00; bits[13:12] select AESE/AESD/AESMC/AESIMC. AESE/AESD
     // combine Vd with the key in Vn; AESMC/AESIMC transform Vn.
     if ((op & 0xFFFFCC00) == 0x4E284800) {
         const unsigned sub = (op >> 12) & 0x3;
@@ -475,9 +474,7 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
     }
     // ── SHA256SU1 (0x5E006000) — 3-operand schedule step 1. ───────
     // Encoding: 0x5E006000 | (Rm<<16) | (Rn<<5) | Rd, mask 0xFFE0FC00.
-    // Vd.4S = SHA256schedule2(Vd, Vn, Vm). The previous implementation
-    // didn't dispatch this at all, so SHA256 code that uses the crypto
-    // extensions silently got wrong schedule values.
+    // Vd.4S = SHA256schedule2(Vd, Vn, Vm).
     if ((op & 0xFFE0FC00) == 0x5E006000) {
         uint32_t vd[4], vn[4], vm[4];
         load_vreg(cpu, rd, vd);

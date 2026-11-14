@@ -36,12 +36,11 @@
 // libraries without recompiling them.
 //
 // ── Why not just dlsym(RTLD_DEFAULT)? ─────────────────────────────────
-// The previous implementation returned host function pointers directly
-// via dlsym(RTLD_DEFAULT, ...). This is fundamentally broken: those are
-// x86-64 function pointers in the host's address space, and the guest
-// would try to execute them as AArch64 code, crashing with SIGILL.
-// The redesign fixes this by returning GUEST-CALLABLE
-// trampoline addresses instead.
+// Returning host function pointers directly (dlsym(RTLD_DEFAULT, ...))
+// cannot work: those are x86-64 function pointers in the host's address
+// space, and the guest would try to execute them as AArch64 code,
+// crashing with SIGILL. GetProcAddress therefore returns GUEST-CALLABLE
+// trampoline addresses.
 //
 // ── Limitations ──────────────────────────────
 //   - Pointer args outside the 4 GiB direct window bounce through a

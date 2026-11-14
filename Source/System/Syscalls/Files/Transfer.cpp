@@ -100,9 +100,7 @@ int64_t syscall_fs_transfer(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 71: { // sendfile(out_fd, in_fd, offset, count) — AArch64 71
-            // BUGFIX: previously called ::sendfile(guest_fd, guest_fd, ...)
-            // directly, bypassing FdTable. Resolve both fds via FdTable so
-            // virtual fds (memfd-backed /proc/*, /dev/fb0) work.
+            // Both fds are resolved via FdTable so virtual fds (memfd-backed /proc/*, /dev/fb0) work.
             auto out_node = fds_.get(static_cast<int>(a0));
             auto in_node  = fds_.get(static_cast<int>(a1));
             if (!out_node || !in_node) {

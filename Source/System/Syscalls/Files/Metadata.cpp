@@ -113,16 +113,11 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 61: { // getdents64(fd, dirent_buf, count)
-            // dispatch via the Node. DirNode synthesizes
-            // linux_dirent64 records for virtual directories (/proc,
-            // /proc/self, /dev); HostNode-equivalent paths fall through
-            // to the host getdents64 syscall via host_fd().
+            // dispatch via the Node. DirNode synthesizes linux_dirent64 records for virtual directories (/proc,
+            // /proc/self, /dev); HostNode-equivalent paths fall through to the host getdents64 syscall via host_fd().
             //
-            // BUGFIX: pass min(count, sizeof(buf)) as the buffer size to the
-            // underlying getdents implementation so the kernel/DirNode only
-            // returns COMPLETE dirent records. The previous code read up to
-            // 8192 bytes then post-truncated to `count`, which could split a
-            // dirent record mid-way and corrupt the guest's readdir parsing.
+            // The buffer size passed down is min(count, sizeof(buf)), so the kernel/DirNode only returns COMPLETE dirent records
+            // (truncating after the read could split a record and corrupt the guest's readdir parsing).
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_host(-EBADF); return 0; }
             // Virtual directory (DirNode)? Use the Node's getdents().
@@ -154,9 +149,7 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             // struct statx_timestamp layout (16 bytes):
             //   +0:  int64_t  tv_sec
             //   +8:  uint32_t tv_nsec
-            //   +12: uint32_t __reserved  ← MUST be 0; the previous code
-            //                                omitted this field, shifting every
-            //                                timestamp after atime by 4 bytes.
+            //   +12: uint32_t __reserved  ← MUST be 0 (each timestamp is 16 bytes)
             // struct statx layout (256 bytes):
             //   +0x00: stx_mask (u32), +0x04: stx_blksize (u32),
             //   +0x08: stx_attributes (u64), +0x10: stx_nlink (u32),
@@ -378,9 +371,8 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 52: { // fchmod(fd, mode) — AArch64 52
-            // BUGFIX: previously labeled "chmod" but AArch64 has no chmod
-            // (only fchmodat at 53). The real syscall at 52 is fchmod.
-            // Resolve via FdTable so virtual fds work.
+            // AArch64 has no chmod (only fchmodat at 53); syscall 52 is fchmod. Resolved via FdTable so virtual fds
+            // work.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_err(EBADF); return 0; }
             int hfd = node->host_fd();
@@ -468,9 +460,8 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 54: { // fchownat(dirfd, path, owner, group, flags) — AArch64 54
-            // BUGFIX: was previously labeled "fchmodat" but fchmodat is
-            // at 53 (handled in FileSystem.cpp). The real syscall at 54 is fchownat.
-            // The guest dirfd resolves through the FdTable (it was passed raw).
+            // fchmodat is syscall 53 (FileSystem.cpp); this one, 54, is fchownat. The guest dirfd resolves through
+            // the FdTable.
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
@@ -495,9 +486,8 @@ int64_t syscall_fs_metadata(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0); return 0;
         }
         case 55: { // fchown(fd, owner, group) — AArch64 55
-            // BUGFIX: was previously labeled "faccessat2" but faccessat2
-            // is at 439 (handled below). The real syscall at 55 is fchown.
-            // Resolve via FdTable so virtual fds work.
+            // faccessat2 is syscall 439 (handled below); this one, 55, is fchown. Resolved via FdTable so virtual
+            // fds work.
             auto node = fds_.get(static_cast<int>(a0));
             // An unknown descriptor is EBADF; a guest fd number never names a host fd.
             if (!node) { ret_err(EBADF); return 0; }
