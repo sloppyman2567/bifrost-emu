@@ -68,7 +68,9 @@ static void *churn(void *arg) {
     return NULL;
 }
 
-/* Runs `mov x0, #n; ret` at the fixed address, twice so the target is in the table. */
+/* Runs `mov x0, #n; ret` at the fixed address, twice so the target is in the table. The page goes
+ * back to a PROT_NONE mapping, never to the allocator: a freed page of the span could be handed to
+ * the churn thread's mmap(NULL), and the next MAP_FIXED here would then replace churn's live page. */
 static int run_at(uint32_t *page, unsigned n) {
     if (mmap(page, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != page) { perror("mmap"); return 0; }
@@ -77,7 +79,9 @@ static int run_at(uint32_t *page, unsigned n) {
     __builtin___clear_cache((char *)page, (char *)(page + 2));
     uint64_t (*volatile code)(void) = (uint64_t (*)(void))page;
     uint64_t first = code(), second = code();
-    munmap(page, 4096);
+    if (mmap(page, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != page) {
+        perror("mmap"); return 0;
+    }
     if (first == n && second == n) return 1;
     fprintf(stderr, "FAIL replaced code %u: got %llu then %llu\n", n,
             (unsigned long long)first, (unsigned long long)second);

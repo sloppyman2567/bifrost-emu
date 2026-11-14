@@ -40,9 +40,7 @@ switch (separate fingerprint), `Tests/Unit/jit_disk_cache_relocated.elf` mapping
 0x10000000 and then 0x7000000000 (verify finds the record equal to a fresh compile, the high mapping reuses it;
 the previous distance-based immediate rule failed this), a fourth build whose budget holds about two of the three existing directories
 (older ones pruned, nothing it records dropped) and a group-writable cache directory (cache off, program
-unaffected). It passed 10 runs in a row when it was written. A Debian 13 run on 2026-11-14 found that the fixture it runs,
-`jit_dispatch_cache_growth.elf`, fails about 1 run in 100 with or without the disk cache (stale code run after an unmap, or a
-segfault), so this test can fail now and then; the cause is open. It does not cover Android apps, code-cache renewals in a game or
+unaffected). It passed 10 runs in a row when it was written. It does not cover Android apps, code-cache renewals in a game or
 network filesystems; [JIT.md](JIT.md#persistent-translation-cache)
 records the manual checks.
 
