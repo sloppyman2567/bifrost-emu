@@ -1,7 +1,8 @@
 # Android host integration
 
-Read the [runtime](../../../Docs/Android/ANDROID_RUNTIME.md) and
-[Binder](../../../Docs/Android/ANDROID_BINDER.md) guides for service/ABI contracts.
+Read the [runtime reference](../../../Docs/Android/ANDROID_RUNTIME_REFERENCE.md) and
+[Binder](../../../Docs/Android/ANDROID_BINDER.md) guides for service/ABI contracts (the
+[runtime guide](../../../Docs/Android/ANDROID_RUNTIME.md) is the overview).
 Guest-side code lives in `Guest/Android/`: native adapters in `Adapters/`,
 launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
 (services in `Managed/Framework/`). JNI natives bind by class name

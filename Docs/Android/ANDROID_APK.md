@@ -14,7 +14,7 @@ or a change to resource limits of library-embedding callers.
 Current tooling scope: October 14, 2026. Bifrost installs signed APK sets and executes a
 `android.app.NativeActivity` through the real guest Bionic linker, and managed
 SurfaceView Activities through the ART/framework
-[managed launcher](ANDROID_RUNTIME.md#managed-apk-launcher-2026-10-08).
+[managed launcher](ANDROID_RUNTIME_REFERENCE.md#managed-apk-launcher-2026-10-08).
 The regression APK uses split assets, pthread/TLS, persistent storage, EGL
 pixel readback and an actual Binder service call. Managed Activities still
 require guest ART and Android framework startup.
@@ -317,7 +317,7 @@ so it keeps following the emulator's default.
 A game window follows desktop habits without a setting: **F11** toggles fullscreen (the key never reaches the app), and the
 window's size is remembered per app in `launcher-window.txt` beside the settings and used at the next start. Position,
 fullscreen and a maximised window are not remembered; delete the file to forget the size.
-([details](ANDROID_RUNTIME.md#fullscreen-and-remembered-size-2026-11-07))
+([details](ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07))
 
 An app's settings in the launcher are its compatibility profile. General
 contains window stats, Back key, network mode, the current bundled Android API,
@@ -352,8 +352,8 @@ mean the game process has already launched.
 | `enter_key` | `enter`, `dpad_center`, `button_a` | what Enter sends outside a text field, for games with their own cursor (`BIFROST_ANDROID_ENTER_KEY`); `button_a` reports a gamepad source |
 | `jit_disk_cache` | `default`, `on`, `off`, `verify` | experimental reuse of JIT translations across launches (`BIFROST_JIT_DISK_CACHE`); `default` follows `[jit] disk_cache` |
 | `jit_disk_cache_mb` | `default`, `128`, `256`, `512`, `1024`, `2048`, `4096` | on-disk budget of that cache for this app (`BIFROST_JIT_DISK_CACHE_MB`); `default` follows `[jit] disk_cache_mb`, normally 512 |
-| `controller` | `auto`, `gamepad`, `cursor` | what a gamepad does for an app that only takes touch (`BIFROST_ANDROID_CONTROLLER`): `auto` (the default) leaves the pad a pad and lets Start and Select pressed together turn a touch cursor on and off (left stick moves, A touches, X is a second finger; the triggers slow and speed it); `gamepad` never has a cursor and leaves Start and Select to the game; `cursor` has it on from the start. See [Touch cursor](ANDROID_RUNTIME.md#touch-cursor-2026-11-07) |
-| `window_mode` | `resizable`, `keep` | `resizable` (the default) lets the host window resize the app's display; `keep` gives the app a fixed panel of the shape it opened at, scaled to the window and pillarboxed, as Android does for `resizeableActivity=false` (`BIFROST_ANDROID_WINDOW_MODE=keep`): for a game that draws wrongly in a window of another shape. See [Window shape](ANDROID_RUNTIME.md#window-shape-2026-10-28) |
+| `controller` | `auto`, `gamepad`, `cursor` | what a gamepad does for an app that only takes touch (`BIFROST_ANDROID_CONTROLLER`): `auto` (the default) leaves the pad a pad and lets Start and Select pressed together turn a touch cursor on and off (left stick moves, A touches, X is a second finger; the triggers slow and speed it); `gamepad` never has a cursor and leaves Start and Select to the game; `cursor` has it on from the start. See [Touch cursor](ANDROID_RUNTIME_REFERENCE.md#touch-cursor-2026-11-07) |
+| `window_mode` | `resizable`, `keep` | `resizable` (the default) lets the host window resize the app's display; `keep` gives the app a fixed panel of the shape it opened at, scaled to the window and pillarboxed, as Android does for `resizeableActivity=false` (`BIFROST_ANDROID_WINDOW_MODE=keep`): for a game that draws wrongly in a window of another shape. See [Window shape](ANDROID_RUNTIME_REFERENCE.md#window-shape-2026-10-28) |
 | `menu_entry` | `on`, `off` | whether the app gets a launcher in the desktop's application menu (see [Menu entries](#menu-entries-2026-11-04)); unset follows `asgard desktop --default` (off at first: nothing is added to the menu until you ask) |
 | `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_OFFLINE=1`: the app's sockets cannot reach anything beyond loopback (`ENETUNREACH`), names do not resolve, and Android reports no network |
 
@@ -568,7 +568,7 @@ Google's embedded sign-in page; the password goes to Google, not to Asgard),
 `<state>/.google` and imported into an app's root at each launch; microG's
 settings stay per app. A completed login needs real credentials and has not
 been observed here. See the
-[runtime guide](ANDROID_RUNTIME.md#google-accounts-and-sign-in-2026-10-20) for
+[runtime guide](ANDROID_RUNTIME_REFERENCE.md#google-accounts-and-sign-in-2026-10-20) for
 the account service and its limits. When an app itself starts a Google
 screen (a Google Sign-In button, `AccountManager.addAccount`), it opens in the
 same kind of separate window and returns to the app; the library window then
@@ -609,7 +609,7 @@ changing the media bundle requires a fresh app state; reinstall with the same
 Real `AMediaFormat` allocation, typed fields, copied strings/buffers, format
 copy/clear/description and deletion are exercised in the signed APK gate.
 No Media NDK replacement functions are supplied. The managed framework's later
-[host media checkpoint](ANDROID_RUNTIME.md#host-media-decoding-2026-10-14)
+[host media checkpoint](ANDROID_RUNTIME_REFERENCE.md#host-media-decoding-2026-10-14)
 adds real Codec2 services owned by the Binder realm, host decoding and genuine
 ImageReader/native-window output. Temporary Java MediaCodec probes decoded
 exact 64x64 AVC/HEVC/VP8/VP9 frames with checked timestamps and EOS; separate
@@ -619,7 +619,7 @@ the Media NDK bundle alone does not create those codec services.
 
 The realm-owned software Gralloc5 allocator and guest mapper are also checked
 through AHardwareBuffer and AImageReader CPU pixels (see
-[allocation validation](ANDROID_RUNTIME.md#software-gralloc5-2026-10-13)).
+[allocation validation](ANDROID_RUNTIME_REFERENCE.md#software-gralloc5-2026-10-13)).
 `media.player` and `media.resource_manager` come from the image's real `mediaserver`, and `media.extractor`
 is the image's real daemon; Oddmar's splash video opens through it. Full stream reconfiguration, HDR,
 native EGL rendering into an aliased Surface and sustained in-game video playback remain unverified. This is a bounded media
@@ -706,7 +706,7 @@ guest-owned NDK LP64 Activity and callback table. Guest linker64 owns relocation
 constructors, dependency loading and TLS. The API-35 linker configuration uses
 an isolated app namespace; APK code resides in its permitted `/data/app` tree.
 The pinned runtime's provenance and 4 KiB pages/16 KiB ELF alignment are covered
-in [ANDROID_RUNTIME.md](ANDROID_RUNTIME.md). This does not establish a complete
+in [the runtime reference](ANDROID_RUNTIME_REFERENCE.md). This does not establish a complete
 API-35 platform implementation.
 
 Before app loading, the guest launcher gives Bionic the packaged library
@@ -779,7 +779,7 @@ compatibility. Missing adapter exports fail explicitly.
 [ANDROID_BINDER.md](ANDROID_BINDER.md). That flag alone does not start the managed
 framework. The managed launcher separately supplies Activity/Package manager
 contracts and limited SurfaceFlinger endpoints; it is not a full Android system.
-See [framework service scope](ANDROID_RUNTIME.md#managed-framework-service-modules-2026-10-09).
+See [framework service scope](ANDROID_RUNTIME_REFERENCE.md#managed-framework-service-modules-2026-10-09).
 
 Historical native-loading results: the user-provided SpongeBob
 5.11.5 set installs successfully: nine signed APKs

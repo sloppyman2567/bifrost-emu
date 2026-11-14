@@ -623,7 +623,7 @@ ended with status 137 after four swaps because the strict Java launcher
 rejected `reportActivityFullyDrawn`. After that and the subsequent service
 calls were implemented, the game rendered 670 frames and reached an unhandled
 `frecps v3.4s,v16.4s,v18.4s` (0x4e32fe03), which raised guest SIGILL. See the
-current service checkpoint in [ANDROID_RUNTIME.md](Android/ANDROID_RUNTIME.md).
+current service checkpoint in [the runtime reference](Android/ANDROID_RUNTIME_REFERENCE.md).
 
 These policies share the buffer emulation, which maps the host buffer and
 gives the guest a bounce of the same range (see the graphics guide). Flush

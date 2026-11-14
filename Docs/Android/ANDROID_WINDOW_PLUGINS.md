@@ -61,7 +61,7 @@ RGBA8888: other positive formats now return `-ENOTSUP` instead of reporting
 an unsupported format as successful. This host window interface does not expose
 general Android buffer-queue or format negotiation. The managed framework's
 real ImageReader/Surface path is described in the
-[host media checkpoint](ANDROID_RUNTIME.md#host-media-decoding-2026-10-14).
+[host media checkpoint](ANDROID_RUNTIME_REFERENCE.md#host-media-decoding-2026-10-14).
 Aliased native-window width/height queries follow the host surface's resized
 geometry rather than the ImageReader's fixed creation dimensions. Focused
 backend checks and the user's visual resize check cover that change; full
@@ -177,7 +177,7 @@ SDL3 backend maps each shape to the nearest SDL system cursor (`SDL_CreateSystem
 reused), hides the pointer with `SDL_HideCursor` and shows it again for the next shape; closing the window shows
 a hidden pointer again and frees its cursors before SDL quits. An app's own bitmap cursor is not part of the
 interface. The managed launcher's side is in
-[pointer icons](ANDROID_RUNTIME.md#pointer-icons-2026-10-28).
+[pointer icons](ANDROID_RUNTIME_REFERENCE.md#pointer-icons-2026-10-28).
 
 ### Gamepads (2026-11-06)
 
@@ -201,7 +201,7 @@ releases held buttons and centers the axes. Using a pad hides the pointer like S
 press, or a stick or trigger past half way, so a resting stick's drift does not, and the touch cursor turning on,
 moving or tapping); mouse motion over the window shows it again, and a pointer the app hid through `set_cursor` stays
 hidden. The guest side is in
-[gamepads](ANDROID_RUNTIME.md#gamepads-2026-11-06).
+[gamepads](ANDROID_RUNTIME_REFERENCE.md#gamepads-2026-11-06).
 
 ### Visibility (2026-11-07)
 
@@ -218,7 +218,7 @@ occluded, from the unmap or `_NET_WM_STATE`) and restored, and never reports a w
 occluded, then exposed), which a compositor may or may not do when a window is minimised or on another workspace
 ([SDL's Wayland driver](https://github.com/libsdl-org/SDL/blob/main/src/video/wayland/SDL_waylandwindow.c): "we do not get
 minimize events from xdg-shell"; `XDG_TOPLEVEL_STATE_SUSPENDED` becomes `SDL_EVENT_WINDOW_OCCLUDED`). The guest side is in
-[window visibility](ANDROID_RUNTIME.md#window-visibility-2026-11-07).
+[window visibility](ANDROID_RUNTIME_REFERENCE.md#window-visibility-2026-11-07).
 
 ### Colour scheme (2026-11-08)
 
@@ -231,7 +231,7 @@ and the app then stays in the scheme it started in.
 The SDL3 backend reads `SDL_GetSystemTheme()` when the window opens and on each `SDL_EVENT_SYSTEM_THEME_CHANGED`, and reports
 the result only when it differs from the last one reported; SDL's unknown changes nothing. Whether SDL can read a given
 desktop's setting depends on the platform and is not checked here. The guest side
-is in [colour scheme](ANDROID_RUNTIME.md#colour-scheme-2026-11-08).
+is in [colour scheme](ANDROID_RUNTIME_REFERENCE.md#colour-scheme-2026-11-08).
 
 ## Validation and reproduction
 

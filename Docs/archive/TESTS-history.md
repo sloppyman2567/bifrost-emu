@@ -1421,7 +1421,7 @@ service-process exit, persisted/namespaced jobs and window/surface lifecycle.
 The full 29-case suite was not rerun after this fixture-only correction.
 
 Permission/return contracts were checked against the pinned Android 15 server
-sources linked in the [runtime guide](../Android/ANDROID_RUNTIME.md#user-and-idle-policy-queries-2026-10-14).
+sources linked in the [runtime guide](../Android/ANDROID_RUNTIME_REFERENCE.md#user-and-idle-policy-queries-2026-10-14).
 The score-query denial was checked against
 [ActivityManagerService.ProcessInfoService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/services/core/java/com/android/server/am/ActivityManagerService.java)
 and the provisioned `platform.xml` grants.
@@ -1460,7 +1460,7 @@ use I420. VPX now uses slice-only threading. It also writes a packed Y, V, U
 frame at the decoded size, ignoring the guest's stale output size, as the
 emulator's `getImage` does. Contexts are keyed by codec family, because both
 VPX modules use ID 1. See the
-[runtime guide](../Android/ANDROID_RUNTIME.md#host-media-decoding-2026-10-14).
+[runtime guide](../Android/ANDROID_RUNTIME_REFERENCE.md#host-media-decoding-2026-10-14).
 
 `make test-android-goldfish-media` (`Tests/Unit/android_goldfish_media_host.cpp`,
 165 checks, needs `USE_MEDIA=1` with FFmpeg) drives the device through
@@ -1987,7 +1987,7 @@ allocator survives app disconnects, not simultaneous full-game compatibility.
 `test_asgard.py` passes all four JIT/interpreter pairs, peer-death cases and the
 eight-process stress test. EGL native-buffer/external-texture import and media
 decoding are excluded. Commands and source references are in the
-[runtime guide](../Android/ANDROID_RUNTIME.md#software-gralloc5-2026-10-13).
+[runtime guide](../Android/ANDROID_RUNTIME_REFERENCE.md#software-gralloc5-2026-10-13).
 
 Final validation for this milestone: SDL/GL and headless emulator/library builds,
 guest adapters and launcher build, generated-table check, strict GPU-enabled JIT
@@ -3083,7 +3083,7 @@ A fresh extraction independently reproduces the 309-file ART inventory and
 the 156-file Media NDK inventory after sharing their disk extractor.
 Real ART loads in both engines but encounters unsupported UADALP before
 VM creation; the experimental DEX/JNI test deliberately remains a failing
-development gate. See [the ART checkpoint](../Android/ANDROID_RUNTIME.md#experimental-same-image-art-bootstrap).
+development gate. See [the ART checkpoint](../Android/ANDROID_RUNTIME_REFERENCE.md#experimental-same-image-art-bootstrap).
 
 The earlier October 5 native APK/service-manager checkpoint passes **273/273 in
 JIT mode** with no skips (223 s) and **266/266 in interpreter mode**, with seven

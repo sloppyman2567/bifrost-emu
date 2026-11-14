@@ -358,7 +358,7 @@ setting, a touch cursor for apps that only take touch.
 In a game window, **F11** toggles fullscreen and the size is remembered per app. A window the desktop minimises or hides stops the
 app until it is shown again (X11 reports minimising; on Wayland it depends on the compositor suspending the window). The library
 offers **Set up…** when a checkout lacks something, and a realm with no app ends after 10 minutes
-(`ASGARD_REALM_IDLE_SECONDS`, `0` keeps it). See [window visibility](Docs/Android/ANDROID_RUNTIME.md#window-visibility-2026-11-07).
+(`ASGARD_REALM_IDLE_SECONDS`, `0` keeps it). See [window visibility](Docs/Android/ANDROID_RUNTIME_REFERENCE.md#window-visibility-2026-11-07).
 
 Native `NativeActivity` libraries can also run directly with
 `./bifrost-emu --android libgame.so`. Android support is experimental: Google
@@ -548,7 +548,7 @@ The current version is **2.0.0-beta.1**, the first beta pre-release toward the
 | App status | [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Arknights](Docs/Apps/arknights.md), [Oddmar](Docs/Apps/oddmar.md), [Umamusume](Docs/Apps/umamusume.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
 | JIT internals | [JIT guide](Docs/JIT.md) |
 | Source layout | [Architecture](Docs/ARCHITECTURE.md) |
-| Android | [Runtime](Docs/Android/ANDROID_RUNTIME.md), [APKs](Docs/Android/ANDROID_APK.md), [Binder](Docs/Android/ANDROID_BINDER.md), [window plugins](Docs/Android/ANDROID_WINDOW_PLUGINS.md) |
+| Android | [Runtime](Docs/Android/ANDROID_RUNTIME.md), [runtime reference](Docs/Android/ANDROID_RUNTIME_REFERENCE.md), [APKs](Docs/Android/ANDROID_APK.md), [Binder](Docs/Android/ANDROID_BINDER.md), [window plugins](Docs/Android/ANDROID_WINDOW_PLUGINS.md) |
 | Host graphics, audio and input | [Host integration](Docs/HOST_INTEGRATION.md), [window stats](Docs/window-stats.md) |
 | Embedding | [C API and native bridge](Docs/EMBEDDING.md) |
 | Support and security | [Support matrix](Docs/SUPPORT.md), [security model](Docs/SECURITY.md) |

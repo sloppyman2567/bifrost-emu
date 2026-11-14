@@ -5,7 +5,7 @@ character devices. By default each device has an independent context per emulato
 request reaches the host Binder driver or the host's Android services.
 Asgard's optional shared broker places these contexts in a separate OS process,
 allowing independent guests to communicate. See
-[shared process setup and tests](ANDROID_RUNTIME.md#shared-guest-processes-october-11-2026).
+[shared process setup and tests](ANDROID_RUNTIME_REFERENCE.md#shared-guest-processes-october-11-2026).
 The wire layout is AArch64 Binder protocol 8, checked against the
 [Linux Binder UAPI](https://raw.githubusercontent.com/torvalds/linux/v6.12/include/uapi/linux/android/binder.h)
 and [driver implementation](https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/android/binder.c).
@@ -142,7 +142,7 @@ query OOM scores. The host service uses platform stability; with stability
 0, Java `getService` failed. Only UID 1013 may register
 `media.resource_manager`, only UID 1040 may register `media.extractor`, and only UID 1046 may register a Codec2
 component store. Media decoding and Surface contracts are described in
-[the runtime guide](ANDROID_RUNTIME.md#host-media-decoding-2026-10-14).
+[the runtime guide](ANDROID_RUNTIME_REFERENCE.md#host-media-decoding-2026-10-14).
 
 ## Boundaries
 
@@ -205,7 +205,7 @@ service handles retain normal strong/weak, transfer and death-subscription
 bookkeeping, but an app disconnect does not kill a realm-owned object. The
 allocator validates bounded descriptors/counts and transfers sealed-size memfds
 using the same fd delivery path as guest Binder replies. See the
-[Gralloc5 contract and validation](ANDROID_RUNTIME.md#software-gralloc5-2026-10-13).
+[Gralloc5 contract and validation](ANDROID_RUNTIME_REFERENCE.md#software-gralloc5-2026-10-13).
 
 The registry holds strong references to real guest Binder objects. Lookup
 returns callable translated handles, whose receive-buffer references follow

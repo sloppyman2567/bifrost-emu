@@ -453,7 +453,7 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   and the settings tests pass; no game was run with it.
 - Known, not fixed: resizing the window does not make an app such as YouTube switch to its portrait layout. The launcher passes
   the new orientation and size to `onConfigurationChanged` but never relaunches an Activity, which Android does for an app that
-  does not declare it handles the change. Written up in [the runtime notes](Android/ANDROID_RUNTIME.md#the-window-setting-and-resizing-2026-11-07).
+  does not declare it handles the change. Written up in [the runtime notes](Android/ANDROID_RUNTIME_REFERENCE.md#the-window-setting-and-resizing-2026-11-07).
 
 ### Added (library gamepad control)
 
@@ -1130,7 +1130,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   AES master key. That provider is installed by Zygote, which does not run here, so the plugin failed to load with
   `AndroidKeyStore not found` and every database call failed. Each managed process now installs the provider and serves keystore2
   (`FrameworkKeystore`) with a software KeyMint for AES and HMAC keys. Its checks and errors follow the AOSP reference KeyMint
-  ([details and limits](Android/ANDROID_RUNTIME.md#android-keystore-2026-11-02)). PolyTrack now creates its key and encrypted
+  ([details and limits](Android/ANDROID_RUNTIME_REFERENCE.md#android-keystore-2026-11-02)). PolyTrack now creates its key and encrypted
   preferences, opens its database and reaches its menu, where a track starts; its second start reuses the key. Longer play and
   saved progress were not checked.
 - Keys are kept unencrypted per uid in `/data/misc/keystore`. They survive runtime replacement and are removed by `clear-data`. RSA,
@@ -1590,7 +1590,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   launcher asks the Activity's view tree (`View.onResolvePointerIcon`) and sends the nearest of twelve shapes to the
   window (`FrameworkCursors`, syscall op 24, optional plugin callback `set_cursor`). The SDL3 backend uses SDL system
   cursors. Only hover updates it, an app's own bitmap cursor shows the arrow, and the first failure turns the feature
-  off with `APP_CURSOR_UNAVAILABLE`; see [pointer icons](Android/ANDROID_RUNTIME.md#pointer-icons-2026-10-28).
+  off with `APP_CURSOR_UNAVAILABLE`; see [pointer icons](Android/ANDROID_RUNTIME_REFERENCE.md#pointer-icons-2026-10-28).
 - Checked: the SDL3 backend against a fake SDL3 (create, reuse, hide, show, free before quit), the plugin host and its
   fixture (valid, out-of-range, refused, absent callback), and the Java mapping and send-on-change through a real
   `View` in `ManagedServiceBatch`. Not checked: a game that sets a pointer icon, or a live window.
@@ -2525,7 +2525,7 @@ procfs `d_type` constants are not changed.
   roots gain the links and updated inventories; managed roots refresh on their next start.
   Tracing global Umamusume confirmed that restoring these paths resolves `__errno` and
   removes its initial null-call crash. Later startup and gameplay remain unverified.
-  See [runtime evidence](Android/ANDROID_RUNTIME.md#bionic-compatibility-paths-2026-10-21).
+  See [runtime evidence](Android/ANDROID_RUNTIME_REFERENCE.md#bionic-compatibility-paths-2026-10-21).
 
 ### Signal queries and fork-child shutdown (2026-10-22)
 
@@ -2544,7 +2544,7 @@ procfs `d_type` constants are not changed.
   profile; microG would create one but its setting is off. `asgard.py google games-profile
   on|off|status` stores the user's choice (default off, with a notice) and every app root gets it
   before its session starts. Nothing changes unless the user turns it on. See
-  [Play Games sign-in answers 404](Android/ANDROID_RUNTIME.md#play-games-sign-in-answers-404-2026-10-21).
+  [Play Games sign-in answers 404](Android/ANDROID_RUNTIME_REFERENCE.md#play-games-sign-in-answers-404-2026-10-21).
 
 ### AudioTrack playback and shared-memory futexes (2026-10-21)
 
@@ -2552,7 +2552,7 @@ procfs `d_type` constants are not changed.
   streaming tracks, with the shared control block and ring in a memfd and a native server
   (`audio_track.c`) that feeds the host engine through one AAudio callback stream per track.
   Umamusume's FMOD logged about 60 `AudioTrack` failures and now none. See
-  [AudioTrack playback](Android/ANDROID_RUNTIME.md#audiotrack-playback-2026-10-21).
+  [AudioTrack playback](Android/ANDROID_RUNTIME_REFERENCE.md#audiotrack-playback-2026-10-21).
   Not yet: static (shared-buffer) tracks, kernel timestamps, rate changes after creation.
 - Fix: a futex on a MAP_SHARED file mapping (memfd, ashmem, file) is now a host futex, so a wake
   through another mapping of the page, in the same process or another, reaches the waiter. The

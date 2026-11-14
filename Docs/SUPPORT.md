@@ -56,7 +56,7 @@ claimed. The Android Vulkan HAL copies each presented frame through a host stagi
 read-back, a wait for the GPU and a CPU copy into the app's buffer on release, then another copy into the window; the
 upload on acquire is skipped after an image's first release (2026-11-08, not yet run in a game). An APK that ships only 32-bit
 libraries cannot start. See
-[runtime contracts](Android/ANDROID_RUNTIME.md), [APK tooling](Android/ANDROID_APK.md)
+[runtime contracts](Android/ANDROID_RUNTIME_REFERENCE.md), [APK tooling](Android/ANDROID_APK.md)
 and the [roadmap](roadmap.md) for open items and the known blockers by cause.
 
 ## CI gates

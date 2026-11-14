@@ -84,7 +84,7 @@ fetched to exercise behavior beyond the synthetic tests:
   The separate ART experiment extracts a verified API-35 ARM64 revision-2 SDK
   image using `Tools/Android/android_art.py`, retains its `NOTICE.txt` and APEX notices,
   and records all runtime file hashes. It reuses the same pinned image as the
-  Media NDK provisioner; see [runtime provenance](Android/ANDROID_RUNTIME.md#experimental-same-image-art-bootstrap).
+  Media NDK provisioner; see [runtime provenance](Android/ANDROID_RUNTIME_REFERENCE.md#experimental-same-image-art-bootstrap).
   These downloads retain their upstream terms and are not redistributed by
   the source commit. Generated regression APKs use a temporary test key and
   original fixture code; commercial APKs and installed app state stay local.

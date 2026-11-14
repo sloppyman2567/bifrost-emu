@@ -122,7 +122,7 @@ The `Managed` fixture checks the controller with a configured AAC decoder
 and the Spatializer; `ManagedPlayServices` checks that the ad request bind
 fails. When this was written ExoPlayer could not play: it needs Java
 `AudioTrack`, and AudioFlinger had no track creation (it has since, see
-[AudioTrack playback](../Android/ANDROID_RUNTIME.md#audiotrack-playback-2026-10-21); `generateAudioSessionId`
+[AudioTrack playback](../Android/ANDROID_RUNTIME_REFERENCE.md#audiotrack-playback-2026-10-21); `generateAudioSessionId`
 and ExoPlayer itself were not rechecked), so GMA played the rewarded video in
 its WebView, whose audio uses AAudio.
 
@@ -917,7 +917,7 @@ and priority sorting against
 [ComputerEngine](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/ComputerEngine.java).
 Disabled providers and declarations for another process are skipped. Remote
 provider acquisition and provider startup in child processes were added
-later; see [microG processes](../Android/ANDROID_RUNTIME.md#microg-processes-remote-providers-and-service-resolution-2026-10-17).
+later; see [microG processes](../Android/ANDROID_RUNTIME_REFERENCE.md#microg-processes-remote-providers-and-service-resolution-2026-10-17).
 
 Starting the previously omitted AndroidX WorkManager provider exposed its
 force-stop check: `PendingIntent.getBroadcast(..., FLAG_NO_CREATE, ...)`.

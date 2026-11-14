@@ -117,7 +117,7 @@ app exit leaves the library and the other apps usable.
 - Answer what an ad's WebView asks of the device so that it never throws out of the app: done for the gamepad `hasKeys`
   call (the cause of Geometry Dash Lite's crash); the next unsupported call shows in the session log.
 - Activity relaunch on a host resize: done in the tree, unreleased (an Activity that does not declare the change is relaunched
-  as Android does; [details](Android/ANDROID_RUNTIME.md#activity-relaunch-2026-11-07)), checked with a fixture on the real
+  as Android does; [details](Android/ANDROID_RUNTIME_REFERENCE.md#activity-relaunch-2026-11-07)), checked with a fixture on the real
   runtime, not with a real app that needs it. It does not explain YouTube, which declares orientation, size and layout in
   `configChanges` and so is never relaunched. Open: trace why YouTube keeps its landscape layout when narrowed (what its
   `onConfigurationChanged` receives, the metrics it reads).
@@ -129,12 +129,12 @@ app exit leaves the library and the other apps usable.
   log shows whether the median drops.
 - Tell the app about its window. The window plugin has seven events (close, resize, key, pointer, text, gamepad,
   visibility). Done in the tree, unreleased: a window the desktop minimises, hides or covers stops the app's Activities
-  and resumes them when it is visible again ([visibility](Android/ANDROID_RUNTIME.md#window-visibility-2026-11-07));
+  and resumes them when it is visible again ([visibility](Android/ANDROID_RUNTIME_REFERENCE.md#window-visibility-2026-11-07));
   checked against a fake SDL, not on a real compositor. Open: whether KWin and other Wayland compositors suspend a
   minimised window (without that, a minimised game on Wayland keeps running), focus loss (traced, not delivered, and
   Android keeps an unfocused app resumed), and idle CPU of a stopped game before and after.
 - Game windows: F11 toggles fullscreen and the size is remembered per app, with no setting for either (done in the tree,
-  unreleased, checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME.md#fullscreen-and-remembered-size-2026-11-07)).
+  unreleased, checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)).
   Position and fullscreen are deliberately not remembered (a Wayland client cannot place its window). Open: a real
   compositor check, including whether the window visibly resizes once at launch. `--fullscreen` still belongs to the library.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested
@@ -276,8 +276,8 @@ Acceptance: repeatable input probes and live game checks pass across the desktop
 ### WebView text input and external pages
 
 Done: desktop text and composition reach native editors through `InputConnection`; http(s) and Play Store links open in
-the host browser ([host text input](Android/ANDROID_RUNTIME.md#host-text-input-2026-10-20),
-[web links](Android/ANDROID_RUNTIME.md#web-links-and-play-store-links-2026-10-20)).
+the host browser ([host text input](Android/ANDROID_RUNTIME_REFERENCE.md#host-text-input-2026-10-20),
+[web links](Android/ANDROID_RUNTIME_REFERENCE.md#web-links-and-play-store-links-2026-10-20)).
 
 Open:
 
