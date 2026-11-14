@@ -283,6 +283,8 @@ UNIT_TESTS=(
     "jit_ld1r|Tests/Unit/jit_ld1r.elf||5|jit_ld1r: ALL PASS"
     "jit_neon_struct|Tests/Unit/jit_neon_struct.elf||15|jit_neon_struct: ALL PASS"
     "jit_fcmp_flags|Tests/Unit/jit_fcmp_flags.elf||10|jit_fcmp_flags: ALL PASS"
+    "jit_addsub_sp_operand|Tests/Unit/jit_addsub_sp_operand.elf||10|jit_addsub_sp_operand: ALL PASS"
+    "jit_unallocated_dp_register|Tests/Unit/jit_unallocated_dp_register.elf||10|jit_unallocated_dp_register: ALL PASS"
     "round_away|Tests/Unit/jit_round_away.elf||5|round_away: ALL PASS"
     "doom_gap|Tests/Unit/jit_doom_gap.elf||10|doom_gap: ALL PASS"
     # An exec'd fork child drops the parent's memory instead of copying it (host /proc measurement).

@@ -7,9 +7,15 @@
 //      region (NOT the regular stack).
 //   4. After rt_sigreturn, SP is restored to the original stack.
 //   5. SS_DISABLE disables the altstack (handler runs on regular stack).
+//   6. A handler that leaves through siglongjmp (no rt_sigreturn) does not
+//      leave the altstack marked in use: the next signal runs on it again,
+//      its frame's uc_stack does not claim SS_ONSTACK, and sigaltstack()
+//      reports it free (Linux decides all three from the current SP).
 //
 // Build: make cross SRC=Tests/Apps/test_sigaltstack.c OUT=Tests/Apps/test_sigaltstack.elf
 // Run:   ./bifrost-emu Tests/Apps/test_sigaltstack.elf
+#include <setjmp.h>
+#include <ucontext.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +51,16 @@ static void handler(int sig) {
     handler_sp_in_altstack =
         (sp >= (unsigned long)expected_altstack_base &&
          sp <  (unsigned long)expected_altstack_base + expected_altstack_size);
+}
+
+static sigjmp_buf jump;
+static volatile int frame_claims_onstack = -1;
+
+static void jumping_handler(int sig, siginfo_t *info, void *context) {
+    (void)info;
+    handler(sig);
+    frame_claims_onstack = (((ucontext_t *)context)->uc_stack.ss_flags & SS_ONSTACK) != 0;
+    siglongjmp(jump, 1);
 }
 
 int main(void) {
@@ -111,7 +127,30 @@ int main(void) {
     // Just verify the call doesn't crash — the size check is implementation-defined.
     (void)r;
 
-    // 8. Final summary.
+    // 8. Leaving through siglongjmp, twice: no rt_sigreturn ever runs.
+    ss.ss_sp    = altstack_buf;
+    ss.ss_size  = sizeof(altstack_buf);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, NULL);
+    struct sigaction jump_sa;
+    memset(&jump_sa, 0, sizeof(jump_sa));
+    jump_sa.sa_sigaction = jumping_handler;
+    jump_sa.sa_flags = SA_ONSTACK | SA_SIGINFO;
+    sigemptyset(&jump_sa.sa_mask);
+    sigaction(SIGUSR2, &jump_sa, NULL);
+    handler_sp_in_altstack = -1;
+    if (!sigsetjmp(jump, 1)) raise(SIGUSR2);
+    CHECK(handler_sp_in_altstack == 1, "first siglongjmp handler runs on altstack");
+    handler_sp_in_altstack = -1;
+    frame_claims_onstack = -1;
+    if (!sigsetjmp(jump, 1)) raise(SIGUSR2);
+    CHECK(handler_sp_in_altstack == 1, "after siglongjmp out of it, the next handler runs on altstack again");
+    CHECK(frame_claims_onstack == 0, "the next frame's uc_stack does not claim SS_ONSTACK");
+    memset(&altstack_query, 0, sizeof(altstack_query));
+    sigaltstack(NULL, &altstack_query);
+    CHECK((altstack_query.ss_flags & SS_ONSTACK) == 0, "altstack not in use after siglongjmp out of the handler");
+
+    // 9. Final summary.
     char msg[128];
     int len = snprintf(msg, sizeof(msg),
                        "passes=%d failures=%d\n", passes, failures);

@@ -494,9 +494,12 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         // unsigned Vd lanes with unsigned saturation (USQADD used to
         // zero-extend Vn). Saturation sets FPSR.QC; .1d is reserved.
         // Q=0 zeroes the destination upper half like every other
-        // vector op.
-        if (sub3_noq == 0x0E207800 || sub3_noq == 0x2E207800 ||
-            sub3_noq == 0x0E203800 || sub3_noq == 0x2E203800) {
+        // vector op. sub3 drops bits 20:16, which must be zero here:
+        // opcode 10111 (U=1: FP8 F1CVTL/BF1CVTL, not advertised) and
+        // 10011 are other instructions.
+        if ((sub3_noq == 0x0E207800 || sub3_noq == 0x2E207800 ||
+             sub3_noq == 0x0E203800 || sub3_noq == 0x2E203800) &&
+            !(op & 0x1F0000)) {
             if (size == 3 && !Q) throw DecodeError(cpu.pc, op);
             const int esize = 1 << size;
             const int bits = esize * 8;
@@ -574,7 +577,7 @@ bool Emulator::exec_simd_arith(const SimdDpFields& f, CPU& cpu) {
         // Truncate toward zero (rmode=3). NaN → 0; ±inf and out-of-range
         // values saturate (the helpers implement FPToFixed's clamp).
         if ((sub3_noq == 0x0E20B800 || sub3_noq == 0x2E20B800) &&
-            (op & 0x10000) && size >= 2) {
+            (op & 0x1F0000) == 0x10000 && size >= 2) {
             if (size == 3 && !Q) throw DecodeError(cpu.pc, op);  // .1d is reserved
             bool is_unsigned = sub3_noq == 0x2E20B800;
             int esize = 1 << size;

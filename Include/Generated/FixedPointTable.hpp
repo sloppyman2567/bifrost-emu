@@ -37,8 +37,8 @@ inline Op classify(uint32_t op) {
     (void)size;
     if ((op & 0x7F3E0000U) == 0x1E020000U) return Op{Family::FIXCONV, 0, 0, "SCVTF_GPR"};
     if ((op & 0x7F3E0000U) == 0x1E180000U) return Op{Family::FIXCONV, 1, 1, "FCVTZS_GPR"};
-    if ((op & 0xDF80E400U) == 0x5F00E400U && (((op >> 11) & 3) == 0)) return Op{Family::FIXCONV, 2, 2, "SCVTF_FP"};
-    if ((op & 0xDF80E400U) == 0x5F00E400U && (((op >> 11) & 3) == 3)) return Op{Family::FIXCONV, 3, 3, "FCVTZS_FP"};
+    if ((op & 0xDF80E400U) == 0x5F00E400U && (((op >> 11) & 3) == 0 && ((op >> 21) & 3) != 0)) return Op{Family::FIXCONV, 2, 2, "SCVTF_FP"};
+    if ((op & 0xDF80E400U) == 0x5F00E400U && (((op >> 11) & 3) == 3 && ((op >> 21) & 3) != 0)) return Op{Family::FIXCONV, 3, 3, "FCVTZS_FP"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

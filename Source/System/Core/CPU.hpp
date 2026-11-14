@@ -347,10 +347,9 @@ public:
     struct AltStack {
         uint64_t sp    = 0;     // base address
         uint64_t size  = 0;     // size in bytes
-        uint32_t flags = 0;     // SS_ONSTACK / SS_DISABLE
+        uint32_t flags = 0;     // SS_DISABLE only; being on the stack follows from SP (SignalTable::on_altstack)
         static constexpr uint32_t SS_ONSTACK_EMU  = 1;
         static constexpr uint32_t SS_DISABLE_EMU  = 2;
-        bool active() const { return (flags & SS_ONSTACK_EMU) != 0; }
         bool disabled() const { return (flags & SS_DISABLE_EMU) != 0 || size == 0; }
         uint64_t top() const { return sp + size; }
     } altstack;

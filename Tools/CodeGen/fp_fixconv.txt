@@ -23,8 +23,10 @@
 #
 # Subops 2/3 are the AdvSIMD-scalar group 0x5F00E400; bits[12:11]
 # separate SCVTF/UCVTF (00) from FCVTZS/FCVTZU (11), so each gets its
-# own GUARD on the same mask/match.
+# own GUARD on the same mask/match. immh (bits[22:19]) = 01xx is S and
+# 1xxx is D; 001x is H (FEAT_FP16, not advertised) and 0001 is reserved,
+# so the guards leave both unclassified and they raise SIGILL.
 SCVTF_GPR  0x7F3E0000   0x1E020000   FIXCONV   0   -
 FCVTZS_GPR 0x7F3E0000   0x1E180000   FIXCONV   1   -
-SCVTF_FP   0xDF80E400   0x5F00E400   FIXCONV   2   ((op >> 11) & 3) == 0
-FCVTZS_FP  0xDF80E400   0x5F00E400   FIXCONV   3   ((op >> 11) & 3) == 3
+SCVTF_FP   0xDF80E400   0x5F00E400   FIXCONV   2   ((op >> 11) & 3) == 0 && ((op >> 21) & 3) != 0
+FCVTZS_FP  0xDF80E400   0x5F00E400   FIXCONV   3   ((op >> 11) & 3) == 3 && ((op >> 21) & 3) != 0

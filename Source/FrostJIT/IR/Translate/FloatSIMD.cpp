@@ -17,9 +17,17 @@
 #include "FrostJIT/IR/IR.hpp"      // public IR types
 #include "System/Core/Emulator.hpp"  // for cond_true() (used by executor only)
 #include "FrostJIT/CodeGen/Native/NativeSIMD.hpp"
-#include "Generated/SIMDTable.hpp" // generated SIMD_DP decode table (Tools/opgen)
-#include "Generated/FixedPointTable.hpp" // generated fixed-point convert table (Tools/opgen)
+#include "Generated/SIMDTable.hpp" // generated SIMD_DP decode table (Tools/CodeGen/opgen.py)
+#include "Generated/FixedPointTable.hpp" // generated fixed-point convert table (Tools/CodeGen/fpgen.py)
 namespace arm64emu {
+// SCVTF/UCVTF with Rn=31 convert XZR: +0.0 for every fbits, exact (no FPSR flags), rest of Vd zeroed, which is the
+// zero FP_MOVI.
+static void emit_fp_zero_from_xzr(IRBlock& block, uint16_t rd, uint8_t ftype, uint64_t cur_pc) {
+    FpMoviParams mp;
+    mp.ftype = ftype;
+    mp.bits = 0;
+    emit_fp_movi(block, rd, mp, cur_pc);
+}
 // Returns `true` if `d.cls` was one of the FP/SIMD cases handled here
 // (structured memory operations also terminate the block). Returns false
 // to let the caller
@@ -475,6 +483,8 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                             w = (op >> 22) & 1;
                         }
                         if (fc.subop == 0) {
+                            // FP_I2F_FIXED's src1 is an architectural GPR index, where 31 would read SP.
+                            if (rn == 31) { emit_fp_zero_from_xzr(block, rd, w, cur_pc); return true; }
                             FpFixedParams fp;
                             fp.w = w;
                             fp.is_unsigned = is_unsigned;
@@ -614,6 +624,8 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 bool is_unsigned = (op >> 16) & 1;
                 uint8_t sf = (op >> 31) & 1;
                 if (ftype <= 1) {
+                    // FP_I2F's src1 is an architectural GPR index, where 31 would read SP.
+                    if (rn == 31) { emit_fp_zero_from_xzr(block, rd, ftype, cur_pc); return true; }
                     FpI2FParams fp;
                     fp.ftype = ftype;
                     fp.sf = sf != 0;

@@ -876,25 +876,27 @@ private:
     // e.g. read back from an open descriptor, so "/proc/self/exe" and symlinks name the real file).
     // `guest_hint` is the path the program was named by, used when a sandboxed file is outside the root.
     void record_executable_host_file(const std::string& host_file, const std::string& guest_hint);
+    // AT_HWCAP for every guest image (startup and execve): FP, ASIMD, CRC32 and ATOMICS. It must match what the
+    // decoder accepts (fp_decode allocation predicates); AT_HWCAP2 is 0 (no BTI, no PAC).
+    static constexpr uint64_t kGuestHwcap = (1ULL << 0) | (1ULL << 1) | (1ULL << 7) | (1ULL << 8);
     uint64_t build_initial_stack(uint64_t stack_top,
                                  std::vector<std::string>& argv,
                                  ElfLoader::Loaded& info);
     void execute(uint32_t inst, uint64_t& next_pc, CPU& cpu);
     // ── Interpreter dispatch helpers ───────────────────────────────────
-    // the giant switch in execute() was split into
-    // per-category member functions, each handling a group of InstClass
-    // cases. They live in Source/Interpreter/interp_{fp,branch}.cpp and have full
-    // access to Emulator state (mem_, brk_verbose_, syscall(), etc.).
+    // execute() hands whole groups of InstClass cases to per-category
+    // member functions (Source/Interpreter/FloatSIMD/ and Core/BranchSystem.cpp)
+    // that have full access to Emulator state (mem_, brk_verbose_, syscall(), etc.).
     // The signature mirrors execute() (inst + next_pc + cpu + d) so the
     // dispatcher can call them with the same locals it already has.
     //   execute_fp     — FMOV_VD1, FMOV_RVD1, SIMD_LD1, SIMD_ST1,
     //                    SIMD_DP, FP_SCALAR  (Source/Interpreter/FloatSIMD/Dispatch.cpp
-    //                    dispatches to interp_simd_*.cpp / FloatScalar.cpp)
+    //                    dispatches to SIMD/*.cpp / FloatScalar.cpp)
     //   execute_branch — B, BL, Bcond, CBZ, CBNZ, TBZ, TBNZ, BR, BLR, RET,
     //                    SVC_IMM, BRK_IMM, HLT_IMM, CLREX_INST, HINT,
     //                    MRS_SYS, MSR_SYS    (Source/Interpreter/Core/BranchSystem.cpp)
     void execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
-    // execute_fp's groups (Source/Interpreter/interp_simd_*.cpp, FloatScalar.cpp).
+    // execute_fp's groups (Source/Interpreter/FloatSIMD/SIMD/*.cpp, FloatScalar.cpp).
     // SIMD_DP groups return true when they handled the instruction and
     // run in a fixed order because their encodings overlap.
     bool exec_simd_three(const SimdDpFields& f, CPU& cpu);

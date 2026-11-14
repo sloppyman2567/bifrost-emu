@@ -418,7 +418,8 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
             5, info.phnum,     // AT_PHNUM
             9, info.entry,     // AT_ENTRY
             25, random_addr,   // AT_RANDOM
-            16, 0x3ff,         // AT_HWCAP (FP+ASIMD+ATOMICS)
+            16, Emulator::kGuestHwcap,  // AT_HWCAP: the same profile as at startup
+            26, 0,             // AT_HWCAP2
             7, 0,              // AT_BASE
             0, 0,              // AT_NULL
         };

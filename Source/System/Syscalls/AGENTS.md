@@ -25,6 +25,10 @@
   sigreturn frame) use `force_signal`, which reverts a blocked or ignored
   signal to SIG_DFL; only asynchronous kill/tgkill/queued signals use
   `deliver_signal` directly.
+  The alternate stack is in use when SP is inside it (`SignalTable::on_altstack`, Linux `on_sig_stack`), never from
+  a marker set at delivery: a handler left by `siglongjmp` never runs `rt_sigreturn`. `sigaltstack()` and a frame's
+  `uc_stack.ss_flags` come from `altstack_flags`; `test_sigaltstack` covers it.
+  `AT_HWCAP` is `Emulator::kGuestHwcap` at startup and in `execve`; it must match the decoder's accepted profile.
   `execve` discards the old image's pages (`madvise_dontneed`, then `untrack_allocation`); never write zeros through
   them: a fork child shares them copy-on-write with its parent and the write copies every page.
   A real host-fork child's `exit_group` instead uses host `_exit`: copied host

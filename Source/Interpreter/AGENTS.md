@@ -11,6 +11,10 @@ before changing shared decode contracts or JIT-facing instruction behavior.
   instruction with a successful no-op. The decoder's `fp_decode` allocation
   predicates define the advertised CPU profile (AT_HWCAP); change them
   together with the HWCAP bits, and check them with the coverage sweep.
+- Register 31 as SP or XZR is decided once, in the decoder's `reads_sp`/`writes_sp`; both engines take it from there
+  (add/subtract immediate and extended register read SP, flag-setting forms included; shifted register reads XZR).
+  A word with a reserved or unadvertised field (ADDG/SUBG, FlagM, FP16, FP8) must fail to decode, not run as its
+  neighbour. `Scripts/Testing/sequence_fuzz.py` compares both engines with QEMU, which `make verify` cannot do.
 - AdvSIMD scalar forms that are their vector operation on element 0 belong in
   `kScalarLaneForms` (`FloatScalar.cpp`), not in a second implementation.
   Saturating integer lanes set FPSR.QC.

@@ -7,8 +7,8 @@
 // When adding a new instruction:
 //   1. Add the decode in Source/Interpreter/Decoder/Decoder.cpp (sets InstClass)
 //   2. Add the execute case here (or execute_fp / execute_branch)
-//   3. Add IR translate in Source/FrostJIT/IR/ir_translate*.cpp + codegen in
-//      Source/FrostJIT/jit_codegen_*.cpp + gate in Source/FrostJIT/Compiler/BlockCompiler.cpp
+//   3. Add IR translate in Source/FrostJIT/IR/Translate/*.cpp + codegen in
+//      Source/FrostJIT/CodeGen/ + gate in Source/FrostJIT/Compiler/BlockCompiler.cpp
 #include "System/Core/Emulator.hpp"
 #include "System/Core/ExclusiveMonitor.hpp"
 #include "System/Core/CrashReport.hpp"
@@ -347,8 +347,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 int width = d.sf ? 64 : 32;
                 bool set_flags = d.set_flags;
                 bool is_sub = d.is_sub;
-                uint64_t a = (d.rn == 31 && !set_flags) ? cpu.sp : cpu.regs[d.rn];
-                if (!d.sf && !(d.rn == 31 && !set_flags)) a &= 0xFFFFFFFF;
+                uint64_t a = d.reads_sp ? cpu.sp : cpu.regs[d.rn];
+                if (!d.sf && !d.reads_sp) a &= 0xFFFFFFFF;
                 uint64_t b = static_cast<uint64_t>(imm12) << (sh ? 12 : 0);
                 uint64_t res;
                 if (is_sub) res = set_sub_flags(cpu, a, b, width, set_flags);

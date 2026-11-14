@@ -108,35 +108,20 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── ADD/SUB (register, immediate) ────────────────────────────
         case InstClass::ADD_REG: case InstClass::ADD_IMM:
         case InstClass::SUB_REG: case InstClass::SUB_IMM: {
-            // For immediate AND extended-register forms, rn=31/rd=31 can
-            // mean SP (the decoder sets d.reads_sp/d.writes_sp). For the
-            // shifted-register form (bit21=0), rd=31 means XZR (the
-            // decoder leaves d.writes_sp=false).
-            //
-            // for SP mapping. ADD_REG/SUB_REG (extended register form)
-            // was excluded, so `add sp, sp, x12` (very common in
-            // function epilogues) was computed as `add xzr, xzr, x12`
-            // and the result was discarded. This corrupted the stack
-            // pointer, causing crashes in musl's mallocng during free()
-            // (get_meta would see a non-16-byte-aligned pointer because
-            // SP was never restored after the function's stack frame
-            // allocation).
+            // Rn=31/Rd=31 is SP for the immediate and extended-register forms
+            // (the decoder sets d.reads_sp/d.writes_sp) and XZR for the
+            // shifted-register form. `add sp, sp, x12` (extended register, an
+            // epilogue idiom) must read and write SP: through XZR it would
+            // drop the result and corrupt the stack pointer.
             bool rn_is_sp = (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM ||
                              d.cls == InstClass::ADD_REG || d.cls == InstClass::SUB_REG) && d.reads_sp;
             uint16_t a = load_arm_reg(block, d.rn, rn_is_sp);
             uint16_t b;
             if (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM) {
-                // the decoder sets d.imm_u to the raw
-                // 12-bit immediate and d.shift to 0 or 12 (the optional
-                // left-shift by 12 for the "add/sub imm, lsl #12" form).
-                // The previous code passed d.imm_u through unshifted, so
-                // e.g. `add x0, x0, #0x1, lsl #12` (= add x0, x0, #0x1000)
-                // was computed as `add x0, x0, #1`. This broke musl's
-                // `cmn x0, #0x1, lsl #12` in __syscall_ret — the function
-                // uses it to test whether a syscall return value is in
-                // the [-4095, -1] error range. Without the shift, every
-                // successful syscall looked like an error, and every
-                // syscall was reported as -1 with bogus errno.
+                // d.imm_u is the raw 12-bit immediate and d.shift is 0 or 12
+                // (the "lsl #12" form), so `cmn x0, #0x1, lsl #12` (musl's
+                // __syscall_ret test for a return value in [-4095, -1])
+                // adds 0x1000, not 1.
                 b = load_imm(block, static_cast<uint64_t>(d.imm_u) << d.shift);
             } else {
                 // Register form. Two sub-cases:
@@ -150,15 +135,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // even though d.shift != 0 — the shift there is a shifted-
                 // register shift, not an extend shift.
                 b = load_arm_reg(block, d.rm);
-                // Extended vs shifted form is bit21 of the raw word
-                // (the decoder only records d.extend for the extended
-                // form, and UXTB encodes as extend=0 — the same value as
-                // the "no extend" default for the shifted form). Testing
-                // `d.extend != 0` therefore miscompiled every UXTB form
-                // (e.g. `add x1, x5, w1, uxtb #2` in libjpeg's
-                // jpeg_huff_decode): the mask was skipped and the extend
-                // amount was applied as a shifted-register LSL instead,
-                // computing a wild address for the following LDR.
+                // Extended vs shifted form is bit21 of the raw word: the
+                // decoder records d.extend only for the extended form, and
+                // UXTB's extend=0 equals the shifted form's default, so
+                // `d.extend != 0` would skip the mask of `add x1, x5, w1,
+                // uxtb #2` and apply its amount as a shifted-register LSL.
                 bool extended = (d.raw & 0x00200000u) != 0;
                 if (extended) {
                     // Extended register form — apply extend, then shift.
@@ -182,22 +163,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── ADDS/SUBS (flag-setting) ─────────────────────────────────
         case InstClass::ADDS_REG: case InstClass::ADDS_IMM:
         case InstClass::SUBS_REG: case InstClass::SUBS_IMM: {
-            // BUGFIX: for the EXTENDED REGISTER form of
-            // ADDS/SUBS (bit21=1), Rn=31 = SP (per ARM ARM). For the
-            // shifted register form (bit21=0), Rn=31 = XZR.
-            // We check the raw instruction bits directly (like the
-            // interpreter does) to avoid stale-field issues.
-            bool rn_is_sp = false;
-            if (d.cls == InstClass::ADDS_REG || d.cls == InstClass::SUBS_REG) {
-                bool extended = ((d.raw & 0x1FE00000) == 0x0B200000);
-                rn_is_sp = extended && (d.rn == 31);
-            }
-            uint16_t a = load_arm_reg(block, d.rn, rn_is_sp);
+            // Rn=31 is SP for the immediate and extended-register forms and
+            // XZR for the shifted-register form (the decoder's reads_sp).
+            uint16_t a = load_arm_reg(block, d.rn, d.reads_sp);
             uint16_t b;
             if (d.cls == InstClass::ADDS_IMM || d.cls == InstClass::SUBS_IMM) {
-                // apply d.shift (0 or 12) to d.imm_u,
-                // matching the interpreter. See ADD_IMM/SUB_IMM above
-                // for the full rationale.
+                // d.shift (0 or 12) applies to d.imm_u as for
+                // ADD_IMM/SUB_IMM above.
                 b = load_imm(block, static_cast<uint64_t>(d.imm_u) << d.shift);
             } else {
                 // Register form. Two sub-cases (mirrors ADD_REG/SUB_REG):
@@ -206,16 +178,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 //       optional shift (0-4).
                 //   (b) Shifted register (bit21=0): apply shift_type
                 //       (LSL/LSR/ASR/ROR) by d.shift (0-63).
-                //
-                // the previous code ignored d.extend
-                // and d.shift_type for ADDS/SUBS, so e.g.
-                //   cmp x0, w24, sxtw
-                // was computed as `x0 - w24` (treating w24 as unsigned
-                // 32-bit, NOT sign-extended). This caused `csel x24, x0,
-                //   x1, ge` in musl's vfprintf %d-zero handling to pick
-                //   the wrong source, producing "" instead of "0" for
-                //   printf("%d", 0). Many other CSEL-after-CMP paths in
-                //   musl were similarly broken.
+                // Both apply here as in ADD_REG/SUB_REG: `cmp x0, w24, sxtw`
+                // sign-extends w24 (musl's vfprintf %d zero case reads the
+                // flags through a csel).
                 b = load_arm_reg(block, d.rm);
                 // Same bit21 extended-form test as ADD_REG/SUB_REG above:
                 // `d.extend != 0` miscompiles UXTB (extend=0, the same as
@@ -558,6 +523,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::CSEL: case InstClass::CSINC:
         case InstClass::CSINV: case InstClass::CSNEG: {
             uint16_t rn_v = load_arm_reg(block, d.rn);
+            // AL and NV are always true, and the host condition mapping has no "always": Rd = Rn.
+            if (d.cond >= 0xE) {
+                store_arm_reg(block, d.rd, zext_if_32bit(block, rn_v, d.sf));
+                return false;
+            }
             uint16_t rm_v = load_arm_reg(block, d.rm);
             uint16_t sel_src2 = rm_v;
             if (d.cls == InstClass::CSINC) {

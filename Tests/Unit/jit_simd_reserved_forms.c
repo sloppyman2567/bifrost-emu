@@ -7,12 +7,19 @@
  * below must raise SIGILL, as under QEMU. DUP (general) ignores imm5 bits
  * above the lowest set bit, and vector FCVTZS/FCVTZU saturate infinities
  * instead of returning 0.
+ *
+ * Forms of features Bifrost does not advertise must trap too (found by
+ * Scripts/Testing/sequence_fuzz.py): scalar fixed-point converts with an
+ * FP16 element (immh = 001x) ran as single precision with a wrong scale, and
+ * FP8 BF1CVTL/F2CVTL ran as SQNEG. They are checked only when AT_HWCAP /
+ * AT_HWCAP2 lack the feature, so the binary also passes under QEMU's max CPU.
  */
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/auxv.h>
 
 static sigjmp_buf trap;
 static void on_sigill(int sig) { (void)sig; siglongjmp(trap, 1); }
@@ -40,6 +47,17 @@ int main(void) {
     TRAPS(0x4e001c02);  /* INS v2, x0, imm5 = 0 */
     TRAPS(0x0e041c02);  /* INS general with Q = 0 */
     TRAPS(0x0ee1b802);  /* FCVTZS v2.1d */
+    TRAPS(0x5f08fc02);  /* scalar FCVTZS #fbits, immh = 0001 (reserved) */
+    TRAPS(0x5f08e402);  /* scalar SCVTF #fbits, immh = 0001 (reserved) */
+    if (!(getauxval(AT_HWCAP) & (1ul << 10))) {  /* HWCAP_ASIMDHP */
+        TRAPS(0x5f1dfc02);  /* fcvtzs h2, h0, #3 */
+        TRAPS(0x7f1dfc02);  /* fcvtzu h2, h0, #3 */
+        TRAPS(0x5f10e402);  /* scvtf h2, h0, #16 */
+    }
+    if (!(getauxval(AT_HWCAP2) & (1ul << 51))) {  /* HWCAP2_F8CVT */
+        TRAPS(0x2ea17802);  /* bf1cvtl v2.8h, v0.8b */
+        TRAPS(0x6e617802);  /* f2cvtl2 v2.8h, v0.16b */
+    }
 
     /* DUP v2.16b, w0 with imm5 = 0b00011: byte size, bit 1 ignored. */
     uint8_t out[16];

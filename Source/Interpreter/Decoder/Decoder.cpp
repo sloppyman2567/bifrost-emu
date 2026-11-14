@@ -478,8 +478,10 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rd = inst & 0x1F;
         return true;
     }
-    // Add/subtract (immediate).
+    // Add/subtract (immediate). Bits 23:22 = 1x are other classes (ADDG/SUBG,
+    // FEAT_MTE): not this profile's, so UNDEFINED rather than a plain ADD/SUB.
     case 0x11: {
+        if ((inst >> 23) & 1) return false;
         bool S      = (inst >> 29) & 1;
         d.is_sub    = (inst >> 30) & 1;
         d.set_flags = S;
@@ -488,7 +490,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.shift     = sh ? 12 : 0;
         d.rn        = (inst >> 5) & 0x1F;
         d.rd        = inst & 0x1F;
-        d.reads_sp  = (d.rn == 31 && !S);
+        d.reads_sp  = (d.rn == 31);
         d.writes_sp = (d.rd == 31 && !S);
         if (d.is_sub) d.cls = S ? InstClass::SUBS_IMM : InstClass::SUB_IMM;
         else          d.cls = S ? InstClass::ADDS_IMM : InstClass::ADD_IMM;
@@ -879,7 +881,9 @@ bool decode(DecodedInst& d, uint32_t inst) {
         if (bit21) return false;
         switch (bits23_22) {
             case 0b00: {
-                // ADC/ADCS/SBC/SBCS.
+                // ADC/ADCS/SBC/SBCS: bits 15:10 = 0. RMIF (x00001) and
+                // SETF8/SETF16 (xx0010) are FEAT_FlagM, not advertised.
+                if ((inst >> 10) & 0x3F) return false;
                 bool S = (inst >> 29) & 1;
                 d.is_sub    = (inst >> 30) & 1;
                 d.set_flags = S;
@@ -891,8 +895,9 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 return true;
             }
             case 0b01: {
-                // Cond compare (CCMP/CCMN). Requires bit 29 = 1.
-                if (!bit29) return false;
+                // Cond compare (CCMP/CCMN). Requires bit 29 = 1 and
+                // o2 (bit 10) = o3 (bit 4) = 0.
+                if (!bit29 || ((inst >> 10) & 1) || ((inst >> 4) & 1)) return false;
                 d.is_sub      = (inst >> 30) & 1;
                 // Register vs immediate form is distinguished by bit 11:
                 //   bit 11 = 0 → register form (operand is Rm)

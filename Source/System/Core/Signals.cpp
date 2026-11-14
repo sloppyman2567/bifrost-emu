@@ -292,14 +292,10 @@ int SignalTable::set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t
     }
     // Linux derives SS_ONSTACK from the current SP, rather than trusting
     // the caller's flags or a cached signal-delivery marker.
-    const bool on_stack = !cpu.altstack.disabled() &&
-        cpu.sp > cpu.altstack.sp &&
-        cpu.sp - cpu.altstack.sp <= cpu.altstack.size;
+    const bool on_stack = SignalTable::on_altstack(cpu, cpu.sp);
     const uint64_t old_sp = cpu.altstack.sp;
     const uint64_t old_size = cpu.altstack.size;
-    const uint32_t old_flags = cpu.altstack.disabled()
-        ? CPU::AltStack::SS_DISABLE_EMU
-        : (on_stack ? CPU::AltStack::SS_ONSTACK_EMU : 0);
+    const uint32_t old_flags = SignalTable::altstack_flags(cpu, cpu.sp);
     if (new_addr != 0) {
         if (on_stack) return -EPERM;
         if (new_flags != 0 && new_flags != CPU::AltStack::SS_ONSTACK_EMU &&
@@ -407,8 +403,10 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
                         uint64_t saved_mask, uint64_t fault_addr) {
     if (uc_addr == 0) return 0;
     uint8_t buf[UCONTEXT_SIZE] = {0};
+    // uc_stack as Linux's __save_altstack writes it: ss_flags from the interrupted SP.
+    const uint32_t stack_flags = SignalTable::altstack_flags(cpu, cpu.sp);
     memcpy(buf + 16, &cpu.altstack.sp, 8);
-    memcpy(buf + 24, &cpu.altstack.flags, 4);
+    memcpy(buf + 24, &stack_flags, 4);
     memcpy(buf + 32, &cpu.altstack.size, 8);
     memcpy(buf + 40,  &saved_mask, 8);
     // sigcontext is 16-byte aligned after the 128-byte signal mask.
@@ -483,10 +481,7 @@ bool restore_ucontext(Memory& mem, CPU& cpu, uint64_t uc_addr) {
     }
     cpu.altstack.sp = read64(16);
     cpu.altstack.size = read64(32);
-    cpu.altstack.flags = stack_flags & ~CPU::AltStack::SS_ONSTACK_EMU;
-    if (!cpu.altstack.disabled() && cpu.sp >= cpu.altstack.sp &&
-        cpu.sp - cpu.altstack.sp < cpu.altstack.size)
-        SignalTable::set_altstack_active(cpu, true);
+    cpu.altstack.flags = stack_flags & CPU::AltStack::SS_DISABLE_EMU;
     cpu.excl_clear();
     return true;
 }
@@ -724,12 +719,12 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         }
         return false;
     }
-    // Pick the stack: altstack if SA_ONSTACK is set and the altstack is
-    // configured and not already in use.
+    // Pick the stack (Linux sigsp): the altstack if SA_ONSTACK is set, it is
+    // configured and SP is not already on it.
     uint64_t target_sp = cpu.sp;
     bool on_altstack = false;
     if ((act_flags & SA_ONSTACK_EMU) &&
-        !cpu.altstack.disabled() && !cpu.altstack.active()) {
+        !cpu.altstack.disabled() && !SignalTable::on_altstack(cpu, cpu.sp)) {
         target_sp = cpu.altstack.top();
         on_altstack = true;
     }
@@ -772,9 +767,6 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     // Hardware clears the exclusive monitor on exception entry: a stale
     // LDXR reservation must not succeed across handler execution.
     cpu.excl_clear();
-    if (on_altstack) {
-        SignalTable::set_altstack_active(cpu, true);
-    }
     // Compute the new mask: current mask | sa_mask | signo (unless
     // SA_NODEFER is set, which allows the handler to be re-entered).
     uint64_t new_mask = saved_mask | act_mask;

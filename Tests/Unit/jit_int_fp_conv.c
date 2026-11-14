@@ -62,6 +62,17 @@ static const uint32_t ucvtf_cases[][2] = {
     {0x40000041, 0x4e800001},
 };
 
+/* ── SCVTF/UCVTF from WZR/XZR: +0.0 with the rest of Vd cleared ──────
+ * Plain and fixed-point forms. The JIT read register 31 as SP (found by
+ * Scripts/Testing/sequence_fuzz.py: ucvtf d23, xzr, #30 gave 2^34). */
+#define ZERO_FORM(insn) "movi v0.2d, #0xffffffffffffffff\n " insn "\n st1 {v0.2d}, [%0], #16\n"
+__attribute__((noinline)) void convert_zero_register(uint64_t *out) {
+    asm volatile(ZERO_FORM("scvtf s0, wzr") ZERO_FORM("scvtf d0, xzr") ZERO_FORM("ucvtf s0, xzr")
+                 ZERO_FORM("ucvtf d0, wzr") ZERO_FORM("scvtf s0, xzr, #1") ZERO_FORM("ucvtf d0, xzr, #30")
+                 ZERO_FORM("ucvtf s0, wzr, #15") ZERO_FORM("scvtf d0, wzr, #32")
+                 : "+r"(out) :: "v0", "memory");
+}
+
 /* ── SCVTF (signed int → FP) ─────────────────────────────────────── */
 __attribute__((noinline)) float scvtf_w(int32_t i) {
     float f;
@@ -238,6 +249,20 @@ int main(void) {
             }
         }
     CHECK(vector_ok, "ucvtf v.4s/v.2s ties");
+
+    {
+        uint64_t zero_out[16];
+        memset(zero_out, 0xa5, sizeof(zero_out));
+        convert_zero_register(zero_out);
+        int zero_ok = 1;
+        for (int k = 0; k < 16; k++)
+            if (zero_out[k]) {
+                printf("cvtf from zero register, form %d half %d: %016llx\n", k / 2, k & 1,
+                       (unsigned long long)zero_out[k]);
+                zero_ok = 0;
+            }
+        CHECK(zero_ok, "scvtf/ucvtf from wzr/xzr, plain and #fbits");
+    }
 
     /* ── Summary ────────────────────────────────────────────────── */
     if (fails == 0) printf("\nALL TESTS PASSED\n");

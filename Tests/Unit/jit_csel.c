@@ -100,6 +100,32 @@ static int cset_forms_ok(void) {
     return bad == 0;
 }
 
+/* AL and NV are always true: CSEL/CSINC/CSINV/CSNEG give Rn whatever NZCV
+ * holds. The JIT selected on Z for both (x86 has no "always" condition;
+ * found by Scripts/Testing/sequence_fuzz.py: csinc w7, w3, w3, al). */
+#define ALWAYS(cc) __asm__ volatile("msr nzcv, %[x]\n" \
+    "csel %[r0], %[a], %[b], " #cc "\n csinc %[r1], %[a], %[b], " #cc "\n" \
+    "csinv %w[r2], %w[a], %w[b], " #cc "\n csneg %w[r3], %w[a], %w[b], " #cc \
+    : [r0] "=&r"(o[0]), [r1] "=&r"(o[1]), [r2] "=&r"(o[2]), [r3] "=&r"(o[3]) \
+    : [x] "r"(x), [a] "r"(a), [b] "r"(b) : "cc")
+__attribute__((noinline)) static void always_al(uint64_t x, uint64_t a, uint64_t b, uint64_t *o) { ALWAYS(al); }
+__attribute__((noinline)) static void always_nv(uint64_t x, uint64_t a, uint64_t b, uint64_t *o) { ALWAYS(nv); }
+static int always_forms_ok(void) {
+    const uint64_t a = 0xdead0000beef1234ULL, b = 0xfeed00004321cafeULL;
+    const uint64_t want[4] = {a, a, a & 0xffffffffULL, a & 0xffffffffULL};
+    int bad = 0;
+    for (int f = 0; f < 2; f++)
+        for (uint64_t i = 0; i < 16; i++) {
+            uint64_t o[4];
+            (f ? always_nv : always_al)(i << 28, a, b, o);
+            for (int k = 0; k < 4; k++)
+                if (o[k] != want[k] && ++bad <= 8)
+                    printf("NG %s form %d nzcv %llx: %llx want %llx\n", f ? "nv" : "al", k,
+                           (unsigned long long)i, (unsigned long long)o[k], (unsigned long long)want[k]);
+        }
+    return bad == 0;
+}
+
 __attribute__((optimize("O1")))
 int main(void) {
     /* ── Basic CSEL: max/min ──────────────────────────────────────── */
@@ -250,6 +276,7 @@ int main(void) {
     }
 
     CHECK(cset_forms_ok(), "cset_csetm_cinc_csel_w_all_conditions");
+    CHECK(always_forms_ok(), "csel_csinc_csinv_csneg_al_nv");
 
     printf("csel: %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

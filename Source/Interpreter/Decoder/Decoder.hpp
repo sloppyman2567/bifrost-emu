@@ -194,8 +194,10 @@ struct DecodedInst {
     bool     is_vec = false;    // true for SIMD/FP, false for GP
     bool     set_flags = false; // true for ADDS/SUBS/ANDS
     // ── SP / XZR disambiguation ──
-    // For ADD/SUB immediate: Rn==31 reads SP (not XZR) when !set_flags.
-    // Rd==31 writes SP (not XZR) when !set_flags.
+    // ADD/SUB(S) immediate and extended register: Rn==31 reads SP (not XZR),
+    // flag-setting forms included (ADDS <Xd>, <Xn|SP>; CMP/CMN <Xn|SP>).
+    // Rd==31 writes SP (not XZR) only when !set_flags. Both engines take
+    // the SP choice from here.
     bool     reads_sp = false;  // source Rn is SP (not XZR)
     bool     writes_sp = false; // destination Rd is SP (not XZR)
     // ── Immediates ──

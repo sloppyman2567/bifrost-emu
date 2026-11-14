@@ -361,15 +361,7 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     }
     mem_.write(sp, rnd, 16);
     uint64_t random_addr = sp;
-    // AT_HWCAP bits for AArch64:
-    //   bit 0: FP, bit 1: ASIMD, bit 7: CRC32, bit 8: LSE atomics.
-    // We advertise FP + ASIMD + CRC32 + LSE atomics (glibc needs these).
-    // We do NOT advertise BTI or PAC/PTRAUTH.
-    const uint64_t HWCAP_FP      = 1ULL << 0;
-    const uint64_t HWCAP_ASIMD   = 1ULL << 1;
-    const uint64_t HWCAP_CRC32   = 1ULL << 7;
-    const uint64_t HWCAP_ATOMICS = 1ULL << 8;
-    uint64_t hwcap = HWCAP_FP | HWCAP_ASIMD | HWCAP_CRC32 | HWCAP_ATOMICS;
+    const uint64_t hwcap = kGuestHwcap;
     // Linux AT_EXECFN names the executable path, independently of argv[0].
     const std::string execfn = elf_path_;
     sp -= execfn.size() + 1;

@@ -51,6 +51,33 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (instructions the JIT and the interpreter ran differently from QEMU and the Arm manual)
+
+- A new differential fuzzer, `Scripts/Testing/sequence_fuzz.py`, runs random straight-line A64 sequences (data processing
+  with immediates, data processing with registers, scalar FP and Advanced SIMD) under QEMU, the JIT and the interpreter and
+  compares every register. `make verify` compares only the JIT with the interpreter, which share one decoder, so it could
+  not see these. Each finding below but the last has a named regression, and each of them passes under QEMU, the JIT and
+  `--no-jit` (2026-11-13).
+- `ADDS`, `SUBS`, `CMP` and `CMN` with an immediate now read SP for register 31, as Arm defines; the decoder, the
+  interpreter and the JIT all read XZR (`adds x1, sp, #0x1ac` gave 0x1ac). Add/subtract immediate words with bit 23 set
+  (ADDG and SUBG, FEAT_MTE) raise SIGILL, as MTE is not advertised. Test: `jit_addsub_sp_operand`.
+- `CSEL`, `CSINC`, `CSINV` and `CSNEG` with the AL or NV condition now give Rn whatever the flags hold; the JIT selected
+  on Z. Test: `jit_csel`.
+- `SCVTF` and `UCVTF` from WZR or XZR, plain and fixed-point, now give +0.0 with the rest of the register cleared; the JIT read
+  register 31 as SP (`ucvtf d23, xzr, #30` gave 2^34). Test: `jit_int_fp_conv`.
+- Encodings of features Bifrost does not advertise now raise SIGILL instead of running as another instruction: ADC and SBC
+  with bits 15:10 set (RMIF, SETF8 and SETF16 are FEAT_FlagM), CCMP and CCMN with the reserved bits 10 or 4 set, scalar
+  fixed-point converts with a half-precision or reserved `immh`, and the FP8 `BF1CVTL`/`F2CVTL` forms that ran as `SQNEG`.
+  Tests: `jit_unallocated_dp_register`, `jit_simd_reserved_forms`.
+- The alternate signal stack is "in use" when SP is inside it, as in Linux, not when a flag set at delivery says so. A handler
+  that leaves through `siglongjmp` never runs `rt_sigreturn`, so the flag stayed set and the next `SA_ONSTACK` signal ran on the
+  ordinary stack. The frame's `uc_stack.ss_flags` and `sigaltstack()` report the same state. Test: `test_sigaltstack`.
+- `execve` passes the same `AT_HWCAP` as a first start, one shared constant (it passed 0x3ff, a different profile from
+  startup's FP, ASIMD, CRC32 and atomics), and an `AT_HWCAP2` of 0.
+- Limits: QEMU is a reference, not the Arm manual. The sequences hold no loads, stores or branches, and only words that
+  QEMU and Bifrost both execute are used, so a clean run proves nothing about other encodings. The IEEE cumulative exception
+  flags of FPSR are left out of the comparison by default (Bifrost does not raise them).
+
 ### Fixed (an app's pointer icons show)
 
 - The desktop pointer now takes the shape an app asks for over its windows (2026-11-12): the hand over a link or button

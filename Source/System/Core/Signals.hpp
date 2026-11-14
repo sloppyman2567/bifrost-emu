@@ -193,9 +193,16 @@ public:
                         uint64_t old_set_addr, size_t sigsetsize);
     // Set/query `cpu.altstack`. Returns 0 on success, -errno on failure.
     static int set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t old_addr);
-    static void set_altstack_active(CPU& cpu, bool active) {
-        if (active) cpu.altstack.flags |= CPU::AltStack::SS_ONSTACK_EMU;
-        else        cpu.altstack.flags &= ~CPU::AltStack::SS_ONSTACK_EMU;
+    // Linux on_sig_stack/sas_ss_flags (include/linux/sched/signal.h): whether `sp` is on the alternate stack, from
+    // the stack pointer alone. A handler that leaves through siglongjmp never calls rt_sigreturn, so no marker set at
+    // delivery could tell that it left.
+    static bool on_altstack(const CPU& cpu, uint64_t sp) {
+        return !cpu.altstack.disabled() && sp > cpu.altstack.sp && sp - cpu.altstack.sp <= cpu.altstack.size;
+    }
+    // ss_flags as sigaltstack(2) and a signal frame's uc_stack report them.
+    static uint32_t altstack_flags(const CPU& cpu, uint64_t sp) {
+        if (cpu.altstack.disabled()) return CPU::AltStack::SS_DISABLE_EMU;
+        return on_altstack(cpu, sp) ? CPU::AltStack::SS_ONSTACK_EMU : 0;
     }
     // Clear a handler (SA_RESETHAND one-shot behavior).
     void clear_handler(int signo) {
