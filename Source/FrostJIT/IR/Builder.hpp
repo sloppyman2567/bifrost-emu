@@ -347,7 +347,8 @@ inline uint16_t load_imm(IRBlock& b, uint64_t val) {
 }
 // Read an ARM64 reg into a fresh vreg.
 // `is_sp` controls the reg-31 mapping:
-//   - For ADD/SUB immediate: reg 31 = SP (is_sp=true)
+//   - For ADD/SUB(S) immediate and extended register: reg 31 = SP
+//     (is_sp = the decoder's d.reads_sp; shifted register reads XZR)
 //   - For load/store data regs: reg 31 = XZR (is_sp=false)
 //   - For data processing (logical/shift): reg 31 = XZR (is_sp=false)
 inline uint16_t load_arm_reg(IRBlock& b, uint8_t ar, bool is_sp = false) {
@@ -490,7 +491,7 @@ uint16_t rbit64_ir(IRBlock& b, uint16_t v);
 uint16_t rbit32_ir(IRBlock& b, uint16_t v);
 uint16_t rev16_64_ir(IRBlock& b, uint16_t v);
 uint16_t rev32_64_ir(IRBlock& b, uint16_t v);
-// ── Translator dispatch helpers (defined in ir_translate_*.cpp) ─────────
+// ── Translator dispatch helpers (defined in Translate/*.cpp) ─────────
 // translate_to_ir() delegates FP/SIMD and memory load/store cases to these
 // helpers. Each returns `true` if it handled `d.cls` (in which case
 // translate_to_ir returns false — none of the extracted cases terminate a

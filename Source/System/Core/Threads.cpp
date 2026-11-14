@@ -358,16 +358,10 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     gt->cpu.excl_tag_valid = false;  // fresh exclusive monitor
     gt->cpu.decode_cache_hits = 0;
     gt->cpu.decode_cache_misses = 0;
-    // BUGFIX: per Linux semantics, a cloned thread starts with an EMPTY
-    // pending signal set and a DISABLED altstack. The previous code
-    // inherited the parent's sigpending and altstack verbatim, which
-    // caused two bugs:
-    //   (1) If the parent had a signal pending (e.g., SIGSEGV being
-    //       delivered), the child would also "have it pending" and
-    //       spuriously run the handler when it unblocked.
-    //   (2) If the parent was ON the altstack when it called clone,
-    //       the child would believe it's already on an altstack and
-    //       deliver future signals to a stack it doesn't own.
+    // A cloned thread starts with an empty pending signal set and a
+    // disabled altstack: a signal pending in the parent must not run the
+    // handler a second time in the child, and the child must not deliver
+    // its signals to a stack the parent owns.
     gt->cpu.sigpending.store(0);
     gt->cpu.altstack = CPU::AltStack{};
     // The child must not inherit stale decode cache entries from the

@@ -3,7 +3,7 @@
 // split into multiple files for readability.
 // further split — ALU/memory/branch cases extracted
 //   from compile_ir_inst()'s switch into three sub-dispatchers
-//   (compile_ir_{alu,mem,branch}) defined in jit_codegen_{alu,mem,branch}.cpp.
+//   (compile_ir_{alu,mem,branch}) defined in CodeGen/Integer/{Arithmetic,Memory,Branch}.cpp.
 //   This file holds:
 //   - compile-time layout checks (CPU struct offsets)
 //   - thread-local watchdog/hotness state
@@ -291,7 +291,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
     bool ends_block = compile_ir_inst_fp_(inst);
     if (fp_handled_) return ends_block;
     // ALU / memory / branch cases are dispatched
-    // to compile_ir_{alu,mem,branch}() (defined in jit_codegen_*.cpp)
+    // to compile_ir_{alu,mem,branch}() (defined in CodeGen/Integer/*.cpp)
     // before the residual switch below. Each sub-dispatcher returns:
     //   -1 = not handled here (fall through to the next dispatcher)
     //    0 = handled, does NOT end the block (compile_ir_inst returns false)

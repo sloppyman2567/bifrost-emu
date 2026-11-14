@@ -78,6 +78,16 @@ channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffe
   QEMU and Bifrost both execute are used, so a clean run proves nothing about other encodings. The IEEE cumulative exception
   flags of FPSR are left out of the comparison by default (Bifrost does not raise them).
 
+### Fixed (stale source comments and a broken import)
+
+- Comments that named files, functions and generators that no longer exist now name the current ones (the interpreter and
+  JIT dispatch notes, the generated-table includes, `compile_ir_inst`, `top_up_queue`, `IRInst::make_bf`, the config loader),
+  and history-style notes in the integer translator and thread creation state the present contract (2026-11-13). Found by a
+  scripted check of comment paths, `BIFROST_*` names and `name()` references; it does not catch a comment that is wrong in
+  prose.
+- `Scripts/Testing/check_doom3_gl.py` imported `glxmlcheck` through a `Tools/opgen` path that no longer exists, so it
+  failed at import; it uses `Tools/CodeGen` now (it starts and prints its help; not run against a dhewm3 source tree).
+
 ### Fixed (an app's pointer icons show)
 
 - The desktop pointer now takes the shape an app asks for over its windows (2026-11-12): the hand over a link or button

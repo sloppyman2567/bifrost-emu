@@ -4,7 +4,8 @@
 //
 //   ARM64 block → translate_to_ir() → IRBlock
 //                → optimize_ir()     → smaller IRBlock
-//                → compile_block()   → native x86-64 code in code_buf_
+//                → compile_ir_inst() → native x86-64 code in code_buf_
+//                  (per op, driven by Compiler/BlockCompiler.cpp)
 //
 // The compiled block is a function:
 //
@@ -1922,11 +1923,10 @@ private:
     void emit_call_vdso_clock(uint64_t arm_pc);
     void emit_call_native_svc(uint64_t arm_pc);
     // compile_ir_inst — the main IR-op→x86 switch.
-    // split into two files for readability. The dispatch stays in
-    // FrostJIT.cpp; FP/SIMD cases are delegated to compile_ir_inst_fp_()
-    // in Dispatch.cpp, and integer/memory/branch cases stay in
-    // compile_ir_inst() in jit_codegen_int.cpp. The split is purely
-    // organizational — no behavior change.
+    // The dispatch is in Compiler/FrostJIT.cpp; FP/SIMD cases are delegated
+    // to compile_ir_inst_fp_() (CodeGen/FloatSIMD/Dispatch.cpp) and
+    // memory/ALU/branch cases to compile_ir_{mem,alu,branch}()
+    // (CodeGen/Integer/); the residual integer switch stays in FrostJIT.cpp.
     //
     // Returns true if the block should end after this op (branch/call),
     // false otherwise.

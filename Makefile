@@ -427,7 +427,7 @@ verify: $(TARGET) test-ir-ssa test-native-simd-helpers
 
 
 # Cross-compile a test program with the bundled musl toolchain.
-# Usage: make cross SRC=Tests/Apps/hello.c OUT=Tests/Apps/hello.elf
+# Usage: make cross SRC=Tests/Unit/jit_csel.c OUT=Tests/Unit/jit_csel.elf
 cross:
 	@if [ -z "$(SRC)" ] || [ -z "$(OUT)" ]; then \
 	echo "Usage: make cross SRC=<file.c> OUT=<file.elf>"; exit 1; \

@@ -81,7 +81,7 @@ struct AudioThunkImpl {
         // on a full ring) keeps music gap-free, makes
         // SDL_GetQueuedAudioSize report the device's true backlog, and
         // lets SDL_PauseAudioDevice actually gate playback. Drained to
-        // the ring lazily by top_up_queue_() from audio-thunk dispatches
+        // the ring lazily by top_up_queue() from audio-thunk dispatches
         // on the guest thread when pump mode is disabled.
         std::vector<uint8_t> pending;
         size_t pending_off = 0;

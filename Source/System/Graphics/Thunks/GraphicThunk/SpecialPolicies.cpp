@@ -68,8 +68,8 @@ std::optional<int64_t> GraphicThunk::dispatch_special_policies_(CPU& cpu, const 
             if (!strcmp(nm, "SDL_qsort") && dbg().thunk_trace) {
                 // Safe stub: the generic path would hand the AArch64
                 // comparator to host qsort (SIGSEGV on first compare), so
-                // this row is SDL_STUB0 and sorts nothing. No Tests/Unit/src
-                // caller depends on it; a borrow-CPU comparator arm would
+                // this row is SDL_STUB0 and sorts nothing. No test under
+                // Tests/ calls it; a borrow-CPU comparator arm would
                 // be disproportionate until a real game needs it.
                 fprintf(stderr, "[thunk] SDL_qsort: no-op, array left "
                         "unsorted (guest comparator cannot run on host)\n");

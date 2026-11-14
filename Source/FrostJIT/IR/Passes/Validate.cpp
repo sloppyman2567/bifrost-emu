@@ -1088,7 +1088,7 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
             case IROp::SBFM:
             case IROp::UBFM: {
                 // immr/imms/sf only; width/cond/flags_op/imm are always 0
-                // (emit_bf never sets them; codegen derives 32/64 from sf).
+                // (IRInst::make_bf never sets them; codegen derives 32/64 from sf).
                 const char* name = (inst.op == IROp::SBFM) ? "SBFM" : "UBFM";
                 if (inst.width != 0 || inst.cond != 0 ||
                     inst.flags_op != 0 || inst.imm != 0) {

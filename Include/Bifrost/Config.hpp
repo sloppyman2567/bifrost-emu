@@ -129,8 +129,8 @@ struct Config {
     // `path` is "-" for stdin, or a filesystem path. Missing files are
     // NOT an error — they just leave the Config unchanged.
     bool load_from_file(const std::string& path, std::string& err);
-    // Load a config from a string (same format as the file). Used by
-    // tests and by the C API's bifrost_config_load_string().
+    // Load a config from a string (same format as the file). load_from_file
+    // reads the file and calls this.
     bool load_from_string(const std::string& text, std::string& err);
     // Apply env vars on top of the current config. BIFROST_FOO=1 sets
     // the corresponding bool to true (or, for inverted knobs like

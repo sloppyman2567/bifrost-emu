@@ -113,7 +113,7 @@ struct SimdMulElemParams {
     bool q = false;     // (flags_op)
 };
 // Bitfield ops (SBFM/UBFM): immr/imms/sf only (width is always 0 —
-// emit_bf never sets it and codegen derives 32/64 from sf). The opcode
+// IRInst::make_bf never sets it and codegen derives 32/64 from sf). The opcode
 // selects signed vs unsigned, so the factory takes it (like shifts).
 struct BfParams {
     uint8_t immr = 0;  // rotate amount (immr)

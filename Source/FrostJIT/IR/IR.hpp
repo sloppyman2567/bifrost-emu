@@ -327,7 +327,7 @@ enum class IROp : uint8_t {
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v[src1].lo)
                    // imm = 0 (signed), 1 (unsigned); width = ftype
-                   // flags_op = sf (JIT ignores this; ir_translate emits
+                   // flags_op = sf (JIT ignores this; the translator emits
                    //                an explicit ZEXT after FP_F2I when sf=0)
     FP_I2F,        // v[dest].lo = (float/double)(regs[src1]); v_hi=0
                    // imm = 0 (signed), 1 (unsigned); width = ftype
