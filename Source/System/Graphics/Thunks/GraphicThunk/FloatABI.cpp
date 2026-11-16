@@ -37,7 +37,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
     }
     // SDL's mixed FP APIs also have pointer-width and return-value contracts
     // that cannot be represented by the legacy int32/void GL setter casts.
-    if (entry.name == "SDL_CalculateGammaRamp") {
+    if (entry.sym == Sym::SDL_CalculateGammaRamp) {
         float gamma; std::memcpy(&gamma, &cpu.v[0].lo, 4);
         uint16_t ramp[256];
         reinterpret_cast<void (*)(float, uint16_t*)>(entry.host_fn)(gamma, ramp);
@@ -45,7 +45,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         cpu.regs[0] = 0;
         return 0;
     }
-    if (entry.name == "SDL_RenderSetScale") {
+    if (entry.sym == Sym::SDL_RenderSetScale) {
         float x, y;
         std::memcpy(&x, &cpu.v[0].lo, 4); std::memcpy(&y, &cpu.v[1].lo, 4);
         int rc = reinterpret_cast<int (*)(void*, float, float)>(entry.host_fn)(
@@ -53,7 +53,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         cpu.regs[0] = static_cast<int64_t>(rc);
         return 0;
     }
-    if (entry.name == "SDL_RenderCopyEx") {
+    if (entry.sym == Sym::SDL_RenderCopyEx) {
         int32_t src[4], dst[4], center[2];
         if (cpu.regs[2]) impl_->mem->read(cpu.regs[2], src, sizeof(src));
         if (cpu.regs[3]) impl_->mem->read(cpu.regs[3], dst, sizeof(dst));
@@ -217,7 +217,7 @@ std::optional<int64_t> GraphicThunk::dispatch_float_abi_(CPU& cpu, const SymbolE
         // registered mixed GL setter whose float precedes its integer in
         // the AArch64 prototype. The generic mixed path handles integer
         // arguments first, so preserve this function's actual ABI order.
-        if (entry.name == "glSampleCoverage" && ni == 1 &&
+        if (entry.sym == Sym::glSampleCoverage && ni == 1 &&
             entry.n_float == 1) {
             using Fn = void (*)(float, uint8_t);
             reinterpret_cast<Fn>(entry.host_fn)(

@@ -89,6 +89,11 @@
   `stale_textures_` for that context's next bind.
 - A native fence is a host `sync_file`: `AndroidNativeFences` publishes it as a guest descriptor and translates a guest
   fd before the driver takes ownership. Never pass a guest fd number to the driver. `gles_native_fence` covers this.
+- `GraphicThunk::dispatch` and its helpers never compare symbol names with strings: each entry carries `SymbolEntry::sym`
+  (`Thunks/SymbolIds.hpp`, set once in `GraphicThunk::register_symbol`) and two `pixel_xfer` bits for the texture
+  upload and readback families. To test a name in dispatch, add it to `BIFROST_GRAPHIC_SYMS` and compare
+  `entry.sym == Sym::glName`; a typo does not compile. A string compare per call cost about 39% of a game's CPU
+  (2026-11-16), and `sym` is `Sym::None` for entries other thunks registered, so use it only on GraphicThunk entries.
 - Graphics symbol ids use two banks (`0x0000` and `0x3000`, 8192 entries);
   every soname registration takes one.
 - Preserve stack/FP argument ABI, nested pointer arrays and string returns.

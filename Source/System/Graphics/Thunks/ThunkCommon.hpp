@@ -22,6 +22,7 @@
 // it tries GraphicThunk first, then AudioThunk, then DisplayThunk.
 // (Each thunk has its own symbol_id namespace, starting from 0.)
 #pragma once
+#include "SymbolIds.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Memory/Memory.hpp"
 #include <cstdint>
@@ -90,6 +91,10 @@ struct SymbolEntry {
     bool        tracks_state = false;
     // Vulkan only: which ASTC-emulation hook (VulkanAstc::Hook) this command takes, 0 for none.
     uint8_t     vk_hook = 0;
+    // GraphicThunk only (SymbolIds.hpp): the id of the names its dispatcher tests, and the pixel-transfer bits, both
+    // computed at registration so a call compares integers, not strings. Left at the defaults by the other thunks.
+    Sym         sym = Sym::None;
+    uint8_t     pixel_xfer = 0;
 };
 // Write a 16-byte trampoline at the given guest address for the given
 // sym_id. Used by all three thunks.

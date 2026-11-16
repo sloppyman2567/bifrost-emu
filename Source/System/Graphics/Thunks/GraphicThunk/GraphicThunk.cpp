@@ -161,6 +161,8 @@ void GraphicThunk::register_function_(const std::string& lib,
     lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args,
                            n_stack, n_float, flags, spec,
                            GLStateTracker::tracks_state(sym)});
+    lt->entries.back().sym = sym_from_name(sym);
+    lt->entries.back().pixel_xfer = pixel_transfer_flags(sym);
     impl_->id_to_idx_.push_back({
         static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)

@@ -3,7 +3,7 @@
 #include "System/Graphics/Thunks/GraphicThunk/GraphicThunkInternal.hpp"
 namespace arm64emu {
 std::optional<int64_t> GraphicThunk::dispatch_special_policies_(CPU& cpu, const SymbolEntry& entry) {
-    if (entry.name == "SDL_GetKeyboardState") {
+    if (entry.sym == Sym::SDL_GetKeyboardState) {
         uint64_t out = cpu.regs[0];
         uint64_t guest = impl_->refresh_keyboard();
         int count;
@@ -90,7 +90,7 @@ std::optional<int64_t> GraphicThunk::dispatch_special_policies_(CPU& cpu, const 
         }
         if (pol == thunk::Policy::THREAD_ID) {
             // SDL_Thread handles belong to our guest runner, never host SDL.
-            cpu.regs[0] = (entry.name == "SDL_ThreadID" || cpu.regs[0] == 0)
+            cpu.regs[0] = (entry.sym == Sym::SDL_ThreadID || cpu.regs[0] == 0)
                 ? static_cast<uint64_t>(cpu.tid)
                 : (impl_->sdl_thread_runner_
                     ? impl_->sdl_thread_runner_(cpu, 3, cpu.regs[0], 0, 0) : 0);
@@ -98,7 +98,7 @@ std::optional<int64_t> GraphicThunk::dispatch_special_policies_(CPU& cpu, const 
         }
         if (pol == thunk::Policy::SDL_EVENT_FILTER) {
 #if defined(BIFROST_THUNK_HAVE_SDL2)
-            if (entry.name == "SDL_SetEventFilter") {
+            if (entry.sym == Sym::SDL_SetEventFilter) {
                 {
                     std::lock_guard<std::mutex> lock(impl_->state_mu);
                     impl_->sdl_filter_fn_ = cpu.regs[0];

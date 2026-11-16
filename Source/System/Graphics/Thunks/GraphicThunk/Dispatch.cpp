@@ -150,14 +150,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.spec && entry.spec->policy == thunk::Policy::SDL_SURFACE) {
         uint64_t window = cpu.regs[0];
         cpu.regs[0] = impl_->surface_bridge.dispatch(*impl_->mem, cpu, entry.name);
-        if (cpu.regs[0] == 0 && (entry.name == "SDL_UpdateWindowSurface" || entry.name == "SDL_UpdateWindowSurfaceRects"))
+        if (cpu.regs[0] == 0 && (entry.sym == Sym::SDL_UpdateWindowSurface || entry.sym == Sym::SDL_UpdateWindowSurfaceRects))
             window_stats::sdl_present(reinterpret_cast<void*>(window), "SDL surface");
         return 0;
     }
-    if (entry.name == "SDL_DestroyWindow") window_stats::forget(reinterpret_cast<void*>(cpu.regs[0]));
-    if (entry.name == "SDL_DestroyWindow" || entry.name == "SDL_SetWindowSize")
+    if (entry.sym == Sym::SDL_DestroyWindow) window_stats::forget(reinterpret_cast<void*>(cpu.regs[0]));
+    if (entry.sym == Sym::SDL_DestroyWindow || entry.sym == Sym::SDL_SetWindowSize)
         impl_->surface_bridge.forget_window(*impl_->mem, cpu.regs[0]);
-    if (entry.name == "SDL_Quit") impl_->surface_bridge.clear(*impl_->mem);
+    if (entry.sym == Sym::SDL_Quit) impl_->surface_bridge.clear(*impl_->mem);
 #else
     if (entry.spec && entry.spec->policy == thunk::Policy::SDL_SURFACE) {
         cpu.regs[0] = 0;
@@ -176,7 +176,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // Mesa rejects eglCreateWindowSurface cross-connection.
     static const bool no_disp_subst =
         (getenv("BIFROST_NO_DISPLAY_SUBST") != nullptr);
-    if (entry.name == "eglGetDisplay" && !no_disp_subst) {
+    if (entry.sym == Sym::eglGetDisplay && !no_disp_subst) {
         auto& mgr = frost::AndroidSurfaceManager::instance();
         if (cpu.regs[0] == 0 && mgr.ready()) {
             if (void* display = mgr.native_display())
@@ -189,7 +189,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // host EGL creates a real window surface. eglSwapBuffers then presents
     // through the normal host path with no further interception.
     uint64_t android_surface_handle = 0;
-    if (entry.name == "eglCreateWindowSurface") {
+    if (entry.sym == Sym::eglCreateWindowSurface) {
         auto& mgr = frost::AndroidSurfaceManager::instance();
         if ((android_surface_handle = mgr.surface_handle(cpu.regs[2]))) {
             uint64_t hw = mgr.host_native_window(android_surface_handle);
@@ -311,7 +311,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.spec) {
         thunk::Policy mpol = entry.spec->policy;
         if (mpol == thunk::Policy::MAP_BUFFER) {
-            bool is_range = (entry.name == "glMapBufferRange");
+            bool is_range = (entry.sym == Sym::glMapBufferRange);
             uint32_t target = static_cast<uint32_t>(args[0]);
             uint32_t access = static_cast<uint32_t>(is_range ? args[3] : args[1]);
             if (!is_range) {
@@ -601,26 +601,26 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // SDL event/out-int buffers are small fixed ABI objects. Reading
         // a generic 64 KiB bounce across a callback stack's guard page
         // fails and substitutes zeros, silently losing nested input.
-        if (idx == 0 && (entry.name == "SDL_PushEvent" ||
-                         entry.name == "SDL_PollEvent" ||
-                         entry.name == "SDL_WaitEvent" ||
-                         entry.name == "SDL_WaitEventTimeout"))
+        if (idx == 0 && (entry.sym == Sym::SDL_PushEvent ||
+                         entry.sym == Sym::SDL_PollEvent ||
+                         entry.sym == Sym::SDL_WaitEvent ||
+                         entry.sym == Sym::SDL_WaitEventTimeout))
             kBounce = sizeof(SDL_Event);
-        if ((entry.name == "SDL_GetMouseState" ||
-             entry.name == "SDL_GetRelativeMouseState") && idx < 2)
+        if ((entry.sym == Sym::SDL_GetMouseState ||
+             entry.sym == Sym::SDL_GetRelativeMouseState) && idx < 2)
             kBounce = sizeof(int);
 #endif
 #if defined(BIFROST_THUNK_HAVE_SDL2)
-        if ((entry.name == "SDL_GetWindowPosition" ||
-             entry.name == "SDL_GetWindowSize") && idx >= 1)
+        if ((entry.sym == Sym::SDL_GetWindowPosition ||
+             entry.sym == Sym::SDL_GetWindowSize) && idx >= 1)
             kBounce = sizeof(int);
-        if (entry.name == "SDL_GetDisplayDPI" && idx >= 1)
+        if (entry.sym == Sym::SDL_GetDisplayDPI && idx >= 1)
             kBounce = sizeof(float);
-        if (entry.name == "SDL_GetWindowDisplayMode" && idx == 1)
+        if (entry.sym == Sym::SDL_GetWindowDisplayMode && idx == 1)
             kBounce = sizeof(SDL_DisplayMode);
-        if (entry.name == "SDL_SetTextInputRect" && idx == 0)
+        if (entry.sym == Sym::SDL_SetTextInputRect && idx == 0)
             kBounce = sizeof(SDL_Rect);
-        if (entry.name == "SDL_GetWindowGammaRamp" && idx >= 1)
+        if (entry.sym == Sym::SDL_GetWindowGammaRamp && idx >= 1)
             kBounce = 256 * sizeof(uint16_t);
 #endif
         // Padded row extent the host driver accesses on pixel-transfer
@@ -865,7 +865,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         default:
             break;
         }
-        if (entry.name == "glTexImage2D" && dbg().thunk_trace) {
+        if (entry.sym == Sym::glTexImage2D && dbg().thunk_trace) {
             static int tex_trace_n = 0;
             if (tex_trace_n++ < 80) {
                 fprintf(stderr,
@@ -927,23 +927,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // Leave them untouched so host GL can interpret them relative to the
     // currently bound PBO. This covers the sized paths and other registered
     // texture transfer calls whose signature still carries a pointer.
-    auto starts_with = [&](const char* prefix) {
-        return entry.name.compare(0, std::strlen(prefix), prefix) == 0;
-    };
-    const bool pixel_unpack_call =
-        starts_with("glTexImage") || starts_with("glTexSubImage") ||
-        starts_with("glCompressedTexImage") ||
-        starts_with("glCompressedTexSubImage") ||
-        starts_with("glTextureSubImage") ||
-        starts_with("glCompressedTextureSubImage") ||
-        entry.name == "glDrawPixels" || entry.name == "glBitmap" ||
-        starts_with("glColorTable");
-    const bool pixel_pack_call =
-        entry.name == "glReadPixels" || starts_with("glGetTexImage") ||
-        starts_with("glGetCompressedTexImage") ||
-        starts_with("glGetnTexImage") || entry.name == "glReadnPixels" ||
-        starts_with("glGetTextureImage") ||
-        starts_with("glGetCompressedTextureImage");
+    // The families are matched by name once, at registration (SymbolIds.hpp).
+    const bool pixel_unpack_call = (entry.pixel_xfer & kPixelUnpack) != 0;
+    const bool pixel_pack_call = (entry.pixel_xfer & kPixelPack) != 0;
     bool pixel_data_is_pbo_offset = false;
     if (impl_->tracker()) {
         constexpr uint32_t pixel_pack_buffer_target = 0x88EB;
@@ -962,7 +948,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.spec && entry.spec->policy == thunk::Policy::DELETE_TRACK &&
         impl_->tracker() && impl_->mem) {
         auto* trk = impl_->tracker();
-        if (entry.name == "glDeleteTextures") {
+        if (entry.sym == Sym::glDeleteTextures) {
             uint64_t n = args[0] & 0xFFFFFFFFu;
             if (n > 0 && n <= 4096 && args[1]) {
                 std::vector<uint32_t> ids(static_cast<size_t>(n));
@@ -973,9 +959,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             } else if (n > 0) {
                 trk->clear_texture_bindings();
             }
-        } else if (entry.name == "glDeleteProgram") {
+        } else if (entry.sym == Sym::glDeleteProgram) {
             trk->unbind_program(static_cast<uint32_t>(args[0]));
-        } else if (entry.name == "glDeleteVertexArrays") {
+        } else if (entry.sym == Sym::glDeleteVertexArrays) {
             uint64_t n = args[0] & 0xFFFFFFFFu;
             if (n > 0 && n <= 4096 && args[1]) {
                 std::vector<uint32_t> ids(static_cast<size_t>(n));
@@ -1003,18 +989,18 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         impl_->tracker()) {
         auto* trk = impl_->tracker();
         bool elided = false;
-        if (entry.name == "glUseProgram") {
+        if (entry.sym == Sym::glUseProgram) {
             elided = (trk->current_program() == static_cast<uint32_t>(args[0]));
-        } else if (entry.name == "glActiveTexture") {
+        } else if (entry.sym == Sym::glActiveTexture) {
             elided = (trk->active_texture() == static_cast<uint32_t>(args[0]));
-        } else if (entry.name == "glBindTexture") {
+        } else if (entry.sym == Sym::glBindTexture) {
             elided = (trk->texture_binding(static_cast<uint32_t>(args[0])) ==
                       static_cast<uint32_t>(args[1]));
-        } else if (entry.name == "glBindVertexArray") {
+        } else if (entry.sym == Sym::glBindVertexArray) {
             bool known = false;
             uint32_t bound = trk->vao_binding(known);
             elided = (known && bound == static_cast<uint32_t>(args[0]));
-        } else if (entry.name == "glBindBuffer") {
+        } else if (entry.sym == Sym::glBindBuffer) {
             // ARRAY_BUFFER is global state; ELEMENT_ARRAY_BUFFER is VAO
             // state (per-VAO capture — a VAO switch restores it with no
             // BindBuffer call). Other/indexed targets never elide: the
@@ -1161,8 +1147,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             //   glDrawRangeElements(mode,start,end,count,type,indices) -> arg5
             //   glDrawRangeElementsBaseVertex(...,type,indices,base) -> arg5
             int pi = 3;
-            if (entry.name == "glDrawRangeElements" ||
-                entry.name == "glDrawRangeElementsBaseVertex") pi = 5;
+            if (entry.sym == Sym::glDrawRangeElements ||
+                entry.sym == Sym::glDrawRangeElementsBaseVertex) pi = 5;
             if (impl_->tracker()->element_array_buffer_binding() == 0 &&
                 args[pi] != 0) {
                 translate_ptr(args[pi], pi, &bounce_bufs[pi],
@@ -1283,7 +1269,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             // into DRAW_INDIRECT_BUFFER when bound, else a translated
             // client struct.
             do {
-                bool is_elem = entry.name == "glDrawElementsIndirect";
+                bool is_elem = entry.sym == Sym::glDrawElementsIndirect;
                 int pi = is_elem ? 2 : 1;
                 size_t sz = is_elem ? 20 : 16;
                 if (impl_->tracker()->
@@ -1648,9 +1634,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // Bracket EGL calls to distinguish blocked calls from failed swaps.
     // Never query eglGetError here: that would consume the guest's error.
     const bool trace_present = dbg().frame_trace &&
-        (entry.name == "eglSwapBuffers" || entry.name == "eglCreateWindowSurface" ||
-         entry.name == "eglDestroySurface" || entry.name == "eglMakeCurrent" ||
-         entry.name == "eglGetError" || entry.name == "eglTerminate");
+        (entry.sym == Sym::eglSwapBuffers || entry.sym == Sym::eglCreateWindowSurface ||
+         entry.sym == Sym::eglDestroySurface || entry.sym == Sym::eglMakeCurrent ||
+         entry.sym == Sym::eglGetError || entry.sym == Sym::eglTerminate);
     auto present_now_us = []() -> int64_t {
         return std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1663,7 +1649,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 static_cast<unsigned long long>(cpu.regs[30]), entry.name.c_str(),
                 static_cast<unsigned long long>(args[0]), static_cast<unsigned long long>(args[1]),
                 static_cast<unsigned long long>(args[2]), static_cast<unsigned long long>(args[3]));
-    if (trace_present && entry.name == "eglSwapBuffers") trace_back_buffer(args[1]);
+    if (trace_present && entry.sym == Sym::eglSwapBuffers) trace_back_buffer(args[1]);
     uint64_t ret = 0;
     // PCWFC: before any call that consumes buffer data (draw/copy/get/
     // texbuffer), push every live persistent+coherent bounce back to the
@@ -1674,7 +1660,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         !impl_->gl_buffer_mappings_.empty()) {
         sync_persistent_mappings_();
     }
-    if (entry.name == "glTexImage2D" && dbg().thunk_trace) {
+    if (entry.sym == Sym::glTexImage2D && dbg().thunk_trace) {
         static int full_tex_trace_n = 0;
         if (full_tex_trace_n++ < 80)
             fprintf(stderr, "[thunk] glTexImage2D call: %llx %llx %llx %llx %llx %llx %llx %llx %llx\n",
@@ -1786,8 +1772,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     // Select the thread's per-context GL state (see GraphicThunkImpl::tracker).
-    if (static_cast<uint32_t>(ret) && entry.name == "eglMakeCurrent") impl_->make_current(args[3]);
-    else if (static_cast<uint32_t>(ret) && entry.name == "eglDestroyContext") {
+    if (static_cast<uint32_t>(ret) && entry.sym == Sym::eglMakeCurrent) impl_->make_current(args[3]);
+    else if (static_cast<uint32_t>(ret) && entry.sym == Sym::eglDestroyContext) {
         impl_->destroy_context(args[1]);
         impl_->android_buffer_images.forget_context(args[1]);
     }
@@ -1851,7 +1837,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 (unsigned long long)args[2], (unsigned long long)args[3],
                 "");
     }
-    if (entry.name == "SDL_GL_SwapWindow" && getenv("BIFROST_FB_DUMP")) {
+    if (entry.sym == Sym::SDL_GL_SwapWindow && getenv("BIFROST_FB_DUMP")) {
         static int frame_n = 0;
         static bool warned = false;
         if (!warned) {
@@ -1929,9 +1915,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         impl_->deliver_glfw_callbacks_(cpu);
     }
 
-    if (entry.name == "SDL_PumpEvents" || entry.name == "SDL_PollEvent" ||
-        entry.name == "SDL_WaitEvent" || entry.name == "SDL_WaitEventTimeout" ||
-        entry.name == "SDL_PeepEvents" || entry.name == "SDL_ResetKeyboard")
+    if (entry.sym == Sym::SDL_PumpEvents || entry.sym == Sym::SDL_PollEvent ||
+        entry.sym == Sym::SDL_WaitEvent || entry.sym == Sym::SDL_WaitEventTimeout ||
+        entry.sym == Sym::SDL_PeepEvents || entry.sym == Sym::SDL_ResetKeyboard)
         impl_->refresh_keyboard();
 
     // Track SDL_Texture* dimensions for SDL_UpdateTexture bounce sizing
@@ -1951,21 +1937,21 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // can release a worker thread blocked in SDL_SemWait when the guest
     // exits (exit_group only stops the calling CPU). SDL_CreateSemaphore
     // returns the host SDL_sem*; SDL_DestroySemaphore takes it as a0.
-    if (entry.name == "SDL_CreateSemaphore") {
+    if (entry.sym == Sym::SDL_CreateSemaphore) {
         if (ret) {
             std::lock_guard<std::mutex> g(impl_->mu);
             impl_->sdl_sems_.insert(ret);
         }
-    } else if (entry.name == "SDL_DestroySemaphore") {
+    } else if (entry.sym == Sym::SDL_DestroySemaphore) {
         std::lock_guard<std::mutex> g(impl_->mu);
         impl_->sdl_sems_.erase(args[0]);
-    } else if (entry.name == "SDL_CreateCond") {
+    } else if (entry.sym == Sym::SDL_CreateCond) {
         // Same contract for SDL_CondWait (see wake_sdl_conditions).
         if (ret) {
             std::lock_guard<std::mutex> g(impl_->mu);
             impl_->sdl_conds_.insert(ret);
         }
-    } else if (entry.name == "SDL_DestroyCond") {
+    } else if (entry.sym == Sym::SDL_DestroyCond) {
         std::lock_guard<std::mutex> g(impl_->mu);
         impl_->sdl_conds_.erase(args[0]);
     }
@@ -2006,12 +1992,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
 #if defined(BIFROST_THUNK_HAVE_SDL2)
-    if (dbg().input_trace && (entry.name == "SDL_SetRelativeMouseMode" ||
-                             entry.name == "SDL_SetWindowGrab"))
+    if (dbg().input_trace && (entry.sym == Sym::SDL_SetRelativeMouseMode ||
+                             entry.sym == Sym::SDL_SetWindowGrab))
         fprintf(stderr, "[input] %s arg=%llu result=%d\n", entry.name.c_str(),
-                static_cast<unsigned long long>(args[entry.name == "SDL_SetWindowGrab" ? 1 : 0]),
+                static_cast<unsigned long long>(args[entry.sym == Sym::SDL_SetWindowGrab ? 1 : 0]),
                 static_cast<int32_t>(ret));
-    if (entry.name == "SDL_PollEvent" && dbg().input_trace && !dbg().input_watch.empty()) {
+    if (entry.sym == Sym::SDL_PollEvent && dbg().input_trace && !dbg().input_watch.empty()) {
         static thread_local std::vector<uint32_t> last;
         static thread_local unsigned captures = 0;
         if (captures < 4096) {
@@ -2033,7 +2019,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
         }
     }
-    if (entry.name == "SDL_PollEvent" && (dbg().thunk_trace || dbg().input_trace) &&
+    if (entry.sym == Sym::SDL_PollEvent && (dbg().thunk_trace || dbg().input_trace) &&
         ret && args[0]) {
         SDL_Event event;
         const void* hp = bounce_guest[0] ? bounce_bufs[0].data()
@@ -2060,10 +2046,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (android_surface_handle && ret)
         frost::AndroidSurfaceManager::instance().register_egl_surface(ret, android_surface_handle);
-    if (entry.name == "eglDestroySurface" && ret)
+    if (entry.sym == Sym::eglDestroySurface && ret)
         frost::AndroidSurfaceManager::instance().destroy_egl_surface(args[1]);
     window_stats::api(entry.name,args,ret);
-    if (entry.name == "eglSwapBuffers" && ret &&
+    if (entry.sym == Sym::eglSwapBuffers && ret &&
         !frost::AndroidSurfaceManager::instance().present_egl_surface(args[1])) {
 #if defined(BIFROST_THUNK_HAVE_SDL2)
         window_stats::sdl_present(impl_->sdl_window,"EGL");
@@ -2071,7 +2057,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     cpu.regs[0] = ret;
     if (dbg().frame_trace) {
-        if (entry.name != "glGetError") {
+        if (entry.sym != Sym::glGetError) {
             frame_last_call() = entry.name;
         } else if (ret) {
             char key[96];

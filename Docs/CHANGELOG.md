@@ -47,6 +47,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (OpenGL, EGL and SDL calls from a game cost much less CPU)
+
+- Every graphics call a game makes used to be matched against dozens of function names, as text, before it reached the
+  driver. It now compares a number set when the program starts. In Minecraft Weekend the same minute of play drew 38% more
+  frames (58,999 against 42,870) for the same CPU. Android games use the same path. Nothing to configure.
+
 ### Changed (a loop's back edge takes one jump, and a repeated access is checked once)
 
 - A loop that ends in a conditional branch back to its own start now jumps there directly instead of through a second jump,

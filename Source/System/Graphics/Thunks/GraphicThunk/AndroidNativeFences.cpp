@@ -69,15 +69,15 @@ std::optional<uint64_t> import_fence(uint64_t display, uint64_t attributes, Memo
 }  // namespace
 
 std::optional<int64_t> AndroidNativeFences::dispatch(CPU& cpu, const SymbolEntry& entry, Memory& mem) {
-    const std::string& name = entry.name;
-    if (name == "eglDupNativeFenceFDANDROID") {
+    const Sym name = entry.sym;
+    if (name == Sym::eglDupNativeFenceFDANDROID) {
         cpu.regs[0] = static_cast<uint64_t>(dup_fence(cpu.regs[0], cpu.regs[1]));
         return 0;
     }
     if (cpu.regs[1] != kSyncNativeFence || !cpu.regs[2]) return std::nullopt;
     std::optional<uint64_t> imported;
-    if (name == "eglCreateSyncKHR") imported = import_fence<int32_t>(cpu.regs[0], cpu.regs[2], mem, "eglCreateSyncKHR");
-    else if (name == "eglCreateSync") imported = import_fence<int64_t>(cpu.regs[0], cpu.regs[2], mem, "eglCreateSync");
+    if (name == Sym::eglCreateSyncKHR) imported = import_fence<int32_t>(cpu.regs[0], cpu.regs[2], mem, "eglCreateSyncKHR");
+    else if (name == Sym::eglCreateSync) imported = import_fence<int64_t>(cpu.regs[0], cpu.regs[2], mem, "eglCreateSync");
     if (!imported) return std::nullopt;
     cpu.regs[0] = *imported;
     return 0;

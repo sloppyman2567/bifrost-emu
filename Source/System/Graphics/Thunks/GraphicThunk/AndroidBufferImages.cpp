@@ -155,26 +155,26 @@ AndroidBufferImages::~AndroidBufferImages() {
 }
 
 std::optional<int64_t> AndroidBufferImages::dispatch(CPU& cpu, const SymbolEntry& entry, Memory& mem) {
-    const std::string& name = entry.name;
-    if ((name == "eglCreateImageKHR" || name == "eglCreateImage") && cpu.regs[2] == kNativeBufferTarget) {
-        cpu.regs[0] = create(mem, cpu.regs[3], cpu.regs[4], name == "eglCreateImage");
+    const Sym name = entry.sym;
+    if ((name == Sym::eglCreateImageKHR || name == Sym::eglCreateImage) && cpu.regs[2] == kNativeBufferTarget) {
+        cpu.regs[0] = create(mem, cpu.regs[3], cpu.regs[4], name == Sym::eglCreateImage);
         return 0;
     }
-    if ((name == "eglDestroyImageKHR" || name == "eglDestroyImage") && (cpu.regs[1] & kImageTag) == kImageTag) {
+    if ((name == Sym::eglDestroyImageKHR || name == Sym::eglDestroyImage) && (cpu.regs[1] & kImageTag) == kImageTag) {
         cpu.regs[0] = destroy(cpu.regs[1]);  // EGL_FALSE (EGL_BAD_PARAMETER) when unknown
         return 0;
     }
     // HWUI makes a hardware bitmap by uploading into a texture whose storage is the bitmap's gralloc buffer: the
     // host image is a copy refreshed from the buffer at bind time, so the pixels also have to reach the buffer.
-    if (name == "glTexSubImage2D" && cpu.regs[0] == kTexture2D && cpu.regs[1] == 0 && cpu.regs[6] == kRgba &&
+    if (name == Sym::glTexSubImage2D && cpu.regs[0] == kTexture2D && cpu.regs[1] == 0 && cpu.regs[6] == kRgba &&
             cpu.regs[7] == kUnsignedByte)
         capture_upload(cpu, mem);  // the call itself still goes to the host
     // A texture name that is deleted, or re-specified with glTexImage2D, no longer shares the image's storage; a later
     // upload into a reused name must not reach the buffer.
-    if (name == "glDeleteTextures") forget_textures(cpu, mem);
-    if (name == "glTexImage2D" && cpu.regs[0] == kTexture2D && cpu.regs[1] == 0) forget_bound_texture();
-    bool texture = name == "glEGLImageTargetTexture2DOES";
-    if ((texture || name == "glEGLImageTargetRenderbufferStorageOES") && (cpu.regs[1] & kImageTag) == kImageTag) {
+    if (name == Sym::glDeleteTextures) forget_textures(cpu, mem);
+    if (name == Sym::glTexImage2D && cpu.regs[0] == kTexture2D && cpu.regs[1] == 0) forget_bound_texture();
+    bool texture = name == Sym::glEGLImageTargetTexture2DOES;
+    if ((texture || name == Sym::glEGLImageTargetRenderbufferStorageOES) && (cpu.regs[1] & kImageTag) == kImageTag) {
         bind(static_cast<uint32_t>(cpu.regs[0]), cpu.regs[1], !texture);
         return 0;
     }
