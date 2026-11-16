@@ -47,7 +47,7 @@ enum class Reloc : uint8_t { GuestPc = 1, CodeAbs, Image, JitObject, Window, Pag
 
 struct NativeBody {
     uint32_t code_bytes, reloc_count, edge_count, fault_count, word_count, dep_count, dep_words;
-    uint32_t chain_entry_off, chain_patch_off, taken_chain_patch_off, selfloop_patch_off;
+    uint32_t chain_entry_off, chain_patch_off, taken_chain_patch_off, selfloop_patch_off, selfloop_jcc_back;
     int32_t instr_count, call_interp_count;
     uint32_t flags;
     int64_t chain_target_rel, taken_target_rel;
@@ -381,6 +381,7 @@ int FrostJIT::build_record(const CompileCapture& a, const CompileCapture& b, std
         ea.has_taken_chain_slot != eb.has_taken_chain_slot || ea.has_selfloop_slot != eb.has_selfloop_slot ||
         (ea.has_taken_chain_slot && ea.taken_chain_patch_off - a.block_start != eb.taken_chain_patch_off - b.block_start) ||
         (ea.has_selfloop_slot && ea.selfloop_patch_off - a.block_start != eb.selfloop_patch_off - b.block_start) ||
+        ea.selfloop_jcc_back != eb.selfloop_jcc_back ||
         ea.instr_count != eb.instr_count || ea.call_interp_count != eb.call_interp_count ||
         ea.emitted_bytes != eb.emitted_bytes || ea.ends_with_branch != eb.ends_with_branch ||
         ea.has_svc != eb.has_svc || ea.has_call != eb.has_call || ea.verified_once != eb.verified_once ||
@@ -402,6 +403,7 @@ int FrostJIT::build_record(const CompileCapture& a, const CompileCapture& b, std
     body.chain_patch_off = uint32_t(ea.chain_patch_off - a.block_start);
     body.taken_chain_patch_off = ea.has_taken_chain_slot ? uint32_t(ea.taken_chain_patch_off - a.block_start) : 0;
     body.selfloop_patch_off = ea.has_selfloop_slot ? uint32_t(ea.selfloop_patch_off - a.block_start) : 0;
+    body.selfloop_jcc_back = ea.selfloop_jcc_back;
     body.instr_count = ea.instr_count;
     body.call_interp_count = ea.call_interp_count;
     body.flags = (ea.ends_with_branch ? kEndsWithBranch : 0) | (ea.has_svc ? kHasSvc : 0) | (ea.has_call ? kHasCall : 0) |
@@ -634,6 +636,7 @@ uint64_t (*FrostJIT::install_cached(Emulator& emu, uint64_t start_pc))(CPU*, Emu
     entry.taken_chain_target_pc = (body.flags & kHasTakenTarget) ? start_pc + uint64_t(body.taken_target_rel) : 0;
     entry.has_selfloop_slot = body.flags & kHasSelfloop;
     entry.selfloop_patch_off = entry.has_selfloop_slot ? uint32_t(block_start + body.selfloop_patch_off) : 0;
+    entry.selfloop_jcc_back = uint16_t(body.selfloop_jcc_back);
     entry.instr_count = body.instr_count;
     entry.call_interp_count = body.call_interp_count;
     entry.ends_with_branch = body.flags & kEndsWithBranch;

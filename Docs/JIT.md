@@ -202,6 +202,15 @@ empty, so `next_use_after` returns -1 as before. Rebuilding all 4,096
 lists per block had been about a third of Tier-1 compile time in a
 SpongeBob startup profile (2026-10-13).
 
+### Loop back edges
+
+A single-thread self-loop ends in `jcc taken; <exit>; taken: jmp <slot>`. When nothing sits between the `jcc`'s target and
+the slot (`note_selfloop_jcc`), `translate_block` patches the slot and also points the `jcc` at the slot's target (the body, or
+the reconcile stub), so an iteration takes one jump instead of two. `BlockEntry::selfloop_jcc_back` (16 bits, the slot's
+distance from the `jcc`) lets differential replay point the `jcc` back at the NOPed slot; the disk cache records it
+(`NativeBody::selfloop_jcc_back`, cache format version 4). MT edges are immutable and keep both jumps, as does an edge with
+code before its slot (stores of dirty unpinned registers, flag materialization).
+
 ### Loop pins
 
 A self-loop keeps up to four loop-carried GPRs in R12-R15. `BRCOND` flushes with `flush_all_vregs_but_pins`, so a
@@ -314,6 +323,16 @@ forced software guards and slow-store tracing retain their existing path.
 `jit_memory_guard_address` covers live-register pressure, negative offsets,
 and byte/halfword/word/doubleword accesses; the host-fault and userfaultfd
 fixtures cover recovery and retry behavior.
+
+A Tier-1 access whose address an earlier access of the same block already checked emits no gate compare
+(`scan_covered_guards`, `guard_cover_`): the same base value and offset, a width no larger, only straight-line scalar ops
+between them (`ldr x3,[x19]; str x4,[x19]`), and no `BRCOND_SKIP` in the block. The access is still a registered fault site
+with its fault exit; only the compare, its scratch register and the software page checks are gone. The earlier access
+(`guard_checked_`) must itself have emitted a gate compare or been covered. The gate is raised without a handshake, so an
+access past its check can already run after the gate closes; the second access joins that window for the few ops between
+the two. An acquire load keeps its alignment check. Tier-2 keeps inline guards.
+`jit_guard_stubs` runs the shapes that are covered and those that must not be (a wider or displaced second access
+crossing into a missing page).
 
 NZCV is stored as described under [Guest state](#nzcv). BRCOND exits omit saving and restoring RFLAGS after their condition
 has been consumed; both exits still commit NZCV. Other consumers keep RFLAGS. `jit_flags_passthrough` checks 32/64-bit
@@ -1700,6 +1719,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [One jump per loop iteration and one check per repeated access (2026-11-16)](archive/JIT-history.md#one-jump-per-loop-iteration-and-one-check-per-repeated-access-2026-11-16)
 - [A fork child keeps the JIT (2026-11-11)](archive/JIT-history.md#a-fork-child-keeps-the-jit-2026-11-11)
 - [Tier-2 exits that chain, exit-rate feedback and profiler costs (2026-11-11)](archive/JIT-history.md#tier-2-exits-that-chain-exit-rate-feedback-and-profiler-costs-2026-11-11)
 - [Tier-2 through calls and returns (2026-11-11)](archive/JIT-history.md#tier-2-through-calls-and-returns-2026-11-11)

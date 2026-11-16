@@ -37,7 +37,7 @@ namespace arm64emu {
 namespace {
 struct CacheFileHeader {
     static constexpr uint32_t kMagic = 0x31434a42;  // "BJC1"
-    static constexpr uint32_t kVersion = 3;
+    static constexpr uint32_t kVersion = 4;
     uint32_t magic, version;
     uint64_t fingerprint_hi, fingerprint_lo;
     uint32_t generation, reserved;

@@ -8,6 +8,13 @@
 // checks results, fault kinds and the state a guest handler sees. The 16-byte
 // Q-register accesses keep their page checks in their own tail (the shared
 // stubs serve widths up to 8); their crossing case faults in bytes 8-15.
+//
+// Two accesses to one address in one block (`ldr x8,[x9]; str x8,[x9]`) check the
+// bound once: the second needs no compare when it has the first's base and offset
+// and a width no larger. The pair cases at the end run each shape open and closed,
+// and prove that the shapes which keep both checks still fault (a wider or
+// displaced second access crossing into a missing page) and that a covered store
+// still recovers through its registered fault site.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -96,13 +103,14 @@ __attribute__((noinline)) static uint64_t access_at(int level, int kind, uint64_
 
 static sigjmp_buf resume;
 static volatile int caught_signo, caught_code;
-static volatile uint64_t caught_addr, caught_x9, caught_x10, caught_pc;
+static volatile uint64_t caught_addr, caught_x8, caught_x9, caught_x10, caught_pc;
 
 static void on_fault(int signo, siginfo_t *info, void *raw) {
     const ucontext_t *uc = raw;
     caught_signo = signo;
     caught_code = info->si_code;
     caught_addr = (uint64_t)info->si_addr;
+    caught_x8 = uc->uc_mcontext.regs[8];
     caught_x9 = uc->uc_mcontext.regs[9];
     caught_x10 = uc->uc_mcontext.regs[10];
     caught_pc = uc->uc_mcontext.pc;
@@ -202,6 +210,91 @@ static uint64_t csel_expected(uint64_t a, uint64_t b, uint64_t s) {
     return sum + (a < b ? a : b);
 }
 
+// Pairs: kinds 0-2 read, change and write one address (covered stores); 3 reads a narrower value second
+// (covered); 4 a wider one and 5 a displaced one (each keeps its own check); 6 stores what it loaded.
+enum { PAIR_KINDS = 7 };
+#define PAIR(insn) \
+    __asm__ volatile("mov x9,%[a]\n mov x8,%[v]\n" insn "\n mov %[r],x8\n" \
+                     : [r] "=&r"(value) : [a] "r"(address), [v] "r"(value_in) : "x8", "x9", "x10", "memory")
+__attribute__((noinline)) static uint64_t pair_at(int kind, uint64_t address, uint64_t value_in) {
+    uint64_t value = 0;
+    switch (kind) {
+    case 0: PAIR("ldr x8,[x9]\n add x8,x8,#1\n str x8,[x9]"); break;
+    case 1: PAIR("ldr w8,[x9]\n add w8,w8,#1\n str w8,[x9]"); break;
+    case 2: PAIR("ldrb w8,[x9]\n add w8,w8,#1\n strb w8,[x9]"); break;
+    case 3: PAIR("ldr x8,[x9]\n ldrb w10,[x9]\n add x8,x8,x10"); break;
+    case 4: PAIR("ldrb w8,[x9]\n ldr x10,[x9]\n add x8,x8,x10"); break;
+    case 5: PAIR("ldr x8,[x9]\n ldr x10,[x9,#8]\n add x8,x8,x10"); break;
+    case 6: PAIR("ldr x8,[x9]\n str x8,[x9]"); break;
+    }
+    return value;
+}
+
+static void expect_pair_fault(int kind, uint64_t address, int signo, int code, uint64_t fault_addr, uint64_t x8) {
+    caught_signo = 0;
+    if (sigsetjmp(resume, 1) == 0) {
+        pair_at(kind, address, 0);
+        printf("pair %d: no fault at %llx\n", kind, (unsigned long long)address);
+        failures++;
+        return;
+    }
+    checks += 3;
+    if (caught_signo != signo || caught_code != code || caught_addr != fault_addr) {
+        printf("pair %d at %llx: signal %d code %d addr %llx, expected %d %d %llx\n", kind,
+               (unsigned long long)address, caught_signo, caught_code, (unsigned long long)caught_addr, signo, code,
+               (unsigned long long)fault_addr);
+        failures++;
+    }
+    if (caught_x9 != address) { printf("pair %d: x9 %llx\n", kind, (unsigned long long)caught_x9); failures++; }
+    // The first access completed and the fault is precise: x8 is its result, not the faulting access's.
+    if (caught_x8 != x8) {
+        printf("pair %d: x8 %llx, expected %llx\n", kind, (unsigned long long)caught_x8, (unsigned long long)x8);
+        failures++;
+    }
+}
+
+// `missing` is the first byte of a registered, missing page that follows a readable one (closed gate), or NULL.
+static void check_pairs(char *base, char *missing) {
+    static const uint64_t second = 0x1122334455667788ull;
+    char *at = base + 256;
+    const uint64_t init[2] = {PATTERN, second};
+    uint64_t out[2];
+    const struct { uint64_t returned; uint64_t first; } expect[PAIR_KINDS] = {
+        {PATTERN + 1, PATTERN + 1},
+        {(PATTERN & 0xFFFFFFFFull) + 1, (PATTERN & ~0xFFFFFFFFull) | ((PATTERN + 1) & 0xFFFFFFFFull)},
+        {(PATTERN & 0xFF) + 1, (PATTERN & ~0xFFull) | ((PATTERN + 1) & 0xFF)},
+        {PATTERN + (PATTERN & 0xFF), PATTERN},
+        {PATTERN + (PATTERN & 0xFF), PATTERN},
+        {PATTERN + second, PATTERN},
+        {PATTERN, PATTERN},
+    };
+    for (int kind = 0; kind < PAIR_KINDS; kind++) {
+        for (int repeat = 0; repeat < REPEATS; repeat++) {
+            memcpy(at, init, sizeof init);
+            const uint64_t got = pair_at(kind, (uint64_t)at, 0);
+            memcpy(out, at, sizeof out);
+            CHECK(got == expect[kind].returned);
+            CHECK(out[0] == expect[kind].first);
+            CHECK(out[1] == second);
+        }
+    }
+    // A covered store to a read-only page: the load completes, the store faults through its fault site.
+    const uint64_t ro = (uint64_t)base + 3 * PAGE + 64;
+    expect_pair_fault(6, ro, SIGSEGV, SEGV_ACCERR, ro, PATTERN);
+    // The real bound still rejects an address far outside the window, at the first access.
+    const uint64_t far = 1ull << 50;
+    expect_pair_fault(0, far, SIGSEGV, SEGV_MAPERR, far, 0);
+    if (missing) {
+        const uint64_t m = (uint64_t)missing;
+        // A covered narrower read at the end of the readable page is a plain read.
+        memset(missing - PAGE, 0x5A, PAGE);
+        CHECK(pair_at(3, m - 8, 0) == 0x5A5A5A5A5A5A5A5Aull + 0x5A);
+        // Kinds 4 and 5 keep their second check: the first access passes, the second reaches the missing page.
+        expect_pair_fault(4, m - 1, SIGBUS, BUS_ADRERR, m, 0x5A);
+        expect_pair_fault(5, m - 8, SIGBUS, BUS_ADRERR, m, 0x5A5A5A5A5A5A5A5Aull);
+    }
+}
+
 int main(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -216,10 +309,12 @@ int main(void) {
     CHECK(base != MAP_FAILED);
     memset(base, 0, 4 * PAGE);
     CHECK(mprotect(base + 2 * PAGE, PAGE, PROT_NONE) == 0);
+    memcpy(base + 3 * PAGE + 64, &PATTERN, sizeof PATTERN);  // read by the pair cases; the checks above use offset 0
     CHECK(mprotect(base + 3 * PAGE, PAGE, PROT_READ) == 0);
     CHECK(munmap(base + 4 * PAGE, PAGE) == 0);
 
     check_values(base, "gate open");
+    check_pairs(base, NULL);
 
     // A registered page that stays missing closes the gate for the whole test.
     int uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | UFFD_USER_MODE_ONLY);
@@ -243,6 +338,7 @@ int main(void) {
     if (!closed) printf("userfaultfd unavailable (%s): only the open gate ran\n", strerror(errno));
 
     check_values(base, closed ? "gate closed" : "gate open again");
+    check_pairs(base, closed ? missing : NULL);
 
     for (int level = 0; level < LEVELS; level++) {
         for (int w = 0; w < WIDTHS; w++) {

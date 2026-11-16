@@ -58,6 +58,13 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         fp_xmm = vec_xmm(fp_reg);
     }
 
+    // An earlier access of this block already checked this address (scan_covered_guards): no gate compare.
+    // The access stays a registered fault site, so a host fault still recovers through its fault exit. An
+    // acquire load keeps its alignment check, which is not part of the gate.
+    const bool covered = defer_guards_ && cur_op_index_ < guard_cover_.size() &&
+        guard_cover_[cur_op_index_] != UINT32_MAX && guard_checked_[guard_cover_[cur_op_index_]] &&
+        decoded.cls != InstClass::LDAR;
+
     memory_fault_stub_ = 0;
     clobber_flags(false, /*rdx_only=*/true);
     int address, value = -1;
@@ -77,8 +84,9 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         emit_modrm_disp(effective, address, static_cast<int32_t>(mp.offset));
         emit_untag_data_address(effective);
     }
-    const int temp = alloc_reg();
-    pinned_host_regs_ |= (1u << temp);
+    // A covered access needs no scratch register for the compare.
+    const int temp = covered ? -1 : alloc_reg();
+    if (!covered) pinned_host_regs_ |= (1u << temp);
     const int page = alloc_reg();
     pinned_host_regs_ |= (1u << page);
 
@@ -95,15 +103,18 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     // The gate reads 0 while some page needs software checks, which can start
     // while this code runs: never hoist it out of a loop. A width without a
     // table entry compares with the window limit and tests the flag instead.
-    const int outside = emit_window_bound_cmp(effective, mp.width, temp, true);
-    const bool gated = outside == kJccAE;
+    bool gated = false;
     size_t checked = 0;
-    if (gated) {
-        checked = emit_jcc_rel32_placeholder(outside);
-    } else {
-        cold.push_back(emit_jcc_rel32_placeholder(outside));
-        emit_test_software_checks();
-        checked = emit_jcc_rel32_placeholder(5);  // JNE
+    if (!covered) {
+        const int outside = emit_window_bound_cmp(effective, mp.width, temp, true);
+        gated = outside == kJccAE;
+        if (gated) {
+            checked = emit_jcc_rel32_placeholder(outside);
+        } else {
+            cold.push_back(emit_jcc_rel32_placeholder(outside));
+            emit_test_software_checks();
+            checked = emit_jcc_rel32_placeholder(5);  // JNE
+        }
     }
     const uint8_t required = Memory::GUEST_PAGE_MAPPED |
         (load ? Memory::GUEST_PROT_READ : Memory::GUEST_PROT_WRITE);
@@ -116,6 +127,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         DeferredGuard guard{inst, effective, temp, page, mp.width, required, mask,
                             0, checked, 0, false, gated,
                             std::move(cold), capture_guard_state()};
+        guard.covered = covered;
         guard.access = code_buf_used_;
         // Placeholder recovery offset: flush_deferred_guards patches the
         // registered site with the real stub offset before publication.
@@ -144,6 +156,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         memory_fault_stub_ = 0;
         deferred_guards_.push_back(std::move(guard));
         pinned_host_regs_ = saved_pins;
+        if (cur_op_index_ < guard_checked_.size()) guard_checked_[cur_op_index_] = covered || gated;
         if (fp_load_done_ == cur_op_index_) {
             // After the capture: the fault exit sees the layout before the load.
             vec_cache_mark_dirty(fp_reg);
@@ -416,8 +429,11 @@ void FrostJIT::emit_cold_stubs() {
 }
 void FrostJIT::flush_deferred_guards() {
     for (DeferredGuard& g : deferred_guards_) {
-        patch_jcc_rel32(g.sw_jump, static_cast<int32_t>(code_buf_used_ - (g.sw_jump + 6)));
-        if (g.gated && g.width <= 8 && use_cold_stubs() && cold_stub_register(g.effective)) {
+        // A covered access has no gate jump and no page checks to reach: only its fault exit follows.
+        if (!g.covered) patch_jcc_rel32(g.sw_jump, static_cast<int32_t>(code_buf_used_ - (g.sw_jump + 6)));
+        if (g.covered) {
+            // nothing: the tail starts at the fault exit
+        } else if (g.gated && g.width <= 8 && use_cold_stubs() && cold_stub_register(g.effective)) {
             const int width = g.width == 1 ? 0 : g.width == 2 ? 1 : g.width == 4 ? 2 : 3;
             const uint32_t target = guard_stub_[g.effective][width][(g.required & Memory::GUEST_PROT_WRITE) ? 1 : 0];
             emit_byte(0xE8);  // call rel32

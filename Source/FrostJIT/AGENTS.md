@@ -49,6 +49,15 @@ it under the guide's Recorded changes.
   body against the same QEMU hashes. `vec_inst_operands` lists each kind's
   vector reads and writes by hand; add a new kind there (a kind that accumulates
   into Vd reads it).
+- A Tier-1 access may skip its gate compare only when `scan_covered_guards` proves an earlier access of the block used the same
+  base value and offset at a width no smaller, with only straight-line scalar ops between and no `BRCOND_SKIP` in the block;
+  `guard_checked_` records that the earlier access really emitted its compare. A covered access is still a registered fault site
+  with its fault exit (`DeferredGuard::covered` drops only the compare and the page checks); an acquire load is never covered.
+  Add an op to the scan's list only if it cannot branch, call, fault or write the base. `jit_guard_stubs` has the pair cases.
+- A single-thread self-loop's conditional jump is retargeted past the patchable slot when nothing sits between them
+  (`note_selfloop_jcc`, patched in `translate_block`). Anything that rewrites or NOPs the slot must treat the jump too: replay
+  in `Dispatch.cpp` uses `BlockEntry::selfloop_jcc_back`, and the disk cache records it (`NativeBody`, format version in
+  `PersistentCache.cpp`; bump it when `NativeBody` changes). The field must stay 16 bits so `BlockEntry` keeps its size.
 - A pair (`LDP`/`STP`/`LDPSW`) uses the native guarded path. Its translation must
   complete every load before writing any architectural register (and write the base
   last), and a store pair must write none: a fault on the second half restarts the

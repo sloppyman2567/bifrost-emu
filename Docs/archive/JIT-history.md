@@ -2,6 +2,35 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## One jump per loop iteration and one check per repeated access (2026-11-16)
+
+Chosen from the CoreMark profile of the same day (16,300 iterations/s, 199.83 G host instructions, IPC 3.77; chain jumps
+8.1% and bounds guards 14.2% of executed block ops on 2026-11-11). The hot `core_bench_list` reversal loop
+(`mov x19,x3; ldr x3,[x19]; str x4,[x19]; mov x4,x19; cbnz x3`) showed both: two identical `cmp reg,[gate]; jae` and a back
+edge of `jne L; jmp exit; L: jmp <slot>`.
+
+- Covered guards: `scan_covered_guards` (Tier-1 only) marks a `LOAD_MEM`/`STORE_MEM` whose base value, offset and a width no
+  larger an earlier access in the block already guarded; `compile_guarded_mem` then emits no compare, scratch register or
+  software page checks, and `flush_deferred_guards` emits only the fault exit for it. The access stays a registered fault
+  site. Not covered: another base value or offset, a wider second access, a block with `BRCOND_SKIP`, anything but
+  straight-line scalar ops between, a pair half at another offset, an acquire load's alignment check.
+- Back edge: the `jcc` is retargeted when the slot is patched. Considered and not built (reasoned, not tried): emitting the
+  taken path first so the slot follows the `jcc` (the fall-through code consumes allocator and flag state before the taken
+  path, and moving emitted bytes would break recorded offsets); skipping the retarget in verify mode (verify would then test
+  another layout than production runs).
+
+CoreMark, 200,000 iterations, one pinned core, three interleaved rounds against the build before the change, every CRC valid
+(`crcfinal` 0x4983): host instructions 199.83 G -> 193.51 G (-3.2%, repeats to four digits), branches 42.58 G -> 38.26 G
+(-10.2%), cycles 53.29 G -> 52.81 G (median, -0.9%), 16,411 -> 16,559 iterations/s (median, +0.9%). The split between the two
+changes was not measured. Cycles move by up to +-15% with code placement alone (see Measuring JIT changes), so the -0.9%
+cycles and +0.9% iterations/s are not shown to be more than placement noise; the instruction and branch counts are exact.
+
+Tests: `jit_guard_stubs` gained the pair cases (4,473 checks, gate open and closed, JIT and interpreter). A mutation check
+(the scan ignoring offset and width) fails exactly the two shapes that must keep their check. `make verify` passes (108
+differential fixtures, 12 threaded oracle runs), as do `test_jit_disk_cache.sh`, `test_jit_cache.sh` and
+`test_jit_generations.sh`. Not run: game workloads, MT code (its back edge is unchanged), Tier-2 regions, the full unit
+category, and a machine other than the Ryzen 7 5800X3D.
+
 ## A fork child keeps the JIT (2026-11-11)
 
 A fork child used to run interpreted: `fork_guest` abandoned the inherited JIT, whose block-table and compile locks

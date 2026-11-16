@@ -982,6 +982,7 @@ private:
         bool gated;  // sw_jump is the gate: the tail first checks the real bound
         std::vector<size_t> cold;  // jcc placeholders targeting the fault exit
         GuardState state;
+        bool covered = false;  // no gate compare of its own (guard_cover_): the tail is the fault exit alone
     };
     bool defer_guards_ = false;
     std::vector<DeferredGuard> deferred_guards_;
@@ -1126,6 +1127,7 @@ private:
         uint32_t chain_patch_off = 0;   // offset of the 5-byte chain slot in code_buf_
         uint32_t taken_chain_patch_off = 0;   // offset of the taken-path slot
         uint32_t selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
+        uint16_t selfloop_jcc_back = 0;   // ST: slot offset minus the retargeted jcc's offset (0: none)
         uint32_t emitted_bytes = 0;    // actual host code size for region admission
         // Offset of the tier-2 hot-head counter sequence in the prologue (the
         // count is a HotCounter, found through hot_counter_sites_). 0 = no
@@ -2117,6 +2119,14 @@ private:
     // emitting that form (the other load paths zero-extend). Tier-1 and regions.
     std::vector<uint8_t> sext_load_;
     size_t sext_load_done_ = SIZE_MAX;
+    // guard_cover_[i] = j: op i is a LOAD_MEM/STORE_MEM at the same base value and offset as the earlier access j,
+    // of at least its width, with only straight-line scalar ops between (scan_covered_guards; empty for a block
+    // with BRCOND_SKIP and outside Tier-1). guard_checked_[j] = 1 once op j's guarded access emitted its gate
+    // compare or was covered itself; only then does op i skip its own compare. The access stays a registered
+    // fault site with its fault exit.
+    std::vector<uint32_t> guard_cover_;
+    std::vector<uint8_t> guard_checked_;
+    void scan_covered_guards(const std::vector<IRInst>& insts);
     // fp_load_[i] = 1: op i is a 4- or 8-byte LOAD_MEM whose only reader is the
     // FMOV_G2F at i + 1 (LDR S/D). When the destination is in the vector cache
     // the guarded load is `movss/movsd xmm, [mem]` straight into its XMM and
@@ -2211,6 +2221,8 @@ private:
     // that skips the epilogue/dispatcher/prologue.
     bool    has_selfloop_slot_ = false;
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
+    size_t  selfloop_jcc_off_ = 0;       // the 6-byte jcc whose target is that slot with nothing between (0: none)
+    void note_selfloop_jcc(size_t jcc_patch, size_t taken_label);
     size_t  selfloop_target_off_ = 0;    // where the patched slot jumps: the body, or the reconcile stub
     bool    selfloop_reconcile_after_ = false;  // an ST back-edge still owes its reconcile stub
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)

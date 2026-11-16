@@ -91,6 +91,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     unchainable_end_ = true;  // the region never chains out
     has_selfloop_slot_ = false;
     selfloop_patch_off_ = 0;
+    selfloop_jcc_off_ = 0;
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;

@@ -118,6 +118,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     indirect_exit_ = false;
     has_selfloop_slot_ = false;
     selfloop_patch_off_ = 0;
+    selfloop_jcc_off_ = 0;
     selfloop_target_off_ = 0;
     selfloop_reconcile_after_ = false;
     tier2_counter_off_ = 0;
@@ -1052,6 +1053,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
     }
     scan_w32_and_sext_loads(ir_block.insts);
+    scan_covered_guards(ir_block.insts);
     // Loads into cached XMMs and compares against a register's memory home
     // (see fp_load_ and lazy_load_). They read the last-use table as it
     // stands and change nothing; both need this compile loop's materializers.
@@ -1192,6 +1194,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     fold_ahead_kind_.clear();
     zext32_fused_.clear();
     sext_load_.clear();
+    guard_cover_.clear();
+    guard_checked_.clear();
     fp_load_.clear();
     fp_load_done_ = SIZE_MAX;
     lazy_load_.clear();
@@ -1481,6 +1485,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             code_buf_[selfloop_patch_off_ + 2] = (self_rel >> 8) & 0xFF;
             code_buf_[selfloop_patch_off_ + 3] = (self_rel >> 16) & 0xFF;
             code_buf_[selfloop_patch_off_ + 4] = (self_rel >> 24) & 0xFF;
+            // The conditional jump that lands on the slot goes to the same place directly.
+            if (selfloop_jcc_off_) {
+                patch_jcc_rel32(selfloop_jcc_off_, static_cast<int32_t>(body_off - (selfloop_jcc_off_ + 6)));
+                entry.selfloop_jcc_back = static_cast<uint16_t>(selfloop_patch_off_ - selfloop_jcc_off_);
+            }
         }
     }
     if (record_oracle_) {  // the shifted proof compile publishes nothing
@@ -1591,6 +1600,53 @@ void FrostJIT::scan_w32_and_sext_loads(const std::vector<IRInst>& insts) {
         if (nx.sext_bits() != width * 8) continue;
         if (width == 4 || ((width == 1 || width == 2) && zext32_fused_[i + 1]))
             sext_load_[i] = 1;
+    }
+}
+// A guarded scalar access whose address an earlier access of the same block already checked (the same base value
+// and offset, a width no smaller) needs no gate compare of its own: `ldr x3, [x19]; str x4, [x19]`. Only
+// straight-line scalar ops may sit between the two, and none may redefine the base: the check compares the address
+// the earlier access used. A branch, call, fallback or barrier ends the search, and a block with BRCOND_SKIP is not
+// scanned because a skip can land between the two. The gate is raised without a handshake, so an access already
+// past its check can run after it closes; skipping the second compare lengthens that window by the straight-line
+// ops between the accesses and nothing else.
+void FrostJIT::scan_covered_guards(const std::vector<IRInst>& insts) {
+    const size_t n = insts.size();
+    guard_cover_.assign(n, UINT32_MAX);
+    guard_checked_.assign(n, 0);
+    for (const IRInst& op : insts)
+        if (op.op == IROp::BRCOND_SKIP) return;
+    const auto straight_line = [](IROp op) {
+        switch (op) {
+            case IROp::NOP: case IROp::IMM: case IROp::MOV: case IROp::LOAD_REG: case IROp::STORE_REG:
+            case IROp::ADD: case IROp::SUB: case IROp::MUL: case IROp::AND: case IROp::OR: case IROp::XOR:
+            case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::NOT: case IROp::NEG:
+            case IROp::SEXT: case IROp::ZEXT: case IROp::UBFM: case IROp::SBFM:
+            case IROp::ADDS: case IROp::SUBS: case IROp::TST:
+                return true;
+            default:
+                return false;
+        }
+    };
+    for (size_t i = 1; i < n; i++) {
+        const IRInst& cur = insts[i];
+        const bool cur_load = cur.op == IROp::LOAD_MEM;
+        if (!cur_load && cur.op != IROp::STORE_MEM) continue;
+        const int base = cur.src1;
+        if (!(base > 32 && base < 4096)) continue;  // a scratch value: an architectural vreg can change under it
+        const MemParams mp = cur_load ? cur.load_mem_params() : cur.store_mem_params();
+        for (size_t j = i; j-- > 0;) {
+            const IRInst& prev = insts[j];
+            const bool prev_mem = prev.op == IROp::LOAD_MEM || prev.op == IROp::STORE_MEM;
+            if (!prev_mem && !straight_line(prev.op)) break;
+            // A load into the base moves the address under every later access; so does any other write to it.
+            if (prev.dest == base && prev.op != IROp::STORE_MEM) break;
+            if (!prev_mem) continue;
+            const MemParams pm = prev.op == IROp::LOAD_MEM ? prev.load_mem_params() : prev.store_mem_params();
+            if (prev.src1 == base && pm.offset == mp.offset && pm.width >= mp.width) {
+                guard_cover_[i] = static_cast<uint32_t>(j);
+                break;
+            }
+        }
     }
 }
 } // namespace arm64emu

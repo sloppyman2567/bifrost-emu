@@ -114,6 +114,15 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // The caller emits the taken cold exit, committing GPRs and vectors.
     return true;
 }
+// The conditional jump of a single-thread self-loop back-edge normally lands on the patchable slot, which then
+// jumps to the body: two taken jumps per iteration. When nothing was emitted between the jump's target and the
+// slot, translate_block retargets the jump to wherever it patches the slot, leaving one. The jump's distance from the
+// slot is kept (BlockEntry::selfloop_jcc_back) so differential replay can point it back at the unpatched slot.
+void FrostJIT::note_selfloop_jcc(size_t jcc_patch, size_t taken_label) {
+    if (has_selfloop_slot_ && !mt_active() && selfloop_patch_off_ == taken_label &&
+        selfloop_patch_off_ - jcc_patch <= UINT16_MAX)
+        selfloop_jcc_off_ = jcc_patch;
+}
 // Out-of-line reconcile for a single-thread self-loop back-edge: reconcile the
 // demand-slot layout, then enter the body. Emitted after the exit that follows
 // the slot (state-neutral, like the MT edge), and only when the layout differs;
@@ -299,6 +308,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
+            const size_t taken_label = code_buf_used_;
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             // ── Self-loop chaining (mirrors BRCOND) ──
@@ -311,6 +321,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // re-runs the prologue, whose preloads read STALE cpu.regs[]
             // for the deferred pins (infinite loop).
             emit_selfloop_backedge(bp.target);
+            note_selfloop_jcc(jcc_patch, taken_label);
             if (has_selfloop_slot_) emit_mov_imm_to_rax(bp.target);  // else emit_taken_path_epilogue
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
@@ -360,6 +371,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
+            const size_t taken_label = code_buf_used_;
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             // ── Self-loop chaining (mirrors BRCOND/BRCOND_ZERO) ──
@@ -368,6 +380,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // deferred pins only persist across a back-edge that jumps to the
             // body, not one that re-enters the prologue (stale preloads).
             emit_selfloop_backedge(bp.target);
+            note_selfloop_jcc(jcc_patch, taken_label);
             if (has_selfloop_slot_) emit_mov_imm_to_rax(bp.target);  // else emit_taken_path_epilogue
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
@@ -468,6 +481,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // ── Taken path ──
+            const size_t taken_label = code_buf_used_;
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             static bool no_selfloop_ = dbg().no_selfloop;
@@ -510,6 +524,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             //
             // Disable with BIFROST_NO_SELFLOOP=1 for debugging.
             emit_selfloop_backedge(bp.target);
+            note_selfloop_jcc(jcc_patch, taken_label);
             if (has_selfloop_slot_) emit_mov_imm_to_rax(bp.target);  // else emit_taken_path_epilogue
             rax_holds_next_pc_ = true;
             flags_in_host_ = false;

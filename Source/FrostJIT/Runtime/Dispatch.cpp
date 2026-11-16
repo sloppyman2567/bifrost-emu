@@ -473,10 +473,18 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // because the JIT ran the loop to completion while the
         // interpreter stepped only `instr_count` instructions.
         uint8_t saved_selfloop[5];
+        uint8_t saved_selfloop_jcc[4] = {};
         bool had_selfloop = entry.has_selfloop_slot;
         if (had_selfloop) {
             make_writable();
             memcpy(saved_selfloop, code_buf_ + entry.selfloop_patch_off, 5);
+            // A conditional jump retargeted past the slot would run the whole loop: point it back at the slot.
+            if (entry.selfloop_jcc_back) {
+                uint8_t* jcc_rel = code_buf_ + entry.selfloop_patch_off - entry.selfloop_jcc_back + 2;
+                const int32_t to_slot = static_cast<int32_t>(entry.selfloop_jcc_back) - 6;
+                memcpy(saved_selfloop_jcc, jcc_rel, 4);
+                memcpy(jcc_rel, &to_slot, 4);
+            }
             // Five-byte NOP — fall through past the slot to whatever
             // code follows (the not-taken epilogue, which returns the
             // branch target as next PC).
@@ -873,6 +881,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (had_selfloop) {
             make_writable();
             memcpy(code_buf_ + entry.selfloop_patch_off, saved_selfloop, 5);
+            if (entry.selfloop_jcc_back)
+                memcpy(code_buf_ + entry.selfloop_patch_off - entry.selfloop_jcc_back + 2, saved_selfloop_jcc, 4);
             std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }

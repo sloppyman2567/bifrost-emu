@@ -47,6 +47,13 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (a loop's back edge takes one jump, and a repeated access is checked once)
+
+- A loop that ends in a conditional branch back to its own start now jumps there directly instead of through a second jump,
+  and a store that follows a load of the same address in the same block skips its second bounds check. CoreMark runs 3.2%
+  fewer host instructions and 10% fewer branches, and about 1% faster. Nothing to configure. An existing JIT disk cache is
+  rebuilt once.
+
 ### Added (a Resolution setting for Android apps)
 
 - Each app has a Resolution setting, in the library's settings and as `asgard config APP resolution 1080` (720, 1080, 1440 or
