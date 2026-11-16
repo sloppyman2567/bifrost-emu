@@ -119,7 +119,56 @@ static void trace_back_buffer(uint64_t surface) {
     for (int i = 0; i < 4; ++i) store(kPack[i], pack[i]);
 }
 
+// The host buffers one thunk call bounces its pointer arguments through. Most calls need none, and building and
+// destroying eighteen vectors on every call was visible in a game's profile (about 8,000 calls per frame), so a call
+// takes a set on first use and returns it on exit. Sets are reused with their capacity (a thread keeps a few), and a
+// nested call (a guest callback that calls another thunk) takes its own. A buffer bigger than kKeepBytes is freed.
+namespace {
+constexpr int kBounceSlots = 16;
+struct BounceSet {
+    std::vector<uint8_t> buf[kBounceSlots];
+    std::vector<const char*> string_array;                  // STRING_ARRAY: host pointers handed to the driver
+    std::vector<std::vector<uint8_t>> string_array_bounces;  // and the bytes of any string that had to be copied
+};
+class BounceLease {
+public:
+    BounceLease() = default;
+    BounceLease(const BounceLease&) = delete;
+    BounceLease& operator=(const BounceLease&) = delete;
+    ~BounceLease() {
+        if (!set_) return;
+        constexpr size_t kKeepBytes = 1 << 20;
+        for (auto& b : set_->buf) {
+            b.clear();
+            if (b.capacity() > kKeepBytes) std::vector<uint8_t>().swap(b);
+        }
+        set_->string_array.clear();
+        set_->string_array_bounces.clear();
+        pool().push_back(std::move(set_));
+    }
+    BounceSet& get() {
+        if (!set_) {
+            auto& free_sets = pool();
+            if (free_sets.empty()) {
+                set_ = std::make_unique<BounceSet>();
+            } else {
+                set_ = std::move(free_sets.back());
+                free_sets.pop_back();
+            }
+        }
+        return *set_;
+    }
+private:
+    static std::vector<std::unique_ptr<BounceSet>>& pool() {
+        thread_local std::vector<std::unique_ptr<BounceSet>> free_sets;
+        return free_sets;
+    }
+    std::unique_ptr<BounceSet> set_;
+};
+}  // namespace
+
 int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
+    const auto& dbgf = dbg();  // read once: each dbg() is a guarded static load, and a call makes dozens
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
@@ -128,7 +177,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return -ENOENT;
     }
     if (local_id >= impl_->id_to_idx_.size()) {
-        if (dbg().thunk_trace) {
+        if (dbgf.thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: unknown symbol_id=%u\n", symbol_id);
         }
         return -ENOENT;
@@ -137,7 +186,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     // A host fault below (a driver or libc reading an untranslated guest pointer) names this call.
     thunk_call::Scope thunk_scope(entry.spec ? entry.spec->name : entry.name.c_str());
-    if (dbg().frame_trace) ++frame_calls()[entry.name];
+    if (dbgf.frame_trace) ++frame_calls()[entry.name];
 
 #if defined(BIFROST_THUNK_HAVE_SDL2)
     struct SdlCpuScope {
@@ -195,13 +244,13 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint64_t hw = mgr.host_native_window(android_surface_handle);
             if (hw == 0) {
                 // No host window backing the shim — EGL_NO_SURFACE.
-                if (dbg().thunk_trace)
+                if (dbgf.thunk_trace)
                     fprintf(stderr, "[thunk] eglCreateWindowSurface: "
                             "android shim without host window\n");
                 cpu.regs[0] = 0;
                 return 0;
             }
-            if (dbg().thunk_trace) {
+            if (dbgf.thunk_trace) {
                 fprintf(stderr, "[thunk] eglCreateWindowSurface: android "
                         "shim 0x%llx -> host window 0x%llx\n",
                         static_cast<unsigned long long>(cpu.regs[2]),
@@ -243,7 +292,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         cpu.regs[0] = g.lo;
         cpu.regs[1] = g.hi;
-        if (dbg().thunk_trace) {
+        if (dbgf.thunk_trace) {
             fprintf(stderr, "[thunk] SDL_JoystickGetGUID(0x%llx) -> %016llx%016llx\n",
                     static_cast<unsigned long long>(args[0]),
                     static_cast<unsigned long long>(g.hi),
@@ -331,14 +380,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (!impl_->mem || !impl_->tracker() ||
                 !impl_->gl_get_buffer_parameteriv_fn_ || !impl_->gl_map_buffer_range_fn_ ||
                 !impl_->gl_unmap_buffer_fn_) {
-                if (dbg().thunk_trace)
+                if (dbgf.thunk_trace)
                     fprintf(stderr, "[thunk] %s: unavailable (mem/tracker/host fns)\n",
                             entry.name.c_str());
                 return 0;
             }
             uint32_t buffer = impl_->tracker()->buffer_binding(target);
             if (buffer == 0) {
-                if (dbg().thunk_trace)
+                if (dbgf.thunk_trace)
                     fprintf(stderr, "[thunk] %s: no buffer bound to target 0x%x\n",
                             entry.name.c_str(), target);
                 return 0;  // GL: map of an unbound buffer → NULL
@@ -350,7 +399,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 // bounce=0 and skip writeback/untrack until the real mapping lands.
                 std::lock_guard<std::mutex> g(impl_->mu);
                 if (impl_->gl_buffer_mappings_.count(buffer)) {
-                    if (dbg().thunk_trace)
+                    if (dbgf.thunk_trace)
                         fprintf(stderr, "[thunk] %s: buffer %u already mapped\n",
                                 entry.name.c_str(), buffer);
                     return 0;  // GL: mapping an already-mapped buffer → NULL
@@ -377,7 +426,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     impl_->gl_buffer_mappings_.erase(it);
             };
             if (length == 0) {
-                if (dbg().thunk_trace)
+                if (dbgf.thunk_trace)
                     fprintf(stderr, "[thunk] %s: buffer %u has zero size\n",
                             entry.name.c_str(), buffer);
                 drop_placeholder_();
@@ -397,7 +446,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint64_t bounce = impl_->mem->mmap_alloc(length);
             uint8_t* bounce_ptr = bounce ? impl_->mem->guest_to_host_ptr(bounce) : nullptr;
             if (!bounce_ptr) {
-                if (dbg().thunk_trace)
+                if (dbgf.thunk_trace)
                     fprintf(stderr, "[thunk] %s: mmap_alloc(%llu) failed\n",
                             entry.name.c_str(),
                             static_cast<unsigned long long>(length));
@@ -417,7 +466,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                                                     target, access, host};
             }
             cpu.regs[0] = bounce;
-            if (dbg().thunk_trace) {
+            if (dbgf.thunk_trace) {
                 fprintf(stderr, "[thunk] %s: buffer=%u target=0x%x off=%llu "
                         "len=%llu acc=0x%x → bounce=0x%llx\n",
                         entry.name.c_str(), buffer, target,
@@ -452,7 +501,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             using UnmapFn = uint8_t (*)(uint32_t);
             cpu.regs[0] = reinterpret_cast<UnmapFn>(impl_->gl_unmap_buffer_fn_)(target);
             if (found) impl_->mem->untrack_allocation(m.bounce, m.size);
-            if (dbg().thunk_trace)
+            if (dbgf.thunk_trace)
                 fprintf(stderr, "[thunk] glUnmapBuffer: buffer=%u target=0x%x %s -> %llu\n",
                         buffer, target, found ? "ok" : "(not mapped)",
                         static_cast<unsigned long long>(cpu.regs[0]));
@@ -484,7 +533,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             using FlushFn = void (*)(uint32_t, intptr_t, intptr_t);
             reinterpret_cast<FlushFn>(impl_->gl_flush_mapped_buffer_range_fn_)(
                 target, static_cast<intptr_t>(offset), static_cast<intptr_t>(length));
-            if (dbg().thunk_trace)
+            if (dbgf.thunk_trace)
                 fprintf(stderr, "[thunk] glFlushMappedBufferRange: buffer=%u "
                         "target=0x%x off=%llu len=%llu\n", buffer, target,
                         static_cast<unsigned long long>(offset),
@@ -552,7 +601,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 }
             }
         }
-        if (dbg().thunk_trace) {
+        if (dbgf.thunk_trace) {
             fprintf(stderr, "[thunk] GetProcAddress('%s') → 0x%llx\n",
                     name ? name : "(null)",
                     static_cast<unsigned long long>(found));
@@ -865,7 +914,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         default:
             break;
         }
-        if (entry.sym == Sym::glTexImage2D && dbg().thunk_trace) {
+        if (entry.sym == Sym::glTexImage2D && dbgf.thunk_trace) {
             static int tex_trace_n = 0;
             if (tex_trace_n++ < 80) {
                 fprintf(stderr,
@@ -901,11 +950,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         (void)idx;
     };
 
-    std::vector<uint8_t> bounce_bufs[kMaxArgs];
-    // STRING_ARRAY: the host string pointers (and any bounced string bytes) handed to the driver
-    // in place of a guest `const char* const*`; they must live until the host call returns.
-    std::vector<const char*> string_array;
-    std::vector<std::vector<uint8_t>> string_array_bounces;
+    // Taken on the first pointer argument that needs a bounce, returned when the call ends (BounceLease above).
+    // STRING_ARRAY keeps its host string pointers (and any bounced string bytes) in the same set: they replace a
+    // guest `const char* const*` and must live until the host call returns.
+    static_assert(kMaxArgs == kBounceSlots, "bounce slots follow the argument ceiling");
+    BounceLease bounce_lease;
     uint64_t bounce_guest[kMaxArgs] = {0};
     bool bounce_wb[kMaxArgs] = {false};
 
@@ -1016,7 +1065,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
         }
         if (elided) {
-            if (dbg().thunk_trace) {
+            if (dbgf.thunk_trace) {
                 fprintf(stderr, "[thunk] elide %s (redundant)\n",
                         entry.name.c_str());
             }
@@ -1028,7 +1077,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         !pixel_data_is_pbo_offset) {
         for (int i = 0; i < kMaxArgs; i++) {
             if (entry.pointer_args & (1u << i)) {
-                translate_ptr(args[i], i, &bounce_bufs[i],
+                translate_ptr(args[i], i, &bounce_lease.get().buf[i],
                               &bounce_guest[i], &bounce_wb[i]);
             }
         }
@@ -1052,8 +1101,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 // Clamp the writeback to the guest's buffer capacity
                 // (cbGUID) so we never overrun pszGUID[cbGUID].
                 size_t wb = static_cast<size_t>(size);
-                if (wb > bounce_bufs[2].size()) wb = bounce_bufs[2].size();
-                impl_->mem->write(bounce_guest[2], bounce_bufs[2].data(), wb);
+                if (wb > bounce_lease.get().buf[2].size()) wb = bounce_lease.get().buf[2].size();
+                impl_->mem->write(bounce_guest[2], bounce_lease.get().buf[2].data(), wb);
             }
         }
         cpu.regs[0] = 0;
@@ -1073,7 +1122,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.spec && entry.spec->policy == thunk::Policy::GLFW_CREATE) {
         if (!impl_->glfw_get_window_content_scale_fn_ ||
             !impl_->glfw_set_window_size_fn_ || !entry.host_fn) {
-            if (dbg().thunk_trace)
+            if (dbgf.thunk_trace)
                 fprintf(stderr, "[thunk] glfwCreateWindow: host fns unavailable\n");
             cpu.regs[0] = 0;
             return 0;
@@ -1094,12 +1143,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 int nh = static_cast<int>(static_cast<int64_t>(args[1]) / ys + 0.5f);
                 using SizeFn = void (*)(uint64_t, int, int);
                 reinterpret_cast<SizeFn>(impl_->glfw_set_window_size_fn_)(win, nw, nh);
-                if (dbg().thunk_trace)
+                if (dbgf.thunk_trace)
                     fprintf(stderr, "[thunk] glfwCreateWindow %llux%llu -> resize "
                             "%dx%d (scale %.2f)\n",
                             static_cast<unsigned long long>(args[0]),
                             static_cast<unsigned long long>(args[1]), nw, nh, xs);
-            } else if (dbg().thunk_trace) {
+            } else if (dbgf.thunk_trace) {
                 fprintf(stderr, "[thunk] glfwCreateWindow %llux%llu (scale %.2f)\n",
                         static_cast<unsigned long long>(args[0]),
                         static_cast<unsigned long long>(args[1]), xs);
@@ -1138,7 +1187,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                             "OFFSET" : "translate");
             if (impl_->tracker()->array_buffer_binding() == 0 &&
                 args[pi] != 0) {
-                translate_ptr(args[pi], pi, &bounce_bufs[pi],
+                translate_ptr(args[pi], pi, &bounce_lease.get().buf[pi],
                               &bounce_guest[pi], &bounce_wb[pi]);
             }
         } else if (entry.spec->policy == thunk::Policy::EL_PTR) {
@@ -1151,7 +1200,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 entry.sym == Sym::glDrawRangeElementsBaseVertex) pi = 5;
             if (impl_->tracker()->element_array_buffer_binding() == 0 &&
                 args[pi] != 0) {
-                translate_ptr(args[pi], pi, &bounce_bufs[pi],
+                translate_ptr(args[pi], pi, &bounce_lease.get().buf[pi],
                               &bounce_guest[pi], &bounce_wb[pi]);
             }
         } else if (entry.spec->policy == thunk::Policy::EL_PTR_ARRAY) {
@@ -1333,7 +1382,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             host_strs[i] = reinterpret_cast<const char*>(bounces.back().data());
         }
         using Fn = void (*)(uint64_t, int, const char* const*, const int*);
-        if (dbg().thunk_trace) {
+        if (dbgf.thunk_trace) {
             fprintf(stderr, "[thunk] shaderSource: shader=0x%llx count=%d "
                     "str0='%.60s' len0=%d\n",
                     static_cast<unsigned long long>(args[0]), count,
@@ -1422,7 +1471,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             host_strs[i] = reinterpret_cast<const char*>(bounces.back().data());
         }
         using Fn = void (*)(uint64_t, int, const char* const*, uint32_t);
-        if (dbg().thunk_trace) {
+        if (dbgf.thunk_trace) {
             fprintf(stderr, "[thunk] transformFeedbackVaryings: program=0x%llx "
                     "count=%d str0='%.60s' mode=0x%llx\n",
                     static_cast<unsigned long long>(args[0]), count,
@@ -1455,6 +1504,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         } catch (...) {
             std::fill(guest_strings.begin(), guest_strings.end(), 0);
         }
+        auto& string_array = bounce_lease.get().string_array;
+        auto& string_array_bounces = bounce_lease.get().string_array_bounces;
         string_array.assign(static_cast<size_t>(count), "");
         for (int i = 0; i < count; i++) {
             const uint64_t gp = guest_strings[static_cast<size_t>(i)];
@@ -1481,7 +1532,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (count > 0) args[2] = reinterpret_cast<uint64_t>(string_array.data());
     }
 
-    if (dbg().thunk_trace) {
+    if (dbgf.thunk_trace) {
         fprintf(stderr, "[thunk] dispatch[T%lx]: %s (host_fn=%p) "
                 "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx "
                 "a8=0x%llx ptrs=0x%x stack=%u\n",
@@ -1531,7 +1582,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         for (int i = 0; i < kMaxArgs; i++) {
             if (!bounce_wb[i] || !bounce_guest[i]) continue;
             const uint64_t g = bounce_guest[i];
-            const size_t want = bounce_bufs[i].size();
+            const size_t want = bounce_lease.get().buf[i].size();
             size_t wb = 0;
             bool in_live = false;
             for (const auto& kv : live) {
@@ -1562,7 +1613,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         want, wb);
             }
             try {
-                impl_->mem->write(g, bounce_bufs[i].data(), wb);
+                impl_->mem->write(g, bounce_lease.get().buf[i].data(), wb);
             } catch (...) { /* best-effort: host call already happened */ }
         }
     };
@@ -1571,7 +1622,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // Skip host call, but still write back any bounced pointer args
         // so the guest sees the query result.
         safe_writeback_all();
-        if (dbg().thunk_trace) {
+        if (dbgf.thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s handled by GL state tracker\n",
                     entry.name.c_str());
         }
@@ -1633,7 +1684,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 
     // Bracket EGL calls to distinguish blocked calls from failed swaps.
     // Never query eglGetError here: that would consume the guest's error.
-    const bool trace_present = dbg().frame_trace &&
+    const bool trace_present = dbgf.frame_trace &&
         (entry.sym == Sym::eglSwapBuffers || entry.sym == Sym::eglCreateWindowSurface ||
          entry.sym == Sym::eglDestroySurface || entry.sym == Sym::eglMakeCurrent ||
          entry.sym == Sym::eglGetError || entry.sym == Sym::eglTerminate);
@@ -1660,7 +1711,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         !impl_->gl_buffer_mappings_.empty()) {
         sync_persistent_mappings_();
     }
-    if (entry.sym == Sym::glTexImage2D && dbg().thunk_trace) {
+    if (entry.sym == Sym::glTexImage2D && dbgf.thunk_trace) {
         static int full_tex_trace_n = 0;
         if (full_tex_trace_n++ < 80)
             fprintf(stderr, "[thunk] glTexImage2D call: %llx %llx %llx %llx %llx %llx %llx %llx %llx\n",
@@ -1691,7 +1742,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (const char* guest_list = gl_extensions::filtered_string())
                 ret = reinterpret_cast<uint64_t>(guest_list);
         }
-        if (dbg().thunk_trace) {
+        if (dbgf.thunk_trace) {
             fprintf(stderr, "[thunk] %s pname=0x%x host='%.*s'\n",
                     entry.name.c_str(),
                     static_cast<unsigned int>(args[0]), 48,
@@ -1992,18 +2043,18 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
 #if defined(BIFROST_THUNK_HAVE_SDL2)
-    if (dbg().input_trace && (entry.sym == Sym::SDL_SetRelativeMouseMode ||
+    if (dbgf.input_trace && (entry.sym == Sym::SDL_SetRelativeMouseMode ||
                              entry.sym == Sym::SDL_SetWindowGrab))
         fprintf(stderr, "[input] %s arg=%llu result=%d\n", entry.name.c_str(),
                 static_cast<unsigned long long>(args[entry.sym == Sym::SDL_SetWindowGrab ? 1 : 0]),
                 static_cast<int32_t>(ret));
-    if (entry.sym == Sym::SDL_PollEvent && dbg().input_trace && !dbg().input_watch.empty()) {
+    if (entry.sym == Sym::SDL_PollEvent && dbgf.input_trace && !dbgf.input_watch.empty()) {
         static thread_local std::vector<uint32_t> last;
         static thread_local unsigned captures = 0;
         if (captures < 4096) {
             std::vector<uint32_t> values;
             bool readable = true;
-            for (uint64_t address : dbg().input_watch) {
+            for (uint64_t address : dbgf.input_watch) {
                 uint32_t value = 0;
                 try { impl_->mem->read(address, &value, sizeof(value)); }
                 catch (...) { readable = false; break; }
@@ -2012,30 +2063,30 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (readable && values != last) {
                 fprintf(stderr, "[input] guest-state");
                 for (size_t i = 0; i < values.size(); ++i)
-                    fprintf(stderr, " %llx=%08x", static_cast<unsigned long long>(dbg().input_watch[i]), values[i]);
+                    fprintf(stderr, " %llx=%08x", static_cast<unsigned long long>(dbgf.input_watch[i]), values[i]);
                 fprintf(stderr, "\n");
                 last = std::move(values);
                 ++captures;
             }
         }
     }
-    if (entry.sym == Sym::SDL_PollEvent && (dbg().thunk_trace || dbg().input_trace) &&
+    if (entry.sym == Sym::SDL_PollEvent && (dbgf.thunk_trace || dbgf.input_trace) &&
         ret && args[0]) {
         SDL_Event event;
-        const void* hp = bounce_guest[0] ? bounce_bufs[0].data()
+        const void* hp = bounce_guest[0] ? bounce_lease.get().buf[0].data()
                                         : reinterpret_cast<void*>(args[0]);
         std::memcpy(&event, hp, sizeof(event));
         if (event.type == SDL_MOUSEMOTION) {
             static std::atomic<unsigned> motion_count{0};
             // Bound opt-in capture so a long play session cannot grow an
             // input log without limit. Full thunk tracing remains unlimited.
-            unsigned count = dbg().input_trace ? motion_count.fetch_add(1) : 0;
-            if (dbg().thunk_trace || count < 4096)
+            unsigned count = dbgf.input_trace ? motion_count.fetch_add(1) : 0;
+            if (dbgf.thunk_trace || count < 4096)
                 fprintf(stderr, "[input] motion window=%u device=%u state=%u x=%d y=%d dx=%d dy=%d relative=%d\n",
                         event.motion.windowID, event.motion.which, event.motion.state,
                         event.motion.x, event.motion.y, event.motion.xrel, event.motion.yrel,
                         SDL_GetRelativeMouseMode());
-        } else if (dbg().input_trace && event.type == SDL_WINDOWEVENT) {
+        } else if (dbgf.input_trace && event.type == SDL_WINDOWEVENT) {
             fprintf(stderr, "[input] window=%u event=%u data=%d,%d\n",
                     event.window.windowID, event.window.event, event.window.data1, event.window.data2);
         }
@@ -2056,7 +2107,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 #endif
     }
     cpu.regs[0] = ret;
-    if (dbg().frame_trace) {
+    if (dbgf.frame_trace) {
         if (entry.sym != Sym::glGetError) {
             frame_last_call() = entry.name;
         } else if (ret) {
@@ -2071,8 +2122,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     // Lightweight frame counter: print every 5 present/swap calls when
     // BIFROST_FRAME_TRACE=1 (avoids the heavy per-call dispatch trace).
-    // Gate is cached in dbg() — getenv() on every dispatch was measurable.
-    if (dbg().frame_trace && entry.spec &&
+    // Gate is cached in dbgf — getenv() on every dispatch was measurable.
+    if (dbgf.frame_trace && entry.spec &&
         entry.spec->policy == thunk::Policy::PRESENT) {
         static uint64_t frame_count = 0;
         static uint64_t t0 = 0;
