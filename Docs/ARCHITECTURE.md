@@ -11,6 +11,7 @@ the emulator's memory, signal, syscall, loader and host-service implementations.
 | CLI and configuration | `Source/Main.cpp`, `Source/System/Core/Config.cpp` |
 | Emulator startup and lifetime | `Source/System/Core/Emulator/`: `Lifecycle.cpp`, `ElfLoading.cpp`, `GuestStartup.cpp`, `Android.cpp`, `ThunkWiring.cpp`, `GuestTimers.cpp` (POSIX timers) |
 | Decode and reference execution | `Source/Interpreter/Decoder/`, `Core/`, `FloatSIMD/` |
+| Host-native `memcpy`/`memmove`/`memset` | `Source/System/Core/NativeLibc.*` (registry and host routines), `Source/System/Loader/DynamicLinker/Symbols.cpp` (symbols), `Source/FrostJIT/Compiler/CallHelpers.cpp` (`emit_native_libc_entry`); see the [JIT guide](JIT.md#host-native-memcpy-memmove-and-memset) |
 | LL/SC exclusive monitor | `Source/System/Core/ExclusiveMonitor.hpp` (shared by the interpreter, the JIT helpers and `Source/FrostJIT/CodeGen/Integer/Atomics.cpp`) |
 | JIT pipeline | `Source/FrostJIT/`: `IR/`, `Compiler/`, `CodeGen/`, `RegisterAlloc/`, `Backend/`, `Runtime/`, `Tier2/` |
 | Guest address space and mappings | `Source/System/Memory/`: `Memory.cpp` (mapping index, access, file backing), `Allocation.cpp`, `Discard.cpp` (madvise, userfaultfd) |

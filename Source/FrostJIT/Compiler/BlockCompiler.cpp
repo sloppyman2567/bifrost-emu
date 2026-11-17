@@ -691,6 +691,14 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         emit_mov_imm64(RDX, ir_block.fwd_enabled ? 1 : 0);
         emit_call_aligned(&jit_trace_block_entry, 0);
     }
+    // A guest memcpy/memmove/memset (recorded by the loader, NativeLibc.hpp): large calls leave for the host's routine.
+    // Not under differential replay (the replay would re-run the guest routine for one block and diverge), store
+    // tracing, or a shifted proof compile (its pc is not the registered one, so the block is not cached).
+    if (!dbg().no_native_libc && !dbg().jit_verify && !dbg().jit_slow_stores && !dbg().need_store_pc() &&
+        fault_sites_ && !private_entry && !record_oracle_ && !tier2_sampling_compile_) {
+        const NativeLibcKind libc_kind = emu.native_libc().find(start_pc);
+        if (libc_kind != NativeLibcKind::None) emit_native_libc_entry(start_pc, static_cast<uint32_t>(libc_kind));
+    }
     // ── Tier-2 hot-head counter (opt-in; BIFROST_TIER2=1 enables) ──
     // Emitted here (after chain_entry_off_, before the R10 window load and
     // vec prologue loads) so BOTH cold entries (falling through the prologue)

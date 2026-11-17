@@ -1546,6 +1546,37 @@ region itself stays cached.
   for off-path blocks. Raising the eight-block cap alone admits none of the measured kernels. Tier-2 spends about 20 M
   cycles per run on compiles and trials before it pays (2026-11-11).
 
+## Host-native memcpy, memmove and memset
+
+A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a Minecraft Weekend profile the chunk mesher's
+`memset` was the hottest translated block (about 19% of the translated-code samples). The loader records where the guest's
+`memcpy`, `memmove` and `memset` start, and a large call runs the host's routine instead.
+
+- **Registry.** `NativeLibcRoutines` (`System/Core/NativeLibc.*`, a member of `Emulator`) maps an entry pc to a kind. It is
+  fed by `DynamicLinker::index_symbols` (the symbol that wins, with an ifunc already resolved to its implementation, so
+  glibc's `__memcpy_*` variants are the recorded addresses), and by `register_symtab_routines`, which reads an unstripped
+  static executable's `.symtab` (functions named exactly `memcpy`, `memmove` or `memset`; IFUNC symbols are skipped, their
+  value is the resolver) when the main image loads and again at `execve`, which clears the registry first.
+- **Block entry.** `translate_block` calls `emit_native_libc_entry` at the chain entry of a block that starts a registered
+  routine, where nothing is cached: `cmp x2, kNativeLibcMinBytes; jb skip`, store `cpu.pc`, call `jit_native_libc`, and when
+  `cpu.pc` changed (the helper left it at x30) take the dynamic exit `CALL_INTERP` uses for a changed pc, which returns to the
+  dispatcher with RAX = the return address. A call below the threshold, or one the helper declines, falls into the block's
+  own code, which is the guest routine. It is not emitted under `BIFROST_JIT_VERIFY` (replay would re-run the guest routine
+  for one block and diverge), slow stores or store tracing, a Tier-2 sampling copy or a shifted proof compile (the registry
+  lookup misses there, so the block differs and the disk cache never reuses it), or `BIFROST_NO_NATIVE_LIBC=1`.
+- **The helper** (`NativeLibcRoutines::run`) declines unless `n >= kNativeLibcMinBytes` and every byte of every range is
+  accessible with the right permission (`Memory::guest_to_host_ptr`: mapping, protection, userfaultfd state, window bound,
+  Android pointer tags), and a `memcpy`'s ranges do not overlap. Nothing is written before all the checks pass. So every
+  fault, userfaultfd page and protection error still happens in the guest routine, at the guest's addresses. Done, it sets
+  x0 to the destination and `pc` to x30.
+- **The threshold** is 1 KiB: the exit and the call cost about 33 ns, the guest routine ties them at 512 bytes and loses
+  from 1 KiB up ([measurements](archive/JIT-history.md#host-native-memcpy-memmove-and-memset-2026-11-16)).
+- **Not covered.** Android: Bionic's libc is linked by the guest's own linker, which the emulator never sees, so nothing is
+  registered there. Also `--guest-ld` glibc, stripped static executables and a dynamic program run through `execve` (the
+  guest `ld.so` links it). A guest thread that unmaps or protects a range while another thread's native call is inside it
+  faults in the host, not in the guest (the guest routine would fault at its own address).
+  `jit_native_libc` (single thread, run by `make verify` too), `test_native_libc_mt` and `test_jit_native_libc.sh` cover it.
+
 ## Planned codegen: retaining guest state across regions
 
 This is the proposed v2 compiler direction, with milestones and performance
@@ -1720,6 +1751,7 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [One jump per loop iteration and one check per repeated access (2026-11-16)](archive/JIT-history.md#one-jump-per-loop-iteration-and-one-check-per-repeated-access-2026-11-16)
+- [Host-native memcpy, memmove and memset (2026-11-16)](archive/JIT-history.md#host-native-memcpy-memmove-and-memset-2026-11-16)
 - [A fork child keeps the JIT (2026-11-11)](archive/JIT-history.md#a-fork-child-keeps-the-jit-2026-11-11)
 - [Tier-2 exits that chain, exit-rate feedback and profiler costs (2026-11-11)](archive/JIT-history.md#tier-2-exits-that-chain-exit-rate-feedback-and-profiler-costs-2026-11-11)
 - [Tier-2 through calls and returns (2026-11-11)](archive/JIT-history.md#tier-2-through-calls-and-returns-2026-11-11)

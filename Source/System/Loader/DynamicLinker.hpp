@@ -69,6 +69,7 @@
 namespace arm64emu {
 class Memory;
 class CPU;
+class NativeLibcRoutines;
 // PT_TLS segment info for a loaded object.
 struct TlsSegment {
     uint64_t vaddr    = 0;  // file vaddr (relative to base)
@@ -364,6 +365,8 @@ public:
     void set_ifunc_resolver(std::function<uint64_t(CPU&, uint64_t)> cb) {
         ifunc_resolver_ = std::move(cb);
     }
+    // The table of host-native libc routines (NativeLibc.hpp) fed by every symbol index; it outlives the linker.
+    void set_native_libc(NativeLibcRoutines* table) { native_libc_ = table; }
     // ── Constructor/init callback ────────────────────────
     // After relocations are applied, the linker must invoke DT_INIT and
     // DT_INIT_ARRAY for each loaded object (in dependency order: libs
@@ -471,6 +474,8 @@ private:
     // triggered a resolver/init callback that clobbered main_cpu_ while
     // the main thread was mid-execution.
     std::function<uint64_t(CPU&, uint64_t)> ifunc_resolver_;
+    // Where index_symbols records the guest's memcpy/memmove/memset (null: nothing is recorded).
+    NativeLibcRoutines* native_libc_ = nullptr;
     // Optional init runner callback (set by Emulator before link()).
     // Used to invoke DT_INIT_ARRAY entries (C++ static constructors).
     // First param is the CPU to borrow (see ifunc_resolver_).

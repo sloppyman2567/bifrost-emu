@@ -318,6 +318,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     load_options.defer_relocations_to_interp = guest_linker_;
     auto info = ElfLoader::load(mem_, data, load_options);
     name_elf_segments(info, path);
+    // An unstripped static executable defines its own memcpy/memmove/memset; record them for the host-native path.
+    if (!android_runtime_) register_symtab_routines(native_libc_, data, info.base_addr);
     entry_ = info.entry;
     prog_entry_ = info.entry;  // save original entry for AT_ENTRY
     end_addr_ = info.end_addr;
@@ -436,6 +438,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         bool native_dynlink = (getenv("BIFROST_NO_NATIVE_DYNLINK") == nullptr);
         if (native_dynlink) {
             dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
+            dyn_linker_->set_native_libc(&native_libc_);
             // ── Wire GraphicThunk into the dynamic linker ──
             // When BIFROST_THUNK_GRAPHICS=1 is set, the thunk forwards
             // guest GL/EGL/SDL2 calls to the host. We init the thunk
@@ -972,6 +975,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // need a DynamicLinker + thunk trampolines. Create a minimal one.
     if (!android_runtime_ && !dyn_linker_) {
         dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
+        dyn_linker_->set_native_libc(&native_libc_);
         if (auto* thunk = graphics_.thunk()) {
             if (thunk->enabled()) {
                 thunk->init(mem_);

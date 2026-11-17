@@ -127,6 +127,9 @@ extern "C" uint64_t jit_fault_step(Emulator* emu, CPU* cpu, uint64_t block_pc);
 // BIFROST_BLOCK_TRACE prologue hook: logs one block entry (InterpreterBridge.cpp).
 extern "C" void jit_trace_block_entry(CPU* cpu, uint64_t block_pc, uint64_t fwd);
 extern "C" void jit_vdso_clock_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
+// Host-native memcpy/memmove/memset (NativeLibc.hpp), called from the top of the block that starts a guest routine.
+// Returns 1 when it did the whole routine and set cpu->pc to the return address, 0 when the guest routine must run.
+extern "C" uint32_t jit_native_libc(Emulator* emu, CPU* cpu, uint32_t kind);
 extern "C" void jit_native_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
 extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
 extern "C" uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
@@ -1920,6 +1923,9 @@ private:
     struct SkipFixup { size_t jcc_offset; int target_op; };
     void emit_call_interp(uint64_t arm_pc, bool ends_block);
     void emit_call_vdso_clock(uint64_t arm_pc);
+    // The top of a block that starts a guest memcpy/memmove/memset: a size check, then jit_native_libc, then a dynamic
+    // exit when it handled the call. Emitted at the chain entry, where nothing is cached (CallHelpers.cpp).
+    void emit_native_libc_entry(uint64_t start_pc, uint32_t kind);
     void emit_call_native_svc(uint64_t arm_pc);
     // compile_ir_inst — the main IR-op→x86 switch.
     // The dispatch is in Compiler/FrostJIT.cpp; FP/SIMD cases are delegated

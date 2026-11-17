@@ -49,6 +49,12 @@ it under the guide's Recorded changes.
   body against the same QEMU hashes. `vec_inst_operands` lists each kind's
   vector reads and writes by hand; add a new kind there (a kind that accumulates
   into Vd reads it).
+- A block that starts a registered guest `memcpy`/`memmove`/`memset` (`NativeLibcRoutines`, `Emulator::native_libc()`) begins
+  with `emit_native_libc_entry`, emitted at the chain entry before anything is cached. It leaves by the dynamic
+  `CALL_INTERP` exit, so it must stay where no register, flag or vector state is live, and `jit_native_libc` must leave `cpu.pc`
+  at the routine's own entry when it declines. Keep it out of verify, slow-store and Tier-2 sampling compiles; a block
+  compiled with it must not be reusable from the disk cache (the shifted proof compile has to differ, which it does because
+  the registry lookup misses at the shifted pc).
 - A Tier-1 access may skip its gate compare only when `scan_covered_guards` proves an earlier access of the block used the same
   base value and offset at a width no smaller, with only straight-line scalar ops between and no `BRCOND_SKIP` in the block;
   `guard_checked_` records that the earlier access really emitted its compare. A covered access is still a registered fault site

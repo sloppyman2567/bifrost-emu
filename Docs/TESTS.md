@@ -30,6 +30,17 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### Host-native memcpy, memmove and memset (2026-11-16)
+
+`Tests/Unit/jit_native_libc.c` (`make verify` runs it too, with the native path off) checks results against byte loops at
+12 sizes from 1 KiB to 1 MiB and several alignments, overlapping moves both ways, an overlapping `memcpy`, the end of a
+mapping, a read-only destination and unreadable or `PROT_NONE` ranges (which must still fault in the guest routine), live
+callee-saved values and nested calls; `Tests/Unit/test_native_libc_mt.c` does it on five threads.
+`Scripts/Testing/test_jit_native_libc.sh` (`run_tests.sh` entry `jit_native_libc`, under a minute with the interpreter run)
+runs them with the native path on (the stats line must show calls), off (`BIFROST_NO_NATIVE_LIBC=1`), under `--no-jit` and
+under `BIFROST_JIT_VERIFY` (the last two must show none), and the glibc dynamic build
+`Tests/Unit/jit_native_libc_glibc.elf` (ifunc-resolved routines, needs the rootfs).
+
 ### Persistent JIT cache (2026-10-26)
 
 `Scripts/Testing/test_jit_disk_cache.sh` (`run_tests.sh` entry `jit_disk_cache`, about 2 s) runs

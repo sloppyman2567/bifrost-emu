@@ -32,6 +32,13 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   OpenSL ES need the managed Bionic tests, not just host audio checks.
   Display tests need GPU access; smoke frames do not establish game playability.
 
+- `Core/NativeLibc.*` is the registry of the guest's `memcpy`/`memmove`/`memset` entry points and their host-native
+  implementation (the JIT hook is in the FrostJIT guide). `run` writes nothing until `Memory::guest_to_host_ptr` has proven
+  every range accessible, declines an overlapping `memcpy`, and returns true only when the guest routine's `ret` is already
+  reflected in `x0` and `pc`. `execve` clears the registry before the new image loads (a stale entry would turn unrelated
+  code into a `memset`); entries come from the native `DynamicLinker` and from an unstripped static executable's `.symtab`.
+  A new source of entries must record the implementation's address, not an ifunc resolver's.
+
 ## Scoped contracts
 
 - [Memory](Memory/AGENTS.md): mappings, discard/remap, userfaultfd and null pages.

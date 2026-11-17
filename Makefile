@@ -599,7 +599,8 @@ GLIBC_DYN_SRCS := \
 # Dynamically-linked variants whose .elf name differs from the source.
 MUSL_DYN_PAIRS := Tests/Apps/hello_dyn_musl.elf:Tests/Apps/hello_dyn.c \
 	Tests/Apps/test_dyn_full_musl.elf:Tests/Apps/test_dyn_full.c
-GLIBC_DYN_PAIRS := Tests/Apps/hello_dyn_glibc.elf:Tests/Apps/hello_dyn.c
+GLIBC_DYN_PAIRS := Tests/Apps/hello_dyn_glibc.elf:Tests/Apps/hello_dyn.c \
+	Tests/Unit/jit_native_libc_glibc.elf:Tests/Unit/jit_native_libc.c
 
 # `make setup-tests` fetches the toolchains (if missing) and cross-
 # compiles the test .elf files — it does NOT run the test suite or build

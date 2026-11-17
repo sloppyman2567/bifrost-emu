@@ -310,7 +310,10 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
     // overwritten by the new binary's segments.
     ElfLoader::Options options;
     options.apply_relocations = !emu.android_runtime_;
+    // The old image's routines are gone; the new one's (static, unstripped) are recorded for the host-native path.
+    emu.native_libc().clear();
     auto info = ElfLoader::load(mem_, elf_data, options);
+    if (!emu.android_runtime_) register_symtab_routines(emu.native_libc(), elf_data, info.base_addr);
     uint64_t exec_entry = info.entry;
     emu.timers().clear();  // execve destroys the POSIX timers
     if (!emu.android_runtime_) {

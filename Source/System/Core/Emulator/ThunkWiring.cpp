@@ -271,6 +271,7 @@ void Emulator::wire_thunk_wl_fd_publisher_() {
 void Emulator::ensure_thunk_linker_() {
     if (dyn_linker_) return;
     dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
+    dyn_linker_->set_native_libc(&native_libc_);
     if (auto* t = graphics_.thunk()) {
         if (t->enabled()) {
             t->init(mem_);

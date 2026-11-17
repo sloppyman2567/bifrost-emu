@@ -14,6 +14,7 @@
 #include "Bifrost/Types.hpp"
 #include "Bifrost/Version.hpp"
 #include "System/Core/CPU.hpp"
+#include "System/Core/NativeLibc.hpp"
 #include "System/Core/Emulator/GuestTimers.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/Signals.hpp"
@@ -336,6 +337,7 @@ public:
     // ── Accessors (public) ────────────────────────────────────────────
     Memory&         mem()      { return mem_; }
     DynamicLinker* dyn_linker(){ return dyn_linker_.get(); }
+    NativeLibcRoutines& native_libc() { return native_libc_; }
     FrostGraphics& graphics() { return graphics_; }
     Audio&          audio()    { return audio_; }
     SignalTable&    signals()  { return signals_; }
@@ -842,6 +844,8 @@ private:
     // definition in this header. Created on first load_elf_file() if
     // the binary has a PT_INTERP.
     std::unique_ptr<DynamicLinker> dyn_linker_;
+    // Where the guest's memcpy/memmove/memset start (NativeLibc.hpp); cleared by execve, fed by the linker and loader.
+    NativeLibcRoutines native_libc_;
     // Friend declaration must come AFTER GuestThread is defined.
     friend void thread_entry(Emulator* emu, GuestThread* gt);
     // SDL thunk threads (SDL_CreateThread): the entry trampoline that

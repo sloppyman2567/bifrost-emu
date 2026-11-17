@@ -1,6 +1,7 @@
 // Global symbol index and (versioned) symbol lookup.
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Core/CPU.hpp"
+#include "System/Core/NativeLibc.hpp"
 #include "System/Memory/Memory.hpp"
 #include "Bifrost/Types.hpp"
 #include "Bifrost/Version.hpp"
@@ -88,6 +89,9 @@ void DynamicLinker::index_symbols(CPU& cpu, const LoadedObject& obj,
             // else: no resolver registered; store resolver address.
             // The guest will crash on first call (visible, not silent).
         }
+        // memcpy/memmove/memset: where the guest's routine starts, for the host-native path (NativeLibc.hpp). Recorded
+        // only for the symbol that wins below; an ifunc was resolved above, so this is the implementation itself.
+        const NativeLibcKind libc_kind = native_libc_ ? NativeLibcRoutines::kind_of(name) : NativeLibcKind::None;
         // First-strong-wins symbol resolution (H6).
         auto it = symbols_.find(name);
         if (it == symbols_.end()) {
@@ -95,6 +99,7 @@ void DynamicLinker::index_symbols(CPU& cpu, const LoadedObject& obj,
             if (undo)
                 undo->push_back({false, name, false, {}, installed});
             symbols_[name] = installed;
+            if (libc_kind != NativeLibcKind::None) native_libc_->add(addr, libc_kind);
         } else {
             // Existing entry. Override only if existing is WEAK and new
             // is STRONG. Never override an existing STRONG.
@@ -104,6 +109,7 @@ void DynamicLinker::index_symbols(CPU& cpu, const LoadedObject& obj,
                 if (undo)
                     undo->push_back({false, name, true, previous, installed});
                 it->second = installed;
+                if (libc_kind != NativeLibcKind::None) native_libc_->add(addr, libc_kind);
             }
             // else: keep existing (first strong wins, or weak kept as-is).
         }

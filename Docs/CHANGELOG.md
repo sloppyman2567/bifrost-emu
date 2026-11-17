@@ -47,6 +47,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (large memory copies and fills run faster)
+
+- A program's `memcpy`, `memmove` and `memset` of 1 KiB or more now run the host's routine when every byte of the memory
+  is valid, 2 to 11 times faster (a 64 KiB fill went from 6.9 to 0.5 microseconds). It applies to Linux programs the
+  emulator links itself and to unstripped static programs, not yet to Android apps. `BIFROST_NO_NATIVE_LIBC=1` turns it off.
+
 ### Changed (OpenGL, EGL and SDL calls from a game cost much less CPU)
 
 - Every graphics call a game makes used to be matched against dozens of function names, as text, before it reached the

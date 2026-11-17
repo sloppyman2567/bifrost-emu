@@ -140,6 +140,13 @@ extern "C" void jit_vdso_clock_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
         emu->syscall(*cpu);
     }
 }
+// ── jit_native_libc — host-native memcpy/memmove/memset ────────────────
+// Called from the top of the block that starts a registered guest routine, for a call of kNativeLibcMinBytes or more.
+// NativeLibcRoutines::run does the whole routine and sets cpu->pc to the return address, or declines (any byte of a
+// range not accessible, an overlapping memcpy) and leaves the CPU alone, and the guest routine runs.
+extern "C" uint32_t jit_native_libc(arm64emu::Emulator* emu, arm64emu::CPU* cpu, uint32_t kind) {
+    return emu->native_libc().run(emu->mem(), *cpu, static_cast<arm64emu::NativeLibcKind>(kind)) ? 1u : 0u;
+}
 // ── jit_thunk_svc — JIT native thunk fast path ─────────────────────────
 // Replicates Syscalls/HostCalls/Thunks.cpp's case GraphicThunk::SYSCALL_NUMBER (try
 // GraphicThunk → AudioThunk → DisplayThunk → ENOSYS), but is reached

@@ -270,6 +270,10 @@ void Emulator::print_jit_stats() {
             static_cast<unsigned long long>(chains));
     fprintf(stderr, "[%s] frostJIT: code cache %zu/%zu bytes, %zu blocks\n",
             CODENAME, code_used, code_size * num_jits, cache_entries);
+    if (native_libc_.calls() > 0)
+        fprintf(stderr, "[%s] native libc: %llu memcpy/memmove/memset calls, %llu bytes\n", CODENAME,
+                static_cast<unsigned long long>(native_libc_.calls()),
+                static_cast<unsigned long long>(native_libc_.bytes()));
     if (all_jits.size() > 1) {
         size_t retired = 0, released = 0;
         jit_generations::counts(retired, released);

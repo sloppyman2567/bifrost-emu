@@ -2,6 +2,45 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Host-native memcpy, memmove and memset (2026-11-16)
+
+Chosen from the game profile of the same day: in Minecraft Weekend the hottest translated block was the guest's `memset`
+(a 64-byte `stp q0,q0` loop, about 19% of the translated-code samples, about 8% of the process). The mechanism and its
+contract are in [the guide](../JIT.md#host-native-memcpy-memmove-and-memset).
+
+Microbenchmark (a static musl guest calling the three routines through function pointers, one pinned core, Ryzen 7
+5800X3D, nanoseconds per call, native path off -> on; `BIFROST_NO_NATIVE_LIBC=1` is the off column):
+
+| Size | memset | memcpy | memmove |
+|---|---|---|---|
+| 512 B | 37 -> 35 | 43 -> 41 | 33 -> 40 |
+| 1 KiB | 63 -> 34 | 77 -> 42 | 49 -> 42 |
+| 2 KiB | 118 -> 43 | 146 -> 48 | 93 -> 47 |
+| 4 KiB | 232 -> 58 | 283 -> 65 | 170 -> 63 |
+| 16 KiB | 1,702 -> 149 | 1,117 -> 198 | 633 -> 156 |
+| 64 KiB | 6,907 -> 532 | 4,393 -> 1,027 | 2,490 -> 779 |
+| 1 MiB | 115,561 -> 10,587 | 68,899 -> 19,460 | 40,495 -> 11,210 |
+
+The "on" figures come from two runs: 4 KiB and up from a build with a 4 KiB threshold, 512 B to 2 KiB from one with a
+256-byte threshold (the native path costs the same whatever the threshold; the shipped 1 KiB build was not re-benchmarked).
+The exit and the call cost about 33 ns, so 512 bytes is parity (memmove loses 7 ns) and the threshold is 1 KiB. Contents are
+identical either way (`check=5184` in both runs). Rejected: the first guess of 4 KiB, which would have left 1 to 4 KiB calls
+(up to 2.7x slower than the native path) on the guest routine.
+
+Tests: `jit_native_libc` (2,879 checks) passes under the JIT with the native path on (853 calls, 72.7 MB), off, the
+interpreter and differential replay, as a static musl binary and as a dynamic glibc binary (ifunc-resolved, the same 853
+calls); `test_native_libc_mt` (3,000 checks on five threads, 3,750 native calls, 462 MB); both also pass on QEMU
+(qemu-aarch64) as the reference. `make verify` passes (109 differential fixtures, 12 threaded oracle runs), as do the
+toybox and real-world programs (65), and the JIT-named, dynamic-linking, exec, fork and thread tests (146 of 147; the one
+failure, `jit_mt_publication`, timed out at 120 s while building its host library with the machine loaded by a game, and
+passes alone in 2 s).
+
+Not measured: a game. The Minecraft Weekend effect (frames in a fixed time, the `memset` share of a profile) was left for
+an idle machine, so the 8% is the profile's share of the guest `memset`, not a result. Not covered: Android (Bionic's
+linker is the guest's own), `--guest-ld`, stripped static executables, programs started by `execve` that use the guest
+`ld.so`, and a concurrent unmap or protect of a range inside a native call (a host fault, where the guest routine would
+fault at its own address).
+
 ## One jump per loop iteration and one check per repeated access (2026-11-16)
 
 Chosen from the CoreMark profile of the same day (16,300 iterations/s, 199.83 G host instructions, IPC 3.77; chain jumps

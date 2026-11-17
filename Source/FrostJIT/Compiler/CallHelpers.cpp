@@ -466,6 +466,33 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
         call_interp_branch_patches_.push_back(jne_patch);
     }
 }
+// ── emit_native_libc_entry — host-native memcpy/memmove/memset ─────────────
+// Emitted at the chain entry of the block that starts a registered guest routine (NativeLibc.hpp), where RBX is the
+// CPU, nothing is cached in a host register and every guest register is in cpu.regs[]. A call below
+// kNativeLibcMinBytes skips all of it. A larger one stores cpu.pc, calls the helper, and when the helper did the
+// whole routine (it leaves cpu.pc at the return address instead of the routine's own entry) leaves through the dynamic
+// exit that CALL_INTERP uses for a changed pc: it returns to the dispatcher, which runs the caller. When the helper
+// declines, execution falls into the block's own code, which runs the guest routine as usual.
+void FrostJIT::emit_native_libc_entry(uint64_t start_pc, uint32_t kind) {
+    // The inline pc store below is explicit, so this call does not also need the chain entry's.
+    const bool calls_out_before = block_calls_out_;
+    emit_load_arm(RAX, 2);                                  // x2: the size
+    emit_alu_imm(RAX, 7, static_cast<int32_t>(kNativeLibcMinBytes));  // cmp rax, imm32 (unsigned compare below)
+    const size_t small = emit_jcc_rel32_placeholder(0x2);   // jb: too small to repay the exit
+    emit_mov_imm_to_rax(start_pc);
+    emit_store(CPU_REG, PC_OFF, RAX);                       // cpu.pc = the routine's entry
+    emit_load_emu(RDI);
+    emit_mov_reg(RSI, CPU_REG);
+    emit_mov_imm32(RDX, static_cast<int32_t>(kind));
+    emit_call_aligned(reinterpret_cast<void*>(&jit_native_libc), /*num_pushed=*/0);
+    emit_load(RAX, CPU_REG, PC_OFF);                        // the pc the helper left
+    if (start_pc <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RCX, static_cast<uint32_t>(start_pc));
+    else emit_mov_imm64(RCX, start_pc);
+    emit_cmp_reg(RCX, RAX);
+    call_interp_branch_patches_.push_back(emit_jcc_rel32_placeholder(5));  // jne: handled, leave with RAX = pc
+    patch_jcc_rel32(small, static_cast<int32_t>(code_buf_used_ - (small + 6)));
+    block_calls_out_ = calls_out_before;
+}
 // ── emit_call_vdso_clock — native vDSO clock fast path ─────────────────
 // Like emit_call_interp, but calls jit_vdso_clock_svc(emu, cpu, svc_pc)
 // instead of stepping the interpreter. Used for SVC instructions that live

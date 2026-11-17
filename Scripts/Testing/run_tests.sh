@@ -304,6 +304,7 @@ UNIT_TESTS=(
     "jit_generations|Scripts/Testing/test_jit_generations.sh||120|jit_generations: ALL PASS|HOST_JIT"
     # The persistent JIT cache: reuse across launches, verify, damage, budget, concurrent writers, pruning.
     "jit_disk_cache|Scripts/Testing/test_jit_disk_cache.sh||120|jit_disk_cache: ALL PASS|HOST_JIT"
+    "jit_native_libc|Scripts/Testing/test_jit_native_libc.sh||180|jit_native_libc: ALL PASS|HOST_JIT"
     # The guest sees the host's real memory pressure under a capped total, identically in /proc/meminfo and sysinfo.
     "guest_memory|Scripts/Testing/test_guest_memory.sh||60|guest_memory: ALL PASS|HOST_JIT"
     # An idle guest thread costs well under 1 MiB of resident memory (the decode cache is mapped on first use).
@@ -382,6 +383,11 @@ UNIT_TESTS=(
     "tier2_calls|Tests/Unit/jit_tier2_calls.elf||60|jit_tier2_calls: ALL PASS|JIT"
     "memory_guard_address|Tests/Unit/jit_memory_guard_address.elf||15|ALL PASS"
     "guard_stubs|Tests/Unit/jit_guard_stubs.elf||20|ALL PASS"
+    # Host-native memcpy/memmove/memset: results against byte loops, overlaps, mapping edges and denied access (which the
+    # guest routine must still fault on); threads separately (verify mode forbids a second CPU). test_jit_native_libc.sh
+    # checks that the native path ran where it should and stayed off where it must.
+    "native_libc|Tests/Unit/jit_native_libc.elf||60|ALL PASS"
+    "native_libc_mt|Tests/Unit/test_native_libc_mt.elf||30|ALL PASS|JIT"
     "bitfield_regalloc|Tests/Unit/jit_bitfield_regalloc.elf||10|ALL PASS"
     "ccmp_forward|Tests/Unit/jit_ccmp_forward.elf||10|ALL PASS"
     "same_operand|Tests/Unit/jit_same_operand.elf||10|ALL PASS"
@@ -896,6 +902,8 @@ DYNAMIC_TESTS=(
     # relocation support and CMEQ #0 SIMD fix that enable glibc's printf
     # and stdio to work under dynamic linking.
     "hello_dyn_glibc|Tests/Apps/hello_dyn_glibc.elf||5|Hello, dynamic world"
+    # glibc's memcpy and memset are ifuncs: the linker resolves them and the host-native path (NativeLibc.hpp) uses that.
+    "jit_native_libc_glibc|Tests/Unit/jit_native_libc_glibc.elf||60|ALL PASS"
     "test_dyn_hello|Tests/Apps/test_dyn_hello.elf||5|Hello, glibc dynamic"
     "test_dyn_malloc|Tests/Apps/test_dyn_malloc.elf||5|^done$"
     "test_dyn_printf|Tests/Apps/test_dyn_printf.elf||10|^\\[done\\]$"
