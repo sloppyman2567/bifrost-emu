@@ -588,6 +588,7 @@ GLIBC_DYN_SRCS := \
 	Tests/Apps/test_dyn_write.c \
 	Tests/Apps/test_dyn_malloc.c \
 	Tests/Apps/test_dyn_printf.c \
+	Tests/Apps/test_dyn_system.c \
 	Tests/Apps/test_dyn_pthread_min.c \
 	Tests/Apps/test_dyn_threads.c \
 	Tests/Apps/test_dyn_pthread_stress.c \

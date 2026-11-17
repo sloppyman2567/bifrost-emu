@@ -10,7 +10,8 @@
 //     fresh entropy.
 // Emulator-specific: a foreign (non-AArch64) ELF such as a host /bin/ls can be stood in for
 // by the running program when that is a multi-call binary (BusyBox, toybox) with an applet of
-// that name; see program_is_multicall().
+// that name; see program_is_multicall(). toybox's sh takes the word after -c as the command, so glibc's
+// `sh -c -- command` (system, popen) loses its `--`; see drop_dashdash_for_toybox_sh().
 #include "System/Core/Emulator.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
@@ -169,6 +170,17 @@ bool program_is_multicall(Emulator& emu) {
            bytes.find("toybox") != std::string::npos;
 }
 
+// glibc's system() and popen() run `sh -c -- command`, which POSIX allows: `--` ends the options and the first operand is the
+// command. toybox's sh takes whatever follows -c as the command, so it ran "--" and answered "sh: --: No such file or
+// directory" (status 127) for every command. When the image about to run is toybox and its sh applet is called that way,
+// drop the `--`: toybox takes the next word as the command whatever it starts with, so the command is exactly what glibc
+// meant. Any other shell (BusyBox, dash, bash) understands `--` and is left alone.
+void drop_dashdash_for_toybox_sh(const std::vector<uint8_t>& image, std::vector<std::string>& argv) {
+    if (argv.size() < 4 || base_name(argv[0]) != "sh" || argv[1] != "-c" || argv[2] != "--") return;
+    if (!memmem(image.data(), image.size(), "toybox", 6)) return;
+    argv.erase(argv.begin() + 2);
+}
+
 std::vector<uint8_t> read_whole_file(const std::string& host_path) {
     std::vector<uint8_t> data;
     if (FILE* f = fopen(host_path.c_str(), "rb")) {
@@ -246,6 +258,7 @@ int64_t syscall_execve(Emulator& emu, CPU& cpu) {
                     emu.elf_path().c_str(), applet.c_str());
     }
     if (new_argv.empty()) new_argv.push_back(path);
+    drop_dashdash_for_toybox_sh(elf_data, new_argv);
     // fork(), the child is executing INSIDE the JIT code buffer
     // (the fork/execve syscall was JIT'd, and jit_interp_step()
     // was called from JIT code). flush_cache() resets

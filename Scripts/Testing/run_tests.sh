@@ -907,6 +907,8 @@ DYNAMIC_TESTS=(
     "test_dyn_hello|Tests/Apps/test_dyn_hello.elf||5|Hello, glibc dynamic"
     "test_dyn_malloc|Tests/Apps/test_dyn_malloc.elf||5|^done$"
     "test_dyn_printf|Tests/Apps/test_dyn_printf.elf||10|^\\[done\\]$"
+    # glibc's system() and popen() run `sh -c -- cmd`; the rootfs shell (toybox) must take that (Exec.cpp).
+    "test_dyn_system|Tests/Apps/test_dyn_system.elf||15|ALL PASS"
     "test_dyn_full_musl|Tests/Apps/test_dyn_full_musl.elf||15|ALL PASS"
     # NEW (Turn 77): glibc dynamic pthread tests. These verify the
     # NPTL stack-list init, _dl_allocate_tls shim override, rseq

@@ -47,6 +47,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (`system()` and `popen()` in a glibc program with the rootfs)
+
+- A glibc program's `system("cmd")` and `popen("cmd", ...)` ran the rootfs shell as `sh -c -- cmd`, and the shell (toybox)
+  took `--` as the command, so every command failed with status 127. The shell now gets `-c cmd`. A command the shell
+  cannot find (`uname`, `ls`: the rootfs has only `sh`) still returns 127; add applets to `rootfs/bin` to run them.
+
 ### Changed (large memory copies and fills run faster)
 
 - A program's `memcpy`, `memmove` and `memset` of 1 KiB or more now run the host's routine when every byte of the memory

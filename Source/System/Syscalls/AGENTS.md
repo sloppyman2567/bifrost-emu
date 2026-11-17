@@ -67,7 +67,10 @@
   the running program only when that is a multi-call binary (`program_is_multicall`: BusyBox, toybox)
   and the file exists: a missing file must stay ENOENT, or `execvp` over a `PATH` re-runs the current
   program as the missing name (an exec loop). The Android branch keeps its own checks (no permission
-  test, no descriptor closing). `test_execve` covers it.
+  test, no descriptor closing). `test_execve` covers it. When the image about to run is toybox and its `sh` is
+  called `sh -c -- command` (glibc's `system` and `popen`), `drop_dashdash_for_toybox_sh` removes the `--`:
+  toybox's `sh` takes the word after `-c` as the command, so it ran `--` and every command returned 127. No other
+  shell is touched. `test_dyn_system` covers it (glibc dynamic, needs the rootfs `/bin/sh`).
 - `clone`/`clone3` with CLONE_VFORK and without CLONE_THREAD (glibc `vfork`, both libcs' `posix_spawn`,
   hence `system` and `popen`) run as a copy-on-write fork on the caller's stack (`clone_is_vfork`): the
   parent is not suspended and does not see the child's writes. Other CLONE_VM-without-THREAD processes
