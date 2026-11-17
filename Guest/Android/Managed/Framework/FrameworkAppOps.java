@@ -279,6 +279,11 @@ final class FrameworkAppOps {
         return checkOperation(code, uid, packageName, null, 0, false);
     }
 
+    // ActivityManagerService.isBackgroundRestrictedNoCheck: any mode but ALLOWED for RUN_ANY_IN_BACKGROUND.
+    boolean backgroundRestricted(int uid, String packageName) throws Exception {
+        return mode(intOf(STR_OP_TO_OP, "android:run_any_in_background"), uid, packageName) != MODE_ALLOWED;
+    }
+
     private Object call(String method, Object[] a) throws Exception {
         Contract contract;
         try { contract = Contract.valueOf(method); }

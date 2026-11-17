@@ -47,6 +47,13 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (two more Android activity-manager calls)
+
+- `ActivityManager.isUserAMonkey()` now answers `false` and `isBackgroundRestricted()` answers from the app's own
+  background-run permission (allowed by default), so apps that ask no longer log `SERVICE_CALL_UNSUPPORTED`. Asking about
+  another app's package raises `IllegalArgumentException`, as on a phone. An installed Asgard needs `asgard realm stop`
+  and `sudo make install-asgard` to pick the launcher up.
+
 ### Fixed (`system()` and `popen()` in a glibc program with the rootfs)
 
 - A glibc program's `system("cmd")` and `popen("cmd", ...)` ran the rootfs shell as `sh -c -- cmd`, and the shell (toybox)

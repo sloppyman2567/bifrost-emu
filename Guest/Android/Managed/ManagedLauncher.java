@@ -1151,6 +1151,16 @@ public final class ManagedLauncher {
             // No crash or ANR dialogs exist here, so no process is ever in an error
             // state; ActivityManager documents null for that.
             if (method.equals("getProcessesInErrorState")) return null;
+            // ActivityManagerService.isUserAMonkey: no monkey runs here and no controller is ever set.
+            if (method.equals("isUserAMonkey")) return false;
+            // ActivityManagerService.isBackgroundRestricted: the package's uid must be the caller's
+            // (IllegalArgumentException otherwise); the answer is its RUN_ANY_IN_BACKGROUND app op.
+            if (method.equals("isBackgroundRestricted")) {
+                if (packages.packageUid((String) a[0]) != Process.myUid())
+                    throw new IllegalArgumentException("Uid " + Process.myUid()
+                            + " cannot query restriction state for package " + a[0]);
+                return appOps.backgroundRestricted(Process.myUid(), (String) a[0]);
+            }
             // ACTION_BATTERY_CHANGED is the only sticky broadcast published here.
             if (method.equals("registerReceiverWithFeature")) return broadcasts.register(a);
             if (method.equals("unregisterReceiver")) { broadcasts.unregister(a[0]); return null; }

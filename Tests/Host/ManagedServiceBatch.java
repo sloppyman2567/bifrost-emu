@@ -892,6 +892,14 @@ public final class ManagedServiceBatch {
                 + " now=" + new java.util.Date());
         Object activity = endpoint("activity", "android.app.IActivityManager");
         check(invoke(activity, "getProcessesInErrorState") == null, "a process reported in error");
+        check(Boolean.FALSE.equals(invoke(activity, "isUserAMonkey")), "no monkey controller");
+        check(Boolean.FALSE.equals(invoke(activity, "isBackgroundRestricted", NAME)), "own package is background-restricted");
+        try {
+            invoke(activity, "isBackgroundRestricted", "com.example.foreign");
+            throw new AssertionError("a foreign package's restriction state was answered");
+        } catch (IllegalArgumentException expected) {
+            check(expected.getMessage().contains("cannot query restriction state"), "foreign restriction query: " + expected.getMessage());
+        }
         android.os.Debug.MemoryInfo[] memory = (android.os.Debug.MemoryInfo[]) invoke(activity,
                 "getProcessMemoryInfo", (Object) new int[] {android.os.Process.myPid(), 1});
         check(memory.length == 2 && memory[0].getTotalPss() > 0 && memory[1].getTotalPss() == 0,
