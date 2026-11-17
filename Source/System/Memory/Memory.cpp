@@ -752,6 +752,8 @@ int Memory::map_file(uint64_t addr, uint64_t size, int fd,
     for (uint64_t a = addr; a < addr + length; a += PAGE_SIZE)
         file_pages_.insert_or_assign(a / PAGE_SIZE, FilePage{owner, a - addr});
     set_mapping_locked(addr, addr + length, prot, false);
+    lock.unlock();
+    if ((prot & GUEST_PROT_EXEC) && exec_map_hook_) exec_map_hook_(addr, length, fd, offset);
     return 0;
 }
 int Memory::sync_shared(uint64_t addr, uint64_t size, int flags) {

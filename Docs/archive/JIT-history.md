@@ -36,10 +36,24 @@ failure, `jit_mt_publication`, timed out at 120 s while building its host librar
 passes alone in 2 s).
 
 Not measured: a game. The Minecraft Weekend effect (frames in a fixed time, the `memset` share of a profile) was left for
-an idle machine, so the 8% is the profile's share of the guest `memset`, not a result. Not covered: Android (Bionic's
-linker is the guest's own), `--guest-ld`, stripped static executables, programs started by `execve` that use the guest
-`ld.so`, and a concurrent unmap or protect of a range inside a native call (a host fault, where the guest routine would
-fault at its own address).
+an idle machine, so the 8% is the profile's share of the guest `memset`, not a result. Not covered: stripped libcs and
+static executables, programs started by `execve` that use the guest `ld.so`, and a concurrent unmap or protect of a range
+inside a native call (a host fault, where the guest routine would fault at its own address).
+
+Android, the same day. Bionic's libc is linked by `linker64`, so the `DynamicLinker` never sees its symbols, but the pinned
+runtime's `libc.so` keeps its `.symtab`: `memset` is a plain function and `memcpy`/`memmove` are ifuncs whose targets
+(`__memcpy_aarch64`, `__memcpy_aarch64_simd`, `__memmove_aarch64` and the `_simd` one; the plain ones share an address) are
+local symbols. `Memory::map_file` now calls an exec-map hook; for a libc-named file `register_mapped_routines` reads the file,
+takes the load base from the program header the mapping starts in (Bionic's text segment is at 0x43000, base = address -
+0x43000), records the routines in that segment and checks 32 bytes of each against guest memory first. Rejected: parsing at
+translation time (a per-block lookup on a hot path), hooking the guest `mmap` syscall (several branches, one `map_file`
+behind all of them), and guessing the base from `addr - offset` (wrong for a later segment, and a wrong base would turn
+unrelated code into a `memset`). `android_bionic_memory` (410 checks, built against the real `libc.so`, run through
+`linker64`) passes with 414 native calls and 39.8 MB moved, and with the path off and under the interpreter with none;
+`make verify` passes (109 differential fixtures, 12 threaded oracles), as do the memory, mmap, dynamic-linking, exec, fork,
+thread and JIT tests (116 of 117; `jit_mt_publication` timed out at 120 s building its host library with a game running,
+and passes alone in 2 s) and the pinned `test_android_bionic.sh` in every mode (JIT, interpreter, Tier 2). Not run: an
+Android app.
 
 ## One jump per loop iteration and one check per repeated access (2026-11-16)
 

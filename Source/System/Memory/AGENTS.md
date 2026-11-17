@@ -20,6 +20,8 @@ State shared between them goes in `MemoryInternal.hpp`.
   (`JIT_PAGE_FLAGS_OFF`). Generated code reads them through the window
   register; change the flag and gate only through `set_software_checks`, and keep
   offsets and contents in step with `window_size_`.
+- `map_file` calls the exec-map hook (`set_exec_map_hook`) after it releases `mu_`, once per file mapped with
+  `PROT_EXEC`; the hook may take Memory locks and read guest memory, and must not retain `fd`.
 - `write()` stores each 2/4/8-byte element (and 16-byte halves) with a single
   host access. Never route instruction-sized guest stores through a
   runtime-sized `memcpy`: its overlapping moves replay the store and can undo

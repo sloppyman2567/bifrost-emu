@@ -174,6 +174,8 @@ bash Scripts/Android/test_android_bionic.sh
 
 The script also rebuilds the Android adapters and runs the managed AAudio
 callback-thread test against them (`SDL_AUDIODRIVER=dummy`, no sound device).
+`bash Scripts/Android/test_android_native_libc.sh` checks that Bionic's `memcpy`, `memmove` and `memset` run the
+host-native path ([JIT guide](../JIT.md#host-native-memcpy-memmove-and-memset)); it takes seconds.
 
 The fetcher pins the official AOSP `prebuilts/runtime` APEX at revision
 `8aeb37cca394ce39c1311744c60960cbd466aa77` (the `android-15.0.0_r1` repository

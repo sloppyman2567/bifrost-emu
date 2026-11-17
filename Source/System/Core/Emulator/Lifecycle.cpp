@@ -34,7 +34,12 @@ namespace arm64emu {
 // ── Static active-emu pointer (defined in Source/System/Core/Signals.cpp) ────────
 // Emulator* Emulator::g_active_emu_ = nullptr;  // defined in Signals.cpp
 Emulator::Emulator(uint64_t guest_window_max) : mem_(true, guest_window_max),
-    debugger_(std::make_unique<GuestDebugger>(*this)) {}
+    debugger_(std::make_unique<GuestDebugger>(*this)) {
+    // A libc the guest's own linker maps (Android's Bionic) is invisible to the DynamicLinker: read its symbols here.
+    mem_.set_exec_map_hook([this](uint64_t addr, uint64_t size, int fd, uint64_t offset) {
+        native_libc_.on_exec_mapping(mem_, addr, size, fd, offset);
+    });
+}
 Emulator::~Emulator() {
     timers_.stop();  // its thread queues signals on the CPUs torn down below
     debugger_->shutdown();

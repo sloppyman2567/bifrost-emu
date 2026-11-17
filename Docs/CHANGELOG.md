@@ -51,7 +51,8 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
 
 - A program's `memcpy`, `memmove` and `memset` of 1 KiB or more now run the host's routine when every byte of the memory
   is valid, 2 to 11 times faster (a 64 KiB fill went from 6.9 to 0.5 microseconds). It applies to Linux programs the
-  emulator links itself and to unstripped static programs, not yet to Android apps. `BIFROST_NO_NATIVE_LIBC=1` turns it off.
+  emulator links itself, to unstripped static programs and to Android's Bionic (checked with a test program on the real
+  `libc.so`; no Android app was run). `BIFROST_NO_NATIVE_LIBC=1` turns it off.
 
 ### Changed (OpenGL, EGL and SDL calls from a game cost much less CPU)
 

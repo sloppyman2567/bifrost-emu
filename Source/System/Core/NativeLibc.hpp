@@ -39,6 +39,9 @@ public:
     NativeLibcKind find(uint64_t pc) const;
     // An execve replaces the image: every address recorded for the old one is meaningless.
     void clear();
+    // Memory's exec-map hook: the guest mapped `size` bytes of file descriptor `fd` (from `offset`) executable. When
+    // the file is a libc (libc.so, libc.so.*, musl's libc and loader), reads its symbols (register_mapped_routines).
+    void on_exec_mapping(Memory& mem, uint64_t addr, uint64_t size, int fd, uint64_t offset);
     bool empty() const { return count_.load(std::memory_order_relaxed) == 0; }
     // The routine the guest just entered (arguments in x0-x2, return address in x30). True when it ran and the CPU
     // looks as if the guest's `ret` had executed (x0 = the destination, pc = x30); false leaves the CPU untouched.
@@ -57,5 +60,14 @@ private:
 // dynamic symbols for them). `load_base` is where the image was mapped. IFUNC symbols are skipped: their value is
 // the resolver, not the routine.
 void register_symtab_routines(NativeLibcRoutines& table, const std::vector<uint8_t>& elf, uint64_t load_base);
+
+// A libc the guest's own linker loaded (Android's Bionic) is invisible to the DynamicLinker. `elf` is that library's file;
+// guest memory [map_addr, map_addr + map_size) is its executable segment's mapping of the file from `map_offset`. The
+// load base follows from the program header that segment belongs to. Records the routines in .symtab and .dynsym that
+// lie in the segment: memcpy, memmove and memset by name, and Bionic's ifunc targets (`__memcpy_aarch64`,
+// `__memmove_aarch64_simd`, ...), which only the symbol table names. Each address is first checked: the 32 bytes at it in
+// guest memory must equal the file's, so a wrong base or another build of the library records nothing.
+void register_mapped_routines(NativeLibcRoutines& table, Memory& mem, const std::vector<uint8_t>& elf,
+                              uint64_t map_addr, uint64_t map_size, uint64_t map_offset);
 
 }  // namespace arm64emu

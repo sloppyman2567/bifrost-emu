@@ -40,6 +40,9 @@ callee-saved values and nested calls; `Tests/Unit/test_native_libc_mt.c` does it
 runs them with the native path on (the stats line must show calls), off (`BIFROST_NO_NATIVE_LIBC=1`), under `--no-jit` and
 under `BIFROST_JIT_VERIFY` (the last two must show none), and the glibc dynamic build
 `Tests/Unit/jit_native_libc_glibc.elf` (ifunc-resolved routines, needs the rootfs).
+`Scripts/Android/test_android_native_libc.sh` (by hand, like `test_android_bionic.sh`; needs clang, lld and the pinned
+runtime, about 7 s) builds `Tests/Unit/android_bionic_memory.c` against the actual Bionic `libc.so` and runs it through
+`linker64` with the native path on (410 checks, 414 native calls), off and under the interpreter.
 
 ### Persistent JIT cache (2026-10-26)
 

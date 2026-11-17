@@ -1552,11 +1552,17 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
 `memset` was the hottest translated block (about 19% of the translated-code samples). The loader records where the guest's
 `memcpy`, `memmove` and `memset` start, and a large call runs the host's routine instead.
 
-- **Registry.** `NativeLibcRoutines` (`System/Core/NativeLibc.*`, a member of `Emulator`) maps an entry pc to a kind. It is
-  fed by `DynamicLinker::index_symbols` (the symbol that wins, with an ifunc already resolved to its implementation, so
-  glibc's `__memcpy_*` variants are the recorded addresses), and by `register_symtab_routines`, which reads an unstripped
-  static executable's `.symtab` (functions named exactly `memcpy`, `memmove` or `memset`; IFUNC symbols are skipped, their
-  value is the resolver) when the main image loads and again at `execve`, which clears the registry first.
+- **Registry.** `NativeLibcRoutines` (`System/Core/NativeLibc.*`, a member of `Emulator`) maps an entry pc to a kind. It has
+  three sources. `DynamicLinker::index_symbols` records the winning symbol, with an ifunc already resolved to its
+  implementation, so glibc's `__memcpy_*` variants are the recorded addresses. `register_symtab_routines` reads an
+  unstripped static executable's `.symtab` (functions named exactly `memcpy`, `memmove` or `memset`; IFUNC symbols are
+  skipped, their value is the resolver) when the main image loads and again at `execve`, which clears the registry first.
+  And for a libc the guest's own linker loads (Android's Bionic, which the `DynamicLinker` never sees), `Memory::map_file`
+  calls an exec-map hook after it maps a file executable; for a file named `libc.so[.*]`, `libc.musl-*` or `ld-musl-*`,
+  `register_mapped_routines` reads the file, finds the load base from the program header the mapping starts in, and records
+  the routines of `.symtab` and `.dynsym` inside that segment: `memcpy`, `memmove` and `memset` by name and Bionic's ifunc
+  targets (`__memcpy_aarch64`, `__memmove_aarch64_simd`, ..., never the `_chk` variants), each only after its 32 bytes in
+  guest memory equal the file's. A memcpy and a memmove at one address (Bionic's are one function) record as memmove.
 - **Block entry.** `translate_block` calls `emit_native_libc_entry` at the chain entry of a block that starts a registered
   routine, where nothing is cached: `cmp x2, kNativeLibcMinBytes; jb skip`, store `cpu.pc`, call `jit_native_libc`, and when
   `cpu.pc` changed (the helper left it at x30) take the dynamic exit `CALL_INTERP` uses for a changed pc, which returns to the
@@ -1571,11 +1577,12 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
   x0 to the destination and `pc` to x30.
 - **The threshold** is 1 KiB: the exit and the call cost about 33 ns, the guest routine ties them at 512 bytes and loses
   from 1 KiB up ([measurements](archive/JIT-history.md#host-native-memcpy-memmove-and-memset-2026-11-16)).
-- **Not covered.** Android: Bionic's libc is linked by the guest's own linker, which the emulator never sees, so nothing is
-  registered there. Also `--guest-ld` glibc, stripped static executables and a dynamic program run through `execve` (the
-  guest `ld.so` links it). A guest thread that unmaps or protects a range while another thread's native call is inside it
-  faults in the host, not in the guest (the guest routine would fault at its own address).
-  `jit_native_libc` (single thread, run by `make verify` too), `test_native_libc_mt` and `test_jit_native_libc.sh` cover it.
+- **Not covered.** A stripped libc or static executable (nothing names the implementations; glibc's `libc.so.6` is
+  stripped, so `--guest-ld` glibc finds nothing), and a dynamic program run through `execve` under the native linker
+  (the guest `ld.so` links it, and only a libc with a symbol table is recognised). A guest thread that unmaps or protects a
+  range while another thread's native call is inside it faults in the host, not in the guest (the guest routine would fault
+  at its own address). `jit_native_libc` (single thread, run by `make verify` too), `test_native_libc_mt`,
+  `test_jit_native_libc.sh` and, for Bionic under `linker64`, `Scripts/Android/test_android_native_libc.sh` cover it.
 
 ## Planned codegen: retaining guest state across regions
 

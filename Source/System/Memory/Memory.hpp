@@ -30,6 +30,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -132,6 +133,9 @@ public:
                         uint8_t prot);
     int map_file(uint64_t addr, uint64_t size, int fd, uint64_t offset,
                  uint8_t prot, bool shared);
+    // Called after map_file maps a file with PROT_EXEC, with the Memory lock released: (addr, length, the caller's fd, file
+    // offset). The emulator uses it to find the memory routines of a libc the guest's own linker loaded; unset does nothing.
+    void set_exec_map_hook(std::function<void(uint64_t, uint64_t, int, uint64_t)> hook) { exec_map_hook_ = std::move(hook); }
     int sync_shared(uint64_t addr, uint64_t size, int flags);
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n);
@@ -392,6 +396,7 @@ public:
         return nullptr;
     }
 private:
+    std::function<void(uint64_t, uint64_t, int, uint64_t)> exec_map_hook_;
     void record_write(uint64_t addr, const void* src, size_t n);
     bool data_top_byte_ignore_ = false;
     bool low_hints_reserved_ = false;

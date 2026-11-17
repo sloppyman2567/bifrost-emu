@@ -36,8 +36,10 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   implementation (the JIT hook is in the FrostJIT guide). `run` writes nothing until `Memory::guest_to_host_ptr` has proven
   every range accessible, declines an overlapping `memcpy`, and returns true only when the guest routine's `ret` is already
   reflected in `x0` and `pc`. `execve` clears the registry before the new image loads (a stale entry would turn unrelated
-  code into a `memset`); entries come from the native `DynamicLinker` and from an unstripped static executable's `.symtab`.
-  A new source of entries must record the implementation's address, not an ifunc resolver's.
+  code into a `memset`); entries come from the native `DynamicLinker`, from an unstripped static executable's `.symtab` and,
+  for a libc the guest's own linker maps (Bionic), from `Memory`'s exec-map hook, which verifies the live bytes against the
+  file before recording. A new source of entries must record the implementation's address, not an ifunc resolver's, and must
+  verify what it records.
 
 ## Scoped contracts
 

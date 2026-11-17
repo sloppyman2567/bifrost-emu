@@ -28,7 +28,8 @@
   loader implementation rather than pinned to one distro's struct layout.
 - `index_symbols` records the winning `memcpy`/`memmove`/`memset` (ifunc already resolved) in the emulator's
   `NativeLibcRoutines` for the host-native path; the table outlives the linker (`set_native_libc`, set where the linker is
-  created). Under `--guest-ld` and in Android's guest linker nothing is recorded, as the emulator does not see those symbols.
+  created). A libc the guest's own linker loads (Android's Bionic) never reaches it; `Memory`'s exec-map hook records those
+  from the mapped file's symbol table instead (a stripped libc, such as glibc's under `--guest-ld`, records nothing).
 - Keep parsing, relocations, symbol/version lookup, ifunc resolution and dlopen
   lifetimes coherent across the `DynamicLinker/` split. Its private header owns
   shared ELF layouts/constants; trace configuration belongs in shared helpers.
