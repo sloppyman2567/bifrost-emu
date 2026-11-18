@@ -60,6 +60,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   took `--` as the command, so every command failed with status 127. The shell now gets `-c cmd`. A command the shell
   cannot find (`uname`, `ls`: the rootfs has only `sh`) still returns 127; add applets to `rootfs/bin` to run them.
 
+### Fixed (latent errors in the JIT's helper-call code)
+
+- Three code-generation helpers had errors that no program reached: a call that saves the processor flags changed them
+  first after an odd number of pushes, a store whose value sat in `rdx` stored the address, and a sign-extending load
+  that took the slow path skipped the sign extension. No change in behaviour is expected; a new test covers all three.
+
 ### Changed (large memory copies and fills run faster)
 
 - A program's `memcpy`, `memmove` and `memset` of 1 KiB or more now run the host's routine when every byte of the memory

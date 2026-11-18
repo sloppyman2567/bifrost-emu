@@ -915,13 +915,10 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             } else if (op1 == 3 && crn == 13 && crm == 0 && op2 == 3) {
                 off = 816;  // TPIDRRO_EL0
             } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
-                // NZCV — materialize flags from host to pstate, then load.
-                if (flags_in_host_) {
-                    if (!host_flags_match_pstate()) emit_materialize_flags(flags_from_sub_);
-                    flags_in_host_ = false;
-                    // Drop cache mappings for RAX/RCX/RDX (clobbered by materialize).
-                    invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
-                }
+                // NZCV — the clobber_flags() above already stored the host flags to
+                // pstate (after flushing dirty RAX/RCX/RDX vregs) and cleared
+                // flags_in_host_, so nothing is pending here. A second
+                // materialize would overwrite RAX before its dirty vreg is flushed.
                 // nzcv_host → architectural bits 31:28. With C restored
                 // (CF inverted) and only N15 Z14 C8 V0 kept, one multiply by
                 // (1<<16)|(1<<21)|(1<<28) puts them at 31..28; the other

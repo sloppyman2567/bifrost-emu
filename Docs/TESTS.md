@@ -44,6 +44,14 @@ under `BIFROST_JIT_VERIFY` (the last two must show none), and the glibc dynamic 
 runtime, about 7 s) builds `Tests/Unit/android_bionic_memory.c` against the actual Bionic `libc.so` and runs it through
 `linker64` with the native path on (410 checks, 414 native calls), off and under the interpreter.
 
+### JIT emitter slow paths (2026-11-17)
+
+`Tests/Unit/jit_emitter_slow_paths.cpp` (`run_tests.sh` entry `jit_emitter_slow_paths`, a few seconds) emits the JIT's
+helper-call sequences into a code buffer, runs them and checks them against the plain x86 result: `emit_call_aligned` keeps
+the flags and the stack alignment for 0 to 3 pushes, the store slow path passes the value for any source register, and the
+load slow path matches the fast path for 1, 2, 4 and 8 bytes with and without sign extension. Guest code does not reach
+these paths today, so no guest fixture covers them. It does not check the other emitters.
+
 ### Persistent JIT cache (2026-10-26)
 
 `Scripts/Testing/test_jit_disk_cache.sh` (`run_tests.sh` entry `jit_disk_cache`, about 2 s) runs

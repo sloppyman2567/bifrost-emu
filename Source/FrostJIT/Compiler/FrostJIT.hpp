@@ -1553,14 +1553,14 @@ private:
     //
     // Rule:
     //   num_pushed EVEN → pushfq alone aligns (no sub rsp needed)
-    //   num_pushed ODD  → sub rsp,8 first, then pushfq aligns
+    //   num_pushed ODD  → pad RSP by 8 first, then pushfq aligns
     //
     // The helper emits (in order):
-    //   [sub rsp, 8]    (only if num_pushed is odd)
+    //   [lea rsp, [rsp-8]]  (only if num_pushed is odd; lea leaves RFLAGS alone)
     //   pushfq
     //   call <target>
     //   popfq
-    //   [add rsp, 8]    (only if num_pushed is odd)
+    //   [lea rsp, [rsp+8]]  (only if num_pushed is odd)
     //
     // Caller pattern:
     //   emit_push(R10);                // save caller-saved

@@ -436,8 +436,10 @@ void FrostJIT::emit_popfq()  { emit_byte(0x9D); }
 //
 // Total pushes including the pushfq below = num_pushed + 1. For
 // RSP%16==0 we need (8 * (num_pushed + 1)) % 16 == 0, i.e.
-// num_pushed must be EVEN. If num_pushed is ODD, we emit `sub rsp, 8`
-// first (effectively adding 1 more "push"), making the total even.
+// num_pushed must be EVEN. If num_pushed is ODD, we move RSP by 8 first
+// (effectively adding 1 more "push"), making the total even. That pad is a
+// `lea`, not `sub`/`add`: those write RFLAGS before pushfq saves them, so the
+// call would not preserve the flags it is asked to preserve.
 void FrostJIT::emit_call_aligned(void* target, int num_pushed, bool preserve_flags) {
     if (!preserve_flags) {
         // NZCV must already be materialized and flags_in_host_ invalidated.
@@ -449,11 +451,16 @@ void FrostJIT::emit_call_aligned(void* target, int num_pushed, bool preserve_fla
         return;
     }
     bool need_align = (num_pushed & 1) != 0;  // ODD → misaligned
-    if (need_align) emit_sub_rsp_imm8(8);
+    auto lea_rsp = [this](int32_t delta) {   // lea rsp, [rsp + delta]: flag-neutral
+        emit_byte(rex(true, false, false, false));
+        emit_byte(0x8D);
+        emit_modrm_disp(RSP, RSP, delta);
+    };
+    if (need_align) lea_rsp(-8);
     emit_pushfq();
     emit_call_abs(target);
     emit_popfq();
-    if (need_align) emit_add_rsp_imm8(8);
+    if (need_align) lea_rsp(8);
 }
 void FrostJIT::emit_load_emu(int dst) { emit_load(dst, CPU_REG, offsetof(CPU, jit_emu)); }
 void FrostJIT::emit_store_emu(int src) { emit_store(CPU_REG, offsetof(CPU, jit_emu), src); }
@@ -765,7 +772,14 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     // so for off != 0 the sum is materialized once into a scratch (LEA)
     // and THAT register is both the cmp operand and the SIB index;
     // off == 0 uses addr_reg itself as the index (never copied, never
-    // destroyed — dst may even equal it, the load reads the index first).
+    // destroyed on the fast path — dst may even equal it, the load reads the
+    // index first). The slow path is a C call: it clobbers RAX, RCX, RDX, RSI,
+    // RDI, R8, R9, R11 and every XMM register (R10 is restored). dst gets the
+    // result, zero-extended and then sign-extended like the fast path when
+    // sign_ext. A caller that keeps another value in one of those registers
+    // must flush it first, as LOAD_MEM's MEM_CLOBBER does. Vector-cache XMM pins
+    // are not written back or reloaded here, and the non-guarded LOAD_MEM does
+    // not either (SIMD_LD16/ST16 do, around their own slow calls).
     // Slow path: jit_load_mem_slow(emu, cpu, addr, width) with the
     // materialized sum in RDX.
     // idx = off ? lea-scratch : addr_reg; must differ from dst (the load
@@ -797,8 +811,20 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
         emit_mov_imm32(RCX, w);              // rcx = width
         emit_call_aligned(&jit_load_mem_slow, /*num_pushed=*/1);
         emit_pop(WIN_REG);                   // restore R10
-        // RAX now has the return value (the loaded data).
-        if (dst != RAX) emit_mov_reg(dst, RAX);
+        // RAX now has the zero-extended loaded data. A sign-extending load
+        // extends it exactly as the fast path's movsxd / movsx forms do
+        // (4 bytes to 64 bits; 1 and 2 bytes to 32 bits, upper half zero).
+        if (sign_ext && (w == 4 || w == 2 || w == 1)) {
+            if (w == 4) {
+                emit_byte(rex(true, dst >= 8, false, false)); emit_byte(0x63);  // movsxd dst, eax
+            } else {
+                if (dst >= 8) emit_byte(rex(false, true, false, false));
+                emit_byte(0x0F); emit_byte(w == 2 ? 0xBF : 0xBE);               // movsx dst32, ax / al
+            }
+            emit_byte(modrm(3, dst & 7, RAX));
+        } else if (dst != RAX) {
+            emit_mov_reg(dst, RAX);
+        }
         jmp_past = emit_jmp_rel32_placeholder();
         // Fast path: load [WIN_REG + idx + off?0] through the SIB index.
         // For off != 0 the sum already includes it — index with NO disp.
@@ -830,11 +856,19 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
 void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w, bool untagged) {
     // Indexed window addressing (2026-08-21): the address (or its LEA sum
     // when off != 0) is used DIRECTLY as the SIB index into
-    // [WIN_REG + idx] — no R8 copy, no `add WIN_REG`. addr_reg and src_reg
-    // are BOTH preserved on every path (src pushed/popped around the slow
-    // call; addr only read). The limit check covers the SUM addr+off,
-    // matching the old add-first semantics. Contract: src_reg must not be
-    // R8/R9 (the scratch pair), addr_reg must not be RDX.
+    // [WIN_REG + idx] — no R8 copy, no `add WIN_REG`. src_reg and R10 are
+    // preserved on every path (pushed/popped around the slow call). addr_reg is
+    // only read on the fast path; the slow path is a C call that clobbers RAX,
+    // RCX, RDX, RSI, RDI, R8, R9, R11 and every XMM register, so an addr_reg in
+    // one of them holds garbage afterwards. A caller that keeps a live value in
+    // one of those registers must flush it first, as STORE_MEM's MEM_CLOBBER does
+    // (a dead scratch address may stay mapped). Vector-cache XMM pins are not
+    // written back or reloaded here, and the non-guarded STORE_MEM does not
+    // either (SIMD_LD16/ST16 do, around their own slow calls).
+    // The limit check covers the SUM addr+off, matching the old add-first
+    // semantics. Contract: src_reg must not be R8/R9 (the scratch pair that the
+    // LEA for off != 0 or a tagged address, and the bound compare, may write);
+    // any other src_reg is fine, RCX and RDX included.
     // idx = off ? lea-scratch : addr_reg.
     int idx = addr_reg;
     if (off != 0 || (data_tbi() && !untagged)) {
@@ -865,7 +899,9 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w, boo
         emit_load_emu(RDI); // rdi = emu
         emit_mov_reg(RSI, CPU_REG);    // rsi = cpu (for SIGSEGV delivery)
         if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (sum in idx)
-        if (src_reg != RCX) emit_mov_reg(RCX, src_reg);  // rcx = val
+        // rcx = val, from the stack copy pushed above (below R10): src_reg may be
+        // RDX or RCX, which the moves into RDX and RCX would overwrite or swap.
+        emit_load(RCX, RSP, 8);
         emit_mov_imm32(R8, w);         // r8 = width (after idx → RDX)
         emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/2);
         emit_pop(WIN_REG);             // restore R10

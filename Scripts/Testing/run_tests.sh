@@ -322,6 +322,7 @@ UNIT_TESTS=(
     "rootfs_profile|Scripts/Testing/test_rootfs_profile.sh||60|PASS uninstall removes the profile|HOST_JIT"
     "sdl_surface_format|Scripts/Testing/test_sdl_surface_format.sh||60|ALL PASS: copied SDL surface formats and palettes|HOST_JIT"
     "window_stats|Scripts/Testing/test_window_stats.sh||150|window_stats regression: ALL PASS|HOST_JIT"
+    "jit_emitter_slow_paths|Scripts/Testing/test_jit_emitter_slow_paths.sh||90|jit_emitter_slow_paths: ALL PASS|HOST_JIT"
     "jit_tier2_mutex|Scripts/Testing/test_jit_tier2_mutex.sh||180|jit_tier2_mutex: 20 promotion-stress runs PASS|HOST_JIT"
     "jit_tier2_discovery|Scripts/Testing/test_jit_tier2_discovery.sh||180|jit_tier2_discovery: direct edges, capped bodies, exits and invalidation PASS|HOST_JIT"
     "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries, exit rates and concurrent phases PASS|HOST_JIT"

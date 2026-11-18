@@ -237,6 +237,10 @@ it under the guide's Recorded changes.
   (`emit_cold_stubs`, `use_cold_stubs`). A page-check stub preserves every register and answers
   in ZF, and its failing path must clear ZF. A persistent-cache recording keeps full tails: a
   reference out of the block cannot be reused in another process. Tier-2 keeps inline guards.
+- `emit_call_aligned` with `preserve_flags` pads an odd push count with `lea rsp, [rsp-8]`, never `sub`/`add`: those
+  write RFLAGS before `pushfq` saves them. The slow paths of `emit_load_mem`/`emit_store_mem` take any source register
+  but R8/R9 (the store reloads its value from its own stack copy, since RDX and RCX are argument registers) and
+  sign-extend exactly as the fast path does (4 bytes to 64 bits, 1 and 2 bytes to 32). `jit_emitter_slow_paths` runs them.
 - A bare `0x40` REX selects SIL/DIL over DH/BH: `emit_rex_if_needed` is only for operations
   with no byte register.
 - Restore the complete ST chain-skip slot through `write_unpatched_slot`;
