@@ -60,7 +60,7 @@ Tier-1 and Tier-2 got the changes listed under [the JIT workstream](#jit-codegen
 Measured on Battle Cats and Subway Surfers launches and kernels; the shared copy has not run from an installed Asgard and no
 game was timed for the JIT changes.
 
-**Games:** 19 recorded, 16 of them playable (12 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
+**Games:** 20 recorded, 17 of them playable (13 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
 [What runs](../README.md#what-runs) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says
 otherwise.
 
