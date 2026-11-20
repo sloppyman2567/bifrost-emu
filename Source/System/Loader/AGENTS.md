@@ -10,6 +10,10 @@
   talk to). A copy reached through the parent's RUNPATH/RPATH or `LD_LIBRARY_PATH`, and
   anything under `/system`, `/vendor`, `/apex`, keeps loading. `--guest-ld` is separate:
   there a real rootfs file wins (below).
+- Every ELF file the loader reads is untrusted: a PT_LOAD or program-header range is checked against the file size, and
+  address arithmetic against overflow, before any byte is copied. `ElfLoader::load` does this for programs and
+  `--guest-ld` interpreters; the native-linker interpreter copy in `Emulator::load_elf_file` repeats the same checks and
+  throws `interpreter: ...`. Keep the two in step. `test_interp_elf_validation.sh` covers the interpreter case.
 - `/proc/self/maps` must contain non-overlapping real ELF/interpreter extents.
   Loading the interpreter does not extend the main ELF's end address; Bionic
   and glibc use the mapping containing SP to find the main stack. Every loader

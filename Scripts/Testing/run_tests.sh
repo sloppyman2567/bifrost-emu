@@ -299,6 +299,8 @@ UNIT_TESTS=(
     "fork_exec_memory|Scripts/Testing/test_fork_exec_memory.sh||75|fork_exec_memory: ALL PASS|HOST_JIT"
     # BIFROST_FORK_STUCK_SECONDS: a fork child that does not finish an execve reports where it is blocked.
     "fork_stuck_report|Scripts/Testing/test_fork_stuck_report.sh||60|fork_stuck_report: ALL PASS|HOST_JIT"
+    # A malformed PT_INTERP file ends the launch with an "interpreter:" error instead of a host fault.
+    "interp_elf_validation|Scripts/Testing/test_interp_elf_validation.sh||60|interp_elf_validation: ALL PASS|HOST_JIT"
     "jit_cache|Scripts/Testing/test_jit_cache.sh||65|jit_cache: ALL PASS|HOST_JIT"
     # A full code cache is replaced as a whole while threads sleep in syscalls, nest calls, rewrite code and take signals.
     "jit_generations|Scripts/Testing/test_jit_generations.sh||120|jit_generations: ALL PASS|HOST_JIT"

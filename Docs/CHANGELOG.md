@@ -866,6 +866,9 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   back on Return to app; the maintainer's conclusion is that this was the Deck's CPU being slow to open and close windows, not a bug
   (not traced here). Details are in the compatibility record, the support matrix and the
   roadmap.
+- **A damaged dynamic linker file no longer crashes the emulator.** A program whose `PT_INTERP` names a truncated or malformed
+  interpreter (a bad segment range, a program-header table past the end of the file, or a non-AArch64 file) now stops with an
+  `interpreter:` error. It used to fault inside the emulator or copy bytes from outside the file into the guest.
 
 ## [2.0.0-beta.1] — app keystore, Vulkan for Android apps, WebView fences and a faster JIT (2026-11-03)
 

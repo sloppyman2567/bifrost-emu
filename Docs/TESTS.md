@@ -188,6 +188,7 @@ make test-android-window-size                  # the remembered window size file
 ./Scripts/Testing/test_rootfs_profile.sh   # named rootfs profiles: install, list, select, errors, uninstall (exit 77 without the fetched toolchains)
 ./Scripts/Testing/test_setup_rootfs.sh     # bifrost-emu --setup-rootfs installs, uninstalls, runs a packaged installer from the cache and reports a missing one
 ./Scripts/Testing/test_guest_env.sh         # the guest gets the caller's environment (curated one in a sandbox)
+./Scripts/Testing/test_interp_elf_validation.sh # a malformed PT_INTERP file (bad segment range, header table past the file, non-AArch64) ends the launch with an "interpreter:" error, not a host fault; a valid one still loads
 ./Scripts/Testing/test_exec_jit.sh          # programs started by execve run under the JIT (exit 77 without the busybox fixture)
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
 ./Scripts/Testing/test_host_cpu_models.sh   # JIT fixtures on older x86-64 CPUs under qemu-x86_64; exit 77 if it cannot run

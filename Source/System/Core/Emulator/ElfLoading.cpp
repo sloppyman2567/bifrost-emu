@@ -996,6 +996,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 memcpy(&i_phoff, idata.data() + 32, 8);
                 memcpy(&i_phentsize, idata.data() + 54, 2);
                 memcpy(&i_phnum, idata.data() + 56, 2);
+                // The file is untrusted input: apply the same layout checks as ElfLoader::load.
+                uint16_t i_machine;
+                memcpy(&i_machine, idata.data() + 18, 2);
+                if (i_machine != 183) throw EmuError("interpreter: not AArch64 ELF");
+                if (i_phoff == 0 || i_phnum == 0) throw EmuError("interpreter: no program headers");
+                if (i_phoff >= idata.size() || i_phentsize < 56)
+                    throw EmuError("interpreter: bad program-header table layout");
+                if (i_phnum > (idata.size() - i_phoff) / i_phentsize)
+                    throw EmuError("interpreter: program-header table exceeds file size");
                 for (int i = 0; i < i_phnum; i++) {
                     const uint8_t* pp = idata.data() + i_phoff + i * i_phentsize;
                     uint32_t p_type;
@@ -1006,8 +1015,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     memcpy(&p_filesz, pp + 32, 8);
                     memcpy(&p_memsz, pp + 40, 8);
                     if (p_type != 1) continue;  // PT_LOAD
+                    if (p_filesz > p_memsz || p_offset > idata.size() ||
+                        p_filesz > idata.size() - p_offset)
+                        throw EmuError("interpreter: invalid PT_LOAD file range");
+                    if (p_vaddr > UINT64_MAX - interp_base ||
+                        p_memsz > UINT64_MAX - interp_base - p_vaddr)
+                        throw EmuError("interpreter: PT_LOAD address overflow");
                     uint64_t addr = interp_base + p_vaddr;
-                    mem_.map_range(addr, p_memsz);
+                    if (!mem_.map_range(addr, p_memsz))
+                        throw EmuError("interpreter: cannot map PT_LOAD");
                     if (p_filesz > 0) {
                         mem_.write(addr, idata.data() + p_offset, p_filesz);
                         mem_.name_image(addr, p_filesz, p_offset, interp_file);
