@@ -35,6 +35,7 @@
 #include "System/Core/TracyProfile.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"
 #include "System/Syscalls/Syscalls.hpp"
+#include "System/Syscalls/SyscallNames.hpp"
 #include <cerrno>
 #include <mutex>
 #include <set>
@@ -50,38 +51,7 @@ namespace arm64emu {
 namespace {
 constexpr size_t SYSCALL_HIST_MAX = 4096 + 1;  // includes GraphicThunk::SYSCALL_NUMBER (0x1000)
 std::atomic<uint64_t> g_syscall_hist[SYSCALL_HIST_MAX]{};
-const char* syscall_name(uint64_t num) {
-    switch (num) {
-        case 23: return "select";      case 40: return "sendto";
-        case 41: return "sendmsg";      case 43: return "recvmsg";
-        case 45: return "recvfrom";     case 48: return "faccessat";
-        case 49: return "chdir";        case 50: return "fchdir";
-        case 56: return "openat";       case 57: return "close";
-        case 61: return "getdents64";   case 62: return "lseek";
-        case 63: return "read";         case 64: return "write";
-        case 65: return "readv";        case 66: return "writev";
-        case 67: return "pread64";      case 68: return "pwrite64";
-        case 72: return "pselect6";     case 73: return "ppoll";
-        case 78: return "readlinkat";   case 79: return "fstatat";
-        case 80: return "fstat";        case 93: return "exit";
-        case 94: return "exit_group";   case 96: return "set_tid_address";
-        case 98: return "futex";        case 99: return "set_robust_list";
-        case 100: return "get_robust_list"; case 129: return "kill";
-        case 130: return "tkill";       case 131: return "tgkill";
-        case 169: return "gettimeofday"; case 174: return "rt_sigaction";
-        case 178: return "gettimeofday_alt"; case 179: return "sysinfo";
-        case 198: return "socket";      case 203: return "connect";
-        case 214: return "brk";         case 215: return "munmap";
-        case 220: return "clone";       case 221: return "execve";
-        case 222: return "mmap";        case 435: return "clone3";
-        case 226: return "mprotect";    case 216: return "mremap";
-        case 232: return "mincore";     case 233: return "madvise";
-        case 113: return "clock_gettime"; case 114: return "clock_getres";
-        case 172: return "getpid";      case 173: return "gettid";
-        case 278: return "prctl";
-        default: return nullptr;
-    }
-}
+const char* syscall_name(uint64_t num) { return aarch64_syscall_name(num); }
 }  // namespace
 // Increment the syscall histogram (used by Emulator::syscall AND the JIT
 // thunk fast path in InterpreterBridge.cpp so BIFROST_STATS_PERIOD keeps
@@ -258,8 +228,8 @@ void Emulator::syscall(CPU& cpu) try {
             case 215: name = "munmap"; break;
             case 198: name = "socket"; break;
             case 203: name = "connect"; break;
-            case 40: name = "sendto"; break;
-            case 45: name = "recvfrom"; break;
+            case 206: name = "sendto"; break;
+            case 207: name = "recvfrom"; break;
             case 221: name = "execve"; break;
             case 220: name = "clone"; break;
             case 435: name = "clone3"; break;
@@ -268,11 +238,10 @@ void Emulator::syscall(CPU& cpu) try {
             case 96: name = "set_tid_address"; break;
             case 179: name = "sysinfo"; break;
             case 98: name = "futex"; break;
-            case 23: name = "select"; break;
             case 72: name = "pselect6"; break;
             case 73: name = "ppoll"; break;
-            case 41: name = "sendmsg"; break;
-            case 43: name = "recvmsg"; break;
+            case 211: name = "sendmsg"; break;
+            case 212: name = "recvmsg"; break;
             case 99: name = "set_robust_list"; break;
             case 100: name = "get_robust_list"; break;
             case 129: name = "kill"; break;

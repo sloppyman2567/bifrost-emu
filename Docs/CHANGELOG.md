@@ -47,6 +47,13 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Fixed (wrong syscall names in statistics, crash lines and the syscall trace)
+
+- The syscall name table was wrong for nine numbers: the statistics printed `rt_sigaction` for `getuid` (174), `gettid` for
+  `getppid` (173), `gettimeofday_alt` for `gettid` (178) and `prctl` for `getrandom` (278), and crash lines used the same names.
+  `BIFROST_SYSCALL_TRACE` used the numbers 40, 41, 43 and 45 for `sendto`, `sendmsg`, `recvmsg` and `recvfrom` (the real ones are 206,
+  211, 212 and 207), so it never traced those four. The names now come from one table generated from the kernel's header.
+
 ### Added (an optional Tracy timeline, `BIFROST_PROF=tracy`)
 
 - A Tracy timeline of the emulator: one row per guest thread, every guest syscall, every GL and EGL call by name, JIT

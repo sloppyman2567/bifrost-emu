@@ -30,6 +30,13 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### Syscall names (2026-11-19)
+
+`Scripts/Testing/test_syscall_names.sh` (`run_tests.sh` entry `syscall_names`) compares every entry of the syscall name table with
+`<asm-generic/unistd.h>` on the machine (skipped without it; an entry newer than that header cannot be judged), and runs a guest that calls
+`sendto`, `recvfrom`, `sendmsg` and `recvmsg` under `BIFROST_SYSCALL_TRACE` to see them under 206, 207, 211 and 212. It fails on the
+build before the fix (the trace part) and on a table with `getuid` or `getrandom` under their old wrong numbers (the table part).
+
 ### Tracy option (2026-11-19)
 
 `Scripts/Testing/test_tracy_profile.sh` (`run_tests.sh` entry `tracy_profile`) checks that `BIFROST_PROF=tracy` is accepted by any
