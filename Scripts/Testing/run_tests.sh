@@ -318,6 +318,8 @@ UNIT_TESTS=(
     "jit_profiler|Scripts/Testing/test_jit_profiler.sh||60|jit_profiler: ALL PASS|HOST_JIT"
     # BIFROST_PROF's per-thread waiting report charges sleeping, futex, poll, io and computing threads to the right column.
     "wait_profile|Scripts/Testing/test_wait_profile.sh||60|wait_profile: ALL PASS|HOST_JIT"
+    # BIFROST_PROF prints a [stall] line for a second-long call on a busy thread (futex address, caller, time of day), not for idle ones.
+    "wait_stall|Scripts/Testing/test_wait_stall.sh||90|wait_stall: ALL PASS|HOST_JIT"
     # The AArch64 syscall name table matches the kernel's header, and BIFROST_SYSCALL_TRACE names the socket calls by their real numbers.
     "syscall_names|Scripts/Testing/test_syscall_names.sh||60|syscall_names: ALL PASS|HOST_JIT"
     # BIFROST_PROF=tracy[:TARGET] is accepted by every build; with a Tracy build present it also starts only for the target.

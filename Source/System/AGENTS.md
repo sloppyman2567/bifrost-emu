@@ -24,7 +24,9 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   (see the FrostJIT guide).
 - `Core/WaitProfile.*` (`BIFROST_PROF`'s per-thread waiting report) counts guest syscalls with a `WaitTimer` at the top of
   `Emulator::syscall` and in the JIT's thunk fast path (`jit_thunk_svc`), which bypasses it. A new path that runs guest
-  syscalls without `Emulator::syscall` needs its own timer, or its time shows as unaccounted. `test_wait_profile` covers it.
+  syscalls without `Emulator::syscall` needs its own timer, or its time shows as unaccounted. A call of a second or more on a thread
+  that is busy (5% CPU) also prints a `[stall]` line; its name and caller lookups (`wait_prof_set_describers`) are try-locked, never
+  waited for. `test_wait_profile` and `test_wait_stall` cover it.
 - `Core/TracyProfile.*` is the optional Tracy backend (`BIFROST_PROF=tracy[:TARGET]`, `make USE_TRACY=1`). Instrument with its
   `BIFROST_ZONE*`, `BIFROST_INSTANT` and `BIFROST_FRAME` macros and include only `TracyProfile.hpp`, never Tracy's headers: without
   `USE_TRACY` the macros are empty. Tracy is built without its crash handler (`TRACY_NO_CRASH_HANDLER`), because guest fault

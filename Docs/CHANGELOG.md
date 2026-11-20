@@ -47,6 +47,11 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (`BIFROST_PROF` names the call behind a freeze)
+
+- With `BIFROST_PROF=1`, a call that takes a second or more on a busy thread now prints a `[stall]` line: the thread, the call, the time
+  of day, the futex address and where it was called from. Use it with the game's own log to find what a freeze was waiting for.
+
 ### Fixed (wrong syscall names in statistics, crash lines and the syscall trace)
 
 - The syscall name table was wrong for nine numbers: the statistics printed `rt_sigaction` for `getuid` (174), `gettid` for

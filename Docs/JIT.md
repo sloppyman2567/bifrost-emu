@@ -1706,6 +1706,18 @@ The percentages are shares of the thread's lifetime, counted from its first sysc
 (Binder transactions are ioctls), **thunk** (the GL, EGL, SDL and audio thunks, where a buffer swap waits for the display) and
 **other** are time inside the call, work and waiting together, so they overlap the CPU share. A thread whose CPU share and
 blocked shares are both low is waiting somewhere the report does not see: a lock in the emulator itself, or being scheduled out.
+**Stall lines.** A freeze is one long wait, which totals hide. Any single call that takes a second or more on a *busy* thread (one
+that spent at least 5% of its lifetime on the CPU, so not a pool worker that sleeps until it is needed) prints one line when it ends,
+with the time of day in the form of Android's log lines, so it lines up with the app's own log:
+
+```
+[bifrost-emu] [stall] 11-19 20:50:41.512 tid 179 "UnityMain": futex took 2.41 s a0=0x7f31a0 a1=0x80 caller=/data/app/.../lib/arm64/libil2cpp.so+0x1a2b3c
+```
+
+`a0` and `a1` are the call's first two arguments (for a futex, the address of the lock and the operation), and `caller` is where the
+call came from, one level up from the libc stub (`BIFROST_FUTEX_BT` gives a full backtrace). For a graphics thunk `a0` is the symbol
+id. At most 200 lines are printed per process. It adds nothing to the cost of a call that is shorter than a second.
+
 Only the outermost call on a thread is counted. A call that bypasses `Emulator::syscall` is not counted unless it has its own
 timer (the JIT's thunk fast path does). The report prints with `BIFROST_STATS_PERIOD` and at exit (also under `--no-jit`), is
 cumulative, and costs about 35 ns per counted call while `BIFROST_PROF` is set (a tight `getppid` loop went from 101 to 136 ns);

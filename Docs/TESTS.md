@@ -30,6 +30,13 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### Stall lines (2026-11-19)
+
+`Tests/Unit/test_wait_stall.c` and `Scripts/Testing/test_wait_stall.sh` (`run_tests.sh` entry `wait_stall`) check, with the JIT and with
+`--no-jit`, that `BIFROST_PROF` prints one `[stall]` line for a busy thread's futex wait and for a busy thread's `nanosleep` (with the
+thread name, the futex address, a caller and the time of day), none for a thread that only waits, none without `BIFROST_PROF`, and none
+for calls under a second. It fails on a build without the lines, and without the busy-thread rule. It does not cover a real game.
+
 ### Syscall names (2026-11-19)
 
 `Scripts/Testing/test_syscall_names.sh` (`run_tests.sh` entry `syscall_names`) compares every entry of the syscall name table with

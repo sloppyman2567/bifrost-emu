@@ -131,7 +131,7 @@ struct UnimplementedReport {
 } // namespace
 void Emulator::syscall(CPU& cpu) try {
     uint64_t num = cpu.regs[8];
-    WaitTimer wait_timer(cpu.tid, num);  // BIFROST_PROF: time in this call, by kind
+    WaitTimer wait_timer(cpu.tid, num, cpu.regs[0], cpu.regs[1], cpu.regs[30]);  // BIFROST_PROF: time in this call, by kind
     BIFROST_ZONE_SYSCALL(num);           // BIFROST_PROF=tracy: the same call on the timeline
     UnimplementedReport unimplemented{*this, cpu, num, cpu.regs[0], cpu.regs[1], cpu.regs[2], cpu.regs[30]};
     note_syscall(num);

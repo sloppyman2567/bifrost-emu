@@ -13,6 +13,8 @@
 #include "Bifrost/Version.hpp"
 #include "System/Core/CrashReport.hpp"
 #include "System/Core/TracyProfile.hpp"
+#include "System/Core/WaitProfile.hpp"
+#include "System/Core/Signals.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"        // GraphicThunk full definition (for init/resolve)
@@ -111,6 +113,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         std::string text = path;
         for (const auto& a : argv) text += ' ' + a;
         tracy_consider_process(text);
+    }
+    if (dbg().cpu_profile) {  // BIFROST_PROF: name the thread and the caller on a `[stall]` line (WaitProfile.hpp)
+        wait_prof_set_describers(
+            [this](int tid) { std::string name; find_task_comm(tid, name); return name; },
+            [this](uint64_t address) { return describe_guest_address(*this, address); });
     }
     if (android_runtime_ && (!yggdrasil::Yggdrasil::sandbox_inside_root() ||
                             path.empty() || path.front() != '/'))

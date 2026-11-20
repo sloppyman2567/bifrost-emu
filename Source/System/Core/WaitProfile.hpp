@@ -21,10 +21,13 @@ enum class WaitKind : uint8_t { Futex, Poll, Sleep, Io, Ioctl, Thunk, Other, Cou
 // What a guest syscall number (AArch64) is counted as. GraphicThunk::SYSCALL_NUMBER (0x1000) is Thunk.
 WaitKind wait_kind_for_syscall(uint64_t number);
 
-// Charges the time from construction to destruction to the calling thread, under the kind of `syscall_number`.
+// Charges the time from construction to destruction to the calling thread, under the kind of `syscall_number`. A call that
+// takes a second or more on a busy thread (one that used at least 5% of its lifetime on the CPU: not a worker that sleeps
+// until it is needed) prints a `[stall]` line when it ends, with the thread, the call, its first two arguments (a futex's
+// address and operation) and its caller: that is a freeze, found by what the thread was waiting for.
 class WaitTimer {
 public:
-    WaitTimer(int guest_tid, uint64_t syscall_number);
+    WaitTimer(int guest_tid, uint64_t syscall_number, uint64_t arg0 = 0, uint64_t arg1 = 0, uint64_t caller = 0);
     ~WaitTimer();
     WaitTimer(const WaitTimer&) = delete;
     WaitTimer& operator=(const WaitTimer&) = delete;
@@ -33,7 +36,11 @@ private:
     void* record_ = nullptr;  // the thread's record when this is the outermost timer, else null
     uint64_t start_ns_ = 0;
     WaitKind kind_ = WaitKind::Other;
+    uint64_t number_ = 0, arg0_ = 0, arg1_ = 0, caller_ = 0;
 };
+
+// How a `[stall]` line names a guest thread and describes a code address (`library+0xoffset`). Set once the emulator can answer.
+void wait_prof_set_describers(std::function<std::string(int)> thread_name, std::function<std::string(uint64_t)> describe_address);
 
 // One thread's totals since it started, for the report and for tests.
 struct WaitThreadReport {

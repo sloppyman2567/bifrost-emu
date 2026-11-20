@@ -5,9 +5,12 @@
 #include "System/Core/WaitProfile.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "Bifrost/Version.hpp"  // CODENAME
+#include "System/Syscalls/SyscallNames.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <ctime>
+#include <string>
 #include <mutex>
 #include <pthread.h>
 
@@ -91,6 +94,47 @@ Record* record_for(Local& l, int guest_tid) {
     return r;
 }
 
+constexpr uint64_t STALL_NS = 1000000000ull;  // a call this long on a busy thread is reported
+constexpr unsigned MAX_STALL_LINES = 200;       // per process: a stuck program must not fill the log
+
+struct Describers {
+    std::function<std::string(int)> thread_name;
+    std::function<std::string(uint64_t)> describe_address;
+};
+std::mutex g_describers_mutex;  // try-locked only (fork_guest does not hold it): a busy lock only leaves a name out
+Describers g_describers;
+std::atomic<unsigned> g_stall_lines{0};
+
+void report_stall(const Record& r, uint64_t duration_ns, uint64_t number, uint64_t arg0, uint64_t arg1, uint64_t caller) {
+    // Only a thread that normally runs: a pool worker that sleeps until it is needed waits for seconds as a matter of course.
+    const uint64_t lifetime = now_ns() - r.born_ns.load(std::memory_order_relaxed);
+    const uint64_t cpu_now = thread_cpu_ns(r.cpu_clock);
+    const uint64_t cpu = cpu_now > r.cpu_base_ns ? cpu_now - r.cpu_base_ns : 0;
+    if (!lifetime || cpu * 20 < lifetime) return;
+    if (g_stall_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_STALL_LINES) return;
+    std::string name, where;
+    {
+        std::unique_lock<std::mutex> lock(g_describers_mutex, std::try_to_lock);
+        if (lock) {
+            if (g_describers.thread_name) name = g_describers.thread_name(r.tid.load(std::memory_order_relaxed));
+            if (g_describers.describe_address && caller) where = g_describers.describe_address(caller);
+        }
+    }
+    // The time of day in the form of Android's log lines (MM-DD HH:MM:SS.mmm), so a stall lines up with the app's own log.
+    timespec wall{};
+    ::clock_gettime(CLOCK_REALTIME, &wall);
+    tm local_time{};
+    ::localtime_r(&wall.tv_sec, &local_time);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%m-%d %H:%M:%S", &local_time);
+    const char* call = aarch64_syscall_name(number);
+    std::fprintf(stderr, "[%s] [stall] %s.%03ld tid %d%s%s%s: %s took %.2f s a0=0x%llx a1=0x%llx caller=%s\n", CODENAME, stamp,
+                 wall.tv_nsec / 1000000, r.tid.load(std::memory_order_relaxed), name.empty() ? "" : " \"", name.c_str(),
+                 name.empty() ? "" : "\"", number == 0x1000 ? "graphics thunk" : (call ? call : "syscall"),
+                 static_cast<double>(duration_ns) / 1e9, static_cast<unsigned long long>(arg0),
+                 static_cast<unsigned long long>(arg1), where.empty() ? "?" : where.c_str());
+}
+
 double percent(uint64_t part, uint64_t whole) { return whole ? 100.0 * static_cast<double>(part) / static_cast<double>(whole) : 0.0; }
 double seconds(uint64_t ns) { return static_cast<double>(ns) / 1e9; }
 
@@ -111,7 +155,7 @@ WaitKind wait_kind_for_syscall(uint64_t number) {
     }
 }
 
-WaitTimer::WaitTimer(int guest_tid, uint64_t syscall_number) {
+WaitTimer::WaitTimer(int guest_tid, uint64_t syscall_number, uint64_t arg0, uint64_t arg1, uint64_t caller) {
     if (!dbg().cpu_profile) return;
     Local& l = local();
     armed_ = true;
@@ -120,6 +164,10 @@ WaitTimer::WaitTimer(int guest_tid, uint64_t syscall_number) {
     if (!r) return;
     record_ = r;
     kind_ = wait_kind_for_syscall(syscall_number);
+    number_ = syscall_number;
+    arg0_ = arg0;
+    arg1_ = arg1;
+    caller_ = caller;
     start_ns_ = now_ns();
 }
 
@@ -129,8 +177,15 @@ WaitTimer::~WaitTimer() {
     if (!record_) return;
     auto* r = static_cast<Record*>(record_);
     const size_t k = static_cast<size_t>(kind_);
-    r->ns[k].fetch_add(now_ns() - start_ns_, std::memory_order_relaxed);
+    const uint64_t duration = now_ns() - start_ns_;
+    r->ns[k].fetch_add(duration, std::memory_order_relaxed);
     r->calls[k].fetch_add(1, std::memory_order_relaxed);
+    if (duration >= STALL_NS) report_stall(*r, duration, number_, arg0_, arg1_, caller_);
+}
+
+void wait_prof_set_describers(std::function<std::string(int)> thread_name, std::function<std::string(uint64_t)> describe_address) {
+    std::lock_guard<std::mutex> lock(g_describers_mutex);
+    g_describers = {std::move(thread_name), std::move(describe_address)};
 }
 
 std::vector<WaitThreadReport> wait_prof_collect() {
