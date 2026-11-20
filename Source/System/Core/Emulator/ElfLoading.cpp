@@ -179,16 +179,40 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // file-backed pages. The callback captures `this`; the Emulator outlives
     // the VFS. Bionic and glibc find the main stack as the first line that
     // contains the initial SP, so [stack] is split out of coalesced ranges.
-    vfs_.set_maps_provider([this]() {
+    // The list is rebuilt only when the guest's mappings or the special ranges below change: a guest that reads
+    // /proc/self/maps in a loop gets the same shared list, and `Yggdrasil` its cached text, until then.
+    // Its lock is not one of the locks `fork_guest` holds, so it is only ever try-locked: a child forked while another
+    // thread held it finds it locked for good and builds the list without caching, instead of hanging.
+    struct MapsCache {
+        std::mutex mu;
+        Memory::MappingsSnapshot mappings;
+        uint64_t brk_start = 0, brk = 0, vdso_base = 0, vdso_size = 0, stack_top = 0;
+        yggdrasil::Yggdrasil::MapList list;
+    };
+    auto maps_cache = std::make_shared<MapsCache>();
+    vfs_.set_maps_provider([this, maps_cache]() {
+        const Memory::MappingsSnapshot mappings = mem_.mappings_snapshot();
+        // Read once: the key stored with the list must be the values the list was built from.
+        const uint64_t brk_start = brk_start_, brk = brk_, vdso_base = vdso_base_, vdso_size = vdso_size_,
+                       stack_top = mem_.stack_top();
+        {
+            std::unique_lock<std::mutex> cache(maps_cache->mu, std::try_to_lock);
+            if (cache.owns_lock() && maps_cache->mappings.same_list(mappings) &&
+                maps_cache->brk_start == brk_start && maps_cache->brk == brk && maps_cache->vdso_base == vdso_base &&
+                maps_cache->vdso_size == vdso_size && maps_cache->stack_top == stack_top)
+                return maps_cache->list;
+        }
         struct Special { uint64_t start, end; const char* name; };
         std::vector<Special> specials;
-        if (brk_start_ > 0 && brk_ > brk_start_)  // Linux omits an empty [heap]
-            specials.push_back({brk_start_, brk_, "[heap]"});
-        specials.push_back({mem_.stack_top() - Memory::STACK_SIZE, mem_.stack_top(), "[stack]"});
-        if (vdso_base_ && vdso_size_)
-            specials.push_back({vdso_base_, vdso_base_ + vdso_size_, "[vdso]"});
+        if (brk_start > 0 && brk > brk_start)  // Linux omits an empty [heap]
+            specials.push_back({brk_start, brk, "[heap]"});
+        specials.push_back({stack_top - Memory::STACK_SIZE, stack_top, "[stack]"});
+        if (vdso_base && vdso_size)
+            specials.push_back({vdso_base, vdso_base + vdso_size, "[vdso]"});
         std::vector<yggdrasil::Yggdrasil::MapEntry> out;
-        for (const auto& view : mem_.mappings_snapshot()) {
+        // A file's guest path is worked out once per identity, not once per line (it reads the environment).
+        std::unordered_map<const Memory::FileIdentity*, std::string> labels;
+        for (const auto& view : mappings) {
             std::vector<uint64_t> cuts{view.start, view.end};
             if (!view.file)
                 for (const auto& special : specials)
@@ -208,9 +232,12 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     e.offset = view.offset + (e.start - view.start);
                     e.dev = view.file->dev;
                     e.inode = view.file->inode;
-                    e.label = view.file->host_path
-                        ? yggdrasil::Yggdrasil::guest_view_of_host_path(view.file->path)
-                        : view.file->path;
+                    auto label = labels.find(view.file.get());
+                    if (label == labels.end())
+                        label = labels.emplace(view.file.get(), view.file->host_path
+                                    ? yggdrasil::Yggdrasil::guest_view_of_host_path(view.file->path)
+                                    : view.file->path).first;
+                    e.label = label->second;
                 } else {
                     for (const auto& special : specials)
                         if (special.start <= e.start && e.end <= special.end) e.label = special.name;
@@ -218,7 +245,19 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 out.push_back(std::move(e));
             }
         }
-        return out;
+        const yggdrasil::Yggdrasil::MapList list(
+            std::make_shared<const std::vector<yggdrasil::Yggdrasil::MapEntry>>(std::move(out)));
+        std::unique_lock<std::mutex> cache(maps_cache->mu, std::try_to_lock);
+        if (cache.owns_lock()) {
+            maps_cache->list = list;
+            maps_cache->mappings = mappings;
+            maps_cache->brk_start = brk_start;
+            maps_cache->brk = brk;
+            maps_cache->vdso_base = vdso_base;
+            maps_cache->vdso_size = vdso_size;
+            maps_cache->stack_top = stack_top;
+        }
+        return list;
     });
     vfs_.set_pagemap_provider([this](uint64_t first_page, size_t count, uint8_t* kinds) {
         mem_.page_kinds(first_page, count, kinds);

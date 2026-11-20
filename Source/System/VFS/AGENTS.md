@@ -62,6 +62,10 @@
 - A task's `/proc/<pid>/status` is the complete status text with the debugger's name, state, ids, tracer and credentials filled
   in; `/proc/self/stat` takes state, times, nice, threads, start time and RSS from the host process and `vsize` from the
   guest mappings. An orphan (its starting parent died) sees parent 1.
+- The maps provider returns a shared immutable list (`Yggdrasil::MapList`) that stays the same object until the guest's
+  mappings, `brk` or the stack/vdso ranges change, and `/proc/self/maps` keeps the text built from the last list. Both
+  caches are guarded by locks that `Emulator::fork_guest` does not hold, so they are only try-locked: a failed try means
+  building without the cache, never waiting. `test_proc_maps_live` covers staleness and forking while threads read.
 - `/proc` mappings and main-stack views describe real guest mappings without
   overlaps. `/proc/self/maps` follows `fs/proc/task_mmu.c` `show_map_vma`:
   real permissions, `s`/`p`, file offset, `major:minor` and inode of the file,

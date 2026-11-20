@@ -30,6 +30,14 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### `/proc/self/maps` stays current (2026-11-19)
+
+`Tests/Unit/test_proc_maps_live.c` (`run_tests.sh` entry `test_proc_maps_live`) reads `/proc/self/maps` after each anonymous
+mmap, mprotect, MAP_FIXED replacement, file mapping, munmap and `brk` change and expects the next read to show it, 300 map and unmap
+pairs in a row, 50 reads with no change that must return the same text, and 40 forks while two threads read maps (every child
+must read maps and exit). It passes natively on Linux. With the invalidation calls removed from `Memory`'s mapping index it fails.
+The maps list is cached between changes of the guest's mappings (`Memory/AGENTS.md`), so this is the guard against a stale list.
+
 ### Host-native memcpy, memmove and memset (2026-11-16)
 
 `Tests/Unit/jit_native_libc.c` (`make verify` runs it too, with the native path off) checks results against byte loops at

@@ -242,6 +242,7 @@ bool Memory::set_direct_prot(uint64_t lo, uint64_t hi, int prot) const {
 }
 // ── vmas_: coalesced mapping index ─────────────────────────────────────
 void Memory::split_vma_locked(uint64_t at) {
+    mappings_changed_locked();
     auto it = vmas_.upper_bound(at);
     if (it == vmas_.begin()) return;
     --it;
@@ -252,6 +253,7 @@ void Memory::split_vma_locked(uint64_t at) {
 }
 void Memory::erase_vma_locked(uint64_t lo, uint64_t hi) {
     if (lo >= hi) return;
+    mappings_changed_locked();
     split_vma_locked(lo);
     split_vma_locked(hi);
     auto it = vmas_.lower_bound(lo);
@@ -330,6 +332,7 @@ void Memory::set_page_flags_locked(uint64_t page, uint8_t flags) {
 void Memory::set_mapping_locked(uint64_t lo, uint64_t hi, uint8_t prot,
                                 bool combine, bool keep_uffd) {
     if (lo >= hi) return;
+    mappings_changed_locked();
     auto flags_for = [&](uint8_t old, uint8_t page_prot) {
         const uint8_t uffd = keep_uffd ? (old & GUEST_PAGE_UFFD_BITS) : 0;
         page_prot = effective_page_prot(page_prot);
@@ -568,6 +571,7 @@ volatile uint32_t* Memory::shared_futex_word(uint64_t addr) const {
     return reinterpret_cast<volatile uint32_t*>(direct_window_ + addr);
 }
 void Memory::detach_file_locked(uint64_t lo, uint64_t hi) {
+    mappings_changed_locked();
     forget_images_locked(lo, hi);
     // Restore anonymous storage before zero/reuse, rather than overwriting
     // a live file through a former MAP_SHARED alias. Adjacent file mappings are
@@ -589,6 +593,7 @@ void Memory::detach_file_locked(uint64_t lo, uint64_t hi) {
 }
 // ── Mapping names (/proc/self/maps) ───────────────────────────────────
 void Memory::forget_images_locked(uint64_t lo, uint64_t hi) {
+    mappings_changed_locked();
     auto it = image_runs_.upper_bound(lo);
     if (it != image_runs_.begin() && std::prev(it)->second.end > lo) --it;
     while (it != image_runs_.end() && it->first < hi) {
@@ -612,10 +617,17 @@ void Memory::name_image(uint64_t addr, uint64_t size, uint64_t offset,
     forget_images_locked(lo, hi);
     image_runs_[lo] = ImageRun{hi, offset - (addr - lo), std::move(identity)};
 }
-std::vector<Memory::MappingView> Memory::mappings_snapshot() const {
+Memory::MappingsSnapshot Memory::mappings_snapshot() const {
     std::shared_lock<std::shared_mutex> lock(mu_);
+    {
+        std::lock_guard<std::mutex> cache(snapshot_mu_);
+        if (snapshot_generation_ == mappings_generation_) return snapshot_cache_;
+    }
     // The kernel names a file mapping by the opened file, not the fd.
     std::unordered_map<const FileBacking*, std::shared_ptr<const FileIdentity>> files;
+    // Every mmap of a file makes its own backing, so a file mapped in many pieces (an APK, an odex) has many
+    // backings with one device and inode: they share one identity, and its path is read once.
+    std::map<std::pair<uint64_t, uint64_t>, std::shared_ptr<const FileIdentity>> by_inode;
     auto backing_file = [&](const FileBacking* backing) {
         auto [it, fresh] = files.try_emplace(backing);
         if (fresh) {
@@ -624,12 +636,18 @@ std::vector<Memory::MappingView> Memory::mappings_snapshot() const {
             if (::fstat(backing->fd, &st) == 0) {
                 file->dev = st.st_dev;
                 file->inode = st.st_ino;
+                auto known = by_inode.find({file->dev, file->inode});
+                if (known != by_inode.end()) {
+                    it->second = known->second;
+                    return it->second;
+                }
             }
             char link[32], target[4096];
             std::snprintf(link, sizeof(link), "/proc/self/fd/%d", backing->fd);
             const ssize_t n = ::readlink(link, target, sizeof(target));
             if (n > 0 && static_cast<size_t>(n) < sizeof(target)) file->path.assign(target, n);
             file->host_path = true;
+            if (file->inode) by_inode.emplace(std::make_pair(file->dev, file->inode), file);
             it->second = std::move(file);
         }
         return it->second;
@@ -691,7 +709,13 @@ std::vector<Memory::MappingView> Memory::mappings_snapshot() const {
             at = end;
         }
     }
-    return out;
+    MappingsSnapshot built(std::make_shared<const std::vector<MappingView>>(std::move(out)));
+    // Readers hold `mu_` shared, so the generation cannot move while this one is stored; two that raced to build
+    // the same generation store equal lists.
+    std::lock_guard<std::mutex> cache(snapshot_mu_);
+    snapshot_cache_ = built;
+    snapshot_generation_ = mappings_generation_;
+    return built;
 }
 void Memory::page_kinds(uint64_t first_page, size_t count, uint8_t* kinds) const {
     std::shared_lock<std::shared_mutex> lock(mu_);
@@ -749,6 +773,7 @@ int Memory::map_file(uint64_t addr, uint64_t size, int fd,
                          (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED,
                          fd, static_cast<off_t>(offset));
     if (alias == MAP_FAILED) return errno;
+    mappings_changed_locked();
     for (uint64_t a = addr; a < addr + length; a += PAGE_SIZE)
         file_pages_.insert_or_assign(a / PAGE_SIZE, FilePage{owner, a - addr});
     set_mapping_locked(addr, addr + length, prot, false);

@@ -47,6 +47,14 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Changed (reading `/proc/self/maps` costs much less)
+
+- Some apps read `/proc/self/maps` over and over, and every read rebuilt the whole list. In a 1000 s profile of Umamusume,
+  two of its threads kept about 1.4 host CPU cores busy doing this. The list and its text are now built once and reused
+  until the app's memory layout changes, and a file mapped in many pieces is looked up once. With 1,500 file mappings a read
+  takes 112 µs instead of 5,290 µs (1,470 µs when a mapping changes before every read). The game's frame rate was not
+  measured. An installed copy needs `sudo make install` to pick it up.
+
 ### Added (two more Android activity-manager calls)
 
 - `ActivityManager.isUserAMonkey()` now answers `false` and `isBackgroundRestricted()` answers from the app's own

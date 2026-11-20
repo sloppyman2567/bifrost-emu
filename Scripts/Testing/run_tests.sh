@@ -474,6 +474,8 @@ UNIT_TESTS=(
     "test_proc_cmdline|Tests/Unit/test_proc_cmdline.elf||10|ALL PASS"
     # /proc/self/mem and pagemap describe the guest's own address space.
     "test_proc_mem_pagemap|Tests/Unit/test_proc_mem_pagemap.elf||10|test_proc_mem_pagemap: ALL PASS"
+    # /proc/self/maps shows each mmap, mprotect, munmap, file mapping and brk change on the next read (the list is cached).
+    "test_proc_maps_live|Tests/Unit/test_proc_maps_live.elf||10|test_proc_maps_live: ALL PASS"
     # A process whose parent exited sees parent 1 (guest init) in getppid and /proc/self/stat.
     "test_orphan_ppid|Tests/Unit/test_orphan_ppid.elf init||15|test_orphan_ppid: ALL PASS"
     # /proc/<pid>/status of a debugger-registered task is a complete status file.
