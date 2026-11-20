@@ -1691,6 +1691,26 @@ instruction counts: a 10 ms sample says where the host was, not how often a bloc
 instruction (its cost was not measured). `Tests/Unit/jit_profiler.cpp` checks the classification at
 each section boundary, across threads and after a code buffer is released, with synthetic samples and no timing.
 
+**Where threads wait.** The sampler counts CPU time, so a thread that waits shows nothing. With `BIFROST_PROF` set, the report
+also prints, for each guest thread, how long it spent inside guest syscalls by kind, next to its lifetime and CPU time
+(`System/Core/WaitProfile.*`):
+
+```
+[bifrost-emu] waiting, 6 thread(s), 3.6 thread-seconds alive, cpu 0.6 s: blocked in futex 0.6 s, poll 0.6 s, sleep 1.2 s; inside io 0.6 s, ...
+[bifrost-emu]   tid 3 "w-futex": alive 0.6 s, cpu 0.1% | blocked: futex 99.9% poll 0.0% sleep 0.0% | inside: io 0.0% ioctl 0.0% thunk 0.0% other 0.0%
+```
+
+The percentages are shares of the thread's lifetime, counted from its first syscall; the busiest 12 threads by CPU time are listed.
+**futex**, **poll** (`ppoll`, `pselect6`, `epoll_pwait`, `wait4`, `waitid`, `rt_sigtimedwait`) and **sleep** (`nanosleep`,
+`clock_nanosleep`) are time blocked. **io** (`read`, `write`, their vectored and socket forms, `connect`, `accept`), **ioctl**
+(Binder transactions are ioctls), **thunk** (the GL, EGL, SDL and audio thunks, where a buffer swap waits for the display) and
+**other** are time inside the call, work and waiting together, so they overlap the CPU share. A thread whose CPU share and
+blocked shares are both low is waiting somewhere the report does not see: a lock in the emulator itself, or being scheduled out.
+Only the outermost call on a thread is counted. A call that bypasses `Emulator::syscall` is not counted unless it has its own
+timer (the JIT's thunk fast path does). The report prints with `BIFROST_STATS_PERIOD` and at exit (also under `--no-jit`), is
+cumulative, and costs about 35 ns per counted call while `BIFROST_PROF` is set (a tight `getppid` loop went from 101 to 136 ns);
+nothing is measured or paid without it.
+
 `BIFROST_REGALLOC_PROFILE=path` writes a row per emitted IR range (`%p` in the path is the process id). It is large: an Android
 game wrote 3.3 GB in 15 seconds. The file now stops at `BIFROST_REGALLOC_PROFILE_MB` (default 256 MiB, counting what the file
 already holds, since it is appended to), prints a notice on stderr and leaves a `# cap reached` line; blocks translated after that

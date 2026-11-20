@@ -383,6 +383,7 @@ public:
     // One "[mem]" line: where this process's resident memory is (guest pages, JIT code, heap, ...).
     void dump_memory_breakdown();
     void dump_prof_snapshot();
+    void dump_wait_profile();  // BIFROST_PROF: per-thread time in syscalls (WaitProfile.hpp); also under --no-jit
     // Periodic real-guest-throughput + block-structure reporter. Uses real
     // instructions_executed (not the run-loop dispatch counter) and prints
     // block-end reasons so the codegen-quality levers stay visible mid-run.

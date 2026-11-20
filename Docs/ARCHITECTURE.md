@@ -50,7 +50,8 @@ bridges live in `Runtime/`; `Runtime/Generations.*` replaces a full code cache
 and releases the old one, and `Runtime/CacheRecording.cpp` (recording, proof
 compile, install) with `Runtime/PersistentCache.*` (on-disk store) form the
 experimental cross-launch translation cache. `Runtime/SampleProfile.*` is the `BIFROST_PROF` sampler's report:
-per-thread sample rings and a registry of each block's entry, body, exit and cold code. Tier-2 separates trace collection, region planning,
+per-thread sample rings and a registry of each block's entry, body, exit and cold code. `System/Core/WaitProfile.*` is its
+other half: per-thread time inside guest syscalls by kind. Tier-2 separates trace collection, region planning,
 region compilation, promotion, feedback, profiling and trial measurement.
 `Tier2Internal.hpp` shares implementation helpers; it is not a public interface.
 

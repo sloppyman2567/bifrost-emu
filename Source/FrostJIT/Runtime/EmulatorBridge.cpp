@@ -10,6 +10,7 @@
 #include "FrostJIT/Runtime/SampleProfile.hpp"
 #include "FrostJIT/Runtime/Generations.hpp"
 #include "System/Syscalls/Syscalls.hpp"
+#include "System/Core/WaitProfile.hpp"
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -310,8 +311,18 @@ void Emulator::print_jit_stats() {
 // and the BIFROST_STATS_PERIOD reporter so the jit/dispatch/translate/interp
 // split can be observed DURING a run phase (e.g. worldgen) without requiring a
 // clean guest exit. Inert unless BIFROST_PROF=1.
+void Emulator::dump_wait_profile() {
+    if (!dbg().cpu_profile) return;
+    wait_prof_print(stderr, [this](int tid) {
+        std::string name;
+        find_task_comm(tid, name);
+        return name;
+    });
+}
 void Emulator::dump_prof_snapshot() {
     dump_interpreted_profile();
+    // Where the threads waited, next to where the sampler found them running.
+    dump_wait_profile();
     if (!prof_enabled.load(std::memory_order_relaxed)) return;
     uint64_t jit = prof_jit.load(std::memory_order_relaxed);
     uint64_t disp = prof_dispatch.load(std::memory_order_relaxed);
@@ -354,6 +365,7 @@ void Emulator::dump_periodic_stats(double dt) {
         last_ic_ = ic;
         fprintf(stderr, "[%s] guest(interp): %.1f MIPS real (%llu instructions total)\n",
                 CODENAME, mips, static_cast<unsigned long long>(ic));
+        dump_wait_profile();
         dump_syscall_histogram(dt);
         return;
     }

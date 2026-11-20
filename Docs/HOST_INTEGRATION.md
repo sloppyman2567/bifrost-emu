@@ -115,6 +115,7 @@ The user-facing switches are listed above and in the [README](../README.md).
 | `BIFROST_JIT_THRESHOLD=N` | Interpret a block for N instructions before compiling it (0, the default, compiles from the start; `[jit] threshold` in the config). |
 | `BIFROST_JIT_TRACE / BIFROST_JIT_DUMP / BIFROST_DUMP_PC=0x...` | Trace JIT dispatch; dump each block's IR after the optimizer; restrict that dump to one block pc. |
 | `BIFROST_PERF_MAP` | Write `/tmp/perf-<pid>.map` with guest block names for `perf`. |
+| `BIFROST_PROF / BIFROST_PC_HIST / BIFROST_STATS_PERIOD=N` | Where host CPU time goes by thread and part of the translated code, the hottest guest blocks, and each thread's time in futex, poll, sleep, I/O, ioctl and GL calls; every N seconds as well as at exit ([JIT.md](JIT.md#where-host-time-goes-bifrost_prof)). |
 | `BIFROST_BLOCK_PROF / BIFROST_CLASS_PROF / BIFROST_CLASS_PROF_PERIOD=N` | Print the JIT's per-block profile; count interpreter instruction classes, reported every N instructions (default 20,000,000). |
 | `BIFROST_JIT_DISPATCH_STATS / BIFROST_REGALLOC_STATS / BIFROST_FALLBACK_PROFILE=path` | TLS dispatch-cache telemetry; per-block spill and reload density; a complete per-thread inventory of interpreter fallbacks (`%p` in the path becomes the host pid). |
 | `BIFROST_TIER2_TRACE / BIFROST_TIER2_TRACE_VERBOSE / BIFROST_T2_REGIONDUMP` | Tier-2 candidates and timing decisions; discovery and compiler details; a hexdump of each published region for offline `objdump`. |

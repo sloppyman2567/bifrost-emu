@@ -22,6 +22,9 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
 - `Core/ExclusiveMonitor.hpp` is the one LL/SC monitor (version table); the interpreter,
   the JIT helpers and the native sequences share its protocol, so change them together
   (see the FrostJIT guide).
+- `Core/WaitProfile.*` (`BIFROST_PROF`'s per-thread waiting report) counts guest syscalls with a `WaitTimer` at the top of
+  `Emulator::syscall` and in the JIT's thunk fast path (`jit_thunk_svc`), which bypasses it. A new path that runs guest
+  syscalls without `Emulator::syscall` needs its own timer, or its time shows as unaccounted. `test_wait_profile` covers it.
 - Private `*Internal.hpp` headers stay within their subsystem. Public embedding
   interfaces are under `Include/Bifrost/` and `Source/System/API/`.
 - Android guest shims/services live in `Guest/Android/` (see the Android guide

@@ -30,6 +30,13 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### Waiting report (2026-11-19)
+
+`Tests/Unit/test_wait_profile.c` runs five threads that each sleep, wait on a futex, wait in poll, block on a pipe or compute for
+0.6 s. `Scripts/Testing/test_wait_profile.sh` (`run_tests.sh` entry `wait_profile`) runs it under `BIFROST_PROF=1`, with the JIT and
+with `--no-jit`, and checks that the report charges each thread at least half of its lifetime to the right kind, and that nothing
+prints without `BIFROST_PROF`. It fails on a build without the report. It does not cover the GL thunk column, Binder ioctls, or an app.
+
 ### `/proc/self/maps` stays current (2026-11-19)
 
 `Tests/Unit/test_proc_maps_live.c` (`run_tests.sh` entry `test_proc_maps_live`) reads `/proc/self/maps` after each anonymous

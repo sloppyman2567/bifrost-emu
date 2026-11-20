@@ -31,6 +31,7 @@
 #include "System/Core/CPU.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "System/Core/Signals.hpp"
+#include "System/Core/WaitProfile.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include <cerrno>
@@ -159,6 +160,7 @@ struct UnimplementedReport {
 } // namespace
 void Emulator::syscall(CPU& cpu) try {
     uint64_t num = cpu.regs[8];
+    WaitTimer wait_timer(cpu.tid, num);  // BIFROST_PROF: time in this call, by kind
     UnimplementedReport unimplemented{*this, cpu, num, cpu.regs[0], cpu.regs[1], cpu.regs[2], cpu.regs[30]};
     note_syscall(num);
     // last-call record for crash reports (cheap: 3 stores, no atomic).

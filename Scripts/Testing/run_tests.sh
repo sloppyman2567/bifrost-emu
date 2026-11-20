@@ -316,6 +316,8 @@ UNIT_TESTS=(
     "fallback_profile|Scripts/Testing/test_fallback_profile.sh||60|fallback_profile: ALL PASS|HOST_JIT"
     "guest_cwd|Scripts/Testing/test_guest_cwd.sh||60|PASS an absolute cd back out works|HOST_JIT"
     "jit_profiler|Scripts/Testing/test_jit_profiler.sh||60|jit_profiler: ALL PASS|HOST_JIT"
+    # BIFROST_PROF's per-thread waiting report charges sleeping, futex, poll, io and computing threads to the right column.
+    "wait_profile|Scripts/Testing/test_wait_profile.sh||60|wait_profile: ALL PASS|HOST_JIT"
     # A 512 GiB realm window places a 16 GiB reservation below a cursor that a hinted mapping pushed to the window top.
     "memory_high_gap|Scripts/Testing/test_memory_high_gap.sh||120|memory_high_gap: ALL PASS|HOST_JIT"
     "late_tls|Scripts/Testing/test_late_tls.sh||60|late TLS regression: PASS|HOST_JIT"

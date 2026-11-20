@@ -427,6 +427,8 @@ int Emulator::run() {
         }
         if (jit_ && jit_enabled_) {
             print_jit_stats();
+        } else {
+            dump_wait_profile();  // the interpreter has no sampler, but its threads wait too
         }
     }
     // Stop + join the periodic reporter before returning (it captures

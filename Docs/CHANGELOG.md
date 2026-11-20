@@ -47,6 +47,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (`BIFROST_PROF` shows where threads wait)
+
+- `BIFROST_PROF=1` now also prints, for each guest thread, how much of its life went to sleeping, waiting on futexes and
+  polls, I/O, ioctls (Binder) and GL or EGL calls, next to its CPU share. Use it with `BIFROST_STATS_PERIOD=30` on a long run.
+  It works with `--no-jit` too. It adds about 35 ns to each system call while it is on, and nothing when it is off.
+
 ### Changed (reading `/proc/self/maps` costs much less)
 
 - Some apps read `/proc/self/maps` over and over, and every read rebuilt the whole list. In a 1000 s profile of Umamusume,
