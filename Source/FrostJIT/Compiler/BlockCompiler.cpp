@@ -14,6 +14,7 @@
 #include "FrostJIT/Compiler/BlockAnalysis.hpp"
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Core/TracyProfile.hpp"
 #include "System/Loader/DynamicLinker.hpp"
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/IR/Builder.hpp"
@@ -44,6 +45,7 @@ extern thread_local bool blr_call_disabled_;
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
+    BIFROST_ZONE("translate block");
     // Public Tier-1 compile time; private Tier-2 sampling copies count as
     // Tier-2 compilation instead.
     struct CompileTimer {

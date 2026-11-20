@@ -2,6 +2,7 @@
 #include "FrostJIT/Runtime/PersistentCache.hpp"
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Core/TracyProfile.hpp"
 #include "Bifrost/Version.hpp"
 #include "System/Core/CrashReport.hpp"
 #include "System/Memory/Memory.hpp"
@@ -430,6 +431,7 @@ int Emulator::run() {
         } else {
             dump_wait_profile();  // the interpreter has no sampler, but its threads wait too
         }
+        tracy_shutdown();
     }
     // Stop + join the periodic reporter before returning (it captures
     // `this`; the Emulator must outlive it by construction, not by luck).

@@ -1711,6 +1711,36 @@ timer (the JIT's thunk fast path does). The report prints with `BIFROST_STATS_PE
 cumulative, and costs about 35 ns per counted call while `BIFROST_PROF` is set (a tight `getppid` loop went from 101 to 136 ns);
 nothing is measured or paid without it.
 
+### Timeline with Tracy: `BIFROST_PROF=tracy`
+
+The sampler and the waiting report give totals. To see what each thread did at each moment (a render thread waiting for a
+swap, a lock another thread held), Bifrost can feed a [Tracy](https://github.com/wolfpld/tracy) timeline. It is optional, and a
+normal build contains none of it.
+
+```bash
+Tools/Fetch/fetch-tracy.sh              # once: the Tracy 0.15.0 client sources into Tools/tracy (BSD 3-clause, checksum-pinned)
+make -j8 USE_TRACY=1                    # build/release-sdl1-gl1-tracy/bifrost-emu; the root bifrost-emu and libbifrost.a stay as they are
+BIFROST_PROF=tracy build/release-sdl1-gl1-tracy/bifrost-emu app.elf
+BIFROST_PROF=tracy:com.example.game asgard start com.example.game    # an Android app: only that process
+```
+
+Connect a Tracy viewer **of the same version (0.15)** to the process; it listens on port 8086, or the next free port. Tracy keeps
+nothing until a viewer connects, so connect first: a call already in progress at that moment is not shown. Without a target the
+process you started is profiled. With `tracy:NAME` the process whose command line or process name contains NAME is (the name is
+also matched cut to 15 characters, as Android names a process after its package). Tracy cannot follow `fork`, so a forked child
+never uses its parent's profiler: for an app use a target, because the Zygote forks.
+
+You get one row per guest thread, named after the guest thread; a zone per guest syscall, coloured by kind (futex, poll, sleep, io,
+ioctl, other); a zone per GL, EGL or SDL thunk call, named after the function; a zone for each block the JIT translates and each
+Tier-2 region; a frame at each `eglSwapBuffers` or `SDL_GL_SwapWindow`; and a message when a full code cache is replaced. Vulkan
+presents are not marked as frames. Tracy's own system sampling and context-switch tracing are not used. The profiler window is a
+separate program built from the same release.
+
+Cost, per syscall in a tight `getppid` loop: no measurable difference in a Tracy build that is not profiling, about 30 ns more with the
+profiler started and no viewer, about 55 ns more with a viewer connected. Checked with Tracy's command-line `capture` and `csvexport`
+tools built from the same release (zone names, thread names, frames, a fork-heavy program, target matching), not with the profiler
+window or an Android game.
+
 `BIFROST_REGALLOC_PROFILE=path` writes a row per emitted IR range (`%p` in the path is the process id). It is large: an Android
 game wrote 3.3 GB in 15 seconds. The file now stops at `BIFROST_REGALLOC_PROFILE_MB` (default 256 MiB, counting what the file
 already holds, since it is appended to), prints a notice on stderr and leaves a `# cap reached` line; blocks translated after that

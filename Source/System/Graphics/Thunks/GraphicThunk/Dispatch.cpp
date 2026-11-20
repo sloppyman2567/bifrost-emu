@@ -3,6 +3,7 @@
 #include <algorithm>
 #include "System/Graphics/Thunks/GraphicThunk/GraphicThunkInternal.hpp"
 #include "System/Graphics/Thunks/ThunkCallRecord.hpp"
+#include "System/Core/TracyProfile.hpp"
 #include "System/Graphics/Thunks/GraphicThunk/ExtensionFilter.hpp"
 #include "System/Graphics/Thunks/GraphicThunk/ShaderIndexConversion.hpp"
 namespace arm64emu {
@@ -186,6 +187,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     // A host fault below (a driver or libc reading an untranslated guest pointer) names this call.
     thunk_call::Scope thunk_scope(entry.spec ? entry.spec->name : entry.name.c_str());
+    BIFROST_ZONE_DYNAMIC(entry.spec ? entry.spec->name : entry.name.c_str());  // BIFROST_PROF=tracy: one zone per call, by symbol
     if (dbgf.frame_trace) ++frame_calls()[entry.name];
 
 #if defined(BIFROST_THUNK_HAVE_SDL2)
@@ -2100,6 +2102,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.sym == Sym::eglDestroySurface && ret)
         frost::AndroidSurfaceManager::instance().destroy_egl_surface(args[1]);
     window_stats::api(entry.name,args,ret);
+    if (entry.sym == Sym::eglSwapBuffers || entry.sym == Sym::SDL_GL_SwapWindow) BIFROST_FRAME();
     if (entry.sym == Sym::eglSwapBuffers && ret &&
         !frost::AndroidSurfaceManager::instance().present_egl_surface(args[1])) {
 #if defined(BIFROST_THUNK_HAVE_SDL2)

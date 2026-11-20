@@ -51,7 +51,8 @@ and releases the old one, and `Runtime/CacheRecording.cpp` (recording, proof
 compile, install) with `Runtime/PersistentCache.*` (on-disk store) form the
 experimental cross-launch translation cache. `Runtime/SampleProfile.*` is the `BIFROST_PROF` sampler's report:
 per-thread sample rings and a registry of each block's entry, body, exit and cold code. `System/Core/WaitProfile.*` is its
-other half: per-thread time inside guest syscalls by kind. Tier-2 separates trace collection, region planning,
+other half: per-thread time inside guest syscalls by kind. `System/Core/TracyProfile.*` is the optional Tracy timeline
+(`make USE_TRACY=1`): zone macros that expand to nothing in a normal build, and the rule for when Tracy starts. Tier-2 separates trace collection, region planning,
 region compilation, promotion, feedback, profiling and trial measurement.
 `Tier2Internal.hpp` shares implementation helpers; it is not a public interface.
 

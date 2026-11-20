@@ -25,6 +25,13 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
 - `Core/WaitProfile.*` (`BIFROST_PROF`'s per-thread waiting report) counts guest syscalls with a `WaitTimer` at the top of
   `Emulator::syscall` and in the JIT's thunk fast path (`jit_thunk_svc`), which bypasses it. A new path that runs guest
   syscalls without `Emulator::syscall` needs its own timer, or its time shows as unaccounted. `test_wait_profile` covers it.
+- `Core/TracyProfile.*` is the optional Tracy backend (`BIFROST_PROF=tracy[:TARGET]`, `make USE_TRACY=1`). Instrument with its
+  `BIFROST_ZONE*`, `BIFROST_INSTANT` and `BIFROST_FRAME` macros and include only `TracyProfile.hpp`, never Tracy's headers: without
+  `USE_TRACY` the macros are empty. Tracy is built without its crash handler (`TRACY_NO_CRASH_HANDLER`), because guest fault
+  recovery depends on the host SIGSEGV handler; it starts only through `tracy_consider_process`; and `fork_guest`'s child calls
+  `tracy_fork_child`, since the profiler's threads exist only in the parent. The sources are fetched and pinned by
+  `Tools/Fetch/fetch-tracy.sh` (never committed); a new version needs the script, `Docs/JIT.md` and a re-check with Tracy's `capture`
+  and `csvexport`, and the viewer must match it. `test_tracy_profile` covers the option, not the timeline's content.
 - Private `*Internal.hpp` headers stay within their subsystem. Public embedding
   interfaces are under `Include/Bifrost/` and `Source/System/API/`.
 - Android guest shims/services live in `Guest/Android/` (see the Android guide

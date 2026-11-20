@@ -13,6 +13,7 @@
 // access private state: threads_, threads_mu_, next_tid_, alive_threads_.
 #include "System/Core/Emulator.hpp"
 #include "System/Core/CrashReport.hpp"
+#include "System/Core/TracyProfile.hpp"
 #include "System/Core/DebugFlags.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/Signals.hpp"   // exit_robust_list helper
@@ -803,6 +804,7 @@ bool Emulator::set_task_comm(int tid, const std::string& requested) {
     if (leader) {
         if (main_host_thread_set_.load(std::memory_order_acquire))
             ::pthread_setname_np(main_host_thread_, name.c_str());
+        tracy_consider_process(name);  // an Android app names its process after its package
         return true;
     }
     std::lock_guard<std::mutex> g(threads_mu_);
@@ -964,6 +966,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         return -1;
     }
     if (child_pid == 0) {
+        tracy_fork_child();
         host_fork_child_ = true;
         fork_parent_pid_ = forking_pid;
         g_exclusive_monitor.unlock_all_in_fork_child();

@@ -5,6 +5,7 @@
 // FrostJIT's full definition (held via unique_ptr in Emulator).
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Core/TracyProfile.hpp"
 #include "FrostJIT/Runtime/FallbackProfile.hpp"
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "FrostJIT/Runtime/SampleProfile.hpp"
@@ -191,6 +192,7 @@ bool Emulator::renew_jit(FrostJIT* full) {
     std::lock_guard<std::mutex> g(jit_renew_mu_);
     if (jit_.get() != full) return true;  // another thread already replaced it
     if (jit_generations::unreleased() >= jit_generations::kMaxUnreleased) return false;
+    BIFROST_INSTANT("jit code cache full: replaced");
     auto fresh = std::make_unique<FrostJIT>();
     configure_jit(*fresh);
     // Join multithreaded mode before any thread can run it (the ticker is already running).

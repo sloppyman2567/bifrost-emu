@@ -12,6 +12,7 @@
 #include "System/Core/DebugFlags.hpp"
 #include "Bifrost/Version.hpp"
 #include "System/Core/CrashReport.hpp"
+#include "System/Core/TracyProfile.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"        // GraphicThunk full definition (for init/resolve)
@@ -106,6 +107,11 @@ void Emulator::record_executable_host_file(const std::string& backing_path, cons
     vfs_.set_elf_path(elf_path_, backing_path);
 }
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
+    if (dbg().tracy) {  // BIFROST_PROF=tracy[:TARGET]: this program, or an Android app's `--app PACKAGE`, may be the target
+        std::string text = path;
+        for (const auto& a : argv) text += ' ' + a;
+        tracy_consider_process(text);
+    }
     if (android_runtime_ && (!yggdrasil::Yggdrasil::sandbox_inside_root() ||
                             path.empty() || path.front() != '/'))
         throw EmuError("Android runtime bootstrap requires --rootfs and an absolute guest ELF path");

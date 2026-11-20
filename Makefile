@@ -55,7 +55,10 @@ USE_SDL2 ?= 1
 USE_THUNK_GL ?= 1
 # Android host window only; guest SDL2 thunk ABI remains unchanged.
 USE_SDL3 ?= $(USE_SDL2)
-BUILD_DIR ?= build/$(BUILD_PROFILE)-sdl$(USE_SDL2)-gl$(USE_THUNK_GL)
+# Optional Tracy timeline profiling (Source/System/Core/TracyProfile.*): run Tools/Fetch/fetch-tracy.sh, then make USE_TRACY=1.
+# Its objects live in their own directory, and the root bifrost-emu and libbifrost.a are left as they are.
+USE_TRACY ?= 0
+BUILD_DIR ?= build/$(BUILD_PROFILE)-sdl$(USE_SDL2)-gl$(USE_THUNK_GL)$(if $(filter 1,$(USE_TRACY)),-tracy)
 OBJDIR   := $(BUILD_DIR)
 TARGET   ?= $(BUILD_DIR)/bifrost-emu
 # The emulator build that install-asgard.py records as the one an installed Asgard belongs with (Scripts/Android/android_pairing.py).
@@ -70,6 +73,17 @@ CROSS_CC ?= $(MUSL_CC)
 # Auto-discover all .cpp under Source/ except the C API (added to
 # LIB_SOURCES below so libbifrost.a exposes Bifrost.h), plus Source/Main.cpp.
 SOURCES  := $(shell find Source -name '*.cpp' -not -path 'Source/System/API/*' -not -path Source/Main.cpp | sort) Source/Main.cpp
+ifeq ($(USE_TRACY),1)
+ifeq ($(wildcard Tools/tracy/public/TracyClient.cpp),)
+$(error USE_TRACY=1 needs the Tracy sources: run Tools/Fetch/fetch-tracy.sh)
+endif
+# Tracy starts only when asked to (TRACY_MANUAL_LIFETIME + TRACY_DELAYED_INIT), keeps no events until a viewer connects
+# (TRACY_ON_DEMAND), and leaves the signal handlers to Bifrost: its crash handler would replace the SIGSEGV handler that
+# guest fault recovery relies on.
+CXXFLAGS += -DBIFROST_TRACY -DTRACY_ENABLE -DTRACY_ON_DEMAND -DTRACY_MANUAL_LIFETIME -DTRACY_DELAYED_INIT -DTRACY_NO_CRASH_HANDLER -ITools/tracy/public
+LDFLAGS  += -ldl
+SOURCES  += Tools/tracy/public/TracyClient.cpp
+endif
 OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
 DEPS     := $(OBJECTS:.o=.d)   # auto-generated header dependency files
 
@@ -134,8 +148,10 @@ endif
 all: $(TARGET)
 ifeq ($(BUILD_PROFILE),release)
 ifeq ($(TARGET),$(BUILD_DIR)/bifrost-emu)
+ifneq ($(USE_TRACY),1)
 	# Rename over the root copy: a running broker holds it open and cp fails with ETXTBSY.
 	cp $(TARGET) bifrost-emu.new && mv -f bifrost-emu.new bifrost-emu
+endif
 endif
 endif
 
@@ -325,6 +341,8 @@ $(CONFIG_STAMP): FORCE
 	if ! cmp -s "$$tmp" "$@"; then mv "$$tmp" "$@"; else rm -f "$$tmp"; fi
 
 $(OBJECTS) $(LIB_OBJECTS): $(CONFIG_STAMP)
+# Tracy's own sources are not ours to clean of warnings.
+$(OBJDIR)/Tools/tracy/public/TracyClient.o: CXXFLAGS += -w
 
 # Relink/rearchive when files are removed or renamed, even if the remaining
 # objects are older than the output. Do not force recompilation for this.
@@ -361,7 +379,9 @@ $(OBJDIR)/%.o: %.cpp
 # Build a configuration-specific archive and refresh the conventional root
 # copy for existing API consumers.
 lib: $(LIB)
+ifneq ($(USE_TRACY),1)
 	cp $(LIB) libbifrost.a
+endif
 
 $(LIB): $(LIB_OBJECTS) $(SOURCE_STAMP) Makefile
 	@rm -f $@.tmp

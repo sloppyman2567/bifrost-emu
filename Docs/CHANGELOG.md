@@ -47,6 +47,12 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
+### Added (an optional Tracy timeline, `BIFROST_PROF=tracy`)
+
+- A Tracy timeline of the emulator: one row per guest thread, every guest syscall, every GL and EGL call by name, JIT
+  translation and a frame at each buffer swap. Run `Tools/Fetch/fetch-tracy.sh` once, build with `make USE_TRACY=1`, and start
+  with `BIFROST_PROF=tracy` (an Android app: `BIFROST_PROF=tracy:PACKAGE`). A normal build is unchanged. See `Docs/JIT.md`.
+
 ### Added (`BIFROST_PROF` shows where threads wait)
 
 - `BIFROST_PROF=1` now also prints, for each guest thread, how much of its life went to sleeping, waiting on futexes and

@@ -11,6 +11,7 @@
 
 #include <climits>
 #include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 #include <algorithm>
 #include <string>
@@ -144,6 +145,10 @@ struct DebugFlags {
     bool render_log = true;
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
     bool cpu_profile = false;  // BIFROST_PROF — sampling on every guest thread
+    // BIFROST_PROF=tracy[:TARGET] — a Tracy timeline instead of the sampler (needs a `make USE_TRACY=1` build). Without a
+    // target this process is profiled; with one, the process whose name or command line matches (Source/System/Core/TracyProfile.hpp).
+    bool tracy = false;
+    std::string tracy_target;
     // BIFROST_HANG_WATCHDOG — abort same-PC/frozen tight loops and demote
     // long-running blocks to the interpreter. A codegen-bug diagnostic:
     // real Linux never stops a spinning program, so it is off by default.
@@ -392,7 +397,14 @@ struct DebugFlags {
         f.window_stats_overlay = toggle("BIFROST_WINDOW_STATS_OVERLAY", stats && stats_mode != 1);
         f.render_log = toggle("BIFROST_RENDER_LOG", true);
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
-        f.cpu_profile = env("BIFROST_PROF");
+        if (const char* prof = std::getenv("BIFROST_PROF")) {
+            if (std::strncmp(prof, "tracy", 5) == 0 && (prof[5] == '\0' || prof[5] == ':')) {
+                f.tracy = true;
+                f.tracy_target = prof[5] == ':' ? prof + 6 : "";
+            } else {
+                f.cpu_profile = true;
+            }
+        }
         f.hang_watchdog = env("BIFROST_HANG_WATCHDOG");
         f.no_code_page_filter = env("BIFROST_NO_CODE_PAGE_FILTER");
         f.jit_perf_map = env("BIFROST_PERF_MAP");

@@ -30,6 +30,15 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### Tracy option (2026-11-19)
+
+`Scripts/Testing/test_tracy_profile.sh` (`run_tests.sh` entry `tracy_profile`) checks that `BIFROST_PROF=tracy` is accepted by any
+build: a normal build says it needs `make USE_TRACY=1`, a Tracy build starts the profiler for the process or only for a matching
+target, a target that matches nothing starts none, and neither runs the sampler. If `build/release-sdl1-gl1-tracy` exists it also runs a
+program that forks 40 times with the profiler started (a smoke check: short-lived children pass without the child-side guard too).
+It does not check the timeline. That was checked by hand with Tracy's `capture` and `csvexport` (built from the 0.15.0 release): zone and
+thread names, GL symbol zones, frames, and the fork program with a viewer connected.
+
 ### Waiting report (2026-11-19)
 
 `Tests/Unit/test_wait_profile.c` runs five threads that each sleep, wait on a futex, wait in poll, block on a pipe or compute for
