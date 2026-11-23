@@ -1661,7 +1661,8 @@ correctness regressions.
 ### Where host time goes: `BIFROST_PROF`
 
 ```bash
-BIFROST_PROF=1 BIFROST_PC_HIST=1 bifrost-emu -v program      # report at exit
+BIFROST_PROF=1 BIFROST_PC_HIST=1 bifrost-emu -v program      # report at exit, with the full JIT stats
+BIFROST_PROF=1 bifrost-emu program                           # the profile report alone, at exit
 BIFROST_PROF=1 BIFROST_STATS_PERIOD=30 bifrost-emu program   # and every 30 s
 ```
 
@@ -1690,6 +1691,79 @@ instruction counts: a 10 ms sample says where the host was, not how often a bloc
 (`Runtime/SampleProfile.cpp`) run only when the variable is set; otherwise the translator tests one flag per compiled
 instruction (its cost was not measured). `Tests/Unit/jit_profiler.cpp` checks the classification at
 each section boundary, across threads and after a code buffer is released, with synthetic samples and no timing.
+
+**The report needs no `-v`.** `-v` adds the JIT's own counters (blocks translated and executed, cache use, memory);
+the profile report prints at exit whenever `BIFROST_PROF` is set, including when the guest ends through `exit_group`.
+
+**Guest instruction counts.** The `guest: N MIPS` line, the `-v` `executed N instructions` line and the `-v` counters
+count what generated code retires, not dispatches. When `-v` or `BIFROST_STATS_PERIOD` is set, the translator emits a
+two-instruction counter in every block entry (after the chain-skip entry, so chained edges count too) and in every
+self-loop back edge, and the dispatcher folds it into the JIT's totals; without either nothing is emitted and nothing is
+paid, so `BIFROST_PROF`'s sampler keeps its profile free of the counters. The counting code runs in the measured run: on
+CoreMark it costs about 15 %, so the rate it gives is a floor. The figure is exact for Tier-1 code; blocks served from
+the persistent cache (recorded before the counters existed) and Tier-2 regions are not counted.
+
+**Where threads wait.** The sampler counts CPU time, so a thread that waits shows nothing. With `BIFROST_PROF` set, the report
+also prints, for each guest thread, how long it spent inside guest syscalls by kind, next to its lifetime and CPU time
+(`System/Core/WaitProfile.*`):
+
+```
+[bifrost-emu] waiting, 6 thread(s), 3.6 thread-seconds alive, cpu 0.6 s: blocked in futex 0.6 s, poll 0.6 s, sleep 1.2 s; inside io 0.6 s, ...
+[bifrost-emu]   tid 3 "w-futex": alive 0.6 s, cpu 0.1% | blocked: futex 99.9% poll 0.0% sleep 0.0% | inside: io 0.0% ioctl 0.0% thunk 0.0% other 0.0%
+```
+
+The percentages are shares of the thread's lifetime, counted from its first syscall; the busiest 12 threads by CPU time are listed.
+**futex**, **poll** (`ppoll`, `pselect6`, `epoll_pwait`, `wait4`, `waitid`, `rt_sigtimedwait`) and **sleep** (`nanosleep`,
+`clock_nanosleep`) are time blocked. **io** (`read`, `write`, their vectored and socket forms, `connect`, `accept`), **ioctl**
+(Binder transactions are ioctls), **thunk** (the GL, EGL, SDL and audio thunks, where a buffer swap waits for the display) and
+**other** are time inside the call, work and waiting together, so they overlap the CPU share. A thread whose CPU share and
+blocked shares are both low is waiting somewhere the report does not see: a lock in the emulator itself, or being scheduled out.
+**Stall lines.** A freeze is one long wait, which totals hide. Any single call that takes a second or more on a *busy* thread (one
+that spent at least 5% of its lifetime on the CPU, so not a pool worker that sleeps until it is needed) prints one line when it ends,
+with the time of day in the form of Android's log lines, so it lines up with the app's own log:
+
+```
+[bifrost-emu] [stall] 11-19 20:50:41.512 tid 179 "UnityMain": futex took 2.41 s a0=0x7f31a0 a1=0x80 caller=/data/app/.../lib/arm64/libil2cpp.so+0x1a2b3c
+```
+
+`a0` and `a1` are the call's first two arguments (for a futex, the address of the lock and the operation), and `caller` is where the
+call came from, one level up from the libc stub (`BIFROST_FUTEX_BT` gives a full backtrace). For a graphics thunk `a0` is the symbol
+id. At most 200 lines are printed per process. It adds nothing to the cost of a call that is shorter than a second.
+
+Only the outermost call on a thread is counted. A call that bypasses `Emulator::syscall` is not counted unless it has its own
+timer (the JIT's thunk fast path does). The report prints with `BIFROST_STATS_PERIOD` and at exit (also under `--no-jit`), is
+cumulative, and costs about 35 ns per counted call while `BIFROST_PROF` is set (a tight `getppid` loop went from 101 to 136 ns);
+nothing is measured or paid without it.
+
+### Timeline with Tracy: `BIFROST_PROF=tracy`
+
+The sampler and the waiting report give totals. To see what each thread did at each moment (a render thread waiting for a
+swap, a lock another thread held), Bifrost can feed a [Tracy](https://github.com/wolfpld/tracy) timeline. It is optional, and a
+normal build contains none of it.
+
+```bash
+Tools/Fetch/fetch-tracy.sh              # once: the Tracy 0.15.0 client sources into Tools/tracy (BSD 3-clause, checksum-pinned)
+make -j8 USE_TRACY=1                    # build/release-sdl1-gl1-tracy/bifrost-emu; the root bifrost-emu and libbifrost.a stay as they are
+BIFROST_PROF=tracy build/release-sdl1-gl1-tracy/bifrost-emu app.elf
+BIFROST_PROF=tracy:com.example.game asgard start com.example.game    # an Android app: only that process
+```
+
+Connect a Tracy viewer **of the same version (0.15)** to the process; it listens on port 8086, or the next free port. Tracy keeps
+nothing until a viewer connects, so connect first: a call already in progress at that moment is not shown. Without a target the
+process you started is profiled. With `tracy:NAME` the process whose command line or process name contains NAME is (the name is
+also matched cut to 15 characters, as Android names a process after its package). Tracy cannot follow `fork`, so a forked child
+never uses its parent's profiler: for an app use a target, because the Zygote forks.
+
+You get one row per guest thread, named after the guest thread; a zone per guest syscall, coloured by kind (futex, poll, sleep, io,
+ioctl, other); a zone per GL, EGL or SDL thunk call, named after the function; a zone for each block the JIT translates and each
+Tier-2 region; a frame at each `eglSwapBuffers` or `SDL_GL_SwapWindow`; and a message when a full code cache is replaced. Vulkan
+presents are not marked as frames. Tracy's own system sampling and context-switch tracing are not used. The profiler window is a
+separate program built from the same release.
+
+Cost, per syscall in a tight `getppid` loop: no measurable difference in a Tracy build that is not profiling, about 30 ns more with the
+profiler started and no viewer, about 55 ns more with a viewer connected. Checked with Tracy's command-line `capture` and `csvexport`
+tools built from the same release (zone names, thread names, frames, a fork-heavy program, target matching), not with the profiler
+window or an Android game.
 
 `BIFROST_REGALLOC_PROFILE=path` writes a row per emitted IR range (`%p` in the path is the process id). It is large: an Android
 game wrote 3.3 GB in 15 seconds. The file now stops at `BIFROST_REGALLOC_PROFILE_MB` (default 256 MiB, counting what the file

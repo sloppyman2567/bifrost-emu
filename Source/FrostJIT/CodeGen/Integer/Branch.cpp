@@ -34,6 +34,9 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     if (target_pc != current_start_pc_ || no_selfloop ||
         (mt_active() && dbg().no_chain)) return false;
     has_selfloop_slot_ = true;
+    // Count the iteration: the back edge jumps to the body, past the prologue's stats counter. The caller has committed
+    // guest flags by here (or the loop carries none, which is why the edge exists), so only host RFLAGS is lost.
+    emit_guest_stat(static_cast<uint32_t>(current_block_instr_count_));
     // The back-edge jumps to the body start, whose allocator state holds
     // only the loop-carried pins. Any other dirty architectural register
     // cached in a host register (e.g. x11 written by UMOV) must reach

@@ -24,6 +24,13 @@ other licenses, so this Apache text is not a blanket license for every runtime
 library, header, tool or external game. Retain the upstream notices when
 redistributing any bundle.
 
+## Tracy profiler (optional, not distributed)
+
+`make USE_TRACY=1` builds the Tracy profiler's client sources into a separate emulator binary. They are fetched by
+`Tools/Fetch/fetch-tracy.sh` (a pinned release, checked by SHA-256) into the ignored `Tools/tracy/` and are not part of the
+repository or of a normal build. Tracy is under the 3-clause BSD license (`Tools/tracy/LICENSE`); keep it with any build that
+contains Tracy that you pass on.
+
 ## Regression sources and generated fixtures
 
 Commit original `.c`, `.cpp` and `.s` test sources and the scripts that build

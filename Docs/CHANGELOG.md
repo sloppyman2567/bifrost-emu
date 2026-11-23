@@ -8,6 +8,16 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
+## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
+
+- `BIFROST_PROF` prints its report at exit without `-v`, including for programs that end through `exit_group`; `-v` is
+  still what adds the JIT's own counters.
+- The `guest: N MIPS` line, the `-v` `executed N instructions` line and its MIPS rate now include chained blocks and
+  self-loop iterations; the last two used the run loop's dispatch count, which a chained guest reaches once per chain.
+  With `-v` or `BIFROST_STATS_PERIOD` the translator emits the counters (about 15 % slower on CoreMark), so the figure is
+  exact for Tier-1 code instead of a small fraction of it; `BIFROST_PROF` alone does not emit them. Persistent-cache
+  blocks and Tier-2 regions are not counted.
+
 ## [2.0.0-beta.2] — installing and updating that rebuild what changed, a fresh-machine test run, Zygote, shared Android and a faster JIT (2026-11-14)
 
 **2.0.0-beta.2** collects the changes made after 2.0.0-beta.1: installing and updating that rebuild what changed (the app
@@ -46,6 +56,38 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
   captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
   table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
+
+### Added (`BIFROST_PROF` names the call behind a freeze)
+
+- With `BIFROST_PROF=1`, a call that takes a second or more on a busy thread now prints a `[stall]` line: the thread, the call, the time
+  of day, the futex address and where it was called from. Use it with the game's own log to find what a freeze was waiting for.
+
+### Fixed (wrong syscall names in statistics, crash lines and the syscall trace)
+
+- The syscall name table was wrong for nine numbers: the statistics printed `rt_sigaction` for `getuid` (174), `gettid` for
+  `getppid` (173), `gettimeofday_alt` for `gettid` (178) and `prctl` for `getrandom` (278), and crash lines used the same names.
+  `BIFROST_SYSCALL_TRACE` used the numbers 40, 41, 43 and 45 for `sendto`, `sendmsg`, `recvmsg` and `recvfrom` (the real ones are 206,
+  211, 212 and 207), so it never traced those four. The names now come from one table generated from the kernel's header.
+
+### Added (an optional Tracy timeline, `BIFROST_PROF=tracy`)
+
+- A Tracy timeline of the emulator: one row per guest thread, every guest syscall, every GL and EGL call by name, JIT
+  translation and a frame at each buffer swap. Run `Tools/Fetch/fetch-tracy.sh` once, build with `make USE_TRACY=1`, and start
+  with `BIFROST_PROF=tracy` (an Android app: `BIFROST_PROF=tracy:PACKAGE`). A normal build is unchanged. See `Docs/JIT.md`.
+
+### Added (`BIFROST_PROF` shows where threads wait)
+
+- `BIFROST_PROF=1` now also prints, for each guest thread, how much of its life went to sleeping, waiting on futexes and
+  polls, I/O, ioctls (Binder) and GL or EGL calls, next to its CPU share. Use it with `BIFROST_STATS_PERIOD=30` on a long run.
+  It works with `--no-jit` too. It adds about 35 ns to each system call while it is on, and nothing when it is off.
+
+### Changed (reading `/proc/self/maps` costs much less)
+
+- Some apps read `/proc/self/maps` over and over, and every read rebuilt the whole list. In a 1000 s profile of Umamusume,
+  two of its threads kept about 1.4 host CPU cores busy doing this. The list and its text are now built once and reused
+  until the app's memory layout changes, and a file mapped in many pieces is looked up once. With 1,500 file mappings a read
+  takes 112 µs instead of 5,290 µs (1,470 µs when a mapping changes before every read). The game's frame rate was not
+  measured. An installed copy needs `sudo make install` to pick it up.
 
 ### Added (two more Android activity-manager calls)
 
@@ -834,6 +876,9 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
   back on Return to app; the maintainer's conclusion is that this was the Deck's CPU being slow to open and close windows, not a bug
   (not traced here). Details are in the compatibility record, the support matrix and the
   roadmap.
+- **A damaged dynamic linker file no longer crashes the emulator.** A program whose `PT_INTERP` names a truncated or malformed
+  interpreter (a bad segment range, a program-header table past the end of the file, or a non-AArch64 file) now stops with an
+  `interpreter:` error. It used to fault inside the emulator or copy bytes from outside the file into the guest.
 
 ## [2.0.0-beta.1] — app keystore, Vulkan for Android apps, WebView fences and a faster JIT (2026-11-03)
 

@@ -463,7 +463,14 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
                 // fs/proc/task_mmu.c show_map_vma: the header ends with a
                 // space; a name is padded to column 73 (64-bit seq_setwidth).
                 constexpr size_t NAME_COLUMN = 25 + sizeof(uint64_t) * 6 - 1;
-                for (const auto& e : maps_provider_()) {
+                const MapList list = maps_provider_();
+                {
+                    // Only try-locked: `fork_guest` does not hold this lock, so a child forked while another thread
+                    // had it would wait forever; it formats without the cache instead.
+                    std::unique_lock<std::mutex> cache(maps_text_mu_, std::try_to_lock);
+                    if (cache.owns_lock() && list.same_list(maps_text_list_)) return maps_text_;
+                }
+                for (const auto& e : list) {
                     char line[160];
                     int n = snprintf(line, sizeof(line),
                         "%08llx-%08llx %s %08llx %02x:%02x %llu ",
@@ -481,6 +488,13 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
                         maps += e.label;
                     }
                     maps += '\n';
+                }
+                if (!maps.empty()) {
+                    std::unique_lock<std::mutex> cache(maps_text_mu_, std::try_to_lock);
+                    if (cache.owns_lock()) {
+                        maps_text_list_ = list;
+                        maps_text_ = maps;
+                    }
                 }
             }
             if (maps.empty()) {

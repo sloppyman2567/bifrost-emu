@@ -299,6 +299,8 @@ UNIT_TESTS=(
     "fork_exec_memory|Scripts/Testing/test_fork_exec_memory.sh||75|fork_exec_memory: ALL PASS|HOST_JIT"
     # BIFROST_FORK_STUCK_SECONDS: a fork child that does not finish an execve reports where it is blocked.
     "fork_stuck_report|Scripts/Testing/test_fork_stuck_report.sh||60|fork_stuck_report: ALL PASS|HOST_JIT"
+    # A malformed PT_INTERP file ends the launch with an "interpreter:" error instead of a host fault.
+    "interp_elf_validation|Scripts/Testing/test_interp_elf_validation.sh||60|interp_elf_validation: ALL PASS|HOST_JIT"
     "jit_cache|Scripts/Testing/test_jit_cache.sh||65|jit_cache: ALL PASS|HOST_JIT"
     # A full code cache is replaced as a whole while threads sleep in syscalls, nest calls, rewrite code and take signals.
     "jit_generations|Scripts/Testing/test_jit_generations.sh||120|jit_generations: ALL PASS|HOST_JIT"
@@ -316,6 +318,16 @@ UNIT_TESTS=(
     "fallback_profile|Scripts/Testing/test_fallback_profile.sh||60|fallback_profile: ALL PASS|HOST_JIT"
     "guest_cwd|Scripts/Testing/test_guest_cwd.sh||60|PASS an absolute cd back out works|HOST_JIT"
     "jit_profiler|Scripts/Testing/test_jit_profiler.sh||60|jit_profiler: ALL PASS|HOST_JIT"
+    # BIFROST_PROF's per-thread waiting report charges sleeping, futex, poll, io and computing threads to the right column.
+    "wait_profile|Scripts/Testing/test_wait_profile.sh||60|wait_profile: ALL PASS|HOST_JIT"
+    # BIFROST_PROF prints its report at exit without -v, and its guest-instruction count covers chained blocks and self-loops.
+    "jit_instruction_count|Scripts/Testing/test_jit_instruction_count.sh||120|jit_instruction_count: ALL PASS|HOST_JIT"
+    # BIFROST_PROF prints a [stall] line for a second-long call on a busy thread (futex address, caller, time of day), not for idle ones.
+    "wait_stall|Scripts/Testing/test_wait_stall.sh||90|wait_stall: ALL PASS|HOST_JIT"
+    # The AArch64 syscall name table matches the kernel's header, and BIFROST_SYSCALL_TRACE names the socket calls by their real numbers.
+    "syscall_names|Scripts/Testing/test_syscall_names.sh||60|syscall_names: ALL PASS|HOST_JIT"
+    # BIFROST_PROF=tracy[:TARGET] is accepted by every build; with a Tracy build present it also starts only for the target.
+    "tracy_profile|Scripts/Testing/test_tracy_profile.sh||180|tracy_profile: ALL PASS|HOST_JIT"
     # A 512 GiB realm window places a 16 GiB reservation below a cursor that a hinted mapping pushed to the window top.
     "memory_high_gap|Scripts/Testing/test_memory_high_gap.sh||120|memory_high_gap: ALL PASS|HOST_JIT"
     "late_tls|Scripts/Testing/test_late_tls.sh||60|late TLS regression: PASS|HOST_JIT"
@@ -474,6 +486,8 @@ UNIT_TESTS=(
     "test_proc_cmdline|Tests/Unit/test_proc_cmdline.elf||10|ALL PASS"
     # /proc/self/mem and pagemap describe the guest's own address space.
     "test_proc_mem_pagemap|Tests/Unit/test_proc_mem_pagemap.elf||10|test_proc_mem_pagemap: ALL PASS"
+    # /proc/self/maps shows each mmap, mprotect, munmap, file mapping and brk change on the next read (the list is cached).
+    "test_proc_maps_live|Tests/Unit/test_proc_maps_live.elf||10|test_proc_maps_live: ALL PASS"
     # A process whose parent exited sees parent 1 (guest init) in getppid and /proc/self/stat.
     "test_orphan_ppid|Tests/Unit/test_orphan_ppid.elf init||15|test_orphan_ppid: ALL PASS"
     # /proc/<pid>/status of a debugger-registered task is a complete status file.

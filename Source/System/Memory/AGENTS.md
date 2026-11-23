@@ -36,6 +36,12 @@ State shared between them goes in `MemoryInternal.hpp`.
   protection, file identity and offset discontinuities. Loader-copied ELF
   pages are named with `name_image`; `detach_file_locked` drops those names
   wherever storage is replaced or unmapped (mprotect keeps them).
+- The snapshot is a shared, immutable list rebuilt only after `mappings_generation_` moves. Every function that changes
+  `vmas_`, `file_pages_` or `image_runs_` calls `mappings_changed_locked()` under the exclusive `mu_` (today
+  `split_vma_locked`, `erase_vma_locked`, `set_mapping_locked`, `forget_images_locked`, `detach_file_locked` and
+  `map_file`); a new place that changes them must too, or maps goes stale (`test_proc_maps_live`). Not every exclusive
+  `mu_` section does: `compare_exchange` and `read_access` take it on hot paths. Backings of one device and inode share
+  one identity within a build, so the path is read once.
 - `page_kinds` classifies a run of pages (unmapped, anonymous, file-backed or loader-named) under one lock for
   `/proc/self/pagemap`; keep it in step with what `mappings_snapshot` calls file-backed, and never build a snapshot per entry.
 - `shared_futex_word` answers whether a 32-bit word lies in a writable MAP_SHARED

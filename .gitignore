@@ -33,6 +33,9 @@ Tests/Apps/teeworlds/
 Tools/aarch64-linux-musl-cross/
 Tools/aarch64-linux-musl-cross.tgz
 
+# Tracy client sources for `make USE_TRACY=1` (fetched on demand by Tools/Fetch/fetch-tracy.sh)
+Tools/tracy/
+
 # Downloaded glibc cross-toolchain (fetched on demand by Tools/Fetch/fetch-glibc-toolchain.sh)
 Tools/aarch64-linux-gnu-cross/
 Tools/aarch64-linux-gnu-cross.tgz

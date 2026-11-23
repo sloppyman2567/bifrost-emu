@@ -2,6 +2,7 @@
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Core/TracyProfile.hpp"
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/IR/SSA/SSA.hpp"
 #include "FrostJIT/IR/Builder.hpp"
@@ -44,6 +45,7 @@ namespace arm64emu {
 uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace,
                                           uint64_t (**chain_out)(CPU*, Emulator*),
                                           Tier2RegionMonitor* monitor_override))(CPU*, Emulator*) {
+    BIFROST_ZONE("compile tier2 region");
     // Codegen-state snapshot captured at each terminating-branch JCC so the
     // deferred side-exit / loop-back-edge epilogues can be emitted LATER (after
     // the whole region body) with the exact regalloc/flags state of that branch

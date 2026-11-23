@@ -14,6 +14,7 @@
 #include "System/Core/Emulator.hpp"
 #include "System/Core/CPU.hpp"
 #include "System/Core/Signals.hpp"
+#include "System/Core/WaitProfile.hpp"
 #include "System/Syscalls/Syscalls.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"
 #include "System/Audio/AudioThunk.hpp"
@@ -162,6 +163,8 @@ extern "C" uint32_t jit_native_libc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
 // and at every real syscall.
 void jit_thunk_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
     arm64emu::note_syscall(arm64emu::GraphicThunk::SYSCALL_NUMBER);
+    // BIFROST_PROF: time in this call; a0 of a stall line is the thunk's symbol id
+    arm64emu::WaitTimer wait_timer(cpu->tid, arm64emu::GraphicThunk::SYSCALL_NUMBER, cpu->regs[9], 0, cpu->regs[30]);
     uint32_t sym_id = static_cast<uint32_t>(cpu->regs[9]);
     // last-call record for crash reports (this path bypasses Emulator::syscall).
     cpu->last_svc_num = arm64emu::GraphicThunk::SYSCALL_NUMBER;

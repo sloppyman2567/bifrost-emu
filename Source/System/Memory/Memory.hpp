@@ -352,8 +352,22 @@ public:
         uint64_t offset = 0;
         std::shared_ptr<const FileIdentity> file;
     };
-    // Every guest mapping in address order, PROT_NONE reservations included.
-    std::vector<MappingView> mappings_snapshot() const;
+    // The list `mappings_snapshot` returns: shared and immutable, so holding it keeps it valid while mappings change.
+    class MappingsSnapshot {
+    public:
+        MappingsSnapshot() = default;
+        explicit MappingsSnapshot(std::shared_ptr<const std::vector<MappingView>> list) : list_(std::move(list)) {}
+        std::vector<MappingView>::const_iterator begin() const { return list_->begin(); }
+        std::vector<MappingView>::const_iterator end() const { return list_->end(); }
+        size_t size() const { return list_ ? list_->size() : 0; }
+        bool same_list(const MappingsSnapshot& other) const { return list_ && list_ == other.list_; }
+    private:
+        std::shared_ptr<const std::vector<MappingView>> list_;
+    };
+    // Every guest mapping in address order, PROT_NONE reservations included. Built once per change of the mappings
+    // (`mappings_generation_`) and shared by every caller until the next one: a guest that reads /proc/self/maps in a
+    // loop must not pay the per-page walk and a stat of every file backing on each read.
+    MappingsSnapshot mappings_snapshot() const;
     // What `count` pages from page number `first_page` are, for /proc/self/pagemap: one byte each,
     // 0 unmapped, 1 anonymous, 2 file-backed (mapped or loader-named). One lock, no allocation:
     // a snapshot of every mapping per entry made a pagemap scan cost seconds of CPU.
@@ -435,6 +449,14 @@ private:
     void read_access(uint64_t addr, void* dst, size_t n, uint8_t access) const;
     // Use shared_mutex for reader-writer locking.
     mutable std::shared_mutex mu_;
+    // Counts changes to `vmas_`, `file_pages_` and `image_runs_`, only under an exclusive `mu_`. Every function that
+    // alters one of them calls `mappings_changed_locked`; readers under a shared `mu_` compare it with the generation
+    // their cached `mappings_snapshot` was built at.
+    uint64_t mappings_generation_ = 0;
+    void mappings_changed_locked() { ++mappings_generation_; }
+    mutable std::mutex snapshot_mu_;  // guards the two fields below; taken inside `mu_`, never around it
+    mutable MappingsSnapshot snapshot_cache_;
+    mutable uint64_t snapshot_generation_ = UINT64_MAX;
     // Host file mappings retain Linux COW/refault semantics in the guest
     // reservation. Keep the fd for fallocate and mremap after guest close.
     struct FileBacking {

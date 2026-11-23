@@ -137,16 +137,18 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         note_last_cache_hit();
         if (!tls_last_block_.fn) {
             tls_stat_instr_++;
-            if ((++tls_stat_exec_ & 0xFFFF) == 0) flush_stat_tls();
+            if ((++tls_stat_exec_ & 0xFFFF) == 0) flush_stat_tls(&cpu);
             emu.step(cpu);
             return cpu.pc;
         }
-        tls_stat_instr_ += tls_last_block_.instr_count;
+        // Generated code counts this block when the run prints the counts; without that, keep the dispatcher-side figure
+        // as it always was (it misses chained and self-loop entries).
+        if (!block_stats_) tls_stat_instr_ += tls_last_block_.instr_count;
         ibl_note(pc, tls_last_block_.chain);
         if (__builtin_expect((++tls_stat_exec_ & 0xFFFF) != 0, 1)) {
             return tls_last_block_.fn(&cpu, &emu);
         }
-        flush_stat_tls();
+        flush_stat_tls(&cpu);
         return tls_last_block_.fn(&cpu, &emu);
     }
     // inline cache for block-to-block transitions.
@@ -162,16 +164,16 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (inline_cache_lookup(pc, &cached_fn, cached_count, &cached_chain)) {
             if (!cached_fn) {
                 tls_stat_instr_++;
-                if ((++tls_stat_exec_ & 0xFFFF) == 0) flush_stat_tls();
+                if ((++tls_stat_exec_ & 0xFFFF) == 0) flush_stat_tls(&cpu);
                 emu.step(cpu);
                 return cpu.pc;
             }
-            tls_stat_instr_ += cached_count;
+            if (!block_stats_) tls_stat_instr_ += cached_count;
             ibl_note(pc, cached_chain);
             if (__builtin_expect((++tls_stat_exec_ & 0xFFFF) != 0, 1)) {
                 return cached_fn(&cpu, &emu);
             }
-            flush_stat_tls();
+            flush_stat_tls(&cpu);
             return cached_fn(&cpu, &emu);
         }
     }
@@ -192,9 +194,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     //   - x86 JIT code is reentrant — multiple threads can execute the
     //     same block concurrently (each has its own CPU/stack).
     //
-    // Flush the thread-local hot-path counters into the shared atomic
-    // stats (slow path runs far less often than block dispatches).
-    flush_stat_tls();
+    // Flush the batched interpreter steps and the counts generated code left on this CPU into the shared atomic stats
+    // (slow path runs far less often than block dispatches).
+    flush_stat_tls(&cpu);
     //
     // Per-thread state (watchdog, hotness) is thread-local — no lock
     // needed.
@@ -337,8 +339,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_watchdog_last_pc_ = pc;
         tls_watchdog_count_ = 0;
     }
-    blocks_executed++;
-    instructions_executed += entry.instr_count;
+    if (!block_stats_) {
+        // Dispatcher-side figure, kept for runs that did not ask for a report: it misses every chained and self-loop
+        // entry. With block_stats_ the block's own prologue counted this execution exactly.
+        blocks_executed++;
+        instructions_executed += entry.instr_count;
+    }
     // populate the single-entry last-block cache so the
     // next dispatch of the same PC can take the fast path. Only cache
     // non-interp_only blocks with a valid fn pointer.

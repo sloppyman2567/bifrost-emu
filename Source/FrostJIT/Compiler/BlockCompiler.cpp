@@ -14,6 +14,7 @@
 #include "FrostJIT/Compiler/BlockAnalysis.hpp"
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Core/TracyProfile.hpp"
 #include "System/Loader/DynamicLinker.hpp"
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/IR/Builder.hpp"
@@ -44,6 +45,7 @@ extern thread_local bool blr_call_disabled_;
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
+    BIFROST_ZONE("translate block");
     // Public Tier-1 compile time; private Tier-2 sampling copies count as
     // Tier-2 compilation instead.
     struct CompileTimer {
@@ -681,6 +683,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
     }
     chain_entry_off_ = code_buf_used_;
+    current_block_instr_count_ = ir_block.count;
+    // -v / BIFROST_STATS_PERIOD: count this entry's guest instructions, after chain_entry_off_ so chain-skip
+    // edges count too. Private entries are not blocks a guest runs (a leaf is inlined into its caller, a region trial
+    // runs its own copies), so they must not count.
+    if (!private_entry && !tier2_sampling_compile_) emit_guest_stat(static_cast<uint32_t>(ir_block.count));
     // BIFROST_BLOCK_TRACE: log every cold and chained entry. Like the Tier-2
     // counter below, it runs before anything is cached, so the caller-saved
     // registers are free. Self-loop iterations re-enter past the prologue

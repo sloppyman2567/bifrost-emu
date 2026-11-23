@@ -35,9 +35,14 @@ namespace arm64emu {
 // (renewed and per-thread ones included) takes the writable+executable buffer.
 static std::atomic<bool> g_force_rwx_code{false};
 void FrostJIT::force_rwx_code_buffers() { g_force_rwx_code.store(true, std::memory_order_relaxed); }
+// Process-wide: set before the first translation when the run will print the counts (-v or BIFROST_STATS_PERIOD),
+// so a BIFROST_PROF-only run does not emit (and pay for) them.
+static std::atomic<bool> g_block_stats_requested{false};
+void FrostJIT::request_block_stats(bool on) { g_block_stats_requested.store(on, std::memory_order_relaxed); }
 // ── Construction ────────────────────────────────────────────────────────
 FrostJIT::FrostJIT() {
     dispatch_stats_enabled_ = dbg().jit_dispatch_stats;
+    block_stats_ = g_block_stats_requested.load(std::memory_order_relaxed) || dbg().stats_period > 0.0;
     code_buf_limit_ = dbg().jit_cache_mb * 1024 * 1024;
     code_capacity_ = std::min<size_t>(dbg().jit_cache_initial_mb * 1024 * 1024, code_buf_limit_);
     // W^X (Write XOR Execute) protection: allocate the code buffer as
@@ -154,6 +159,43 @@ void FrostJIT::make_executable() {
         // If mprotect fails, leave the buffer writable (better than crashing).
     }
 }
+// -v / BIFROST_STATS_PERIOD: add one execution of the block to the CPU's counters. RBX holds the CPU at both
+// call sites and no GPR is needed, so only RFLAGS is clobbered: block entry has not loaded guest flags yet (the Tier-2
+// counter below clobbers them at the same point), and a self-loop back edge either carries no flags or has committed them.
+void FrostJIT::emit_guest_stat(uint32_t instructions) {
+    if (!block_stats_ || instructions == 0) return;
+    const size_t slot = (current_start_pc_ >> 2) & (CPU::JIT_STAT_SLOTS - 1);
+    emit_byte(0x48); emit_byte(0x81); emit_byte(0x83);  // add qword [rbx+disp32], imm32
+    emit_u32(static_cast<uint32_t>(offsetof(CPU, jit_stat_instr) + slot * sizeof(uint64_t)));
+    emit_u32(instructions);
+    emit_byte(0x48); emit_byte(0xFF); emit_byte(0x83);  // inc qword [rbx+disp32]
+    emit_u32(static_cast<uint32_t>(offsetof(CPU, jit_stat_blocks) + slot * sizeof(uint64_t)));
+}
+
+void FrostJIT::flush_stat_tls(CPU* cpu) {
+    const uint64_t live_instr = cpu ? cpu->jit_stat_instr_total() : 0;
+    const uint64_t live_blocks = cpu ? cpu->jit_stat_blocks_total() : 0;
+    if (live_instr | live_blocks) {
+        blocks_executed.fetch_add(live_blocks, std::memory_order_relaxed);
+        instructions_executed.fetch_add(live_instr, std::memory_order_relaxed);
+        for (size_t i = 0; i < CPU::JIT_STAT_SLOTS; ++i) cpu->jit_stat_blocks[i] = cpu->jit_stat_instr[i] = 0;
+    }
+    if (tls_stat_instr_) {
+        instructions_executed.fetch_add(tls_stat_instr_, std::memory_order_relaxed);
+        tls_stat_instr_ = 0;
+    }
+    tls_stat_exec_ = 0;
+    if (dispatch_stats_enabled_ && (tls_dispatch_stats_.last | tls_dispatch_stats_.way0 |
+        tls_dispatch_stats_.way1 | tls_dispatch_stats_.table | tls_dispatch_stats_.evictions)) {
+        dispatch_last_hits_.fetch_add(tls_dispatch_stats_.last, std::memory_order_relaxed);
+        dispatch_way0_hits_.fetch_add(tls_dispatch_stats_.way0, std::memory_order_relaxed);
+        dispatch_way1_hits_.fetch_add(tls_dispatch_stats_.way1, std::memory_order_relaxed);
+        dispatch_table_lookups_.fetch_add(tls_dispatch_stats_.table, std::memory_order_relaxed);
+        dispatch_evictions_.fetch_add(tls_dispatch_stats_.evictions, std::memory_order_relaxed);
+        tls_dispatch_stats_ = DispatchStats{};
+    }
+}
+
 uint8_t FrostJIT::profile_op_kind(IROp op) {
     switch (op) {
     case IROp::LOAD_REG: case IROp::STORE_REG:

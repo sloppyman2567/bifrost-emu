@@ -431,23 +431,19 @@ public:
     // dump never read stale zeros from a fast-path-parked guest.
     static thread_local uint64_t tls_stat_exec_;
     static thread_local uint64_t tls_stat_instr_;
-    void flush_stat_tls() {
-        if (tls_stat_exec_ | tls_stat_instr_) {
-            blocks_executed.fetch_add(tls_stat_exec_, std::memory_order_relaxed);
-            instructions_executed.fetch_add(tls_stat_instr_, std::memory_order_relaxed);
-            tls_stat_exec_ = 0;
-            tls_stat_instr_ = 0;
-        }
-        if (dispatch_stats_enabled_ && (tls_dispatch_stats_.last | tls_dispatch_stats_.way0 |
-            tls_dispatch_stats_.way1 | tls_dispatch_stats_.table | tls_dispatch_stats_.evictions)) {
-            dispatch_last_hits_.fetch_add(tls_dispatch_stats_.last, std::memory_order_relaxed);
-            dispatch_way0_hits_.fetch_add(tls_dispatch_stats_.way0, std::memory_order_relaxed);
-            dispatch_way1_hits_.fetch_add(tls_dispatch_stats_.way1, std::memory_order_relaxed);
-            dispatch_table_lookups_.fetch_add(tls_dispatch_stats_.table, std::memory_order_relaxed);
-            dispatch_evictions_.fetch_add(tls_dispatch_stats_.evictions, std::memory_order_relaxed);
-            tls_dispatch_stats_ = DispatchStats{};
-        }
-    }
+    // -v / BIFROST_STATS_PERIOD: the translator emits a guest-instruction and block counter in every block entry and
+    // self-loop back edge (emit_guest_stat), because chained edges never return to the dispatcher that used to count.
+    // Decided at translation time, so a run that prints no counts (BIFROST_PROF alone included) pays nothing.
+    bool block_stats_ = false;
+    int current_block_instr_count_ = 0;  // guest instructions of the block being emitted
+    // Whether the run will print the counts (-v or BIFROST_STATS_PERIOD). Set before any translation; every JIT
+    // constructed afterwards (renewed, per-thread) reads it.
+    static void request_block_stats(bool on);
+    void emit_guest_stat(uint32_t instructions);
+    // Folds this thread's batched interpreter steps, and (with `cpu`) the counts generated code left on the CPU, into the
+    // JIT's totals. Called at dispatch boundaries; a guest parked in chained blocks reaches none, so the reporters also
+    // add whatever is still on a CPU (print_jit_stats, dump_periodic_stats).
+    void flush_stat_tls(CPU* cpu = nullptr);
     // Per-thread inline cache for block transitions.
     // This is the FEX-Emu pattern: cache the last N (PC→fn) mappings so
     // that multi-block cycles (A→B→A→B), virtual dispatch, switch tables,

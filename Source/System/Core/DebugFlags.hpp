@@ -11,6 +11,7 @@
 
 #include <climits>
 #include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 #include <algorithm>
 #include <string>
@@ -144,6 +145,13 @@ struct DebugFlags {
     bool render_log = true;
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
     bool cpu_profile = false;  // BIFROST_PROF — sampling on every guest thread
+    // BIFROST_STATS_PERIOD=seconds — how often the periodic stats reporter runs (Lifecycle.cpp). The JIT also emits its
+    // guest-instruction counters when this or `-v` is set, so the reported throughput covers chained blocks.
+    double stats_period = 0.0;
+    // BIFROST_PROF=tracy[:TARGET] — a Tracy timeline instead of the sampler (needs a `make USE_TRACY=1` build). Without a
+    // target this process is profiled; with one, the process whose name or command line matches (Source/System/Core/TracyProfile.hpp).
+    bool tracy = false;
+    std::string tracy_target;
     // BIFROST_HANG_WATCHDOG — abort same-PC/frozen tight loops and demote
     // long-running blocks to the interpreter. A codegen-bug diagnostic:
     // real Linux never stops a spinning program, so it is off by default.
@@ -392,7 +400,19 @@ struct DebugFlags {
         f.window_stats_overlay = toggle("BIFROST_WINDOW_STATS_OVERLAY", stats && stats_mode != 1);
         f.render_log = toggle("BIFROST_RENDER_LOG", true);
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
-        f.cpu_profile = env("BIFROST_PROF");
+        if (const char* period = std::getenv("BIFROST_STATS_PERIOD")) {
+            char* end = nullptr;
+            const double seconds = std::strtod(period, &end);
+            if (end != period && *end == '\0' && seconds > 0.0) f.stats_period = seconds;
+        }
+        if (const char* prof = std::getenv("BIFROST_PROF")) {
+            if (std::strncmp(prof, "tracy", 5) == 0 && (prof[5] == '\0' || prof[5] == ':')) {
+                f.tracy = true;
+                f.tracy_target = prof[5] == ':' ? prof + 6 : "";
+            } else {
+                f.cpu_profile = true;
+            }
+        }
         f.hang_watchdog = env("BIFROST_HANG_WATCHDOG");
         f.no_code_page_filter = env("BIFROST_NO_CODE_PAGE_FILTER");
         f.jit_perf_map = env("BIFROST_PERF_MAP");

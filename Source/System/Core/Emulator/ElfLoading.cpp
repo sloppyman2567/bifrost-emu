@@ -12,6 +12,9 @@
 #include "System/Core/DebugFlags.hpp"
 #include "Bifrost/Version.hpp"
 #include "System/Core/CrashReport.hpp"
+#include "System/Core/TracyProfile.hpp"
+#include "System/Core/WaitProfile.hpp"
+#include "System/Core/Signals.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Loader/DynamicLinker.hpp"
 #include "System/Graphics/Thunks/GraphicThunk.hpp"        // GraphicThunk full definition (for init/resolve)
@@ -106,6 +109,16 @@ void Emulator::record_executable_host_file(const std::string& backing_path, cons
     vfs_.set_elf_path(elf_path_, backing_path);
 }
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
+    if (dbg().tracy) {  // BIFROST_PROF=tracy[:TARGET]: this program, or an Android app's `--app PACKAGE`, may be the target
+        std::string text = path;
+        for (const auto& a : argv) text += ' ' + a;
+        tracy_consider_process(text);
+    }
+    if (dbg().cpu_profile) {  // BIFROST_PROF: name the thread and the caller on a `[stall]` line (WaitProfile.hpp)
+        wait_prof_set_describers(
+            [this](int tid) { std::string name; find_task_comm(tid, name); return name; },
+            [this](uint64_t address) { return describe_guest_address(*this, address); });
+    }
     if (android_runtime_ && (!yggdrasil::Yggdrasil::sandbox_inside_root() ||
                             path.empty() || path.front() != '/'))
         throw EmuError("Android runtime bootstrap requires --rootfs and an absolute guest ELF path");
@@ -179,16 +192,40 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // file-backed pages. The callback captures `this`; the Emulator outlives
     // the VFS. Bionic and glibc find the main stack as the first line that
     // contains the initial SP, so [stack] is split out of coalesced ranges.
-    vfs_.set_maps_provider([this]() {
+    // The list is rebuilt only when the guest's mappings or the special ranges below change: a guest that reads
+    // /proc/self/maps in a loop gets the same shared list, and `Yggdrasil` its cached text, until then.
+    // Its lock is not one of the locks `fork_guest` holds, so it is only ever try-locked: a child forked while another
+    // thread held it finds it locked for good and builds the list without caching, instead of hanging.
+    struct MapsCache {
+        std::mutex mu;
+        Memory::MappingsSnapshot mappings;
+        uint64_t brk_start = 0, brk = 0, vdso_base = 0, vdso_size = 0, stack_top = 0;
+        yggdrasil::Yggdrasil::MapList list;
+    };
+    auto maps_cache = std::make_shared<MapsCache>();
+    vfs_.set_maps_provider([this, maps_cache]() {
+        const Memory::MappingsSnapshot mappings = mem_.mappings_snapshot();
+        // Read once: the key stored with the list must be the values the list was built from.
+        const uint64_t brk_start = brk_start_, brk = brk_, vdso_base = vdso_base_, vdso_size = vdso_size_,
+                       stack_top = mem_.stack_top();
+        {
+            std::unique_lock<std::mutex> cache(maps_cache->mu, std::try_to_lock);
+            if (cache.owns_lock() && maps_cache->mappings.same_list(mappings) &&
+                maps_cache->brk_start == brk_start && maps_cache->brk == brk && maps_cache->vdso_base == vdso_base &&
+                maps_cache->vdso_size == vdso_size && maps_cache->stack_top == stack_top)
+                return maps_cache->list;
+        }
         struct Special { uint64_t start, end; const char* name; };
         std::vector<Special> specials;
-        if (brk_start_ > 0 && brk_ > brk_start_)  // Linux omits an empty [heap]
-            specials.push_back({brk_start_, brk_, "[heap]"});
-        specials.push_back({mem_.stack_top() - Memory::STACK_SIZE, mem_.stack_top(), "[stack]"});
-        if (vdso_base_ && vdso_size_)
-            specials.push_back({vdso_base_, vdso_base_ + vdso_size_, "[vdso]"});
+        if (brk_start > 0 && brk > brk_start)  // Linux omits an empty [heap]
+            specials.push_back({brk_start, brk, "[heap]"});
+        specials.push_back({stack_top - Memory::STACK_SIZE, stack_top, "[stack]"});
+        if (vdso_base && vdso_size)
+            specials.push_back({vdso_base, vdso_base + vdso_size, "[vdso]"});
         std::vector<yggdrasil::Yggdrasil::MapEntry> out;
-        for (const auto& view : mem_.mappings_snapshot()) {
+        // A file's guest path is worked out once per identity, not once per line (it reads the environment).
+        std::unordered_map<const Memory::FileIdentity*, std::string> labels;
+        for (const auto& view : mappings) {
             std::vector<uint64_t> cuts{view.start, view.end};
             if (!view.file)
                 for (const auto& special : specials)
@@ -208,9 +245,12 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     e.offset = view.offset + (e.start - view.start);
                     e.dev = view.file->dev;
                     e.inode = view.file->inode;
-                    e.label = view.file->host_path
-                        ? yggdrasil::Yggdrasil::guest_view_of_host_path(view.file->path)
-                        : view.file->path;
+                    auto label = labels.find(view.file.get());
+                    if (label == labels.end())
+                        label = labels.emplace(view.file.get(), view.file->host_path
+                                    ? yggdrasil::Yggdrasil::guest_view_of_host_path(view.file->path)
+                                    : view.file->path).first;
+                    e.label = label->second;
                 } else {
                     for (const auto& special : specials)
                         if (special.start <= e.start && e.end <= special.end) e.label = special.name;
@@ -218,7 +258,19 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 out.push_back(std::move(e));
             }
         }
-        return out;
+        const yggdrasil::Yggdrasil::MapList list(
+            std::make_shared<const std::vector<yggdrasil::Yggdrasil::MapEntry>>(std::move(out)));
+        std::unique_lock<std::mutex> cache(maps_cache->mu, std::try_to_lock);
+        if (cache.owns_lock()) {
+            maps_cache->list = list;
+            maps_cache->mappings = mappings;
+            maps_cache->brk_start = brk_start;
+            maps_cache->brk = brk;
+            maps_cache->vdso_base = vdso_base;
+            maps_cache->vdso_size = vdso_size;
+            maps_cache->stack_top = stack_top;
+        }
+        return list;
     });
     vfs_.set_pagemap_provider([this](uint64_t first_page, size_t count, uint8_t* kinds) {
         mem_.page_kinds(first_page, count, kinds);
@@ -944,6 +996,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 memcpy(&i_phoff, idata.data() + 32, 8);
                 memcpy(&i_phentsize, idata.data() + 54, 2);
                 memcpy(&i_phnum, idata.data() + 56, 2);
+                // The file is untrusted input: apply the same layout checks as ElfLoader::load.
+                uint16_t i_machine;
+                memcpy(&i_machine, idata.data() + 18, 2);
+                if (i_machine != 183) throw EmuError("interpreter: not AArch64 ELF");
+                if (i_phoff == 0 || i_phnum == 0) throw EmuError("interpreter: no program headers");
+                if (i_phoff >= idata.size() || i_phentsize < 56)
+                    throw EmuError("interpreter: bad program-header table layout");
+                if (i_phnum > (idata.size() - i_phoff) / i_phentsize)
+                    throw EmuError("interpreter: program-header table exceeds file size");
                 for (int i = 0; i < i_phnum; i++) {
                     const uint8_t* pp = idata.data() + i_phoff + i * i_phentsize;
                     uint32_t p_type;
@@ -954,8 +1015,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     memcpy(&p_filesz, pp + 32, 8);
                     memcpy(&p_memsz, pp + 40, 8);
                     if (p_type != 1) continue;  // PT_LOAD
+                    if (p_filesz > p_memsz || p_offset > idata.size() ||
+                        p_filesz > idata.size() - p_offset)
+                        throw EmuError("interpreter: invalid PT_LOAD file range");
+                    if (p_vaddr > UINT64_MAX - interp_base ||
+                        p_memsz > UINT64_MAX - interp_base - p_vaddr)
+                        throw EmuError("interpreter: PT_LOAD address overflow");
                     uint64_t addr = interp_base + p_vaddr;
-                    mem_.map_range(addr, p_memsz);
+                    if (!mem_.map_range(addr, p_memsz))
+                        throw EmuError("interpreter: cannot map PT_LOAD");
                     if (p_filesz > 0) {
                         mem_.write(addr, idata.data() + p_offset, p_filesz);
                         mem_.name_image(addr, p_filesz, p_offset, interp_file);

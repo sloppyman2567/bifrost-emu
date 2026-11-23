@@ -30,6 +30,55 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### Stall lines (2026-11-19)
+
+`Tests/Unit/test_wait_stall.c` and `Scripts/Testing/test_wait_stall.sh` (`run_tests.sh` entry `wait_stall`) check, with the JIT and with
+`--no-jit`, that `BIFROST_PROF` prints one `[stall]` line for a busy thread's futex wait and for a busy thread's `nanosleep` (with the
+thread name, the futex address, a caller and the time of day), none for a thread that only waits, none without `BIFROST_PROF`, and none
+for calls under a second. It fails on a build without the lines, and without the busy-thread rule. It does not cover a real game.
+
+### Syscall names (2026-11-19)
+
+`Scripts/Testing/test_syscall_names.sh` (`run_tests.sh` entry `syscall_names`) compares every entry of the syscall name table with
+`<asm-generic/unistd.h>` on the machine (skipped without it; an entry newer than that header cannot be judged), and runs a guest that calls
+`sendto`, `recvfrom`, `sendmsg` and `recvmsg` under `BIFROST_SYSCALL_TRACE` to see them under 206, 207, 211 and 212. It fails on the
+build before the fix (the trace part) and on a table with `getuid` or `getrandom` under their old wrong numbers (the table part).
+
+### Tracy option (2026-11-19)
+
+`Scripts/Testing/test_tracy_profile.sh` (`run_tests.sh` entry `tracy_profile`) checks that `BIFROST_PROF=tracy` is accepted by any
+build: a normal build says it needs `make USE_TRACY=1`, a Tracy build starts the profiler for the process or only for a matching
+target, a target that matches nothing starts none, and neither runs the sampler. If `build/release-sdl1-gl1-tracy` exists it also runs a
+program that forks 40 times with the profiler started (a smoke check: short-lived children pass without the child-side guard too).
+It does not check the timeline. That was checked by hand with Tracy's `capture` and `csvexport` (built from the 0.15.0 release): zone and
+thread names, GL symbol zones, frames, and the fork program with a viewer connected.
+
+### Guest instruction counts (2026-11-23)
+
+`Tests/Unit/jit_stats_count.c` and `Scripts/Testing/test_jit_instruction_count.sh` (`run_tests.sh` entry
+`jit_instruction_count`) check that `BIFROST_PROF` prints its report at exit without `-v` (the waiting report with the JIT
+and with `--no-jit`, the JIT sample report with the JIT), that nothing prints without it, and that the JIT's `-v`
+guest-instruction count for a self-loop-and-call workload matches the interpreter's count for the same program (it is
+exactly equal on this build; the check allows 2 %). It fails on the build before the fix (a report only under `-v`, and a
+count around a thousandth of the interpreter's). It does not check that `BIFROST_PROF` alone leaves the counters out
+(that is timing, not output), and it does not cover blocks served from the persistent JIT cache or Tier-2 regions, which
+are not counted.
+
+### Waiting report (2026-11-19)
+
+`Tests/Unit/test_wait_profile.c` runs five threads that each sleep, wait on a futex, wait in poll, block on a pipe or compute for
+0.6 s. `Scripts/Testing/test_wait_profile.sh` (`run_tests.sh` entry `wait_profile`) runs it under `BIFROST_PROF=1`, with the JIT and
+with `--no-jit`, and checks that the report charges each thread at least half of its lifetime to the right kind, and that nothing
+prints without `BIFROST_PROF`. It fails on a build without the report. It does not cover the GL thunk column, Binder ioctls, or an app.
+
+### `/proc/self/maps` stays current (2026-11-19)
+
+`Tests/Unit/test_proc_maps_live.c` (`run_tests.sh` entry `test_proc_maps_live`) reads `/proc/self/maps` after each anonymous
+mmap, mprotect, MAP_FIXED replacement, file mapping, munmap and `brk` change and expects the next read to show it, 300 map and unmap
+pairs in a row, 50 reads with no change that must return the same text, and 40 forks while two threads read maps (every child
+must read maps and exit). It passes natively on Linux. With the invalidation calls removed from `Memory`'s mapping index it fails.
+The maps list is cached between changes of the guest's mappings (`Memory/AGENTS.md`), so this is the guard against a stale list.
+
 ### Host-native memcpy, memmove and memset (2026-11-16)
 
 `Tests/Unit/jit_native_libc.c` (`make verify` runs it too, with the native path off) checks results against byte loops at
@@ -150,6 +199,7 @@ make test-android-window-size                  # the remembered window size file
 ./Scripts/Testing/test_rootfs_profile.sh   # named rootfs profiles: install, list, select, errors, uninstall (exit 77 without the fetched toolchains)
 ./Scripts/Testing/test_setup_rootfs.sh     # bifrost-emu --setup-rootfs installs, uninstalls, runs a packaged installer from the cache and reports a missing one
 ./Scripts/Testing/test_guest_env.sh         # the guest gets the caller's environment (curated one in a sandbox)
+./Scripts/Testing/test_interp_elf_validation.sh # a malformed PT_INTERP file (bad segment range, header table past the file, non-AArch64) ends the launch with an "interpreter:" error, not a host fault; a valid one still loads
 ./Scripts/Testing/test_exec_jit.sh          # programs started by execve run under the JIT (exit 77 without the busybox fixture)
 ./Scripts/Testing/test_apk_launch.sh        # bifrost-emu app.apk hands the package to Asgard (stub)
 ./Scripts/Testing/test_host_cpu_models.sh   # JIT fixtures on older x86-64 CPUs under qemu-x86_64; exit 77 if it cannot run

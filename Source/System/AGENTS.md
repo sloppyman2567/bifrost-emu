@@ -22,6 +22,18 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
 - `Core/ExclusiveMonitor.hpp` is the one LL/SC monitor (version table); the interpreter,
   the JIT helpers and the native sequences share its protocol, so change them together
   (see the FrostJIT guide).
+- `Core/WaitProfile.*` (`BIFROST_PROF`'s per-thread waiting report) counts guest syscalls with a `WaitTimer` at the top of
+  `Emulator::syscall` and in the JIT's thunk fast path (`jit_thunk_svc`), which bypasses it. A new path that runs guest
+  syscalls without `Emulator::syscall` needs its own timer, or its time shows as unaccounted. A call of a second or more on a thread
+  that is busy (5% CPU) also prints a `[stall]` line; its name and caller lookups (`wait_prof_set_describers`) are try-locked, never
+  waited for. `test_wait_profile` and `test_wait_stall` cover it.
+- `Core/TracyProfile.*` is the optional Tracy backend (`BIFROST_PROF=tracy[:TARGET]`, `make USE_TRACY=1`). Instrument with its
+  `BIFROST_ZONE*`, `BIFROST_INSTANT` and `BIFROST_FRAME` macros and include only `TracyProfile.hpp`, never Tracy's headers: without
+  `USE_TRACY` the macros are empty. Tracy is built without its crash handler (`TRACY_NO_CRASH_HANDLER`), because guest fault
+  recovery depends on the host SIGSEGV handler; it starts only through `tracy_consider_process`; and `fork_guest`'s child calls
+  `tracy_fork_child`, since the profiler's threads exist only in the parent. The sources are fetched and pinned by
+  `Tools/Fetch/fetch-tracy.sh` (never committed); a new version needs the script, `Docs/JIT.md` and a re-check with Tracy's `capture`
+  and `csvexport`, and the viewer must match it. `test_tracy_profile` covers the option, not the timeline's content.
 - Private `*Internal.hpp` headers stay within their subsystem. Public embedding
   interfaces are under `Include/Bifrost/` and `Source/System/API/`.
 - Android guest shims/services live in `Guest/Android/` (see the Android guide
@@ -72,7 +84,7 @@ runs, uses (comm table, futex shards, thread lists, guest descriptor table, POSI
 child, but a read/write lock copies its queue of waiting writers and must be re-initialized there
 (`Memory::reset_mutex_in_fork_child`); the JIT's locks join the set and the child keeps the JIT (see the FrostJIT
 guide), falling back to the interpreter when they cannot be taken. Add any new process-wide lock that
-guest syscalls take to that set. The exclusive monitor's bucket spinlocks are too many to take: the child clears any it
+guest syscalls take to that set, or only try-lock it and do the work uncached when it is busy (the `/proc/self/maps` caches). The exclusive monitor's bucket spinlocks are too many to take: the child clears any it
 copied held (`ExclusiveMonitor::unlock_all_in_fork_child`). `test_fork_lock_contention` and `test_fork_exec_memory` cover it. A real host-fork child's process-ending exit (`exit_group`, or `exit` from its only thread)
 uses kernel termination without host resource teardown; track that ownership
 separately from `CPU::is_fork_process`, which Binder-realm apps also use for PID

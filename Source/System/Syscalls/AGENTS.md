@@ -1,5 +1,9 @@
 # Linux syscall translation
 
+- `SyscallNames.cpp` is the one table of AArch64 syscall names (statistics, crash lines, the Tracy timeline), generated from the
+  kernel's `<asm-generic/unistd.h>`: a name goes with its AArch64 number, never an x86-64 or remembered one. The name switch in
+  `Emulator::syscall` for `BIFROST_SYSCALL_TRACE` also decides which calls are traced, so its numbers must match the table.
+  `test_syscall_names` checks the table against the header and the trace by a guest.
 - Decode the AArch64 ABI's actual slots, widths, signed values, structures and
   errno rules. Read only the arguments the raw syscall defines: e.g. raw
   `faccessat` and `fchmodat` take three, so x3 is caller garbage (the flags

@@ -273,7 +273,20 @@ public:
         uint64_t    dev = 0, inode = 0;    // host st_dev/st_ino of the file
         std::string label;     // guest path, "[stack]"/"[heap]"/"[vdso]" or ""
     };
-    void set_maps_provider(std::function<std::vector<MapEntry>()> cb) {
+    // The provider's list is shared and immutable: it stays the same object until the guest's mappings change, so
+    // `same_list` tells a caller that text built from the last one is still current.
+    class MapList {
+    public:
+        MapList() = default;
+        explicit MapList(std::shared_ptr<const std::vector<MapEntry>> list) : list_(std::move(list)) {}
+        std::vector<MapEntry>::const_iterator begin() const { return list_->begin(); }
+        std::vector<MapEntry>::const_iterator end() const { return list_->end(); }
+        bool empty() const { return !list_ || list_->empty(); }
+        bool same_list(const MapList& other) const { return list_ && list_ == other.list_; }
+    private:
+        std::shared_ptr<const std::vector<MapEntry>> list_;
+    };
+    void set_maps_provider(std::function<MapList()> cb) {
         maps_provider_ = std::move(cb);
     }
     // Guest memory access for /proc/self/mem: false where the range is not accessible.
@@ -320,7 +333,7 @@ public:
         return false;
     }
     // Expose the maps provider for /proc/self/maps.
-    const std::function<std::vector<MapEntry>()>& maps_provider() const {
+    const std::function<MapList()>& maps_provider() const {
         return maps_provider_;
     }
     // Expose the cwd getter for getcwd syscall.
@@ -349,7 +362,12 @@ private:
     int self_pid_ = 1;
     ::arm64emu::FrostGraphics* gfx_ = nullptr;
     ::arm64emu::Audio* audio_ = nullptr;
-    std::function<std::vector<MapEntry>()> maps_provider_;
+    std::function<MapList()> maps_provider_;
+    // The /proc/self/maps text of the list it was built from (`maps_text_`), so a repeated read of an unchanged
+    // layout copies a string instead of formatting every line.
+    std::mutex maps_text_mu_;  // try-locked only: `Emulator::fork_guest` does not hold it
+    MapList maps_text_list_;
+    std::string maps_text_;
     std::function<bool(uint64_t, void*, size_t)> memory_read_;
     std::function<bool(uint64_t, const void*, size_t)> memory_write_;
     std::function<void(uint64_t, size_t, uint8_t*)> pagemap_provider_;
