@@ -20,9 +20,9 @@ and how to install.
 ## Highlights
 
 - **FrostJIT** — ARM64 → typed IR → scalar SSA → x86_64, with block chaining, an indirect-branch cache and an optional Tier-2
-  superblock compiler. A reference interpreter backs every instruction.
+  superblock compiler. Programs run on the JIT.
 - **Checked against references** — instruction semantics (NaNs, rounding, signed zero, faults) are compared with QEMU and the Arm
-  pseudocode, and `make verify` replays JIT blocks against the interpreter.
+  pseudocode. A reference interpreter is the JIT's test oracle and runs the rare instruction the JIT does not translate.
 - **Android apps without a phone** — *Asgard* runs real Bionic, ART and the Android 15 framework. `bifrost-emu game.apk` installs
   and runs an app, and games built with Unity/IL2CPP, Cocos2d-x and Ren'Py run (see [What runs](#what-runs)).
 - **Your real GPU, audio and input** — GL, EGL, GLES, Vulkan, SDL2/SDL3, ALSA and PulseAudio calls go to host libraries, and Android
@@ -187,6 +187,72 @@ everything that changed is in the [changelog](Docs/CHANGELOG.md). Since 2.0.0-al
   the above is checked with fixtures and on one machine, not on every game or desktop, and a passing build or a launch is not
   gameplay. The changelog has the caveats for each item.
 
+## Limitations
+
+- **User mode only** — no kernel or full-system emulation (use QEMU system mode).
+- **AArch64 guests only** — no 32-bit ARM, so an Android APK that ships only `armeabi-v7a` or `x86` libraries cannot start.
+- **x86_64 Linux hosts only** — other distributions are expected to work, but only Ubuntu 24.04 is CI-built; see the
+  [support matrix](Docs/SUPPORT.md).
+- **Android is experimental** — Google Play services and a complete system_server are absent, full in-game video and rewarded-ad
+  playback are unverified, and window behaviour has been checked with fakes, not on every compositor.
+- **Untrusted binaries** — read the [security model](Docs/SECURITY.md) first.
+
+## Documentation
+
+The current version is **2.0.0-beta.2**, the second beta pre-release toward the [v2.0 roadmap](Docs/roadmap.md); its goals are not
+complete yet.
+
+| Topic | Document |
+|---|---|
+| What runs | [Full notes](Docs/COMPATIBILITY.md); [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Arknights](Docs/Apps/arknights.md), [Oddmar](Docs/Apps/oddmar.md), [Umamusume](Docs/Apps/umamusume.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
+| JIT internals | [JIT guide](Docs/JIT.md) |
+| Source layout | [Architecture](Docs/ARCHITECTURE.md) |
+| Android | [Runtime](Docs/Android/ANDROID_RUNTIME.md), [runtime reference](Docs/Android/ANDROID_RUNTIME_REFERENCE.md), [APKs](Docs/Android/ANDROID_APK.md), [Binder](Docs/Android/ANDROID_BINDER.md), [window plugins](Docs/Android/ANDROID_WINDOW_PLUGINS.md) |
+| Host graphics, audio and input | [Host integration](Docs/HOST_INTEGRATION.md), [window stats](Docs/window-stats.md) |
+| Embedding | [C API and native bridge](Docs/EMBEDDING.md) |
+| Support and security | [Support matrix](Docs/SUPPORT.md), [security model](Docs/SECURITY.md) |
+| Tests and history | [Test guide](Docs/TESTS.md), [changelog](Docs/CHANGELOG.md) (releases before 2.0.0-alpha.3 are in `Docs/archive/`), and the dated [test](Docs/archive/TESTS-history.md), [JIT](Docs/archive/JIT-history.md) and [runtime](Docs/archive/ANDROID_RUNTIME-history.md) history, [third-party notes](Docs/THIRD_PARTY.md); per-app investigation logs are in `Docs/archive/apps/` |
+| Licensing | [License scope and texts](LICENSES/README.md) |
+| Configuration | [`bifrost.toml.sample`](bifrost.toml.sample) |
+
+## For developers
+
+The sections from here to *Contributing* are for people building, testing or embedding Bifrost: [Performance](#performance),
+[Architecture](#architecture), [Building](#building), [Testing](#testing), [Configuration](#configuration) and
+[Embedding](#embedding). You do not need them to install and run programs.
+
+## Performance
+
+CoreMark (November 8, 2026), measured on a Ryzen 7 5800X3D with the CPU governor on `performance` (boost on): 160,000 iterations,
+one warmup and three interleaved measured runs per binary, every CRC validated. The method and its limits are in
+[the JIT history](Docs/archive/JIT-history.md#coremark-re-measurement-2026-11-08).
+
+| Build | Median iterations/s |
+|---|---|
+| bifrost-emu 2.0.0-beta.1 tree (JIT, shipped SDL/GL build) | 14,874 |
+| same code, headless build | 14,753 |
+| bifrost-emu 2.0.0-alpha.2 (JIT, headless build) | 12,711 |
+| QEMU 11.1.1 user mode (TCG) | 7,992 |
+
+On this integer and control-flow benchmark the shipped build is about 86% faster than QEMU, and the headless build of the same code
+is about 16% faster than the alpha.2 release built the same way. Neither predicts game FPS. The runs spread 1% to 2.5%, so
+differences of a few percent are noise: compare numbers within one table, not across dates.
+
+The `bench_*` programs (same host, median of three runs, each program's own timer except `bench_mips`, which is process wall time;
+JIT compilation is included, so the millisecond-scale times are coarse):
+
+| Benchmark | Interpreter | JIT | Speedup |
+|---|---|---|---|
+| fib(35) | 7.35 s | 0.076 s | ~97x |
+| memcpy 256 MiB | 171 MiB/s | ~9,390 MiB/s | ~55x |
+| qsort 100K ints | 4.51 s | 0.076 s | ~59x |
+| matrix 256×256 | 11.9 MFLOPS | ~1,129 MFLOPS | ~95x |
+| bench_mips (800M instructions) | ~51 MIPS | ~4,515 MIPS | ~89x |
+
+Repeatable runs with checksums and host metadata: `Scripts/Bench/run_benchmarks.py`. The JIT uses AVX-512, AVX2, SSE4.2,
+AES-NI/PCLMULQDQ/SHA-NI, BMI1/BMI2 and FMA3 where the host has them, with fallbacks. Game profiling notes live on each app page, for
+example [Doom 3](Docs/Apps/doom3.md).
+
 ## Architecture
 
 ```mermaid
@@ -256,8 +322,8 @@ Guest test programs build with `make setup-tests`, or one at a time with
 ```bash
 make check            # standard suite (benchmarks included)
 make check-quick      # without benchmarks
-make check-nojit      # quick suite under the interpreter
-make verify           # replay JIT blocks against the interpreter
+make check-nojit      # quick suite under the reference interpreter (a test mode, not a way to run programs)
+make verify           # for JIT changes: replay JIT blocks against the reference interpreter
 make ci               # local correctness gate (generated files, APIs, both engines)
 ./Scripts/Testing/run_tests.sh --strict --filter "sig|brk|pipe"   # by name
 ```
@@ -281,42 +347,10 @@ BIFROST_DYNLINK_TRACE=1         # trace the dynamic linker
 BIFROST_THUNK_TRACE=1           # trace host GL/audio/display calls
 ```
 
-Useful switches: `-d` traces every instruction, `--no-jit` forces the interpreter, `--window-stats` shows FPS and load statistics
+Useful switches: `-d` traces every instruction, `--no-jit` forces the reference interpreter (slow: for debugging, or a CPU without SSE4.1 and FMA3), `--window-stats` shows FPS and load statistics
 (see [window stats](Docs/window-stats.md)), and the experimental `--jit-disk-cache` keeps translations in `~/.cache/bifrost/jit` so
 later launches start faster ([JIT guide](Docs/JIT.md#persistent-translation-cache)). [`bifrost.toml.sample`](bifrost.toml.sample)
 lists every option, and `Source/System/Core/DebugFlags.hpp` lists the diagnostic switches.
-
-## Performance
-
-CoreMark (November 8, 2026), measured on a Ryzen 7 5800X3D with the CPU governor on `performance` (boost on): 160,000 iterations,
-one warmup and three interleaved measured runs per binary, every CRC validated. The method and its limits are in
-[the JIT history](Docs/archive/JIT-history.md#coremark-re-measurement-2026-11-08).
-
-| Build | Median iterations/s |
-|---|---|
-| bifrost-emu 2.0.0-beta.1 tree (JIT, shipped SDL/GL build) | 14,874 |
-| same code, headless build | 14,753 |
-| bifrost-emu 2.0.0-alpha.2 (JIT, headless build) | 12,711 |
-| QEMU 11.1.1 user mode (TCG) | 7,992 |
-
-On this integer and control-flow benchmark the shipped build is about 86% faster than QEMU, and the headless build of the same code
-is about 16% faster than the alpha.2 release built the same way. Neither predicts game FPS. The runs spread 1% to 2.5%, so
-differences of a few percent are noise: compare numbers within one table, not across dates.
-
-The `bench_*` programs (same host, median of three runs, each program's own timer except `bench_mips`, which is process wall time;
-JIT compilation is included, so the millisecond-scale times are coarse):
-
-| Benchmark | Interpreter | JIT | Speedup |
-|---|---|---|---|
-| fib(35) | 7.35 s | 0.076 s | ~97x |
-| memcpy 256 MiB | 171 MiB/s | ~9,390 MiB/s | ~55x |
-| qsort 100K ints | 4.51 s | 0.076 s | ~59x |
-| matrix 256×256 | 11.9 MFLOPS | ~1,129 MFLOPS | ~95x |
-| bench_mips (800M instructions) | ~51 MIPS | ~4,515 MIPS | ~89x |
-
-Repeatable runs with checksums and host metadata: `Scripts/Bench/run_benchmarks.py`. The JIT uses AVX-512, AVX2, SSE4.2,
-AES-NI/PCLMULQDQ/SHA-NI, BMI1/BMI2 and FMA3 where the host has them, with fallbacks. Game profiling notes live on each app page, for
-example [Doom 3](Docs/Apps/doom3.md).
 
 ## Embedding
 
@@ -334,43 +368,6 @@ guest function calls, symbol lookup, syscall hooks and guest `dlopen`. The
 [embedding guide](Docs/EMBEDDING.md) covers it and the Android native-bridge
 adapter.
 
-## Limitations
-
-- **User mode only** — no kernel or full-system emulation (use QEMU system mode).
-- **AArch64 guests only** — no 32-bit ARM, so an Android APK that ships only `armeabi-v7a` or `x86` libraries cannot start.
-- **x86_64 Linux hosts only** — other distributions are expected to work, but only Ubuntu 24.04 is CI-built; see the
-  [support matrix](Docs/SUPPORT.md).
-- **Android is experimental** — Google Play services and a complete system_server are absent, full in-game video and rewarded-ad
-  playback are unverified, and window behaviour has been checked with fakes, not on every compositor.
-- **Untrusted binaries** — read the [security model](Docs/SECURITY.md) first.
-
-## Documentation
-
-The current version is **2.0.0-beta.2**, the second beta pre-release toward the [v2.0 roadmap](Docs/roadmap.md); its goals are not
-complete yet.
-
-| Topic | Document |
-|---|---|
-| What runs | [Full notes](Docs/COMPATIBILITY.md); [SpongeBob](Docs/Apps/spongebob.md), [Azur Lane](Docs/Apps/azur-lane.md), [Arknights](Docs/Apps/arknights.md), [Oddmar](Docs/Apps/oddmar.md), [Umamusume](Docs/Apps/umamusume.md), [Neverball](Docs/Apps/neverball.md), [Minecraft Weekend](Docs/Apps/minecraft-weekend.md), [vkQuake](Docs/Apps/vkquake.md), [Doom 3](Docs/Apps/doom3.md), [zstd](Docs/Apps/zstd.md) |
-| JIT internals | [JIT guide](Docs/JIT.md) |
-| Source layout | [Architecture](Docs/ARCHITECTURE.md) |
-| Android | [Runtime](Docs/Android/ANDROID_RUNTIME.md), [runtime reference](Docs/Android/ANDROID_RUNTIME_REFERENCE.md), [APKs](Docs/Android/ANDROID_APK.md), [Binder](Docs/Android/ANDROID_BINDER.md), [window plugins](Docs/Android/ANDROID_WINDOW_PLUGINS.md) |
-| Host graphics, audio and input | [Host integration](Docs/HOST_INTEGRATION.md), [window stats](Docs/window-stats.md) |
-| Embedding | [C API and native bridge](Docs/EMBEDDING.md) |
-| Support and security | [Support matrix](Docs/SUPPORT.md), [security model](Docs/SECURITY.md) |
-| Tests and history | [Test guide](Docs/TESTS.md), [changelog](Docs/CHANGELOG.md) (releases before 2.0.0-alpha.3 are in `Docs/archive/`), and the dated [test](Docs/archive/TESTS-history.md), [JIT](Docs/archive/JIT-history.md) and [runtime](Docs/archive/ANDROID_RUNTIME-history.md) history, [third-party notes](Docs/THIRD_PARTY.md); per-app investigation logs are in `Docs/archive/apps/` |
-| Licensing | [License scope and texts](LICENSES/README.md) |
-| Configuration | [`bifrost.toml.sample`](bifrost.toml.sample) |
-
-## License
-
-Bifrost's original code, original Asgard integration and original regression
-tests use the [Unlicense](LICENSE). Reused AOSP material keeps its upstream
-license; [LICENSES/](LICENSES/README.md) includes Apache 2.0 and Android source
-attribution alongside the project license. Third-party fixtures, vendored
-dependencies and game assets keep their own terms. See
-[third-party and test distribution notes](Docs/THIRD_PARTY.md).
-
 ## Contributing
 
 1. Fork the repository and follow the existing code style.
@@ -384,3 +381,12 @@ dependencies and game assets keep their own terms. See
 
 Bug reports help most with the AArch64 binary (or a minimal reproducer), the
 exact command line, and the tail of `./bifrost-emu -v -d ... 2>&1`.
+
+## License
+
+Bifrost's original code, original Asgard integration and original regression
+tests use the [Unlicense](LICENSE). Reused AOSP material keeps its upstream
+license; [LICENSES/](LICENSES/README.md) includes Apache 2.0 and Android source
+attribution alongside the project license. Third-party fixtures, vendored
+dependencies and game assets keep their own terms. See
+[third-party and test distribution notes](Docs/THIRD_PARTY.md).
