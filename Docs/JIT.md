@@ -1661,7 +1661,8 @@ correctness regressions.
 ### Where host time goes: `BIFROST_PROF`
 
 ```bash
-BIFROST_PROF=1 BIFROST_PC_HIST=1 bifrost-emu -v program      # report at exit
+BIFROST_PROF=1 BIFROST_PC_HIST=1 bifrost-emu -v program      # report at exit, with the full JIT stats
+BIFROST_PROF=1 bifrost-emu program                           # the profile report alone, at exit
 BIFROST_PROF=1 BIFROST_STATS_PERIOD=30 bifrost-emu program   # and every 30 s
 ```
 
@@ -1690,6 +1691,17 @@ instruction counts: a 10 ms sample says where the host was, not how often a bloc
 (`Runtime/SampleProfile.cpp`) run only when the variable is set; otherwise the translator tests one flag per compiled
 instruction (its cost was not measured). `Tests/Unit/jit_profiler.cpp` checks the classification at
 each section boundary, across threads and after a code buffer is released, with synthetic samples and no timing.
+
+**The report needs no `-v`.** `-v` adds the JIT's own counters (blocks translated and executed, cache use, memory);
+the profile report prints at exit whenever `BIFROST_PROF` is set, including when the guest ends through `exit_group`.
+
+**Guest instruction counts.** The `guest: N MIPS` line, the `-v` `executed N instructions` line and the `-v` counters
+count what generated code retires, not dispatches. When `-v` or `BIFROST_STATS_PERIOD` is set, the translator emits a
+two-instruction counter in every block entry (after the chain-skip entry, so chained edges count too) and in every
+self-loop back edge, and the dispatcher folds it into the JIT's totals; without either nothing is emitted and nothing is
+paid, so `BIFROST_PROF`'s sampler keeps its profile free of the counters. The counting code runs in the measured run: on
+CoreMark it costs about 15 %, so the rate it gives is a floor. The figure is exact for Tier-1 code; blocks served from
+the persistent cache (recorded before the counters existed) and Tier-2 regions are not counted.
 
 **Where threads wait.** The sampler counts CPU time, so a thread that waits shows nothing. With `BIFROST_PROF` set, the report
 also prints, for each guest thread, how long it spent inside guest syscalls by kind, next to its lifetime and CPU time

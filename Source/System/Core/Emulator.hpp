@@ -250,7 +250,7 @@ public:
     // whether to retry or propagate the error.
     bool handle_eintr(CPU& cpu);
     // ── Configuration (public) ────────────────────────────────────────
-    void set_verbose(bool v) { verbose_ = v; }
+    void set_verbose(bool v);
     void set_trace(bool v)   { trace_  = v; }
     void set_brk_verbose(bool v) { brk_verbose_ = v; }
     void set_jit_enabled(bool v) { jit_enabled_ = v; }
@@ -380,6 +380,9 @@ public:
     // Defined in Source/FrostJIT/Runtime/EmulatorBridge.cpp so the FrostJIT definition is visible.
     void jit_step(CPU& cpu);
     void print_jit_stats();
+    // Guest instructions retired so far (run-loop interpreter steps plus generated-code counters); the dispatch
+    // count is not usable for this while the guest stays in chained blocks.
+    uint64_t guest_instruction_total();
     // One "[mem]" line: where this process's resident memory is (guest pages, JIT code, heap, ...).
     void dump_memory_breakdown();
     void dump_prof_snapshot();

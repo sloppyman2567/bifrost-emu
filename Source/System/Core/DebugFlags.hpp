@@ -145,6 +145,9 @@ struct DebugFlags {
     bool render_log = true;
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
     bool cpu_profile = false;  // BIFROST_PROF — sampling on every guest thread
+    // BIFROST_STATS_PERIOD=seconds — how often the periodic stats reporter runs (Lifecycle.cpp). The JIT also emits its
+    // guest-instruction counters when this or `-v` is set, so the reported throughput covers chained blocks.
+    double stats_period = 0.0;
     // BIFROST_PROF=tracy[:TARGET] — a Tracy timeline instead of the sampler (needs a `make USE_TRACY=1` build). Without a
     // target this process is profiled; with one, the process whose name or command line matches (Source/System/Core/TracyProfile.hpp).
     bool tracy = false;
@@ -397,6 +400,11 @@ struct DebugFlags {
         f.window_stats_overlay = toggle("BIFROST_WINDOW_STATS_OVERLAY", stats && stats_mode != 1);
         f.render_log = toggle("BIFROST_RENDER_LOG", true);
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
+        if (const char* period = std::getenv("BIFROST_STATS_PERIOD")) {
+            char* end = nullptr;
+            const double seconds = std::strtod(period, &end);
+            if (end != period && *end == '\0' && seconds > 0.0) f.stats_period = seconds;
+        }
         if (const char* prof = std::getenv("BIFROST_PROF")) {
             if (std::strncmp(prof, "tracy", 5) == 0 && (prof[5] == '\0' || prof[5] == ':')) {
                 f.tracy = true;

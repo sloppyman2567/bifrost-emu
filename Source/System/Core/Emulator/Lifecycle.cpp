@@ -34,6 +34,12 @@
 namespace arm64emu {
 // ── Static active-emu pointer (defined in Source/System/Core/Signals.cpp) ────────
 // Emulator* Emulator::g_active_emu_ = nullptr;  // defined in Signals.cpp
+void Emulator::set_verbose(bool v) {
+    verbose_ = v;
+    // -v prints the JIT's guest-instruction counts at exit, so have the translator emit the counters that make them exact.
+    // BIFROST_PROF's sampler does not print them, and must not pay for them.
+    FrostJIT::request_block_stats(v || dbg().stats_period > 0.0);
+}
 Emulator::Emulator(uint64_t guest_window_max) : mem_(true, guest_window_max),
     debugger_(std::make_unique<GuestDebugger>(*this)) {
     // A libc the guest's own linker maps (Android's Bionic) is invisible to the DynamicLinker: read its symbols here.
@@ -87,6 +93,7 @@ static void resolve_crash_module(DynamicLinker* dl, uint64_t pc,
 }
 // ── Run loop ──────────────────────────────────────────────────────────
 int Emulator::run() {
+    FrostJIT::request_block_stats(verbose_ || dbg().stats_period > 0.0);
     if (!debugger_->register_task(main_cpu_)) return 1;
     uint64_t count = 0;
     uint32_t preempt_seen = g_jit_preempt_epoch.load(std::memory_order_relaxed);
@@ -125,10 +132,7 @@ int Emulator::run() {
     // thread sleeps on wall time and calls dump_periodic_stats (which also
     // chains the SIGPROF snapshot and syscall histogram). Inert unless the
     // env var is set. Joined before run() returns.
-    const double stats_period_ = []() {
-        const char* s = getenv("BIFROST_STATS_PERIOD");
-        return s ? atof(s) : 0.0;
-    }();
+    const double stats_period_ = dbg().stats_period;
     if (stats_period_ > 0.0) {
         stats_reporter_stop_.store(false, std::memory_order_relaxed);
         stats_reporter_thread_ = std::thread([this, stats_period_]() {
@@ -405,8 +409,11 @@ int Emulator::run() {
     auto t1 = std::chrono::steady_clock::now();
     double secs = std::chrono::duration<double>(t1 - t0).count();
     if (verbose_) {
+        // The run-loop count above counts dispatches, and a chained guest returns here only once per chain: report the
+        // guest instructions the generated code actually retired.
+        const uint64_t guest_instrs = guest_instruction_total();
         fprintf(stderr, "[%s] executed %llu instructions in %.3fs (%.2f MIPS)\n",
-                CODENAME, static_cast<unsigned long long>(count), secs, count / 1e6 / secs);
+                CODENAME, static_cast<unsigned long long>(guest_instrs), secs, guest_instrs / 1e6 / secs);
         fprintf(stderr, "[%s] mem pages: %zu (%.1f MB)\n",
                 CODENAME, mem_.page_count(),
                 mem_.page_count() * 4096 / 1048576.0);
@@ -432,6 +439,10 @@ int Emulator::run() {
             dump_wait_profile();  // the interpreter has no sampler, but its threads wait too
         }
         tracy_shutdown();
+    } else if (dbg().cpu_profile) {
+        // BIFROST_PROF asks for the report; -v is not part of the deal. A long run also gets it from
+        // BIFROST_STATS_PERIOD, and this covers the end of a short one (exit_group returns here for the whole group).
+        dump_prof_snapshot();
     }
     // Stop + join the periodic reporter before returning (it captures
     // `this`; the Emulator must outlive it by construction, not by luck).

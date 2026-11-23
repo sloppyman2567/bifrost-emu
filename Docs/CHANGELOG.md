@@ -8,6 +8,16 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
+## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
+
+- `BIFROST_PROF` prints its report at exit without `-v`, including for programs that end through `exit_group`; `-v` is
+  still what adds the JIT's own counters.
+- The `guest: N MIPS` line, the `-v` `executed N instructions` line and its MIPS rate now include chained blocks and
+  self-loop iterations; the last two used the run loop's dispatch count, which a chained guest reaches once per chain.
+  With `-v` or `BIFROST_STATS_PERIOD` the translator emits the counters (about 15 % slower on CoreMark), so the figure is
+  exact for Tier-1 code instead of a small fraction of it; `BIFROST_PROF` alone does not emit them. Persistent-cache
+  blocks and Tier-2 regions are not counted.
+
 ## [2.0.0-beta.2] — installing and updating that rebuild what changed, a fresh-machine test run, Zygote, shared Android and a faster JIT (2026-11-14)
 
 **2.0.0-beta.2** collects the changes made after 2.0.0-beta.1: installing and updating that rebuild what changed (the app

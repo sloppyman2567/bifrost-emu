@@ -683,6 +683,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
     }
     chain_entry_off_ = code_buf_used_;
+    current_block_instr_count_ = ir_block.count;
+    // -v / BIFROST_STATS_PERIOD: count this entry's guest instructions, after chain_entry_off_ so chain-skip
+    // edges count too. Private entries are not blocks a guest runs (a leaf is inlined into its caller, a region trial
+    // runs its own copies), so they must not count.
+    if (!private_entry && !tier2_sampling_compile_) emit_guest_stat(static_cast<uint32_t>(ir_block.count));
     // BIFROST_BLOCK_TRACE: log every cold and chained entry. Like the Tier-2
     // counter below, it runs before anything is cached, so the caller-saved
     // registers are free. Self-loop iterations re-enter past the prologue

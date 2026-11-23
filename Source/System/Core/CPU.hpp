@@ -395,6 +395,27 @@ public:
     // generated-code frame and its code buffer can be retired and released.
     uint64_t jit_svc_pc = 0;
     uint32_t jit_chain_budget = 0; // host-only, replenished at dispatch boundaries
+    // Host-only: guest instructions and block executions retired by generated code, counted only when the run prints
+    // the counts, `-v` or BIFROST_STATS_PERIOD (FrostJIT::block_stats_). Chained edges and self-loop back edges never reach
+    // the dispatcher, so the counters a block's prologue and back edge add here are the only complete count. The
+    // dispatcher folds them into the JIT's totals and the reporters add whatever is still here.
+    //
+    // Thirty-two slots, chosen from the block's address: every entry is a read-modify-write, and on one address each
+    // entry waits for the previous store to forward (a 33 % penalty on CoreMark with one). Consecutive blocks take
+    // different slots; the reporters sum them.
+    static constexpr size_t JIT_STAT_SLOTS = 32;
+    uint64_t jit_stat_instr[JIT_STAT_SLOTS] = {};
+    uint64_t jit_stat_blocks[JIT_STAT_SLOTS] = {};
+    uint64_t jit_stat_instr_total() const {
+        uint64_t n = 0;
+        for (uint64_t v : jit_stat_instr) n += v;
+        return n;
+    }
+    uint64_t jit_stat_blocks_total() const {
+        uint64_t n = 0;
+        for (uint64_t v : jit_stat_blocks) n += v;
+        return n;
+    }
     // Host-only, MT code: the preemption epoch this CPU last observed at a
     // dispatch boundary (FrostJIT::grant_lease). Polled read-only by backward
     // edges; a bumped global epoch returns the thread to the dispatcher.

@@ -173,6 +173,8 @@ void Emulator::enable_jit() {
         FrostJIT::force_rwx_code_buffers();
     }
     jit_shared_mode_ = shared_jit_mode;
+    // Guest-instruction counters are emitted only for a run that prints them (-v or the stats reporter).
+    FrostJIT::request_block_stats(verbose_ || dbg().stats_period > 0.0);
     jit_.add(std::make_unique<FrostJIT>());
     jit_enabled_ = static_cast<bool>(jit_);
     jit_wanted_ = jit_enabled_;
@@ -217,6 +219,23 @@ void Emulator::restart_jit_for_exec() {
     jit_enabled_ = false;
     enable_jit();
 }
+uint64_t Emulator::guest_instruction_total() {
+    // Run-loop interpreter steps (the warmup threshold's, or all of them without the JIT) are not in any JIT total.
+    uint64_t total = interp_count_;
+    if (!jit_ || !jit_enabled_) return total;
+    total += main_cpu_.jit_stat_instr_total();
+    for (FrostJIT* j : jit_.all()) total += j->instructions_executed.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        for (auto& gt : threads_) {
+            total += gt->cpu.jit_stat_instr_total();
+            // Per-thread JITs (BIFROST_NO_SHARED_JIT) are not in jit_.all(); in shared mode every thread runs the
+            // main JIT, so adding its totals again here would double count.
+            if (gt->jit) total += gt->jit->instructions_executed.load(std::memory_order_relaxed);
+        }
+    }
+    return total;
+}
 void Emulator::print_jit_stats() {
     if (!jit_ || !jit_enabled_) return;
     // Aggregate main JIT + all per-thread JITs for a complete picture.
@@ -231,6 +250,9 @@ void Emulator::print_jit_stats() {
     size_t    code_size        = jit_->code_buf_size();
     size_t    cache_entries    = jit_->cache_entries();
     size_t    num_jits         = 1;  // main JIT
+    // Generated code counts into its own CPU: chained edges never return here, so add what no dispatch boundary has
+    // folded into a JIT's totals yet.
+    uint64_t live_instr = main_cpu_.jit_stat_instr_total(), live_blocks = main_cpu_.jit_stat_blocks_total();
     // Earlier generations of the main JIT: their work counts toward the totals, not the cache size.
     const auto all_jits = jit_.all();
     for (FrostJIT* old : all_jits) {
@@ -246,6 +268,8 @@ void Emulator::print_jit_stats() {
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         for (auto& gt : threads_) {
+            live_instr += gt->cpu.jit_stat_instr_total();
+            live_blocks += gt->cpu.jit_stat_blocks_total();
             if (gt->jit) {
                 blocks_translated += gt->jit->blocks_translated;
                 blocks_executed   += gt->jit->blocks_executed;
@@ -260,6 +284,8 @@ void Emulator::print_jit_stats() {
             }
         }
     }
+    instructions += live_instr;
+    blocks_executed += live_blocks;
     fprintf(stderr, "[%s] frostJIT (%zu thread%s): %llu blocks translated, "
             "%llu executed (%llu instructions, %llu cache hits, %llu misses, "
             "%llu fallbacks, %llu chains)\n",
@@ -400,10 +426,17 @@ void Emulator::dump_periodic_stats(double dt) {
         t2_bytes += j.tier2_code_bytes.load(r);
     };
     for (FrostJIT* j : jit_.all()) add(*j);
+    // Generated code counts into its own CPU, and a guest parked in chained blocks never reaches a dispatch boundary:
+    // add the counts still on the CPUs live.
+    instr += main_cpu_.jit_stat_instr_total();
+    blocks += main_cpu_.jit_stat_blocks_total();
     {
         std::lock_guard<std::mutex> g(threads_mu_);
-        for (auto& gt : threads_)
+        for (auto& gt : threads_) {
+            instr += gt->cpu.jit_stat_instr_total();
+            blocks += gt->cpu.jit_stat_blocks_total();
             if (gt->jit) add(*gt->jit);
+        }
     }
     // deltas since the last dump. A total can still fall when counters leave the sum (exec starts
     // a fresh JIT, a per-thread JIT exits with its thread); the delta is then the new total rather
@@ -512,10 +545,11 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     static thread_local unsigned call_depth = 0;
     struct CallStatsGuard {
         FrostJIT* jit;
+        CPU* cpu;
         unsigned& depth;
-        CallStatsGuard(FrostJIT* j, unsigned& d) : jit(j), depth(d) { ++depth; }
-        ~CallStatsGuard() { if (--depth == 0 && jit) jit->flush_stat_tls(); }
-    } stats_guard(jit, call_depth);
+        CallStatsGuard(FrostJIT* j, CPU* c, unsigned& d) : jit(j), cpu(c), depth(d) { ++depth; }
+        ~CallStatsGuard() { if (--depth == 0 && jit) jit->flush_stat_tls(cpu); }
+    } stats_guard(jit, cpu, call_depth);
     static const bool verify_mode_ = dbg().jit_verify;
     uint64_t dbg2_count = 0;
     while (cpu->running && !cpu->jit_dispatch_requested && cpu->pc != return_pc &&
@@ -561,15 +595,15 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
                 // A cloned CPU may still carry another thread's table.
                 jit->bind_ibl(*cpu);
                 uint64_t pcbefore = cpu->pc;
-                // Bounded-staleness stats (2026-08-21): count BL_CALL
-                // callee blocks into the shared TLS (see run_block) and
-                // batch-flush every 64K — a game's frame loop parked in
-                // this helper used to be invisible to the stats reporter.
-                FrostJIT::tls_stat_instr_ += ic;
+                // Bounded-staleness stats (2026-08-21): the callee's own prologue counts it when the run prints the
+                // counts (-v or BIFROST_STATS_PERIOD); without that, keep the dispatcher-side figure as it was.
+                // Either way the flush also publishes the CPU's generated counts — a game's frame loop parked in this
+                // helper used to be invisible to the stats reporter.
+                if (!jit->block_stats_) FrostJIT::tls_stat_instr_ += ic;
                 if (__builtin_expect((++FrostJIT::tls_stat_exec_ & 0xFFFF) != 0, 1)) {
                     cpu->pc = fn(cpu, emu);
                 } else {
-                    jit->flush_stat_tls();
+                    jit->flush_stat_tls(cpu);
                     cpu->pc = fn(cpu, emu);
                 }
                 if (dbg_call_trace_) {
@@ -602,7 +636,7 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
         }
         if (jit) {
             FrostJIT::tls_stat_instr_++;
-            if ((++FrostJIT::tls_stat_exec_ & 0xFFFF) == 0) jit->flush_stat_tls();
+            if ((++FrostJIT::tls_stat_exec_ & 0xFFFF) == 0) jit->flush_stat_tls(cpu);
         }
         // This helper is itself called through generated frames: guest
         // memory exceptions must be handled before crossing that boundary.

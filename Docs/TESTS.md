@@ -53,6 +53,17 @@ program that forks 40 times with the profiler started (a smoke check: short-live
 It does not check the timeline. That was checked by hand with Tracy's `capture` and `csvexport` (built from the 0.15.0 release): zone and
 thread names, GL symbol zones, frames, and the fork program with a viewer connected.
 
+### Guest instruction counts (2026-11-23)
+
+`Tests/Unit/jit_stats_count.c` and `Scripts/Testing/test_jit_instruction_count.sh` (`run_tests.sh` entry
+`jit_instruction_count`) check that `BIFROST_PROF` prints its report at exit without `-v` (the waiting report with the JIT
+and with `--no-jit`, the JIT sample report with the JIT), that nothing prints without it, and that the JIT's `-v`
+guest-instruction count for a self-loop-and-call workload matches the interpreter's count for the same program (it is
+exactly equal on this build; the check allows 2 %). It fails on the build before the fix (a report only under `-v`, and a
+count around a thousandth of the interpreter's). It does not check that `BIFROST_PROF` alone leaves the counters out
+(that is timing, not output), and it does not cover blocks served from the persistent JIT cache or Tier-2 regions, which
+are not counted.
+
 ### Waiting report (2026-11-19)
 
 `Tests/Unit/test_wait_profile.c` runs five threads that each sleep, wait on a futex, wait in poll, block on a pipe or compute for
