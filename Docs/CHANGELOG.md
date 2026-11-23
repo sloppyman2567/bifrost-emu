@@ -10,6 +10,8 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- `[stall]` lines stop repeating: a call site prints its first five stalls and the report counts the rest (`repeated stalls:
+  ... x179, 179.0 s in all`). A game's 1 s watchdog sleep used to fill the 200-line limit within minutes and hide later freezes.
 - A `[stall]` line for a `read`, `write`, socket call or `ioctl` now says what the descriptor is: a file path, a pipe, a socket
   with its addresses, or the emulator's own device. When two stalls ended together, the second used to lose its thread name and
   caller; it now waits briefly for them.

@@ -25,7 +25,8 @@ WaitKind wait_kind_for_syscall(uint64_t number);
 // takes a second or more on a busy thread (one that used at least 5% of its lifetime on the CPU: not a worker that sleeps
 // until it is needed) prints a `[stall]` line when it ends, with the thread, the call, its first two arguments (a futex's
 // address and operation), what its descriptor is when the call takes one, and its caller: that is a freeze, found by what the
-// thread was waiting for.
+// thread was waiting for. Each call site (thread, call and caller) prints its first five stalls; later ones are counted, and the
+// report lists the sites that went past five with their count and total time.
 class WaitTimer {
 public:
     WaitTimer(int guest_tid, uint64_t syscall_number, uint64_t arg0 = 0, uint64_t arg1 = 0, uint64_t caller = 0);

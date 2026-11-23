@@ -25,7 +25,7 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
 - `Core/WaitProfile.*` (`BIFROST_PROF`'s per-thread waiting report) counts guest syscalls with a `WaitTimer` at the top of
   `Emulator::syscall` and in the JIT's thunk fast path (`jit_thunk_svc`), which bypasses it. A new path that runs guest
   syscalls without `Emulator::syscall` needs its own timer, or its time shows as unaccounted. A call of a second or more on a thread
-  that is busy (5% CPU) also prints a `[stall]` line; its name, caller and descriptor lookups (`wait_prof_set_describers`) are try-locked, retried for
+  that is busy (5% CPU) also prints a `[stall]` line (five per call site, then counted in the report's `repeated stalls` lines); its name, caller and descriptor lookups (`wait_prof_set_describers`) are try-locked, retried for
   up to 50 ms and never waited for (a fork child may inherit the lock held). A descriptor is named through the `FdTable` node
   (`describe_fd_node` in `Core/Emulator/ElfLoading.cpp`), never by treating a guest fd number as a host fd. `test_wait_profile` and `test_wait_stall` cover it.
 - `Core/GuestIdentity.hpp` is the one definition of the kernel identity the guest sees (`uname` nodename, release, version): `uname`

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # BIFROST_PROF prints a `[stall]` line for a guest call that takes a second or more on a busy thread, naming the thread, the
 # call, its arguments (a futex's address), what its descriptor is (a pipe, a socket) and its caller; a thread that is not busy is
-# not reported, and nothing prints without BIFROST_PROF or for calls under a second. Run with the JIT and with --no-jit.
+# not reported, and nothing prints without BIFROST_PROF or for calls under a second. A call site that stalls again and again
+# prints five lines and is counted in the report. Run with the JIT and with --no-jit.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -36,6 +37,11 @@ for mode in jit no-jit; do
     check "$mode: a blocked socket read is reported as read" 1 "$(grep -c 'read took' <<<"$sockline")"
     check "$mode: it says the descriptor is a unix stream socket" 1 "$(grep -c " fd=$sock_fd unix stream .*caller=" <<<"$sockline")"
     check "$mode: a futex line has no descriptor" 0 "$(grep -c ' fd=' <<<"$line")"
+    loops=$(grep '\[stall\].*"st-loop"' <<<"$out" || true)
+    check "$mode: a call site prints five stalls of seven" 5 "$(grep -c . <<<"$loops")"
+    check "$mode: only the fifth says it is the last line" 1 "$(grep -c 'last line for this call site' <<<"$loops")"
+    check "$mode: the report counts all seven" 1 "$(grep -c 'repeated stalls: tid [0-9]* "st-loop" nanosleep x7, ' <<<"$out")"
+    check "$mode: the other threads are not in the repeated list" 0 "$(grep 'repeated stalls' <<<"$out" | grep -c -v '"st-loop"')"
     check "$mode: the idle thread is not reported" 0 "$(grep -c '\[stall\].*"st-idle"' <<<"$out")"
     check "$mode: the idle main thread is not reported" 0 "$(grep -c '\[stall\].*tid 1 ' <<<"$out")"
 done
