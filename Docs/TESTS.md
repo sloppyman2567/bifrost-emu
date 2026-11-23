@@ -38,6 +38,13 @@ thread name, the futex address, a caller and the time of day), for a busy thread
 what the descriptor is), none for a thread that only waits, none without `BIFROST_PROF`, and none
 for calls under a second. It fails on a build without the lines, and without the busy-thread rule. It does not cover a real game.
 
+### Guest identity (2026-11-23)
+
+`Tests/Unit/test_uname_consistency.c` (`run_tests.sh` entry `uname_consistency`) checks that `uname`, `gethostname()`,
+`/proc/sys/kernel/hostname`, `/proc/sys/kernel/osrelease` and `/proc/version` agree. It also passes on a real Linux kernel. It fails on
+the build before the fix (the hostname file said `bifrost`, `/proc/version` lacked the version string). The Android DNS test
+`test_guest_hostname_matches_the_emulators_uname_nodename` ties the DNS service's copy of the nodename to the same header.
+
 ### Syscall names (2026-11-19)
 
 `Scripts/Testing/test_syscall_names.sh` (`run_tests.sh` entry `syscall_names`) compares every entry of the syscall name table with

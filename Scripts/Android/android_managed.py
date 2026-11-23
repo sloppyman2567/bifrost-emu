@@ -512,10 +512,10 @@ class DnsProxy:
         ("SERVICE", 9), ("SOCKTYPE", 10), ("SYSTEM", 11), ("OVERFLOW", 14))
         if hasattr(socket, "EAI_" + name)}
 
-    # The guest's own name (the `uname` nodename in Source/System/Syscalls/Process/Identity.cpp). It resolves to the device itself,
+    # The guest's own name (the `uname` nodename, GUEST_NODENAME in Source/System/Core/GuestIdentity.hpp). It resolves to the device itself,
     # as it does through /etc/hosts on Linux, and is never sent to the host: a single-label name that the network does not
     # know costs seconds of LLMNR and mDNS timeouts on a host whose resolver has them on, and the app waits for the answer.
-    GUEST_HOSTNAME = "arm64-emu"
+    GUEST_HOSTNAME = "bifrost-emu"
 
     SLOW_LOOKUP_SECONDS = 1.0  # a lookup this slow blocks the app's calling thread long enough to be seen as a freeze
     MAX_SLOW_LINES = 200

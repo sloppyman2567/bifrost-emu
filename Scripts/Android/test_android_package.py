@@ -3147,19 +3147,19 @@ class DnsProxyTests(unittest.TestCase):
         from android_managed import DnsProxy
         answer = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 80))]
         with patch("android_managed.socket.getaddrinfo", return_value=answer) as resolver:
-            for host in ("arm64-emu", "ARM64-EMU.", "arm64-emu."):
+            for host in ("bifrost-emu", "BIFROST-EMU.", "bifrost-emu."):
                 self.assertTrue(DnsProxy.resolve(f"getaddrinfo {host} ^ 0 0 1 0 0".encode()).startswith(b"222\0"), host)
                 self.assertTrue(DnsProxy.resolve(f"getaddrinfo {host} ^ 0 0 1 0 0".encode(), offline=True).startswith(b"222\0"), host)
             self.assertEqual({call.args[0] for call in resolver.call_args_list}, {"localhost"})
             resolver.reset_mock()
-            DnsProxy.resolve(b"getaddrinfo arm64-emu.example ^ 0 0 1 0 0")
+            DnsProxy.resolve(b"getaddrinfo bifrost-emu.example ^ 0 0 1 0 0")
             DnsProxy.resolve(b"getaddrinfo other-single-label ^ 0 0 1 0 0")
-            self.assertEqual([call.args[0] for call in resolver.call_args_list], ["arm64-emu.example", "other-single-label"])
+            self.assertEqual([call.args[0] for call in resolver.call_args_list], ["bifrost-emu.example", "other-single-label"])
 
     def test_guest_hostname_matches_the_emulators_uname_nodename(self):
         from android_managed import DnsProxy
-        source = (ROOT / "Source/System/Syscalls/Process/Identity.cpp").read_text()
-        self.assertRegex(source, r'"%s",\s*// nodename' % re.escape(DnsProxy.GUEST_HOSTNAME))
+        source = (ROOT / "Source/System/Core/GuestIdentity.hpp").read_text()
+        self.assertRegex(source, r'GUEST_NODENAME = "%s";' % re.escape(DnsProxy.GUEST_HOSTNAME))
 
     def test_errors_are_android_numbers_and_bad_flags_do_not_resolve(self):
         from android_managed import DnsProxy

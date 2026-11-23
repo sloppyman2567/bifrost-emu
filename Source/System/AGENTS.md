@@ -28,6 +28,9 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   that is busy (5% CPU) also prints a `[stall]` line; its name, caller and descriptor lookups (`wait_prof_set_describers`) are try-locked, retried for
   up to 50 ms and never waited for (a fork child may inherit the lock held). A descriptor is named through the `FdTable` node
   (`describe_fd_node` in `Core/Emulator/ElfLoading.cpp`), never by treating a guest fd number as a host fd. `test_wait_profile` and `test_wait_stall` cover it.
+- `Core/GuestIdentity.hpp` is the one definition of the kernel identity the guest sees (`uname` nodename, release, version): `uname`
+  and the /proc files that repeat it use it, so they cannot disagree. The Android DNS service answers the nodename itself
+  (`DnsProxy.GUEST_HOSTNAME`); a name change needs both, and `test_android_package.py` compares them. `test_uname_consistency` covers the rest.
 - `Core/TracyProfile.*` is the optional Tracy backend (`BIFROST_PROF=tracy[:TARGET]`, `make USE_TRACY=1`). Instrument with its
   `BIFROST_ZONE*`, `BIFROST_INSTANT` and `BIFROST_FRAME` macros and include only `TracyProfile.hpp`, never Tracy's headers: without
   `USE_TRACY` the macros are empty. Tracy is built without its crash handler (`TRACY_NO_CRASH_HANDLER`), because guest fault

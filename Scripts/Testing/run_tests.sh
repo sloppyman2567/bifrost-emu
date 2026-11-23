@@ -261,6 +261,7 @@ fi
 # Unit tests (Tests/Unit/ — focused JIT regression tests)
 UNIT_TESTS=(
     "proc_exe|Tests/Unit/test_proc_exe.elf||5|test_proc_exe: ALL PASS"
+    "uname_consistency|Tests/Unit/test_uname_consistency.elf||5|test_uname_consistency: ALL PASS"
     "mmap_hint|Tests/Unit/test_mmap_hint.elf||10|test_mmap_hint: ALL PASS"
     "hello|Tests/Unit/hello.elf||5"
     "addsub_imm|Tests/Unit/jit_addsub_imm.elf||5|PASS"
