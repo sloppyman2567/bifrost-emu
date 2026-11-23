@@ -74,7 +74,7 @@ versions, frame rates and known problems, is [What has been run](Docs/COMPATIBIL
 | Manage Android apps, settings and saves | [APK guide](Docs/Android/ANDROID_APK.md) |
 | Run Linux programs that need libraries | [Rootfs guide](Docs/ROOTFS.md) |
 | See what is planned | [Roadmap](Docs/roadmap.md) and [changelog](Docs/CHANGELOG.md) |
-| Build it, change settings, report a bug or contribute | [Building and contributing](Docs/BUILDING.md) |
+| Build it, change settings, report a bug or contribute | [Build, configure and contribute](Docs/BUILDING.md) |
 | Understand how it works | [Source layout](Docs/ARCHITECTURE.md), [JIT guide](Docs/JIT.md), [speed](Docs/PERFORMANCE.md) |
 | Use it from my own program | [Embedding](Docs/EMBEDDING.md) |
 | Run the tests | [Test guide](Docs/TESTS.md) |

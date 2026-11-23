@@ -1,6 +1,7 @@
-# Building, configuring and contributing
+# Build, configure and contribute
 
-You do not need this to install and run programs: [Install and update](INSTALL.md) is enough.
+For people who want to build Bifrost themselves, change its settings, report a bug or send a change. To just install and run
+programs, [Install and update](INSTALL.md) is enough. To use Bifrost from your own program, see [Embedding](EMBEDDING.md).
 
 ## Building
 
@@ -61,14 +62,16 @@ BIFROST_DYNLINK_TRACE=1         # trace the dynamic linker
 BIFROST_THUNK_TRACE=1           # trace host GL/audio/display calls
 ```
 
-Useful switches: `-d` traces every instruction, `--no-jit` forces the reference interpreter (slow: for debugging, or a CPU without SSE4.1 and FMA3), `--window-stats` shows FPS and load statistics
-(see [window stats](window-stats.md)), and the experimental `--jit-disk-cache` keeps translations in `~/.cache/bifrost/jit` so
-later launches start faster ([JIT guide](JIT.md#persistent-translation-cache)). [`bifrost.toml.sample`](../bifrost.toml.sample)
-lists every option, and `Source/System/Core/DebugFlags.hpp` lists the diagnostic switches.
+Useful switches:
 
-## Embedding
+- `-d` traces every instruction.
+- `--no-jit` forces the reference interpreter. It is slow: use it for debugging, or on a CPU without SSE4.1 and FMA3.
+- `--window-stats` shows FPS and load statistics (see [window stats](window-stats.md)).
+- `--jit-disk-cache` is experimental. It keeps translations in `~/.cache/bifrost/jit` so later launches start faster
+  ([JIT guide](JIT.md#persistent-translation-cache)).
 
-A C API (`libbifrost`, built with `make lib`) and an Android native-bridge adapter: see the [embedding guide](EMBEDDING.md).
+[`bifrost.toml.sample`](../bifrost.toml.sample) lists every option, and `Source/System/Core/DebugFlags.hpp` lists the
+diagnostic switches.
 
 ## Contributing
 

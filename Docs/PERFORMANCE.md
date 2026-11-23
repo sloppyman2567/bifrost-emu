@@ -1,6 +1,7 @@
 # Performance
 
-The published CoreMark and `bench_*` figures. The [project site](https://sloppyman2567.github.io/bifrost-emu/jit/) reads the two tables below, so keep their headers when re-measuring.
+How fast the JIT is, measured on one machine: CoreMark against QEMU and an earlier release, then five small benchmark programs
+against the reference interpreter. These figures compare builds on the same host. They do not predict how fast a game runs.
 
 CoreMark (November 23, 2026), measured on a Ryzen 7 5800X3D with the CPU governor on `performance` (boost on), every run pinned to
 one core: 200,000 iterations, one warmup and three interleaved measured runs per binary, every CRC validated. The method and its
