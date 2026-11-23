@@ -1,30 +1,35 @@
-<img src="Assets/Branding/bifrost-emu-icon.svg" alt="bifrost-emu icon" width="72" height="72">
+<div align="center">
+
+<img src="Assets/Branding/bifrost-emu-icon.svg" alt="bifrost-emu icon" width="96" height="96">
 
 # bifrost-emu
 
-Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC. Give it an `.apk` or an ARM64 program and
-it runs it, using your own graphics card, sound and controller. There is no phone, no emulated device and no virtual machine
-to set up.
+Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC.
+
+[Website](https://sloppyman2567.github.io/bifrost-emu/) · [Install](Docs/INSTALL.md) · [What has been run](Docs/COMPATIBILITY.md) · [Screenshots](Docs/SCREENSHOTS.md) · [Changelog](Docs/CHANGELOG.md)
 
 [![CI](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml/badge.svg)](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml)
 [![Version: 2.0.0-beta.2](https://img.shields.io/badge/version-2.0.0--beta.2-orange.svg)](Docs/CHANGELOG.md)
 [![Games: 17 playable of 20](https://img.shields.io/badge/games-17%20playable%20of%2020-brightgreen.svg)](Docs/COMPATIBILITY.md)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 
-Website: [sloppyman2567.github.io/bifrost-emu](https://sloppyman2567.github.io/bifrost-emu/): what runs, screenshots
-and how to install.
+<img src="Docs/Images/SpongeBob-2026-11-01/gameplay.png" alt="SpongeBob cooking gameplay" width="260">
+<img src="Docs/Images/AzurLane-2026-10-14/login.png" alt="Azur Lane title and login screen" width="260">
+<img src="Docs/Images/Neverball-2026-10-04/gameplay.png" alt="Neverball gameplay" width="260">
+
+</div>
 
 ## What it is
 
-Most programs and games on phones are built for ARM processors, and your PC has an x86_64 one. bifrost-emu translates the
-program while it runs, so the two can meet. It has two parts:
+Give bifrost-emu an `.apk` or an ARM64 program and it runs it on your PC, using your own graphics card, sound and controller.
+There is no phone, no emulated device and no virtual machine to set up. It translates the program while it runs.
 
-- Bifrost runs ARM64 Linux programs: command-line tools, SDL and OpenGL games, Vulkan games.
-- Asgard is its Android layer. `bifrost-emu game.apk` installs an Android game and starts it, and `asgard launcher` opens a
-  small library of the games you installed.
+| | |
+|---|---|
+| Bifrost | Runs ARM64 Linux programs: command-line tools, SDL and OpenGL games, Vulkan games. |
+| Asgard | Its Android layer. `bifrost-emu game.apk` installs a game and starts it, and `asgard launcher` opens a library of what you installed. |
 
-It is a beta. Some games play well, others only start, and a few are blocked. [What has been run](Docs/COMPATIBILITY.md)
-says which, honestly.
+It is a beta. Some games play well, others only start, and a few are blocked.
 
 ## Quick start
 
@@ -49,27 +54,17 @@ Updating, removing, Debian packages and immutable systems such as Bazzite are in
 ## Does my game run?
 
 17 of the 20 games tried so far are playable, according to the people who played them: SpongeBob Krusty Cook-Off, Azur Lane,
-Arknights, Umamusume (Global), Subway Surfers, Neverball, Doom 3 and more. Roblox and TrickCal are blocked.
-The full list, with versions, frame rates and known problems, is [What has been run](Docs/COMPATIBILITY.md).
-
-<table>
-<tr>
-<td><img src="Docs/Images/SpongeBob-2026-11-01/gameplay.png" alt="SpongeBob cooking gameplay" width="320"><br><sub>SpongeBob: Krusty Cook-Off (Android)</sub></td>
-<td><img src="Docs/Images/AzurLane-2026-10-14/login.png" alt="Azur Lane title and login screen" width="320"><br><sub>Azur Lane (Android)</sub></td>
-<td><img src="Docs/Images/Neverball-2026-10-04/gameplay.png" alt="Neverball gameplay" width="320"><br><sub>Neverball (Linux)</sub></td>
-</tr>
-</table>
-
-[More screenshots](Docs/SCREENSHOTS.md).
+Arknights, Umamusume (Global), Subway Surfers, Neverball, Doom 3 and more. Roblox and TrickCal are blocked. The full list, with
+versions, frame rates and known problems, is [What has been run](Docs/COMPATIBILITY.md).
 
 ## Good to know
 
-- Android is experimental. Google Play services come from microG, so Google sign-in works only up to Google's own page. Media
-  decoding and many system services are partial or missing.
-- ARM64 only. An app that ships only 32-bit ARM or x86 code cannot start.
-- x86_64 Linux only. Other distributions should work, but only Ubuntu 24.04 is tested in CI; see the
-  [support matrix](Docs/SUPPORT.md).
-- Untrusted programs. Read the [security model](Docs/SECURITY.md) before running anything you do not trust.
+| | |
+|---|---|
+| Android is experimental | Google Play services come from microG, so Google sign-in works only up to Google's own page. Media decoding and many system services are partial or missing. |
+| ARM64 only | An app that ships only 32-bit ARM or x86 code cannot start. |
+| x86_64 Linux only | Other distributions should work, but only Ubuntu 24.04 is tested in CI; see the [support matrix](Docs/SUPPORT.md). |
+| Untrusted programs | Read the [security model](Docs/SECURITY.md) before running anything you do not trust. |
 
 ## Learn more
 
