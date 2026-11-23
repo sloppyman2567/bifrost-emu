@@ -10,6 +10,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- A `[stall]` line for a `read`, `write`, socket call or `ioctl` now says what the descriptor is: a file path, a pipe, a socket
+  with its addresses, or the emulator's own device. When two stalls ended together, the second used to lose its thread name and
+  caller; it now waits briefly for them.
 - `BIFROST_PROF` prints its report at exit without `-v`, including for programs that end through `exit_group`; `-v` is
   still what adds the JIT's own counters.
 - The `guest: N MIPS` line, the `-v` `executed N instructions` line and its MIPS rate now include chained blocks and

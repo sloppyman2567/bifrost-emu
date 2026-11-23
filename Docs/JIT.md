@@ -1728,7 +1728,16 @@ with the time of day in the form of Android's log lines, so it lines up with the
 
 `a0` and `a1` are the call's first two arguments (for a futex, the address of the lock and the operation), and `caller` is where the
 call came from, one level up from the libc stub (`BIFROST_FUTEX_BT` gives a full backtrace). For a graphics thunk `a0` is the symbol
-id. At most 200 lines are printed per process. It adds nothing to the cost of a call that is shorter than a second.
+id. A call on a descriptor (`read`, `write`, `sendto`, `recvfrom`, `accept`, `connect` and their relatives, and `ioctl`) also says
+what the descriptor is, found when the call ends:
+
+```
+[bifrost-emu] [stall] 11-23 09:18:21.184 tid 179 "UnityMain": read took 3.83 s a0=0x2f6 a1=0x7267 fd=758 tcp 10.0.0.2:41234 -> 203.0.113.5:443 caller=...
+```
+
+After `fd=` comes the file's path, `pipe:[inode]`, a socket (`tcp` or `udp` with its two addresses, `unix stream` with its paths, `-` for none),
+or `virtual Name` for a descriptor the emulator serves itself (Binder, a memfd). `closed` means another thread closed it first. If two
+stalls end at the same moment, the second waits up to 50 ms for the lookup and then prints without the name, caller and descriptor. At most 200 lines are printed per process. It adds nothing to the cost of a call that is shorter than a second.
 
 Only the outermost call on a thread is counted. A call that bypasses `Emulator::syscall` is not counted unless it has its own
 timer (the JIT's thunk fast path does). The report prints with `BIFROST_STATS_PERIOD` and at exit (also under `--no-jit`), is

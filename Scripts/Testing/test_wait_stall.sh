@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # BIFROST_PROF prints a `[stall]` line for a guest call that takes a second or more on a busy thread, naming the thread, the
-# call, its arguments (a futex's address) and its caller; a thread that is not busy is not reported, and nothing prints
-# without BIFROST_PROF or for calls under a second. Run with the JIT and with --no-jit.
+# call, its arguments (a futex's address), what its descriptor is (a pipe, a socket) and its caller; a thread that is not busy is
+# not reported, and nothing prints without BIFROST_PROF or for calls under a second. Run with the JIT and with --no-jit.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -27,6 +27,15 @@ for mode in jit no-jit; do
     check "$mode: it names a caller" 0 "$(grep -c 'caller=? *$' <<<"$line")"
     check "$mode: it carries the time of day" 1 "$(grep -c -E '\[stall\] [0-9]{2}-[0-9]{2} [0-9:]{8}\.[0-9]{3} ' <<<"$line")"
     check "$mode: the busy sleeper is reported as nanosleep" 1 "$(grep '\[stall\].*"st-sleep"' <<<"$out" | grep -c 'nanosleep took')"
+    pipe_fd=$(sed -n 's/^descriptors: pipe=\([0-9]*\) .*/\1/p' <<<"$out")
+    sock_fd=$(sed -n 's/^descriptors: .* socket=\([0-9]*\)$/\1/p' <<<"$out")
+    pipeline=$(grep '\[stall\].*"st-pipe"' <<<"$out" || true)
+    sockline=$(grep '\[stall\].*"st-sock"' <<<"$out" || true)
+    check "$mode: a blocked pipe read is reported as read" 1 "$(grep -c 'read took' <<<"$pipeline")"
+    check "$mode: it says the descriptor is a pipe" 1 "$(grep -c " fd=$pipe_fd pipe:\[[0-9]*\] caller=" <<<"$pipeline")"
+    check "$mode: a blocked socket read is reported as read" 1 "$(grep -c 'read took' <<<"$sockline")"
+    check "$mode: it says the descriptor is a unix stream socket" 1 "$(grep -c " fd=$sock_fd unix stream .*caller=" <<<"$sockline")"
+    check "$mode: a futex line has no descriptor" 0 "$(grep -c ' fd=' <<<"$line")"
     check "$mode: the idle thread is not reported" 0 "$(grep -c '\[stall\].*"st-idle"' <<<"$out")"
     check "$mode: the idle main thread is not reported" 0 "$(grep -c '\[stall\].*tid 1 ' <<<"$out")"
 done
