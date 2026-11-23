@@ -512,6 +512,11 @@ class DnsProxy:
         ("SERVICE", 9), ("SOCKTYPE", 10), ("SYSTEM", 11), ("OVERFLOW", 14))
         if hasattr(socket, "EAI_" + name)}
 
+    # The guest's own name (the `uname` nodename in Source/System/Syscalls/Process/Identity.cpp). It resolves to the device itself,
+    # as it does through /etc/hosts on Linux, and is never sent to the host: a single-label name that the network does not
+    # know costs seconds of LLMNR and mDNS timeouts on a host whose resolver has them on, and the app waits for the answer.
+    GUEST_HOSTNAME = "arm64-emu"
+
     SLOW_LOOKUP_SECONDS = 1.0  # a lookup this slow blocks the app's calling thread long enough to be seen as a freeze
     MAX_SLOW_LINES = 200
 
@@ -540,10 +545,14 @@ class DnsProxy:
     def failure(code):
         return b"401\0" + struct.pack("<i", code)
 
-    @staticmethod
-    def local_name(host):
-        """Names an offline device still resolves: no name, localhost and loopback address literals."""
-        if host in ("^", "localhost", "localhost.localdomain"):
+    @classmethod
+    def is_guest_hostname(cls, host):
+        return host.lower().rstrip(".") == cls.GUEST_HOSTNAME
+
+    @classmethod
+    def local_name(cls, host):
+        """Names an offline device still resolves: no name, localhost, its own hostname and loopback address literals."""
+        if host in ("^", "localhost", "localhost.localdomain") or cls.is_guest_hostname(host):
             return True
         try:
             return ipaddress.ip_address(host.split("%")[0]).is_loopback
@@ -558,6 +567,8 @@ class DnsProxy:
         if offline and not cls.local_name(args[1]):
             return cls.failure(7)  # EAI_NODATA, Android's "No address associated with hostname"
         _, host, service, flags, family, kind, protocol, netid = args
+        if cls.is_guest_hostname(host):
+            host = "localhost"
         flags, family, kind, protocol, netid = map(int, (flags, family, kind, protocol, netid))
         if not 0 <= netid <= 0xffffffff:
             return cls.failure(4)
