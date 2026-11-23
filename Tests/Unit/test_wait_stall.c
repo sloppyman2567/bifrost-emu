@@ -1,11 +1,13 @@
-// test_wait_stall.c — three threads for BIFROST_PROF's `[stall]` lines (a call of a second or more on a busy thread).
+// test_wait_stall.c — threads for BIFROST_PROF's `[stall]` lines (a call of a second or more on a busy thread).
 //
-// st-futex computes for 0.3 s, then waits on a futex for about 1.1 s. st-sleep computes, then sleeps for 1.2 s. st-idle only
-// waits on a futex for 1.4 s: a thread that does not run is not a freeze, so it must not be reported. st-pipe and st-sock compute,
-// then block in read() on a pipe and on a unix socket until the main thread writes after 1.4 s; their descriptor numbers are
+// st-futex computes for 0.3 s of CPU time, then waits on a futex for over a second. st-sleep computes, then sleeps for 1.2 s.
+// st-idle only waits on a futex: a thread that does not run is not a freeze, so it must not be reported. st-pipe and st-sock
+// compute, then block in read() on a pipe and on a unix socket until the main thread writes; their descriptor numbers are
 // printed. st-loop computes briefly and sleeps 1.05 s, nine times from one call site: only five stalls print, and the report
 // counts all nine. Thirteen st-many threads each sleep seven times from their own site, so 14 sites pass five and the report
-// shows twelve and then "and 2 more call sites". (A thread whose record is made late loses its first stall, hence seven.) The main thread wakes the futex waiters after 1.4 s. The futex addresses are printed so
+// shows twelve and then "and 2 more call sites". (A thread whose record is made late loses its first stall, hence seven.)
+// Every spin is CPU time, and the st-many threads start 150 ms apart, so the result does not depend on how many cores there are.
+// The main thread waits until the four waiters are about to block, holds them for 1.2 s, then wakes them. The futex addresses are printed so
 // Scripts/Testing/test_wait_stall.sh can match them.
 //
 // Plain C: build it natively as well to compare with the host kernel.
@@ -25,22 +27,27 @@ static int failures;
 #define CHECK(cond, what) do { if (!(cond)) { printf("FAIL %s\n", what); failures++; } } while (0)
 
 static uint32_t busy_word, idle_word;
+static int ready;  // waiters that are about to block: the main thread times the wake from here, not from a clock
 #define MANY 13
 static volatile int done[6 + MANY];
 static int pipe_fds[2], sock_fds[2];
 
-static uint64_t now_ms(void) {
+static uint64_t cpu_ms(void) {
     struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
     return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
 }
 
+// Burns `ms` of this thread's own CPU time, not wall time. BIFROST_PROF calls a thread busy by the share of its life that it spent
+// on the CPU, and a wall-clock spin on a runner with few cores would leave each of many threads below that share.
 static void spin(uint64_t ms) {
     volatile uint64_t x = 1;
-    uint64_t end = now_ms() + ms;
-    while (now_ms() < end)
+    uint64_t end = cpu_ms() + ms;
+    while (cpu_ms() < end)
         for (int i = 0; i < 20000; ++i) x = x * 6364136223846793005ull + 1442695040888963407ull;
 }
+
+static void mark_ready(void) { __atomic_add_fetch(&ready, 1, __ATOMIC_RELEASE); }
 
 static void wait_on(uint32_t *word) {
     while (__atomic_load_n(word, __ATOMIC_ACQUIRE) == 0) syscall(SYS_futex, word, FUTEX_WAIT, 0, NULL, NULL, 0);
@@ -50,6 +57,7 @@ static void *futex_thread(void *unused) {
     (void)unused;
     prctl(PR_SET_NAME, "st-futex");
     spin(300);
+    mark_ready();
     wait_on(&busy_word);
     done[0] = 1;
     return NULL;
@@ -68,6 +76,7 @@ static void *sleep_thread(void *unused) {
 static void *idle_thread(void *unused) {
     (void)unused;
     prctl(PR_SET_NAME, "st-idle");
+    mark_ready();
     wait_on(&idle_word);
     done[2] = 1;
     return NULL;
@@ -78,6 +87,7 @@ static void *pipe_thread(void *unused) {
     prctl(PR_SET_NAME, "st-pipe");
     spin(300);
     char c;
+    mark_ready();
     CHECK(read(pipe_fds[0], &c, 1) == 1, "pipe read");
     done[3] = 1;
     return NULL;
@@ -88,6 +98,7 @@ static void *sock_thread(void *unused) {
     prctl(PR_SET_NAME, "st-sock");
     spin(300);
     char c;
+    mark_ready();
     CHECK(read(sock_fds[0], &c, 1) == 1, "socket read");
     done[4] = 1;
     return NULL;
@@ -97,7 +108,7 @@ static void *many_thread(void *unused) {
     (void)unused;
     prctl(PR_SET_NAME, "st-many");
     for (int i = 0; i < 7; ++i) {
-        spin(100);
+        spin(150);
         struct timespec ts = {1, 50000000L};
         nanosleep(&ts, NULL);
     }
@@ -129,8 +140,17 @@ int main(void) {
     CHECK(pthread_create(&threads[3], NULL, pipe_thread, NULL) == 0, "pthread_create");
     CHECK(pthread_create(&threads[4], NULL, sock_thread, NULL) == 0, "pthread_create");
     CHECK(pthread_create(&threads[5], NULL, loop_thread, NULL) == 0, "pthread_create");
-    for (int i = 0; i < MANY; ++i) CHECK(pthread_create(&threads[6 + i], NULL, many_thread, NULL) == 0, "pthread_create");
-    struct timespec ts = {1, 400000000L};
+    // Started 150 ms apart, so that a runner with few cores does not have all of them spinning at once.
+    for (int i = 0; i < MANY; ++i) {
+        CHECK(pthread_create(&threads[6 + i], NULL, many_thread, NULL) == 0, "pthread_create");
+        struct timespec gap = {0, 150000000L};
+        nanosleep(&gap, NULL);
+    }
+    // Every waiter blocks for at least 1.2 s however many cores there are: wait until all four are about to block, then hold them.
+    struct timespec poll_gap = {0, 10000000L};
+    for (int i = 0; i < 6000 && __atomic_load_n(&ready, __ATOMIC_ACQUIRE) < 4; ++i) nanosleep(&poll_gap, NULL);
+    CHECK(__atomic_load_n(&ready, __ATOMIC_ACQUIRE) == 4, "all waiters reached their wait");
+    struct timespec ts = {1, 200000000L};
     nanosleep(&ts, NULL);
     __atomic_store_n(&busy_word, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&idle_word, 1, __ATOMIC_RELEASE);
