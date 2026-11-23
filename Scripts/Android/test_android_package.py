@@ -3,9 +3,11 @@
 
 import argparse
 import concurrent.futures
+import contextlib
 import hashlib
 import hmac
 import importlib.util
+import io
 import json
 import os
 import re
@@ -3150,6 +3152,60 @@ class DnsProxyTests(unittest.TestCase):
             self.assertEqual(DnsProxy.resolve(b"getaddrinfo missing.invalid ^ 16 0 1 0 0"),
                              b"401\0" + struct.pack("<i", 3))
             resolver.assert_not_called()
+
+    def test_slow_lookup_line_names_the_host_and_the_result(self):
+        from android_managed import DnsProxy
+        request = b"getaddrinfo cdn.example.invalid ^ 0 0 1 0 0"
+        self.assertIsNone(DnsProxy.slow_lookup_line(request, b"222\0", 0.99))
+        self.assertEqual(DnsProxy.slow_lookup_line(request, b"222\0", 3.7),
+                         "dnsproxyd: getaddrinfo cdn.example.invalid took 3.70 s (answered)")
+        self.assertEqual(DnsProxy.slow_lookup_line(request, DnsProxy.failure(8), 1.0),
+                         "dnsproxyd: getaddrinfo cdn.example.invalid took 1.00 s (error 8)")
+        self.assertIn("getaddrinfo ? took", DnsProxy.slow_lookup_line(b"", b"", 2.0))
+
+    def test_slow_lookup_is_logged_by_the_running_proxy(self):
+        from android_managed import DnsProxy
+        def slow(*args):
+            time.sleep(DnsProxy.SLOW_LOOKUP_SECONDS + 0.1)
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 80))]
+        with tempfile.TemporaryDirectory(prefix="bifrost-dns-") as directory:
+            proxy = DnsProxy(Path(directory))
+            captured = io.StringIO()
+            try:
+                with patch("android_managed.socket.getaddrinfo", side_effect=slow), contextlib.redirect_stderr(captured):
+                    for host in ("slow.example.invalid", "slow.example.invalid"):
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                            client.settimeout(10)
+                            client.connect(str(proxy.path))
+                            client.sendall(f"getaddrinfo {host} ^ 0 0 1 0 0\0".encode())
+                            data = b""
+                            while chunk := client.recv(4096):
+                                data += chunk
+                        self.assertTrue(data.startswith(b"222\0"))
+            finally:
+                proxy.close()
+            lines = captured.getvalue().splitlines()
+            self.assertEqual(len(lines), 2, lines)
+            self.assertTrue(all(l.startswith("dnsproxyd: getaddrinfo slow.example.invalid took 1.") and l.endswith("(answered)")
+                                for l in lines), lines)
+
+    def test_fast_lookups_print_nothing(self):
+        from android_managed import DnsProxy
+        answer = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 80))]
+        with tempfile.TemporaryDirectory(prefix="bifrost-dns-") as directory:
+            proxy = DnsProxy(Path(directory))
+            captured = io.StringIO()
+            try:
+                with patch("android_managed.socket.getaddrinfo", return_value=answer), contextlib.redirect_stderr(captured):
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                        client.settimeout(5)
+                        client.connect(str(proxy.path))
+                        client.sendall(b"getaddrinfo fast.example.invalid ^ 0 0 1 0 0\0")
+                        while client.recv(4096):
+                            pass
+            finally:
+                proxy.close()
+            self.assertEqual(captured.getvalue(), "")
 
     def test_fragmented_request_and_cleanup(self):
         from android_managed import DnsProxy

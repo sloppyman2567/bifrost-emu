@@ -3329,6 +3329,8 @@ flags/error numbers and IPv4/IPv6 socket addresses using the
 [AOSP Bionic protocol](https://android.googlesource.com/platform/bionic/+/refs/tags/android-15.0.0_r1/libc/dns/net/getaddrinfo.c)
 and [DnsResolver serialization](https://android.googlesource.com/platform/packages/modules/DnsResolver/+/refs/tags/android-15.0.0_r1/DnsProxyListener.cpp).
 Requests and concurrent clients are bounded; sockets close with the session.
+A lookup that takes a second or more (the app's calling thread waits for it) is logged to the session's `launcher.log` with its
+hostname, duration and result, at most 200 lines per session. There is no result cache.
 This supplies the host's default network. Android per-network routing, legacy
 hostent commands and raw `resnsend` queries are not implemented. No DNS server
 address or application hostname is hardcoded.

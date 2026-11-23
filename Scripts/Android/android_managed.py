@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
@@ -511,8 +512,12 @@ class DnsProxy:
         ("SERVICE", 9), ("SOCKTYPE", 10), ("SYSTEM", 11), ("OVERFLOW", 14))
         if hasattr(socket, "EAI_" + name)}
 
+    SLOW_LOOKUP_SECONDS = 1.0  # a lookup this slow blocks the app's calling thread long enough to be seen as a freeze
+    MAX_SLOW_LINES = 200
+
     def __init__(self, root, offline=False):
         self.offline = offline
+        self.slow_lines = 0
         self.path = root / "dev/socket/dnsproxyd"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -589,6 +594,21 @@ class DnsProxy:
             return cls.failure(7)
         return bytes(output) + struct.pack("!i", 0)
 
+    @classmethod
+    def slow_lookup_line(cls, request, response, seconds):
+        """The log line for a lookup that took a second or more (the session's launcher.log), else None."""
+        if seconds < cls.SLOW_LOOKUP_SECONDS:
+            return None
+        args = request.decode("ascii", "replace").split()
+        host = args[1] if len(args) > 1 else "?"
+        if response.startswith(b"222\0"):
+            result = "answered"
+        elif response.startswith(b"401\0") and len(response) >= 8:
+            result = f"error {struct.unpack('<i', response[4:8])[0]}"
+        else:
+            result = "failed"
+        return f"dnsproxyd: getaddrinfo {host} took {seconds:.2f} s ({result})"
+
     def serve(self, client):
         try:
             client.settimeout(5)
@@ -601,10 +621,20 @@ class DnsProxy:
                 if len(request) == 4096 and b"\0" not in request:
                     client.sendall(self.failure(4))
                     return
+            request = bytes(request).split(b"\0", 1)[0]
+            started = time.monotonic()
             try:
-                response = self.resolve(bytes(request).split(b"\0", 1)[0], self.offline)
+                response = self.resolve(request, self.offline)
             except (ValueError, OverflowError, OSError):
                 response = self.failure(4)
+            line = self.slow_lookup_line(request, response, time.monotonic() - started)
+            with self.lock:
+                if line and self.slow_lines < self.MAX_SLOW_LINES:
+                    self.slow_lines += 1
+                else:
+                    line = None
+            if line:
+                print(line, file=sys.stderr, flush=True)
             client.sendall(response)
         except OSError:
             pass  # client closed, timed out, or launcher is shutting down
