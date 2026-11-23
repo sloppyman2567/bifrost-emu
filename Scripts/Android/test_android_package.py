@@ -3048,6 +3048,48 @@ class SettingsIdentityTests(unittest.TestCase):
             dex.write_text("launcher version four")
             self.assertFalse((prepare() / managed.PARSE_CACHE).exists())
 
+    def test_a_rebuilt_runtime_carries_the_guests_storage_by_link_not_by_copy(self):
+        import android_managed as managed
+        with tempfile.TemporaryDirectory(prefix="bifrost-retained-") as temporary, ExitStack() as patches:
+            work = Path(temporary)
+            app, framework, adapters, dex, metadata, code = managed_runtime_fixture(work)
+            managed_runtime_patches(patches)
+            prepare = lambda: managed.prepare_root(app, metadata, code, None, framework, work / "art", adapters, dex)[0]
+            root = prepare()
+            relative = "storage/emulated/0/Android/data/org.bifrost.fixture/files/resource.bin"
+            resource = root / relative
+            resource.parent.mkdir(parents=True)
+            resource.write_bytes(b"downloaded" * 1000)
+            save = root / "data/user/0/org.bifrost.fixture/save"
+            save.write_text("saved game")
+            identity = lambda path: (path.stat().st_dev, path.stat().st_ino)
+            before = identity(resource), identity(save)
+            dex.write_text("launcher version two")                  # a rebuilt runtime: a new root replaces the old one
+            hashed = []
+            import android_art
+            real_digest = android_art.digest
+            def record(path, *args, **options):
+                hashed.append(str(path))
+                return real_digest(path, *args, **options)
+            with patch.object(android_art, "digest", side_effect=record):
+                root = prepare()
+            self.assertTrue(hashed, "the runtime's own files were not hashed")
+            self.assertFalse([path for path in hashed if "/storage/" in path or "/data/user/" in path],
+                             "the guest's data was hashed")
+            for path, was in ((root / relative, before[0]), (root / "data/user/0/org.bifrost.fixture/save", before[1])):
+                self.assertEqual(identity(path), was, f"{path.name} was copied, not carried by link")
+                self.assertEqual(path.stat().st_nlink, 1)           # the old root is gone
+            self.assertEqual((root / relative).read_bytes(), b"downloaded" * 1000)
+            real_link = os.link
+            def refuse_storage(source, target, **options):          # the host will not link here: copy instead
+                if "/storage/" in str(target): raise OSError(18, "Invalid cross-device link")
+                return real_link(source, target, **options)
+            dex.write_text("launcher version three")
+            with patch.object(managed.os, "link", side_effect=refuse_storage):
+                root = prepare()
+            self.assertEqual((root / relative).read_bytes(), b"downloaded" * 1000)
+            self.assertNotEqual(identity(root / relative), before[0])
+
     def test_app_runtimes_link_one_read_only_image_and_keep_their_own_settings(self):
         import json
         import android_managed as managed

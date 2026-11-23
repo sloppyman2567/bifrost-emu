@@ -3310,9 +3310,15 @@ Surfers (2026-11-11): the image is 904 MB once and the app's own root 677 MB
 instead of a 1.6 GB copy; a rebuild against an existing image took 2.1 s instead
 of 2.9 to 3.8 s, of which 1.7 s is hashing the inventory again (a new link changes
 the shared files' change time, so the digest cache rehashes them once per rebuild
-and once per other app's next launch). Replacement copies `data/user`, `data/user_de` and
-`storage` before publishing the new root, preserving saves across runs and
-runtime upgrades. The installed package's verified root is kept separate.
+and once per other app's next launch). Replacement carries `data/user`, `data/user_de`, `data/misc/profiles`,
+`data/misc/keystore` and `storage` into the new root before publishing it, preserving saves across runs and
+runtime upgrades. It hardlinks those files (`link_or_copy`; a copy where the host refuses the link), because the old root is
+deleted right after: copying the 38 GB of downloaded resources of Zenless Zone Zero took 105 s of "Preparing Android runtime"
+after every launcher, adapter or framework change, and linking its 8,076 files takes 0.1 s. Only the runtime's own files are hashed for the
+reuse check (`android_art.inventory` takes a filter), never `storage` or `data/user`: hashing them took 40 s of the rebuild.
+A rebuild of that app measured 2.7 s on a hardlinked copy of its state. The installed package's code
+(`data/app`) is still copied: a link would let the guest write into the verified tree. The installed package's verified
+root is kept separate.
 Every launch recreates the package's CE/DE data directories
 (`data/user/0/<package>`, `data/user_de/0/<package>`) if absent, as `installd`
 does on Android; `ContextImpl` creates only their subdirectories and otherwise

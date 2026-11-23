@@ -106,10 +106,14 @@ def verify_inventory(files):
         raise ValueError("ART file inventory differs from the pinned SDK image")
 
 
-def inventory(root):
+def inventory(root, keep=None):
+    """Every file and link under root with its digest. With `keep`, only the names it accepts are recorded; the rest are
+    never read, hashed or type-checked (a root also holds the guest's data, tens of GB of it for a game)."""
     result = {}
     for path in sorted(root.rglob("*")):
         name = str(path.relative_to(root))
+        if keep is not None and not keep(name):
+            continue
         if path.is_symlink():
             result[name] = {"link": str(path.readlink())}
         elif path.is_file():
