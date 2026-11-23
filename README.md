@@ -2,7 +2,7 @@
 
 # bifrost-emu
 
-**Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC.** Give it an `.apk` or an ARM64 program and
+Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC. Give it an `.apk` or an ARM64 program and
 it runs it, using your own graphics card, sound and controller. There is no phone, no emulated device and no virtual machine
 to set up.
 
@@ -11,7 +11,7 @@ to set up.
 [![Games: 17 playable of 20](https://img.shields.io/badge/games-17%20playable%20of%2020-brightgreen.svg)](Docs/COMPATIBILITY.md)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 
-**Website:** [sloppyman2567.github.io/bifrost-emu](https://sloppyman2567.github.io/bifrost-emu/): what runs, screenshots
+Website: [sloppyman2567.github.io/bifrost-emu](https://sloppyman2567.github.io/bifrost-emu/): what runs, screenshots
 and how to install.
 
 ## What it is
@@ -19,11 +19,11 @@ and how to install.
 Most programs and games on phones are built for ARM processors, and your PC has an x86_64 one. bifrost-emu translates the
 program while it runs, so the two can meet. It has two parts:
 
-- **Bifrost** runs ARM64 Linux programs: command-line tools, SDL and OpenGL games, Vulkan games.
-- **Asgard** is its Android layer. `bifrost-emu game.apk` installs an Android game and starts it, and `asgard launcher` opens a
+- Bifrost runs ARM64 Linux programs: command-line tools, SDL and OpenGL games, Vulkan games.
+- Asgard is its Android layer. `bifrost-emu game.apk` installs an Android game and starts it, and `asgard launcher` opens a
   small library of the games you installed.
 
-It is a **beta**. Some games play well, others only start, and a few are blocked. [What has been run](Docs/COMPATIBILITY.md)
+It is a beta. Some games play well, others only start, and a few are blocked. [What has been run](Docs/COMPATIBILITY.md)
 says which, honestly.
 
 ## Quick start
@@ -64,12 +64,12 @@ The full list, with versions, frame rates and known problems, is [What has been 
 
 ## Good to know
 
-- **Experimental Android.** Google Play services come from microG, so Google sign-in works only up to Google's own page. Media
+- Android is experimental. Google Play services come from microG, so Google sign-in works only up to Google's own page. Media
   decoding and many system services are partial or missing.
-- **ARM64 only.** An app that ships only 32-bit ARM or x86 code cannot start.
-- **x86_64 Linux only.** Other distributions should work, but only Ubuntu 24.04 is tested in CI; see the
+- ARM64 only. An app that ships only 32-bit ARM or x86 code cannot start.
+- x86_64 Linux only. Other distributions should work, but only Ubuntu 24.04 is tested in CI; see the
   [support matrix](Docs/SUPPORT.md).
-- **Untrusted programs.** Read the [security model](Docs/SECURITY.md) before running anything you do not trust.
+- Untrusted programs. Read the [security model](Docs/SECURITY.md) before running anything you do not trust.
 
 ## Learn more
 
