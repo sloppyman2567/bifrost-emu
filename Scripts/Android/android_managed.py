@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
@@ -511,8 +512,17 @@ class DnsProxy:
         ("SERVICE", 9), ("SOCKTYPE", 10), ("SYSTEM", 11), ("OVERFLOW", 14))
         if hasattr(socket, "EAI_" + name)}
 
+    # The guest's own name (the `uname` nodename, GUEST_NODENAME in Source/System/Core/GuestIdentity.hpp). It resolves to the device itself,
+    # as it does through /etc/hosts on Linux, and is never sent to the host: a single-label name that the network does not
+    # know costs seconds of LLMNR and mDNS timeouts on a host whose resolver has them on, and the app waits for the answer.
+    GUEST_HOSTNAME = "bifrost-emu"
+
+    SLOW_LOOKUP_SECONDS = 1.0  # a lookup this slow blocks the app's calling thread long enough to be seen as a freeze
+    MAX_SLOW_LINES = 200
+
     def __init__(self, root, offline=False):
         self.offline = offline
+        self.slow_lines = 0
         self.path = root / "dev/socket/dnsproxyd"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -535,10 +545,14 @@ class DnsProxy:
     def failure(code):
         return b"401\0" + struct.pack("<i", code)
 
-    @staticmethod
-    def local_name(host):
-        """Names an offline device still resolves: no name, localhost and loopback address literals."""
-        if host in ("^", "localhost", "localhost.localdomain"):
+    @classmethod
+    def is_guest_hostname(cls, host):
+        return host.lower().rstrip(".") == cls.GUEST_HOSTNAME
+
+    @classmethod
+    def local_name(cls, host):
+        """Names an offline device still resolves: no name, localhost, its own hostname and loopback address literals."""
+        if host in ("^", "localhost", "localhost.localdomain") or cls.is_guest_hostname(host):
             return True
         try:
             return ipaddress.ip_address(host.split("%")[0]).is_loopback
@@ -553,6 +567,8 @@ class DnsProxy:
         if offline and not cls.local_name(args[1]):
             return cls.failure(7)  # EAI_NODATA, Android's "No address associated with hostname"
         _, host, service, flags, family, kind, protocol, netid = args
+        if cls.is_guest_hostname(host):
+            host = "localhost"
         flags, family, kind, protocol, netid = map(int, (flags, family, kind, protocol, netid))
         if not 0 <= netid <= 0xffffffff:
             return cls.failure(4)
@@ -589,6 +605,21 @@ class DnsProxy:
             return cls.failure(7)
         return bytes(output) + struct.pack("!i", 0)
 
+    @classmethod
+    def slow_lookup_line(cls, request, response, seconds):
+        """The log line for a lookup that took a second or more (the session's launcher.log), else None."""
+        if seconds < cls.SLOW_LOOKUP_SECONDS:
+            return None
+        args = request.decode("ascii", "replace").split()
+        host = args[1] if len(args) > 1 else "?"
+        if response.startswith(b"222\0"):
+            result = "answered"
+        elif response.startswith(b"401\0") and len(response) >= 8:
+            result = f"error {struct.unpack('<i', response[4:8])[0]}"
+        else:
+            result = "failed"
+        return f"dnsproxyd: getaddrinfo {host} took {seconds:.2f} s ({result})"
+
     def serve(self, client):
         try:
             client.settimeout(5)
@@ -601,10 +632,20 @@ class DnsProxy:
                 if len(request) == 4096 and b"\0" not in request:
                     client.sendall(self.failure(4))
                     return
+            request = bytes(request).split(b"\0", 1)[0]
+            started = time.monotonic()
             try:
-                response = self.resolve(bytes(request).split(b"\0", 1)[0], self.offline)
+                response = self.resolve(request, self.offline)
             except (ValueError, OverflowError, OSError):
                 response = self.failure(4)
+            line = self.slow_lookup_line(request, response, time.monotonic() - started)
+            with self.lock:
+                if line and self.slow_lines < self.MAX_SLOW_LINES:
+                    self.slow_lines += 1
+                else:
+                    line = None
+            if line:
+                print(line, file=sys.stderr, flush=True)
             client.sendall(response)
         except OSError:
             pass  # client closed, timed out, or launcher is shutting down

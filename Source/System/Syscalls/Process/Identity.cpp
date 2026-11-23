@@ -37,6 +37,7 @@
 #include <syscall.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
+#include "System/Core/GuestIdentity.hpp"
 #include "System/Core/GuestMemoryView.hpp"
 #include <sys/types.h>
 #include <unistd.h>
@@ -74,9 +75,9 @@ int64_t syscall_identity(Emulator& emu, CPU& cpu, uint64_t num) {
             // reasonably modern kernel so glibc takes the fast paths.
             const char* fields[] = {
                 "Linux",                       // sysname
-                "arm64-emu",                   // nodename
-                "6.5.0",                       // release (glibc wants >= 3.2 for most things)
-                "#1 SMP PREEMPT Dynamic arm64-emu", // version
+                GUEST_NODENAME,                // nodename
+                GUEST_RELEASE,                 // release
+                GUEST_KERNEL_VERSION,          // version
                 "aarch64",                     // machine
                 "(none)",                      // domainname
             };

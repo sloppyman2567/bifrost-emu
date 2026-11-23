@@ -8,10 +8,14 @@
 #include "System/Syscalls/SyscallNames.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <map>
+#include <tuple>
 #include <ctime>
 #include <string>
 #include <mutex>
+#include <thread>
 #include <pthread.h>
 
 namespace arm64emu {
@@ -96,14 +100,40 @@ Record* record_for(Local& l, int guest_tid) {
 
 constexpr uint64_t STALL_NS = 1000000000ull;  // a call this long on a busy thread is reported
 constexpr unsigned MAX_STALL_LINES = 200;       // per process: a stuck program must not fill the log
+constexpr unsigned MAX_LINES_PER_SITE = 5;      // per thread, call and caller: a loop that sleeps a second must not use them all
 
 struct Describers {
     std::function<std::string(int)> thread_name;
     std::function<std::string(uint64_t)> describe_address;
+    std::function<std::string(int)> describe_fd;
 };
 std::mutex g_describers_mutex;  // try-locked only (fork_guest does not hold it): a busy lock only leaves a name out
 Describers g_describers;
 std::atomic<unsigned> g_stall_lines{0};
+
+// How often each call site stalled. Only the first MAX_LINES_PER_SITE stalls of a site print; the rest are counted here and the
+// report lists the sites that went past it, with their count and time, so a repeating freeze is still seen in full.
+struct Site {
+    uint64_t count = 0, total_ns = 0, max_ns = 0;
+};
+using SiteKey = std::tuple<int, uint64_t, uint64_t>;  // guest tid, syscall number, caller
+std::mutex g_sites_mutex;                              // locked briefly like the describers' (fork_guest does not hold it)
+std::map<SiteKey, Site> g_sites;
+
+// Stalls that end together meet at these locks: retry for a moment, but never wait for good, since a fork child's copy of a lock
+// may be held by a thread that does not exist there.
+bool lock_briefly(std::unique_lock<std::mutex>& lock) {
+    for (int attempt = 0; !lock && attempt < 500; ++attempt) {
+        if (attempt) std::this_thread::sleep_for(std::chrono::microseconds(100));
+        (void)lock.try_lock();
+    }
+    return lock.owns_lock();
+}
+
+// Calls whose first argument is a descriptor and whose wait is worth naming: the I/O calls and ioctl (a Binder transaction).
+bool takes_descriptor(uint64_t number) {
+    return wait_kind_for_syscall(number) == WaitKind::Io || wait_kind_for_syscall(number) == WaitKind::Ioctl;
+}
 
 void report_stall(const Record& r, uint64_t duration_ns, uint64_t number, uint64_t arg0, uint64_t arg1, uint64_t caller) {
     // Only a thread that normally runs: a pool worker that sleeps until it is needed waits for seconds as a matter of course.
@@ -111,13 +141,28 @@ void report_stall(const Record& r, uint64_t duration_ns, uint64_t number, uint64
     const uint64_t cpu_now = thread_cpu_ns(r.cpu_clock);
     const uint64_t cpu = cpu_now > r.cpu_base_ns ? cpu_now - r.cpu_base_ns : 0;
     if (!lifetime || cpu * 20 < lifetime) return;
+    uint64_t site_count = 0;  // 0: the table was busy, so the line prints as before
+    {
+        std::unique_lock<std::mutex> lock(g_sites_mutex, std::try_to_lock);
+        if (lock_briefly(lock)) {
+            Site& site = g_sites[SiteKey{r.tid.load(std::memory_order_relaxed), number, caller}];
+            site_count = ++site.count;
+            site.total_ns += duration_ns;
+            site.max_ns = std::max(site.max_ns, duration_ns);
+        }
+    }
+    if (site_count > MAX_LINES_PER_SITE) return;
     if (g_stall_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_STALL_LINES) return;
-    std::string name, where;
+    std::string name, where, fd;
     {
         std::unique_lock<std::mutex> lock(g_describers_mutex, std::try_to_lock);
-        if (lock) {
+        if (lock_briefly(lock)) {
             if (g_describers.thread_name) name = g_describers.thread_name(r.tid.load(std::memory_order_relaxed));
             if (g_describers.describe_address && caller) where = g_describers.describe_address(caller);
+            if (g_describers.describe_fd && takes_descriptor(number)) {
+                const int guest_fd = static_cast<int>(arg0);
+                fd = " fd=" + std::to_string(guest_fd) + " " + g_describers.describe_fd(guest_fd);
+            }
         }
     }
     // The time of day in the form of Android's log lines (MM-DD HH:MM:SS.mmm), so a stall lines up with the app's own log.
@@ -128,11 +173,12 @@ void report_stall(const Record& r, uint64_t duration_ns, uint64_t number, uint64
     char stamp[32];
     std::strftime(stamp, sizeof(stamp), "%m-%d %H:%M:%S", &local_time);
     const char* call = aarch64_syscall_name(number);
-    std::fprintf(stderr, "[%s] [stall] %s.%03ld tid %d%s%s%s: %s took %.2f s a0=0x%llx a1=0x%llx caller=%s\n", CODENAME, stamp,
+    std::fprintf(stderr, "[%s] [stall] %s.%03ld tid %d%s%s%s: %s took %.2f s a0=0x%llx a1=0x%llx%s caller=%s%s\n", CODENAME, stamp,
                  wall.tv_nsec / 1000000, r.tid.load(std::memory_order_relaxed), name.empty() ? "" : " \"", name.c_str(),
                  name.empty() ? "" : "\"", number == 0x1000 ? "graphics thunk" : (call ? call : "syscall"),
                  static_cast<double>(duration_ns) / 1e9, static_cast<unsigned long long>(arg0),
-                 static_cast<unsigned long long>(arg1), where.empty() ? "?" : where.c_str());
+                 static_cast<unsigned long long>(arg1), fd.c_str(), where.empty() ? "?" : where.c_str(),
+                 site_count == MAX_LINES_PER_SITE ? " (last line for this call site; repeats are counted in the report)" : "");
 }
 
 double percent(uint64_t part, uint64_t whole) { return whole ? 100.0 * static_cast<double>(part) / static_cast<double>(whole) : 0.0; }
@@ -183,9 +229,10 @@ WaitTimer::~WaitTimer() {
     if (duration >= STALL_NS) report_stall(*r, duration, number_, arg0_, arg1_, caller_);
 }
 
-void wait_prof_set_describers(std::function<std::string(int)> thread_name, std::function<std::string(uint64_t)> describe_address) {
+void wait_prof_set_describers(std::function<std::string(int)> thread_name, std::function<std::string(uint64_t)> describe_address,
+                              std::function<std::string(int)> describe_fd) {
     std::lock_guard<std::mutex> lock(g_describers_mutex);
-    g_describers = {std::move(thread_name), std::move(describe_address)};
+    g_describers = {std::move(thread_name), std::move(describe_address), std::move(describe_fd)};
 }
 
 std::vector<WaitThreadReport> wait_prof_collect() {
@@ -253,6 +300,34 @@ void wait_prof_print(std::FILE* out, const std::function<std::string(int)>& name
         }
         std::fprintf(out, "[%s]   and %zu more threads: cpu %.1f s, blocked in futex %.1f s\n", CODENAME,
                      threads.size() - SHOWN, seconds(rest_cpu), seconds(rest_futex));
+    }
+    // Call sites that stalled more often than their lines printed, longest total first.
+    struct Repeated {
+        SiteKey key;
+        Site site;
+    };
+    std::vector<Repeated> repeated;
+    {
+        std::unique_lock<std::mutex> sites_lock(g_sites_mutex, std::try_to_lock);
+        if (lock_briefly(sites_lock))
+            for (const auto& entry : g_sites)
+                if (entry.second.count > MAX_LINES_PER_SITE) repeated.push_back({entry.first, entry.second});
+    }
+    std::sort(repeated.begin(), repeated.end(), [](const Repeated& a, const Repeated& b) { return a.site.total_ns > b.site.total_ns; });
+    for (size_t i = 0; i < repeated.size() && i < SHOWN; ++i) {
+        const auto& [tid, number, caller] = repeated[i].key;
+        const Site& site = repeated[i].site;
+        const std::string name = name_of ? name_of(tid) : std::string();
+        std::string where;
+        {
+            std::unique_lock<std::mutex> lock(g_describers_mutex, std::try_to_lock);
+            if (lock_briefly(lock) && g_describers.describe_address && caller) where = g_describers.describe_address(caller);
+        }
+        const char* call = aarch64_syscall_name(number);
+        std::fprintf(out, "[%s]   repeated stalls: tid %d%s%s%s %s x%llu, %.1f s in all, longest %.2f s, caller=%s\n", CODENAME, tid,
+                     name.empty() ? "" : " \"", name.c_str(), name.empty() ? "" : "\"",
+                     number == 0x1000 ? "graphics thunk" : (call ? call : "syscall"), static_cast<unsigned long long>(site.count),
+                     seconds(site.total_ns), seconds(site.max_ns), where.empty() ? "?" : where.c_str());
     }
     State& s = state();
     std::unique_lock<std::mutex> lock(s.mutex, std::try_to_lock);

@@ -17,6 +17,7 @@
 #include "System/VFS/Nodes/HostNode.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Graphics/Display/Graphics.hpp"
+#include "System/Core/GuestIdentity.hpp"
 #include "System/Core/GuestMemoryView.hpp"
 #include <sstream>
 #include <algorithm>
@@ -613,13 +614,13 @@ std::unique_ptr<Node> Yggdrasil::resolve_procfs(const std::string& path,
         }, flags);
     }
     if (path == "/proc/version") {
-        return serve_static(std::string("Linux version 6.5.0 (bifrost-emu) (gcc) #1 SMP\n"), flags);
+        return serve_static(std::string("Linux version ") + GUEST_RELEASE + " (bifrost-emu) (gcc) " + GUEST_KERNEL_VERSION + "\n", flags);
     }
     if (path == "/proc/sys/kernel/osrelease") {
-        return serve_static(std::string("6.5.0\n"), flags);
+        return serve_static(std::string(GUEST_RELEASE) + "\n", flags);
     }
     if (path == "/proc/sys/kernel/hostname") {
-        return serve_static(std::string("bifrost\n"), flags);
+        return serve_static(std::string(GUEST_NODENAME) + "\n", flags);
     }
     if (path == "/proc/self/limits") {
         std::string s;

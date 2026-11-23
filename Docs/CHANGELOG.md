@@ -10,6 +10,18 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- `[stall]` lines stop repeating: a call site prints its first five stalls and the report counts the rest (`repeated stalls:
+  ... x179, 179.0 s in all`). A game's 1 s watchdog sleep used to fill the 200-line limit within minutes and hide later freezes.
+- A `[stall]` line for a `read`, `write`, socket call or `ioctl` now says what the descriptor is: a file path, a pipe, a socket
+  with its addresses, or the emulator's own device. When two stalls ended together, the second used to lose its thread name and
+  caller; it now waits briefly for them.
+- The Android DNS service logs a lookup that takes a second or more, with the hostname and how long it took, to the session's
+  `launcher.log`. A slow lookup freezes the app thread that asked, and until now nothing said which name it was.
+- Umamusume's connect freezes (about 4 s each, several in a row) were the app looking up its own hostname: on a host where
+  `systemd-resolved` tries LLMNR and mDNS for single-label names, the answer took 3.7 s. The Android DNS service now answers the
+  guest's own hostname with loopback itself. Other single-label names still go to the host.
+- The guest's hostname is `bifrost-emu` everywhere. It was `arm64-emu` (the project's old name) in `uname` and `bifrost` in
+  `/proc/sys/kernel/hostname`; `uname` and the `/proc` files that repeat it now come from one definition.
 - `BIFROST_PROF` prints its report at exit without `-v`, including for programs that end through `exit_group`; `-v` is
   still what adds the JIT's own counters.
 - The `guest: N MIPS` line, the `-v` `executed N instructions` line and its MIPS rate now include chained blocks and

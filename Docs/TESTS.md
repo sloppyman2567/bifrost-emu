@@ -34,8 +34,16 @@ builds the headless library inside that limit (the library's timestamps fit; the
 
 `Tests/Unit/test_wait_stall.c` and `Scripts/Testing/test_wait_stall.sh` (`run_tests.sh` entry `wait_stall`) check, with the JIT and with
 `--no-jit`, that `BIFROST_PROF` prints one `[stall]` line for a busy thread's futex wait and for a busy thread's `nanosleep` (with the
-thread name, the futex address, a caller and the time of day), none for a thread that only waits, none without `BIFROST_PROF`, and none
+thread name, the futex address, a caller and the time of day), for a busy thread blocked in `read` on a pipe and on a unix socket (with
+what the descriptor is), only five lines for a call site that stalls seven times (the report counts all seven), none for a thread that only waits, none without `BIFROST_PROF`, and none
 for calls under a second. It fails on a build without the lines, and without the busy-thread rule. It does not cover a real game.
+
+### Guest identity (2026-11-23)
+
+`Tests/Unit/test_uname_consistency.c` (`run_tests.sh` entry `uname_consistency`) checks that `uname`, `gethostname()`,
+`/proc/sys/kernel/hostname`, `/proc/sys/kernel/osrelease` and `/proc/version` agree. It also passes on a real Linux kernel. It fails on
+the build before the fix (the hostname file said `bifrost`, `/proc/version` lacked the version string). The Android DNS test
+`test_guest_hostname_matches_the_emulators_uname_nodename` ties the DNS service's copy of the nodename to the same header.
 
 ### Syscall names (2026-11-19)
 

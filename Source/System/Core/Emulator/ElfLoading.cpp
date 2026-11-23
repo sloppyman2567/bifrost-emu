@@ -22,7 +22,12 @@
 #include "System/Audio/AudioThunk.hpp"  // AudioThunk
 #include "System/Graphics/Thunks/DisplayThunk.hpp"// DisplayThunk
 #include "System/VFS/Nodes/HostNode.hpp"  // wl fd publisher wraps duped host fds
+#include <arpa/inet.h>
+#include <cxxabi.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include <algorithm>
@@ -34,14 +39,76 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <climits>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <typeinfo>
 #include <vector>
 namespace arm64emu {
+namespace {
+// A socket address for a `[stall]` line: `ip:port`, a unix path (`@name` when abstract), or `-` when there is none.
+std::string describe_socket_address(const sockaddr_storage& a, socklen_t len) {
+    char text[INET6_ADDRSTRLEN] = "?";
+    if (a.ss_family == AF_INET) {
+        const auto& in = reinterpret_cast<const sockaddr_in&>(a);
+        ::inet_ntop(AF_INET, &in.sin_addr, text, sizeof(text));
+        return std::string(text) + ":" + std::to_string(ntohs(in.sin_port));
+    }
+    if (a.ss_family == AF_INET6) {
+        const auto& in = reinterpret_cast<const sockaddr_in6&>(a);
+        ::inet_ntop(AF_INET6, &in.sin6_addr, text, sizeof(text));
+        return "[" + std::string(text) + "]:" + std::to_string(ntohs(in.sin6_port));
+    }
+    if (a.ss_family == AF_UNIX) {
+        const auto& un = reinterpret_cast<const sockaddr_un&>(a);
+        const size_t path_len = len > offsetof(sockaddr_un, sun_path) ? len - offsetof(sockaddr_un, sun_path) : 0;
+        if (!path_len || !un.sun_path[0]) return path_len > 1 ? "@" + std::string(un.sun_path + 1, path_len - 1) : "-";
+        return std::string(un.sun_path, strnlen(un.sun_path, path_len));
+    }
+    return "-";
+}
+
+// What a guest descriptor is, for a `[stall]` line: a file's host path, a pipe, a socket with its type and addresses, or the
+// class of a virtual node (Binder, memfd, ...). A host fd is named by the kernel, never assumed equal to the guest's number.
+std::string describe_fd_node(const yggdrasil::Node& node) {
+    const int host = node.host_fd();
+    if (host < 0) {
+        int status = 0;
+        char* demangled = abi::__cxa_demangle(typeid(node).name(), nullptr, nullptr, &status);
+        std::string name = status == 0 && demangled ? demangled : typeid(node).name();
+        ::free(demangled);
+        const size_t colon = name.rfind("::");
+        return "virtual " + (colon == std::string::npos ? name : name.substr(colon + 2));
+    }
+    char link[PATH_MAX];
+    const std::string proc = "/proc/self/fd/" + std::to_string(host);
+    const ssize_t n = ::readlink(proc.c_str(), link, sizeof(link) - 1);
+    const std::string target = n > 0 ? std::string(link, static_cast<size_t>(n)) : std::string("?");
+    if (target.compare(0, 7, "socket:") != 0) return target;
+    int type = 0, domain = 0;
+    socklen_t len = sizeof(type);
+    ::getsockopt(host, SOL_SOCKET, SO_TYPE, &type, &len);
+    len = sizeof(domain);
+    ::getsockopt(host, SOL_SOCKET, SO_DOMAIN, &domain, &len);
+    const bool inet = domain == AF_INET || domain == AF_INET6;
+    std::string kind = domain == AF_UNIX ? "unix " : domain == AF_NETLINK ? "netlink " : inet ? "" : "socket ";
+    kind += type == SOCK_STREAM ? (inet ? "tcp" : "stream") : type == SOCK_DGRAM ? (inet ? "udp" : "dgram") :
+            type == SOCK_SEQPACKET ? "seqpacket" : type == SOCK_RAW ? "raw" : "type " + std::to_string(type);
+    sockaddr_storage local{}, peer{};
+    socklen_t local_len = sizeof(local), peer_len = sizeof(peer);
+    const bool has_local = ::getsockname(host, reinterpret_cast<sockaddr*>(&local), &local_len) == 0;
+    const bool has_peer = ::getpeername(host, reinterpret_cast<sockaddr*>(&peer), &peer_len) == 0;
+    if (has_local && domain != AF_NETLINK) kind += " " + describe_socket_address(local, local_len);
+    if (has_peer) kind += " -> " + describe_socket_address(peer, peer_len);
+    return kind;
+}
+}  // namespace
+
 // ── ELF loading ───────────────────────────────────────────────────────
 // Read Android runtime images through the same confined VFS as guest opens.
 std::vector<uint8_t> Emulator::read_android_elf(const std::string& guest_path) {
@@ -117,7 +184,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     if (dbg().cpu_profile) {  // BIFROST_PROF: name the thread and the caller on a `[stall]` line (WaitProfile.hpp)
         wait_prof_set_describers(
             [this](int tid) { std::string name; find_task_comm(tid, name); return name; },
-            [this](uint64_t address) { return describe_guest_address(*this, address); });
+            [this](uint64_t address) { return describe_guest_address(*this, address); },
+            [this](int fd) {
+                const auto node = fds_.get(fd);
+                return node ? describe_fd_node(*node) : std::string("closed");
+            });
     }
     if (android_runtime_ && (!yggdrasil::Yggdrasil::sandbox_inside_root() ||
                             path.empty() || path.front() != '/'))
