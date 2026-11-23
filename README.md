@@ -21,9 +21,6 @@ Existing binaries need no cross-compiler and no QEMU.
 **Website:** [sloppyman2567.github.io/bifrost-emu](https://sloppyman2567.github.io/bifrost-emu/): what runs, screenshots
 and how to install.
 
-**Note:** progress on this project may be paused for some time. Fixes, new games and replies to issues may take longer
-than usual.
-
 [![CI](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml/badge.svg)](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
