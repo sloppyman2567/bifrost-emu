@@ -10,6 +10,10 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- The README is now a short page for people: what Bifrost is, the quick start, a few screenshots and links. The game list stays in
+  [COMPATIBILITY.md](COMPATIBILITY.md); the CoreMark tables, the screenshot gallery and the build, configuration and
+  contributing notes moved to [PERFORMANCE.md](PERFORMANCE.md), [SCREENSHOTS.md](SCREENSHOTS.md) and [BUILDING.md](BUILDING.md).
+  The project site reads them from there and looks the same.
 - `[stall]` lines stop repeating: a call site prints its first five stalls and the report counts the rest (`repeated stalls:
   ... x179, 179.0 s in all`). A game's 1 s watchdog sleep used to fill the 200-line limit within minutes and hide later freezes.
 - A `[stall]` line for a `read`, `write`, socket call or `ioctl` now says what the descriptor is: a file path, a pipe, a socket

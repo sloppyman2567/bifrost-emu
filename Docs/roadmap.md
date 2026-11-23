@@ -61,7 +61,7 @@ Measured on Battle Cats and Subway Surfers launches and kernels; the shared copy
 game was timed for the JIT changes.
 
 **Games:** 20 recorded, 17 of them playable (13 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
-[What runs](../README.md#what-runs) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says
+[What has been run](COMPATIBILITY.md) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says
 otherwise.
 
 **Known blockers, by cause:**

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build the project site (GitHub Pages: home, install, games, screenshots and JIT pages) from files in the repository.
 
-The pages take the version from Include/Bifrost/Version.hpp and, from README.md, the "What
-runs" summary and table (the full notes come from Docs/COMPATIBILITY.md), the screenshots and the Performance tables; the plain-language copy of each page is its own
+The pages take the version from Include/Bifrost/Version.hpp, the summary and table of programs from
+Docs/COMPATIBILITY.md, the screenshots from Docs/SCREENSHOTS.md and the CoreMark and bench_* tables from
+Docs/PERFORMANCE.md; the plain-language copy of each page is its own
 file here (home.html, install.html, games.html, screenshots.html, jit.html) and layout.html holds the sidebar.
 Each table row's status is checked against Scripts/Android/compatibility.json, and the build fails
 rather than publish a page that disagrees with it. Writes one index.html per page, sitemap.xml
@@ -64,13 +65,6 @@ def plain(text):
     return re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text).replace("**", "").replace("`", "")
 
 
-def section(readme, title):
-    match = re.search(rf"^## {re.escape(title)}\n(.*?)(?=^## )", readme, re.S | re.M)
-    if not match:
-        raise SystemExit(f"README.md has no '## {title}' section")
-    return match.group(1)
-
-
 def normalized(name):
     name = re.sub(r"\(.*?\)", "", name.lower())
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", name).split())
@@ -101,21 +95,20 @@ def table_rows(text, where):
     return [tuple(cell.strip() for cell in line.strip("|").split(" | ")) for line in table.group(1).splitlines()]
 
 
-def games(readme, compat):
-    body = section(readme, "What runs")
-    summary = re.search(r"\*\*(\d+) games recorded \((\d{4}-\d{2}-\d{2})\): (\d+) playable\*\*.*?(?=\n\n)", body, re.S)
+def games(compat):
+    page = (ROOT / "Docs/COMPATIBILITY.md").read_text()
+    summary = re.search(r"\*\*(\d+) games recorded \((\d{4}-\d{2}-\d{2})\): (\d+) playable\*\*.*?(?=\n\n)", page, re.S)
     if not summary:
-        raise SystemExit("README 'What runs' summary not understood")
-    # The README has a one-line status per program; Docs/COMPATIBILITY.md has the full notes, which the site shows as details.
-    short = table_rows(body, "README")
-    full = table_rows((ROOT / "Docs/COMPATIBILITY.md").read_text(), "Docs/COMPATIBILITY.md")
-    if [normalized(plain(row[0])) for row in short] != [normalized(plain(row[0])) for row in full]:
-        raise SystemExit("README 'What runs' and Docs/COMPATIBILITY.md list different programs, or in a different order")
+        raise SystemExit("Docs/COMPATIBILITY.md summary line not understood")
+    full = table_rows(page, "Docs/COMPATIBILITY.md")
     rows, statuses, playable = [], [], []
-    for (program, _, brief), (_, kind, status) in zip(short, full):
+    # The page lives in Docs/, so its relative links are rewritten to be relative to the repository root.
+    def from_root(cell):
+        return re.sub(r"\]\((?![a-z]+://|#|Docs/)", "](Docs/", cell)
+
+    for program, kind, status in full:
+        program, kind, status = from_root(program), from_root(kind), from_root(status)
         state = status_of(status)
-        if status_of(brief) != state:
-            raise SystemExit(f"README says {plain(program)} is {status_of(brief)}, Docs/COMPATIBILITY.md says {state}")
         statuses.append((normalized(plain(program)), state))
         if state == "playable":  # names for the home page, without versions
             playable += [re.sub(r"\s+\d+(\.\d+)+$", "", name.strip()) for name in plain(program).split(", ")]
@@ -131,18 +124,18 @@ def games(readme, compat):
         name = normalized(app["name"])
         found = [state for row, state in statuses if name in row]
         if not found:
-            raise SystemExit(f"README 'What runs' has no row for {app['name']} ({package}, {app['status']})")
+            raise SystemExit(f"Docs/COMPATIBILITY.md has no row for {app['name']} ({package}, {app['status']})")
         if app["status"] == "playable" and "playable" not in found:
-            raise SystemExit(f"README marks {app['name']} {found[0]}, compatibility.json playable")
+            raise SystemExit(f"Docs/COMPATIBILITY.md marks {app['name']} {found[0]}, compatibility.json playable")
         if app["status"] == "blocked" and found[0] not in ("blocked", "playable"):
-            raise SystemExit(f"README marks {app['name']} {found[0]}, compatibility.json blocked")
+            raise SystemExit(f"Docs/COMPATIBILITY.md marks {app['name']} {found[0]}, compatibility.json blocked")
     text = " ".join(summary.group(0).split())
     return summary, inline(text), "\n".join(rows), playable
 
 
-def performance(readme):
-    """The README's CoreMark and bench_* tables for the JIT page; the build fails rather than show figures it misread."""
-    body = section(readme, "Performance")
+def performance():
+    """The CoreMark and bench_* tables of Docs/PERFORMANCE.md for the JIT page; the build fails rather than show figures it misread."""
+    body = (ROOT / "Docs/PERFORMANCE.md").read_text()
     when = re.search(r"CoreMark \(([A-Z][a-z]+ \d{1,2}, \d{4})\), measured on (an? [^,]+?) with", body)
     def table(header):
         match = re.search(rf"^{re.escape(header)}\n\|[-|]+\|\n((?:\|.*\|\n)+)", body, re.M)
@@ -150,11 +143,11 @@ def performance(readme):
     coremark = table("| Build | Median iterations/s |")
     bench = table("| Benchmark | Interpreter | JIT | Speedup |")
     if not when or len(coremark) < 2 or not bench or not all(re.fullmatch(r"[\d,]+", value) for _, value in coremark):
-        raise SystemExit("README 'Performance' CoreMark or bench_* table not understood")
+        raise SystemExit("Docs/PERFORMANCE.md CoreMark or bench_* table not understood")
     values = [int(value.replace(",", "")) for _, value in coremark]
     qemu = [value for (build, _), value in zip(coremark, values) if "QEMU" in build]
     if len(qemu) != 1:
-        raise SystemExit("README 'Performance' CoreMark table needs exactly one QEMU row")
+        raise SystemExit("Docs/PERFORMANCE.md CoreMark table needs exactly one QEMU row")
     top = max(values)
     # One series: Bifrost builds in the accent, the QEMU reference in neutral gray; every value is printed.
     rows = "\n".join(
@@ -166,8 +159,8 @@ def performance(readme):
             "vs_qemu": f"{values[0] / qemu[0]:.1f}", "coremark_rows": rows, "bench_rows": bench_rows}
 
 
-def screenshots(readme, output, url):
-    """The README's screenshots as WebP at most 960 px wide (twice their width on the page)."""
+def screenshots(output, url):
+    """The screenshots of Docs/SCREENSHOTS.md as WebP at most 960 px wide (twice their width on the page)."""
     try:
         from PIL import Image
     except ImportError:
@@ -176,8 +169,8 @@ def screenshots(readme, output, url):
     images = output / "images"
     images.mkdir(parents=True, exist_ok=True)
     for src, alt, caption in re.findall(r'<img src="([^"]+)" alt="([^"]+)"[^>]*><br><sub>([^<]+)</sub>',
-                                        section(readme, "Screenshots")):
-        source = ROOT / src
+                                        (ROOT / "Docs/SCREENSHOTS.md").read_text()):
+        source = ROOT / "Docs" / src
         stem = source.parent.name.lower() + "-" + source.stem
         with Image.open(source) as image:
             image = image.convert("RGB")
@@ -188,7 +181,7 @@ def screenshots(readme, output, url):
                      f'height="{height}" loading="lazy" decoding="async"><figcaption>{html.escape(caption)}'
                      f"</figcaption></figure>")
     if not shots:
-        raise SystemExit("README has no screenshots")
+        raise SystemExit("Docs/SCREENSHOTS.md has no screenshots")
     return "\n".join(shots)
 
 
@@ -196,15 +189,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output", type=Path, default=ROOT / "build/site")
     args = parser.parse_args()
-    readme = (ROOT / "README.md").read_text()
     compat = json.loads((ROOT / "Scripts/Android/compatibility.json").read_text())
     version = re.search(r'VERSION\s*=\s*"([^"]+)"', (ROOT / "Include/Bifrost/Version.hpp").read_text()).group(1)
     url = site_url()
     if args.output.exists():
         shutil.rmtree(args.output)
     args.output.mkdir(parents=True)
-    summary, summary_html, rows, playable = games(readme, compat)
-    shots = screenshots(readme, args.output, url)
+    summary, summary_html, rows, playable = games(compat)
+    shots = screenshots(args.output, url)
     # The project icon (tab icon and header mark) and the social preview card (link previews).
     branding = ROOT / "Assets/Branding"
     shutil.copyfile(branding / "bifrost-emu-icon.svg", args.output / "icon.svg")
@@ -264,7 +256,7 @@ def main():
     jit_description = ("How FrostJIT, the bifrost-emu compiler, turns ARM64 Android and Linux code into native x86_64 code, "
                        "how fast it runs against QEMU and how it stays correct.")
     render("jit.html", "FrostJIT: How bifrost-emu Runs ARM64 Code on x86_64", "jit/", jit_description,
-           page_ld("TechArticle", "FrostJIT, the bifrost-emu JIT compiler", "jit/", jit_description), **performance(readme))
+           page_ld("TechArticle", "FrostJIT, the bifrost-emu JIT compiler", "jit/", jit_description), **performance())
     # As many playable names as fit the ~160 characters a search result shows.
     lead = (f"Android games that run on Linux with bifrost-emu: {summary.group(3)} of {summary.group(1)} playable, "
             f"including ")
@@ -285,7 +277,8 @@ def main():
         shutil.copyfile(verification, args.output / verification.name)
     # The date of the newest commit to anything the pages are built from (the build date when git is unavailable).
     try:
-        today = subprocess.run(["git", "log", "-1", "--format=%cs", "--", "README.md", "Scripts/Android/compatibility.json",
+        today = subprocess.run(["git", "log", "-1", "--format=%cs", "--", "README.md", "Docs/COMPATIBILITY.md", "Docs/PERFORMANCE.md",
+                                "Docs/SCREENSHOTS.md", "Scripts/Android/compatibility.json",
                                 "Include/Bifrost/Version.hpp", "Docs/Images", "Assets/Branding", "Tools/Site"],
                                cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
         datetime.date.fromisoformat(today)

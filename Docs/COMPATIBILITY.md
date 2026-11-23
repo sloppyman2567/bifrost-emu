@@ -1,9 +1,12 @@
 # What has been run
 
-The [README](../README.md) lists each program with a one-line status. This page keeps the full notes for every row: versions,
-dates, frame rates and known problems. The machine-readable status of the Android apps is in
-[`Scripts/Android/compatibility.json`](../Scripts/Android/compatibility.json), and the pages in [`Apps/`](Apps/) have more
-detail for some of them.
+**20 games recorded (2026-11-14): 17 playable** (13 Android, 4 Linux), **1 starts** without confirmed gameplay
+(Teeworlds) and **2 are blocked** (Roblox, TrickCal). Umamusume counts as playable through its
+Global client; its JP client is blocked. Apps such as YouTube and Firefox are not counted.
+
+This page keeps the notes for every program: versions, dates, frame rates and known problems. The machine-readable status
+of the Android apps is in [`Scripts/Android/compatibility.json`](../Scripts/Android/compatibility.json), and the pages in
+[`Apps/`](Apps/) have more detail for some of them.
 
 "User-confirmed" and "user-reported" mean the user played it on Bifrost, not that every feature has an automated test or a
 recorded capture. A passing build or a launch is not gameplay.

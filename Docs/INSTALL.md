@@ -1,6 +1,6 @@
 # Install and update
 
-The plain steps. The [README](../README.md) has the full picture and the
+The plain steps. The [README](../README.md) is the short version and the
 [Android guide](Android/ANDROID_APK.md) has every option. What has been checked on which distribution is in the
 [support matrix](SUPPORT.md).
 

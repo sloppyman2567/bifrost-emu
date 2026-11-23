@@ -69,7 +69,7 @@ display's native pixel density; see [window plugins](Android/ANDROID_WINDOW_PLUG
 
 These are for developers and bug reports; names and output can change without notice. Almost all are read by presence:
 **any value, including `0`, turns the switch on**, so `unset` one to turn it off. Where a value is shown it is parsed.
-The user-facing switches are listed above and in the [README](../README.md).
+The user-facing switches are listed above and in [Building and contributing](BUILDING.md#configuration).
 
 ### Logging, crash reports and process control
 
