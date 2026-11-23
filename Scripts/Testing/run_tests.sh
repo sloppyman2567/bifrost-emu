@@ -346,6 +346,7 @@ UNIT_TESTS=(
     "jit_unmap_reuse_race|Tests/Unit/jit_unmap_reuse_race.elf||30|jit_unmap_reuse_race: ALL PASS"
     "jit_selfloop_writeback|Tests/Unit/jit_selfloop_writeback.elf||15|jit_selfloop_writeback: ALL PASS"
     "jit_selfloop_pins|Tests/Unit/jit_selfloop_pins.elf||15|jit_selfloop_pins: ALL PASS"
+    "jit_pin_inplace|Tests/Unit/jit_pin_inplace.elf||15|jit_pin_inplace: ALL PASS"
     "jit_dispatch_cache|Tests/Unit/jit_dispatch_cache.elf||15|jit_dispatch_cache: ALL PASS"
     "jit_call_helpers|Tests/Unit/jit_call_helpers.elf||15|jit_call_helpers: ALL PASS"
     "jit_call_depth|Tests/Unit/jit_call_helpers.elf 20000 deep||15|jit_call_helpers: ALL PASS deep calls"

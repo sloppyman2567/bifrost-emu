@@ -36,6 +36,15 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### In-place pin updates (2026-11-23)
+
+`Tests/Unit/jit_pin_inplace.c` (`run_tests.sh` entry `jit_pin_inplace`) runs self-loops that update pinned registers in the
+shapes the optimisation takes: a counter in `x0` with a later reader of the new value, 64-bit add/sub/eor/orr, 32-bit
+add/sub/eor/mul, the old value read before the update, a `madd`, each checked against plain C for several trip counts, and a
+faulting load on either side of the update (the registers in the signal frame must show the update done or not). It passes
+under the interpreter and the JIT, with and without `BIFROST_NO_PIN_INPLACE`, and it fails (7 `madd_shape` checks) with the
+`ADD` guard in `Arithmetic.cpp` removed. It does not run Tier-2 regions, threads or a game.
+
 ### Stall lines (2026-11-19)
 
 `Tests/Unit/test_wait_stall.c` and `Scripts/Testing/test_wait_stall.sh` (`run_tests.sh` entry `wait_stall`) check, with the JIT and with

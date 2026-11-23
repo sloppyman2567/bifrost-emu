@@ -2,6 +2,49 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## In-place updates of pinned registers (2026-11-23)
+
+Chosen from a read-only profile of the same day (CoreMark, busybox gzip, zstd, sort, fib, dispatch, memcpy, matrix; one pinned
+core; IBS op sampling classified per host instruction): the generated code runs about 3.5 host instructions per guest
+instruction on CoreMark (19.62 G host over 20,000 iterations of 279,918 guest instructions) against about 1.2 for a native
+x86 build of the same C (328,013 instructions per iteration, gcc 16.2.1 `-O2`), so the gap is the JIT's instruction count and not
+the compiler: the AArch64 guest is the shorter program. 31% of CoreMark's executed ops are in eight self-loop blocks. Reading the
+hottest, `matrix_mul_matrix` (guest 0x401de0, 8 ARM instructions, 29 host per iteration against 10 in the native loop):
+8 register copies, 3 loop-invariant state loads (only R12-R15 are pins), 3 dead-looking state stores and 4 guard instructions.
+Mechanism: [the guide](../JIT.md#loop-pins).
+
+Microbenchmark (the 29 executed instructions transcribed into an inline-asm harness with hand-optimised variants of the same
+dataflow, results compared, one pinned core, median of 16 loop alignments because placement alone moved a variant by 15 to
+20%; ns per 16-iteration visit, A 18.5):
+
+| Variant | Change vs A |
+|---|---|
+| everything fixed (no copies, no dead stores, invariants in registers) | -26% |
+| copies fixed (reads from the pin, results in place) | -21% |
+| state traffic fixed (3 invariant loads, 3 stores) | -18% |
+| dead stores only | -6% |
+| write side only / read side only | -6.5% / -4% |
+| two extra pins for x20 and x21 (RSI/RDI), stores and copies kept | +0.5% |
+| chains updated in place, side copies kept | -12% |
+| exactly what the JIT now emits (chains in place, one side copy of the new counter) | -6.7% |
+
+The loop is bound by instruction dispatch (about 5.7 instructions per cycle), so each removed instruction is about 3.5% of it,
+and the pieces are not additive. One extra `mov` was worth 5 points.
+
+Result of the change (new binary against the previous one, alternating runs, one pinned core, host counters): CoreMark 40,000
+iterations, 15 pairs: 16,681 to 16,821 it/s (+0.8% median, +0.4% mean; the stdev of one run is 1.1 to 1.5%), instructions -1.8%,
+cycles -0.8%, fewer cycles in 10 of 15 pairs. busybox gzip of 6.7 MB: cycles -1.3% (12 of 15 pairs). `bench_mips` -4.7%
+instructions, cycles +0.1%. `bench_sort`, zstd and `bench_fib` within noise (no pinned counter loops). The code is correct on
+`jit_pin_inplace`, the 103 JIT-named unit fixtures and 65 toybox/real-world tests; gzip and zstd output is byte-identical. Not
+measured: a game, the Android runtime, Tier-2 (it keeps its own allocator), a second machine. `make verify` cannot cover this: it
+sets `BIFROST_JIT_VERIFY`, which turns pinning off.
+
+Rejected, do not repeat: a non-owning register alias for the `LOAD_REG` copy (the allocator holds `reg_vreg_[vreg_home_[v]] == v`
+in about 55 places and `drop_vreg` reports a violation); renaming operands to architectural vregs (x0 is vreg 0, the IR's "no
+operand"); more pins in RSI/RDI (not callee-saved, so a block with any C-call slow path would clobber them, and the measured gain
+alone is zero). Left: a reader of the new value after the update still takes a copy (the single cheapest further step, about 5
+points on this loop), the three invariant loads and the stores of `x5`/`x6` (not pin candidates: written before read).
+
 ## Host-native memcpy, memmove and memset (2026-11-16)
 
 Chosen from the game profile of the same day: in Minecraft Weekend the hottest translated block was the guest's `memset`

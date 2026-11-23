@@ -10,6 +10,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- Hot loops that count or accumulate in a register (`add x0, x0, #1`, a running sum) update it in place instead of through a
+  scratch copy: fewer instructions per iteration. About 1% on CoreMark and gzip on one machine, nothing on programs without
+  such loops. `BIFROST_NO_PIN_INPLACE=1` switches it off.
 - The README is now a short page for people: what Bifrost is, the quick start, a few screenshots and links. The game list stays in
   [COMPATIBILITY.md](COMPATIBILITY.md); the CoreMark tables, the screenshot gallery and the build, configuration and
   contributing notes moved to [PERFORMANCE.md](PERFORMANCE.md), [SCREENSHOTS.md](SCREENSHOTS.md) and [BUILDING.md](BUILDING.md).

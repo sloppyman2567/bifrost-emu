@@ -221,6 +221,16 @@ allocated (`scvtf s0, w1` at a loop head) would read the stale `cpu.regs` slot. 
 architectural vreg (`store_dirty_unpinned_arch_regs`) before its slot. `jit_selfloop_pins` and `jit_fp_ldst_cache` cover
 both.
 
+A pinned register that the loop updates (`add x0, x0, #1`, `add w3, w3, w4`, `madd x3, x9, x8, x3`) is updated in its pin.
+The IR is `LOAD_REG t <- a; OP s <- t, y; [ZEXT 32]; STORE_REG a <- s` and the generic path computes in a scratch copy of the
+pin and moves the result back, three instructions on the loop-carried chain. `scan_pin_inplace` marks an `ADD`/`SUB`/`AND`/
+`OR`/`XOR`/`MUL` of exactly that adjacent shape (the ZEXT only when `zext32_fused_` fused it into the op); the compile loop
+emits it as `a <- a OP y`, the existing `dest == src1` form, on the pin, skips the `STORE_REG`, the `ZEXT` and a `LOAD_REG`
+that only the op read, and gives readers of the new value after the `STORE_REG` a copy of the pin. Nothing sits between the
+op and the end of the guest instruction, so no fault or exit can see the new value early. Readers of the old value before the
+op keep their `LOAD_REG` copy. An `ADD` with `dest == src1` never moves its result into a dead second operand's register
+(the pin would lose the value). `BIFROST_NO_PIN_INPLACE=1` goes back to the scratch copy. `jit_pin_inplace` covers it.
+
 ### Peepholes
 
 Tier-1 decides each with a pre-scan and the emitter re-checks it:
@@ -1854,6 +1864,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [In-place updates of pinned registers (2026-11-23)](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23)
 - [One jump per loop iteration and one check per repeated access (2026-11-16)](archive/JIT-history.md#one-jump-per-loop-iteration-and-one-check-per-repeated-access-2026-11-16)
 - [Host-native memcpy, memmove and memset (2026-11-16)](archive/JIT-history.md#host-native-memcpy-memmove-and-memset-2026-11-16)
 - [A fork child keeps the JIT (2026-11-11)](archive/JIT-history.md#a-fork-child-keeps-the-jit-2026-11-11)
