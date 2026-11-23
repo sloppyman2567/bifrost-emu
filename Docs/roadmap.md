@@ -297,7 +297,7 @@ exit; then the Azur Lane interaction is checked in a real window and its frame d
 Goal: keep guest registers, vectors and NZCV in host registers across hot paths, reconstructing state only at observable
 boundaries ([design](JIT.md#planned-codegen-retaining-guest-state-across-regions)).
 
-Done: experimental Tier-2 regions (opt-in); a cheaper Tier-1 (CoreMark 13,156 iterations/s on October 27 and 14,874 on November 8, over the 10,000
+Done: experimental Tier-2 regions (opt-in); a cheaper Tier-1 (CoreMark 13,156 iterations/s on October 27, 14,874 on November 8 and 16,880 on November 23 (pinned, 200,000 iterations), over the 10,000
 target; [method](archive/JIT-history.md#coremark-re-measurement-2026-11-08)); compact scalar memory guards; shared cold stubs; native scalar and vector FP by element and LD1R; loop bodies up
 to twice the block cap; lighter Q-register accesses. On a set of engine-shaped kernels the JIT went from 5.8× to 4.2× the
 time of a native AVX2 build ([details](JIT.md)).

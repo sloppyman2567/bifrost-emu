@@ -400,7 +400,55 @@ whose blocks each start with a load packs seven instructions on every edge), one
 same-base stack accesses, guest-state stores overwritten later in the block, the 17-instruction indirect-branch probe, copies to
 and from pinned registers, and the `movabs` of the window base on every chain entry.
 
+## CoreMark and benchmark re-measurement (2026-11-23)
+
+The README's performance figures, measured again with the November 8 method and two changes: every run is pinned to one core
+(`taskset -c 5`), and the count is 200,000 iterations, because the current build at 160,000 would run under CoreMark's ten-second
+minimum. `Tests/Unit/coremark.elf` as `coremark.elf 0 0 0 200000`, one warmup and three measured runs interleaved across the four
+binaries, every run with the expected CRCs (`crclist` 0xe714, `crcmatrix` 0x1fd7, `crcstate` 0x8e3a, `crcfinal` 0x4983, the value
+QEMU prints at this count). The CPU governor was `performance` with boost on (`/sys`), and the runs started after the 1-minute load
+average had fallen below 1.0 (it then sat near 1.0: the benchmark itself). Each bifrost-emu binary was built from `git archive` in a
+temporary directory (the shipped one with `USE_SDL2=1 USE_THUNK_GL=1`, the headless ones with
+`USE_SDL2=0 USE_SDL3=0 USE_THUNK_GL=0 USE_MEDIA=0`), so no shared build was replaced.
+
+| Build | Runs (iterations/s) | Median |
+|---|---|---|
+| tree at `68a384ca`, shipped SDL/GL build | 16,880 / 16,913 / 16,828 | 16,880 |
+| same source, headless build | 16,810 / 16,889 / 16,919 | 16,889 |
+| 2.0.0-alpha.2 release commit (`556557b0`), headless build | 12,628 / 12,665 / 12,635 | 12,635 |
+| QEMU 11.1.3 user mode | 8,024 / 8,010 / 8,030 | 8,024 |
+
+The shipped build is 2.10 times QEMU; the headless build is 1.34 times alpha.2; the shipped and headless builds differ by 0.1%.
+Against November 8 the shipped build is 13% faster (14,874 to 16,880), which fits the 2026-11-10 and 11-11 JIT changes (see the
+changelog); the alpha.2 binary measured 12,635 against 12,711 then, 0.6% apart despite the pinning and the higher count.
+
+The `bench_*` table in the README comes from `taskset -c 5 bifrost-emu [--no-jit] Tests/Apps/bench_NAME.elf`, one warmup and three
+measured runs per mode on the shipped build, each program's own timer except `bench_mips` (process wall time), medians:
+
+| Program | Interpreter | JIT | Speedup |
+|---|---|---|---|
+| fib(35) | 7.221 s (7.227 / 7.221 / 7.128) | 0.065 s | 111x |
+| memcpy 256 MiB | 185.0 MiB/s | 13,956 MiB/s | 75x |
+| qsort 100K ints | 4.350 s | 0.071 s | 61x |
+| matrix 256x256 | 12.7 MFLOPS | 1,086 MFLOPS | 86x |
+| `bench_mips` | 15.407 s, 51.9 MIPS | 0.178 s, 4,482 MIPS | 86x |
+
+This run used a small harness around the same commands, not `Scripts/Bench/run_benchmarks.py --mode both`, which the November 8 run
+used for `bench_mips`; the program output was checked for its `VALID:` line each time. Compared with November 8: the JIT `memcpy`
+is 49% faster (9,390 to 13,956 MiB/s; large copies now run the host's routine, commit `7be92eb5`), JIT `fib(35)` is 14% faster
+(0.076 to 0.065 s) and JIT `qsort` 7% (0.076 to 0.071 s), and the JIT `matrix` is 4% slower (1,129 to 1,086 MFLOPS), which is one
+millisecond of the 31 ms timer. The interpreter figures are 2% to 8% faster (fib 7.35 to 7.22 s, qsort 4.51 to 4.35 s, matrix 11.9
+to 12.7 MFLOPS, memcpy 171 to 185 MiB/s, `bench_mips` 51 to 52 MIPS), which this note does not explain.
+
+Limits: one host and one benchmark; the JIT times of the small programs are millisecond-scale. Pinning one core removes scheduler
+noise but is a different condition from the unpinned November 8 runs, so the two sets are comparable only loosely (the alpha.2
+cross-check above is the evidence they are close). Core 5 read 4,441 MHz after nearly every run and 3,589 MHz after one (the first
+shipped-build run of round 1, 16,880 iterations/s, in line with the others). No `BIFROST_TIER2=1` run. CoreMark does not predict
+game frame rates.
+
 ## CoreMark re-measurement (2026-11-08)
+
+Superseded by the [2026-11-23 re-measurement](#coremark-and-benchmark-re-measurement-2026-11-23); kept as the record of these numbers.
 
 The October 27 method on the same Ryzen 7 5800X3D desktop, now with the CPU governor on `performance` (boost on, checked in
 `/sys`). `Tests/Unit/coremark.elf` as `coremark.elf 0 0 0 160000`, one warmup and three measured runs interleaved across the four

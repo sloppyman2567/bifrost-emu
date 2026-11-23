@@ -1846,8 +1846,8 @@ by method rather than by fixed address ranges.
   prints). A run under ten seconds is invalid, and a new count needs its CRC from QEMU. Fix the CPU governor to
   `performance`. Whole-process cache-miss counts mostly measure startup and translation (the dynamic loader, thunk
   registration), not generated code. CoreMark does not predict game frame rates.
-- **Latest recorded figures.** CoreMark 14,874 iterations/s on the shipped build against 7,992 for QEMU 11.1.1 (Ryzen 7
-  5800X3D, 2026-11-08), and 37,951 natively (gcc `-O2`, same host, 2026-11-07); records and methods are under
+- **Latest recorded figures.** CoreMark 16,880 iterations/s on the shipped build against 8,024 for QEMU 11.1.3 (Ryzen 7
+  5800X3D, pinned to one core, 2026-11-23), and 37,951 natively (gcc `-O2`, same host, 2026-11-07); records and methods are under
   [Recorded changes](#recorded-changes). The README's performance tables are the published figures.
 
 ## Recorded changes

@@ -20,6 +20,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - Umamusume's connect freezes (about 4 s each, several in a row) were the app looking up its own hostname: on a host where
   `systemd-resolved` tries LLMNR and mDNS for single-label names, the answer took 3.7 s. The Android DNS service now answers the
   guest's own hostname with loopback itself. Other single-label names still go to the host.
+- The README's performance tables are re-measured (2026-11-23, pinned to one core): CoreMark 16,880 iterations/s on the shipped
+  build, 2.1 times QEMU 11.1.3 (8,024), and the `bench_*` speedups are 61x to 111x. The `wait_stall` test no longer depends on how
+  many cores the machine has (it failed on CI).
 - The README is shorter and easier to scan: Quick start comes right after the highlights, each game in "What runs" has one
   line, and the long notes moved to the new [Docs/COMPATIBILITY.md](COMPATIBILITY.md). The other install routes and their notes
   are in [Install and update](INSTALL.md#other-ways-to-install). The project site shows the full notes as before.
