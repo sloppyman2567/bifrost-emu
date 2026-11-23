@@ -35,7 +35,7 @@ builds the headless library inside that limit (the library's timestamps fit; the
 `Tests/Unit/test_wait_stall.c` and `Scripts/Testing/test_wait_stall.sh` (`run_tests.sh` entry `wait_stall`) check, with the JIT and with
 `--no-jit`, that `BIFROST_PROF` prints one `[stall]` line for a busy thread's futex wait and for a busy thread's `nanosleep` (with the
 thread name, the futex address, a caller and the time of day), for a busy thread blocked in `read` on a pipe and on a unix socket (with
-what the descriptor is), only five lines for a call site that stalls seven times (the report counts all seven), none for a thread that only waits, none without `BIFROST_PROF`, and none
+what the descriptor is), only five lines for a call site that stalls nine times (the report counts all of them, lists twelve such sites and says how many more there are), none for a thread that only waits, none without `BIFROST_PROF`, and none
 for calls under a second. It fails on a build without the lines, and without the busy-thread rule. It does not cover a real game.
 
 ### Guest identity (2026-11-23)

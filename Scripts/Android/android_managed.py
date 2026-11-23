@@ -567,7 +567,8 @@ class DnsProxy:
         if offline and not cls.local_name(args[1]):
             return cls.failure(7)  # EAI_NODATA, Android's "No address associated with hostname"
         _, host, service, flags, family, kind, protocol, netid = args
-        if cls.is_guest_hostname(host):
+        own_name = cls.is_guest_hostname(host)
+        if own_name:
             host = "localhost"
         flags, family, kind, protocol, netid = map(int, (flags, family, kind, protocol, netid))
         if not 0 <= netid <= 0xffffffff:
@@ -598,6 +599,8 @@ class DnsProxy:
                        socket.inet_pton(family, address[0]) + struct.pack("<I", address[3]))
             else:
                 continue
+            if own_name and canon:
+                canon = cls.GUEST_HOSTNAME  # the answer is for the guest's own name, not for "localhost"
             name = canon.encode("utf-8") + b"\0" if canon else b""
             output += struct.pack("!6i", 1, flags, family, kind, protocol, len(raw))
             output += raw + struct.pack("!i", len(name)) + name
@@ -644,9 +647,12 @@ class DnsProxy:
                     self.slow_lines += 1
                 else:
                     line = None
-            if line:
-                print(line, file=sys.stderr, flush=True)
             client.sendall(response)
+            if line:  # after the reply, and on its own: a broken log must not cost the app its answer
+                try:
+                    print(line, file=sys.stderr, flush=True)
+                except (OSError, ValueError):
+                    pass
         except OSError:
             pass  # client closed, timed out, or launcher is shutting down
         finally:

@@ -3156,6 +3156,45 @@ class DnsProxyTests(unittest.TestCase):
             DnsProxy.resolve(b"getaddrinfo other-single-label ^ 0 0 1 0 0")
             self.assertEqual([call.args[0] for call in resolver.call_args_list], ["bifrost-emu.example", "other-single-label"])
 
+    def test_own_hostname_keeps_its_canonical_name(self):
+        from android_managed import DnsProxy
+        answer = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "localhost", ("127.0.0.1", 80))]
+        with patch("android_managed.socket.getaddrinfo", return_value=answer):
+            own = DnsProxy.resolve(f"getaddrinfo {DnsProxy.GUEST_HOSTNAME} ^ 2 0 1 0 0".encode())
+            other = DnsProxy.resolve(b"getaddrinfo localhost ^ 2 0 1 0 0")
+        self.assertIn(DnsProxy.GUEST_HOSTNAME.encode() + b"\0", own)
+        self.assertNotIn(b"localhost\0", own)
+        self.assertIn(b"localhost\0", other)
+
+    def test_a_broken_log_does_not_cost_the_app_its_answer(self):
+        from android_managed import DnsProxy
+        class BrokenLog:
+            def write(self, text): raise BrokenPipeError("log closed")
+            def flush(self): raise BrokenPipeError("log closed")
+        def slow(*args):
+            time.sleep(DnsProxy.SLOW_LOOKUP_SECONDS + 0.1)
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 80))]
+        with tempfile.TemporaryDirectory(prefix="bifrost-dns-") as directory:
+            proxy = DnsProxy(Path(directory))
+            try:
+                with patch("android_managed.socket.getaddrinfo", side_effect=slow), \
+                     patch("android_managed.sys.stderr", BrokenLog()):
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                        client.settimeout(10)
+                        client.connect(str(proxy.path))
+                        client.sendall(b"getaddrinfo slow.example.invalid ^ 0 0 1 0 0\0")
+                        data = b""
+                        while chunk := client.recv(4096):
+                            data += chunk
+            finally:
+                proxy.close()
+        self.assertTrue(data.startswith(b"222\0"), data)
+
+    def test_the_generic_rootfs_writes_the_same_hostname(self):
+        from android_managed import DnsProxy
+        script = (ROOT / "Scripts/Setup/setup-rootfs.sh").read_text()
+        self.assertIn('echo "%s" > "$ROOTFS/etc/hostname"' % DnsProxy.GUEST_HOSTNAME, script)
+
     def test_guest_hostname_matches_the_emulators_uname_nodename(self):
         from android_managed import DnsProxy
         source = (ROOT / "Source/System/Core/GuestIdentity.hpp").read_text()

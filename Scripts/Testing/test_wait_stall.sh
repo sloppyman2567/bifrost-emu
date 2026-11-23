@@ -38,10 +38,12 @@ for mode in jit no-jit; do
     check "$mode: it says the descriptor is a unix stream socket" 1 "$(grep -c " fd=$sock_fd unix stream .*caller=" <<<"$sockline")"
     check "$mode: a futex line has no descriptor" 0 "$(grep -c ' fd=' <<<"$line")"
     loops=$(grep '\[stall\].*"st-loop"' <<<"$out" || true)
-    check "$mode: a call site prints five stalls of seven" 5 "$(grep -c . <<<"$loops")"
+    check "$mode: a call site prints five stalls of nine" 5 "$(grep -c . <<<"$loops")"
     check "$mode: only the fifth says it is the last line" 1 "$(grep -c 'last line for this call site' <<<"$loops")"
-    check "$mode: the report counts all seven" 1 "$(grep -c 'repeated stalls: tid [0-9]* "st-loop" nanosleep x7, ' <<<"$out")"
-    check "$mode: the other threads are not in the repeated list" 0 "$(grep 'repeated stalls' <<<"$out" | grep -c -v '"st-loop"')"
+    check "$mode: the report counts all nine" 1 "$(grep -c 'repeated stalls: tid [0-9]* "st-loop" nanosleep x[89], ' <<<"$out")"
+    check "$mode: twelve repeated sites are listed" 12 "$(grep -c 'repeated stalls: tid' <<<"$out")"
+    check "$mode: only the looping threads are in that list" 0 "$(grep 'repeated stalls: tid' <<<"$out" | grep -c -v '"st-loop"\|"st-many"')"
+    check "$mode: the report says how many sites it left out" 1 "$(grep -c -E 'and [1-9][0-9]* more call sites with repeated stalls' <<<"$out")"
     check "$mode: the idle thread is not reported" 0 "$(grep -c '\[stall\].*"st-idle"' <<<"$out")"
     check "$mode: the idle main thread is not reported" 0 "$(grep -c '\[stall\].*tid 1 ' <<<"$out")"
 done

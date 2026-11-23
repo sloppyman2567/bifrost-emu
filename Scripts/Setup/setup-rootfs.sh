@@ -15,7 +15,7 @@
 #     etc/
 #       passwd         (minimal)
 #       group          (minimal)
-#       hostname       ("bifrost")
+#       hostname       ("bifrost-emu", the guest's uname nodename)
 #       hosts          (localhost entries)
 #       nsswitch.conf  (files dns)
 #     bin/             -> sh (symlink to busybox/toybox if available)
@@ -141,7 +141,7 @@ root:x:0:
 nobody:x:65534:
 EOF
 
-echo "bifrost" > "$ROOTFS/etc/hostname"
+echo "bifrost-emu" > "$ROOTFS/etc/hostname"  # GUEST_NODENAME in Source/System/Core/GuestIdentity.hpp
 
 cat > "$ROOTFS/etc/hosts" <<'EOF'
 127.0.0.1   localhost localhost.localdomain bifrost

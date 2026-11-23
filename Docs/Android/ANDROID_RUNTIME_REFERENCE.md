@@ -3332,8 +3332,9 @@ Requests and concurrent clients are bounded; sockets close with the session.
 A lookup that takes a second or more (the app's calling thread waits for it) is logged to the session's `launcher.log` with its
 hostname, duration and result, at most 200 lines per session. There is no result cache. The guest's own hostname (`bifrost-emu`,
 the `uname` nodename) resolves to loopback without asking the host: a host whose resolver tries LLMNR and mDNS for single-label
-names (systemd-resolved does by default) took about 3.7 s to say no, and the app's main thread waited for it. Other single-label
-names still go to the host.
+names (systemd-resolved does by default) took about 3.7 s to say no, and the app's main thread waited for it. An
+`AI_CANONNAME` answer for that name carries it as the canonical name. Other single-label names still go to the host. The reply is
+sent before the slow-lookup line is logged, and a log that cannot be written does not affect the reply.
 This supplies the host's default network. Android per-network routing, legacy
 hostent commands and raw `resnsend` queries are not implemented. No DNS server
 address or application hostname is hardcoded.

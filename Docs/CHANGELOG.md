@@ -20,6 +20,10 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - Umamusume's connect freezes (about 4 s each, several in a row) were the app looking up its own hostname: on a host where
   `systemd-resolved` tries LLMNR and mDNS for single-label names, the answer took 3.7 s. The Android DNS service now answers the
   guest's own hostname with loopback itself. Other single-label names still go to the host.
+- Review fixes for the stall and hostname work: the generic rootfs writes `/etc/hostname` as `bifrost-emu` too (it said `bifrost`);
+  the DNS reply is sent before a slow lookup is logged, so a broken log cannot drop it; the guest's own name keeps itself as the
+  canonical name; stall sites are keyed by thread record (a reused tid cannot hide a thread's first stalls), the retry is bounded
+  by 50 ms of real time, and the report says how many repeated-stall sites it left out.
 - The guest's hostname is `bifrost-emu` everywhere. It was `arm64-emu` (the project's old name) in `uname` and `bifrost` in
   `/proc/sys/kernel/hostname`; `uname` and the `/proc` files that repeat it now come from one definition.
 - `BIFROST_PROF` prints its report at exit without `-v`, including for programs that end through `exit_group`; `-v` is

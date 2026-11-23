@@ -112,19 +112,24 @@ Describers g_describers;
 std::atomic<unsigned> g_stall_lines{0};
 
 // How often each call site stalled. Only the first MAX_LINES_PER_SITE stalls of a site print; the rest are counted here and the
-// report lists the sites that went past it, with their count and time, so a repeating freeze is still seen in full.
+// report lists the sites that went past it, with their count and time, so a repeating freeze is still seen in full. A site is a
+// thread's record (never reused, unlike a guest tid), the call and its caller.
 struct Site {
+    int tid = 0;
     uint64_t count = 0, total_ns = 0, max_ns = 0;
 };
-using SiteKey = std::tuple<int, uint64_t, uint64_t>;  // guest tid, syscall number, caller
-std::mutex g_sites_mutex;                              // locked briefly like the describers' (fork_guest does not hold it)
+using SiteKey = std::tuple<const Record*, uint64_t, uint64_t>;  // thread record, syscall number, caller
+constexpr size_t MAX_SITES = 4096;                              // the table is never pruned: a full one counts nothing new
+std::mutex g_sites_mutex;                                       // locked briefly like the describers' (fork_guest does not hold it)
 std::map<SiteKey, Site> g_sites;
+std::atomic<unsigned> g_unsited_lines{0};  // stalls that could not be counted per site (table busy or full): a few lines print
 
-// Stalls that end together meet at these locks: retry for a moment, but never wait for good, since a fork child's copy of a lock
-// may be held by a thread that does not exist there.
+// Stalls that end together meet at these locks: retry for up to 50 ms, but never wait for good, since a fork child's copy of a
+// lock may be held by a thread that does not exist there.
 bool lock_briefly(std::unique_lock<std::mutex>& lock) {
-    for (int attempt = 0; !lock && attempt < 500; ++attempt) {
-        if (attempt) std::this_thread::sleep_for(std::chrono::microseconds(100));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    while (!lock && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
         (void)lock.try_lock();
     }
     return lock.owns_lock();
@@ -141,17 +146,25 @@ void report_stall(const Record& r, uint64_t duration_ns, uint64_t number, uint64
     const uint64_t cpu_now = thread_cpu_ns(r.cpu_clock);
     const uint64_t cpu = cpu_now > r.cpu_base_ns ? cpu_now - r.cpu_base_ns : 0;
     if (!lifetime || cpu * 20 < lifetime) return;
-    uint64_t site_count = 0;  // 0: the table was busy, so the line prints as before
+    uint64_t site_count = 0;
+    bool counted = false;
     {
         std::unique_lock<std::mutex> lock(g_sites_mutex, std::try_to_lock);
         if (lock_briefly(lock)) {
-            Site& site = g_sites[SiteKey{r.tid.load(std::memory_order_relaxed), number, caller}];
-            site_count = ++site.count;
-            site.total_ns += duration_ns;
-            site.max_ns = std::max(site.max_ns, duration_ns);
+            const SiteKey key{&r, number, caller};
+            if (g_sites.size() < MAX_SITES || g_sites.count(key)) {
+                Site& site = g_sites[key];
+                site.tid = r.tid.load(std::memory_order_relaxed);
+                site_count = ++site.count;
+                site.total_ns += duration_ns;
+                site.max_ns = std::max(site.max_ns, duration_ns);
+                counted = true;
+            }
         }
     }
-    if (site_count > MAX_LINES_PER_SITE) return;
+    // A busy or full table (a fork child can inherit it locked) must not bring the flood back: a few lines, then none.
+    if (counted ? site_count > MAX_LINES_PER_SITE : g_unsited_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_LINES_PER_SITE)
+        return;
     if (g_stall_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_STALL_LINES) return;
     std::string name, where, fd;
     {
@@ -315,8 +328,9 @@ void wait_prof_print(std::FILE* out, const std::function<std::string(int)>& name
     }
     std::sort(repeated.begin(), repeated.end(), [](const Repeated& a, const Repeated& b) { return a.site.total_ns > b.site.total_ns; });
     for (size_t i = 0; i < repeated.size() && i < SHOWN; ++i) {
-        const auto& [tid, number, caller] = repeated[i].key;
+        const uint64_t number = std::get<1>(repeated[i].key), caller = std::get<2>(repeated[i].key);
         const Site& site = repeated[i].site;
+        const int tid = site.tid;
         const std::string name = name_of ? name_of(tid) : std::string();
         std::string where;
         {
@@ -329,6 +343,7 @@ void wait_prof_print(std::FILE* out, const std::function<std::string(int)>& name
                      number == 0x1000 ? "graphics thunk" : (call ? call : "syscall"), static_cast<unsigned long long>(site.count),
                      seconds(site.total_ns), seconds(site.max_ns), where.empty() ? "?" : where.c_str());
     }
+    if (repeated.size() > SHOWN) std::fprintf(out, "[%s]   and %zu more call sites with repeated stalls\n", CODENAME, repeated.size() - SHOWN);
     State& s = state();
     std::unique_lock<std::mutex> lock(s.mutex, std::try_to_lock);
     if (lock && s.dropped) std::fprintf(out, "[%s]   %llu thread(s) not counted: the table of %zu is full\n", CODENAME,
