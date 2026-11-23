@@ -4,6 +4,12 @@ How the suite is organized and run. Passing fixtures do not establish untested a
 launch is not game playability. The dated checkpoints that used to live here (what was run, when, and what it found)
 are kept unchanged in [the test history](archive/TESTS-history.md); the changelog records what changed.
 
+## Last full run
+
+On 2026-11-01, with every fixture provisioned, the strict suite passed **377/377** under the JIT and **362/362** under the interpreter
+(15 JIT-only tests are not run there), and `make verify` passed 100 differential fixtures plus ten threaded oracle runs. Missing
+fixtures fail strict mode; environment skips (exit 77) stay visible. This is a dated figure, not a claim about the current tree.
+
 ## Test inventory
 
 Original regression sources ship under Bifrost's Unlicense. Generated guest

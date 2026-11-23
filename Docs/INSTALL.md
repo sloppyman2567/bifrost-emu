@@ -27,6 +27,89 @@ bifrost-emu ./program-arm64       # runs an ARM64 Linux program
 bifrost-emu --setup-rootfs        # once, if a Linux program needs shared libraries
 ```
 
+## Other ways to install
+
+### Debian and Ubuntu packages
+
+The quickest route there (Ubuntu 25.10 or newer for Android windows):
+
+```bash
+sudo apt install build-essential debhelper pkg-config libavcodec-dev libavutil-dev libswscale-dev \
+     libegl-dev libffi-dev libgl-dev libsdl3-dev libsdl2-dev libwayland-dev libx11-dev
+make deb                                  # writes ../bifrost-emu_2.0.0~beta.2_amd64.deb
+sudo apt install ../bifrost-emu_*.deb
+bifrost-emu --setup-rootfs                # once: downloads the toolchains and builds the guest rootfs
+```
+
+Android apps need Asgard, which `make deb` also packages as `bifrost-emu-asgard`:
+
+```bash
+sudo apt install ../bifrost-emu-asgard_*.deb      # also pulls in clang, lld and a headless JDK
+asgard-setup                                      # once: ~1.5 GB of pinned downloads, then installs ~1.1 GB under ~/.local
+bifrost-emu /path/to/app.apkm                     # installs and runs it
+```
+
+### For all users, under /usr/local
+
+```bash
+make deps                                 # once: the host packages
+make -j$(nproc)                           # build as yourself, never with sudo
+sudo make install install-rootfs          # the emulator, and the Linux library root if you want one
+make provision-asgard PREFIX=$HOME/.local # Android: about 1.5 GB of pinned downloads
+sudo make install-asgard                  # then the Android part
+```
+
+### Only the emulator, without Android
+
+```bash
+make deps                                 # once: the host packages
+make -j$(nproc)                           # build (SDL2/GL thunks are detected)
+./bifrost-emu hello.elf                   # run a static ARM64 binary
+./bifrost-emu -v Tests/Apps/fib.elf       # print execution stats on exit
+./bifrost-emu Tests/Apps/toybox seq 1 10  # arguments pass through
+```
+
+### An immutable Fedora such as Bazzite
+
+Build and run inside a [Distrobox](https://distrobox.it) container, since the emulator links the container's libraries:
+
+```bash
+distrobox create --name bifrost --image registry.fedoraproject.org/fedora-toolbox:44 && distrobox enter bifrost   # Bazzite only
+make deps
+make -j$(nproc)
+./bifrost-emu --setup-rootfs              # once: the libraries Linux programs need
+./bifrost-emu --setup-rootfs --games      # for Linux games; --rootfs-default games then uses them by default
+```
+
+This was checked in a Fedora 44 chroot on one machine, without Distrobox, a display or a GPU: see the [support matrix](SUPPORT.md).
+
+### Linux programs that need shared libraries
+
+Dynamically linked programs need a guest root filesystem. The [rootfs guide](ROOTFS.md) has the options (`--system`, `--prefix DIR`,
+`--full`, `--games`, `--profile NAME`, `--uninstall`) and the search order:
+
+```bash
+./bifrost-emu --setup-rootfs              # for your user, ~/.local/share/bifrost/rootfs (about 235 MB)
+bifrost-emu my_dynamic_app.elf            # finds the rootfs automatically
+```
+
+## What the installer does and checks
+
+- `make bootstrap` and `make deps` need `make`, and bootstrap also needs Python. On a minimal system without them, run
+  `Scripts/Setup/install-deps.sh` first: it needs only bash and installs both.
+- Nothing needs root for what is already installed. A tool that is present but not on your `PATH` is found anyway (`debugfs` lives in
+  `/usr/sbin`, which an ordinary Debian user's `PATH` lacks; JDKs under `/usr/lib/jvm`, LLVM, `~/.local/bin`, Nix and Homebrew are
+  searched too, and `BIFROST_TOOL_DIRS=DIR` adds a directory). A library `pkg-config` finds is not installed again.
+- Where the distribution has no SDL3 (Debian 12 and 13, Ubuntu 24.04), bootstrap installs what building it needs and builds SDL 3.4.18
+  from the pinned release into `Tools/sdl3`, then installs it beside the emulator (`PREFIX/lib/bifrost`).
+- An interrupted download (Ctrl-C included) is kept as `NAME.part` and the next run resumes it.
+- If Bifrost is already installed elsewhere, such as `/usr/local`, `make bootstrap` makes a second copy of about 1.1 GB, which takes
+  over if `~/.local/bin` comes first on your `PATH`. To update an existing install instead, see below.
+- The desktop launcher (`asgard launcher`) also needs PyQt6, which `make deps` and `make bootstrap` install; `bifrost-emu app.apk`
+  works without it. The [APK guide](Android/ANDROID_APK.md) has the details of `Scripts/Setup/install-asgard.py`.
+- `make bootstrap` is new and not yet confirmed end to end, and `make deps` has only been shown to work on some distributions: see
+  the [support matrix](SUPPORT.md).
+
 ## Update
 
 Pull the new code first (`git pull` in your clone), then pick the line that matches how you installed.

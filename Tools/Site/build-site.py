@@ -2,7 +2,7 @@
 """Build the project site (GitHub Pages: home, install, games, screenshots and JIT pages) from files in the repository.
 
 The pages take the version from Include/Bifrost/Version.hpp and, from README.md, the "What
-runs" summary and table, the screenshots and the Performance tables; the plain-language copy of each page is its own
+runs" summary and table (the full notes come from Docs/COMPATIBILITY.md), the screenshots and the Performance tables; the plain-language copy of each page is its own
 file here (home.html, install.html, games.html, screenshots.html, jit.html) and layout.html holds the sidebar.
 Each table row's status is checked against Scripts/Android/compatibility.json, and the build fails
 rather than publish a page that disagrees with it. Writes one index.html per page, sitemap.xml
@@ -91,18 +91,31 @@ def status_of(text):
 LABELS = {"playable": "Playable", "blocked": "Blocked", "tested": "Tested", "starts": "Starts"}
 
 
+TABLE = re.compile(r"^\| Program \| Kind \| Status \|\n\|[-|]+\|\n((?:\|.*\|\n)+)", re.M)
+
+
+def table_rows(text, where):
+    table = TABLE.search(text)
+    if not table:
+        raise SystemExit(f"{where} 'What runs' table not found")
+    return [tuple(cell.strip() for cell in line.strip("|").split(" | ")) for line in table.group(1).splitlines()]
+
+
 def games(readme, compat):
     body = section(readme, "What runs")
     summary = re.search(r"\*\*(\d+) games recorded \((\d{4}-\d{2}-\d{2})\): (\d+) playable\*\*.*?(?=\n\n)", body, re.S)
     if not summary:
         raise SystemExit("README 'What runs' summary not understood")
+    # The README has a one-line status per program; Docs/COMPATIBILITY.md has the full notes, which the site shows as details.
+    short = table_rows(body, "README")
+    full = table_rows((ROOT / "Docs/COMPATIBILITY.md").read_text(), "Docs/COMPATIBILITY.md")
+    if [normalized(plain(row[0])) for row in short] != [normalized(plain(row[0])) for row in full]:
+        raise SystemExit("README 'What runs' and Docs/COMPATIBILITY.md list different programs, or in a different order")
     rows, statuses, playable = [], [], []
-    table = re.search(r"^\| Program \| Kind \| Status \|\n\|[-|]+\|\n((?:\|.*\|\n)+)", body, re.M)
-    if not table:
-        raise SystemExit("README 'What runs' table not found")
-    for line in table.group(1).splitlines():
-        program, kind, status = (cell.strip() for cell in line.strip("|").split(" | "))
+    for (program, _, brief), (_, kind, status) in zip(short, full):
         state = status_of(status)
+        if status_of(brief) != state:
+            raise SystemExit(f"README says {plain(program)} is {status_of(brief)}, Docs/COMPATIBILITY.md says {state}")
         statuses.append((normalized(plain(program)), state))
         if state == "playable":  # names for the home page, without versions
             playable += [re.sub(r"\s+\d+(\.\d+)+$", "", name.strip()) for name in plain(program).split(", ")]

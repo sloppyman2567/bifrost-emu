@@ -20,6 +20,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - Umamusume's connect freezes (about 4 s each, several in a row) were the app looking up its own hostname: on a host where
   `systemd-resolved` tries LLMNR and mDNS for single-label names, the answer took 3.7 s. The Android DNS service now answers the
   guest's own hostname with loopback itself. Other single-label names still go to the host.
+- The README is shorter and easier to scan: Quick start comes right after the highlights, each game in "What runs" has one
+  line, and the long notes moved to the new [Docs/COMPATIBILITY.md](COMPATIBILITY.md). The other install routes and their notes
+  are in [Install and update](INSTALL.md#other-ways-to-install). The project site shows the full notes as before.
 - Review fixes for the stall and hostname work: the generic rootfs writes `/etc/hostname` as `bifrost-emu` too (it said `bifrost`);
   the DNS reply is sent before a slow lookup is logged, so a broken log cannot drop it; the guest's own name keeps itself as the
   canonical name; stall sites are keyed by thread record (a reused tid cannot hide a thread's first stalls), the retry is bounded
