@@ -9,7 +9,7 @@ Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC.
 [Website](https://sloppyman2567.github.io/bifrost-emu/) · [Install](Docs/INSTALL.md) · [What has been run](Docs/COMPATIBILITY.md) · [Screenshots](Docs/SCREENSHOTS.md) · [Changelog](Docs/CHANGELOG.md)
 
 [![CI](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml/badge.svg)](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml)
-[![Version: 2.0.0-beta.2](https://img.shields.io/badge/version-2.0.0--beta.2-orange.svg)](Docs/CHANGELOG.md)
+[![Version: 2.0.0-beta.3](https://img.shields.io/badge/version-2.0.0--beta.3-orange.svg)](Docs/CHANGELOG.md)
 [![Games: 17 playable of 20](https://img.shields.io/badge/games-17%20playable%20of%2020-brightgreen.svg)](Docs/COMPATIBILITY.md)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 

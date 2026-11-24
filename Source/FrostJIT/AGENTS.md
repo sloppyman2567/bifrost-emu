@@ -6,6 +6,16 @@ Document a JIT change by updating the guide's section for that mechanism (no dat
 write-up, measurements and rejected attempts at the top of [the JIT history](../../Docs/archive/JIT-history.md) and list
 it under the guide's Recorded changes.
 
+One place per kind of fact, so a later change has one place to correct:
+
+- The guide (`Docs/JIT.md`): how the mechanism works now, with at most one short measurement.
+- The history: dated write-up, every number, rejected attempts, what was and was not tested.
+- This file: contracts, what must not break and which test covers it. A number only where it is the reason for the rule.
+- `Docs/roadmap.md`: open work in full; finished work as one line with the headline number and a link to the history section.
+- `Docs/CHANGELOG.md`: 2 to 6 lines for people. The commit message carries the evidence.
+
+A new history section can make an older "not measured" or "next section" line wrong: recheck them.
+
 - `Compiler/BlockAnalysis.*` owns fallback prediction, leaf eligibility and the
   dead-NZCV successor scan (`nzcv_dead_in`);
   `BlockCompiler.cpp` orchestrates Tier-1 compilation; `VerificationStores.cpp`

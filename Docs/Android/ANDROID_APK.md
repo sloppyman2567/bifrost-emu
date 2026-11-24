@@ -483,12 +483,15 @@ or stops something here, and a button still held when the library returns is ign
 switched off for the session with its error on stderr; `BIFROST_NO_GAMEPAD=1` turns gamepad control off.
 
 To see whether the library sees a controller, look beside the app count in its header: it reads "6 apps · Steam Controller
-connected" while one is in use. If gamepad control is off, `asgard launcher` says why on stderr (SDL3 missing, no gamepad support,
+connected" while one is in use. If gamepad control is off, `asgard launcher` says why on stderr and in its log (SDL3 missing, no gamepad support,
 the opt-out). `python3 Scripts/Android/android_gamepad.py` is a live diagnostic: it lists the controllers SDL3 finds and prints
 each button or stick change and the library action it makes, so it shows which step fails (no controller found, a controller
 whose presses never arrive, or presses that do arrive). `BIFROST_GAMEPAD_DEBUG=1 asgard launcher` traces, on stderr, what the running
 library does with each press: the window being in front or not, the action, and whether the library, a dialog or a key press on
 the focused widget took it. Ctrl-C ends the library cleanly.
+The library keeps a log in `<state>/.asgard/launcher.log`, beside `broker.log`: each command it ran and how long it took, every notice it
+showed, and how it ended; a crash also writes the Python traceback there. Refreshes are logged only when they fail, and the error
+text of Google account commands is left out. Once the file passes 512 KiB the next start keeps it as `launcher.log.1`. Attach it to a bug report.
 On SteamOS, add the launcher as a non-Steam game and give it a **gamepad** controller layout: Steam's default for such
 shortcuts is keyboard and mouse, and the library then sees no pad at all. That is not enough by itself: on a Steam Deck
 (2026-11-08) the launcher could not reach the Android library from a plain shortcut, because Steam's environment variables have
