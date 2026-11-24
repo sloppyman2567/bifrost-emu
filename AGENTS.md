@@ -27,6 +27,10 @@ graphics/audio adapters.
 - Preserve uncommitted work, keep changes scoped and stay on the current branch. Commit related code and docs only;
   never push without explicit approval.
 - Update the docs after the change. Guides describe how things work now; history goes to `Docs/archive/`.
+- Sweep for stale text before committing (root rule): `git grep` every removed or renamed op, function, switch and file, read the
+  comments around each edited declaration and emitter, and recheck the section in `Docs/JIT.md`, `Docs/roadmap.md`,
+  `Docs/CHANGELOG.md`, `Docs/archive/` and the nearest `AGENTS.md`. A new history section can make an older "not measured" or
+  "next section" line wrong.
 - Keep throwaway probes and logs outside the repository. Diagnostic switches belong in
   `Source/System/Core/DebugFlags.hpp`, not in repeated `getenv` calls.
 - Name files after what they implement, never "misc", "common" or "core".
