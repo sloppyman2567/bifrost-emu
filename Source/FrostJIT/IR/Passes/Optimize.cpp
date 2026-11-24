@@ -25,19 +25,62 @@
 #include "FrostJIT/IR/SSA/SSA.hpp"
 #include "System/Core/Emulator.hpp"
 #include "System/Core/DebugFlags.hpp"
-#include <unordered_map>
-#include <unordered_set>
+#include <cstdlib>
+#include <cstring>
+#include <new>
 #include <vector>
 #include <cstdio>
 namespace arm64emu {
+// ── Per-block tables ────────────────────────────────────────────────────
+// A map from a small integer to T whose clear() is O(1): a slot is live only when it carries the current epoch. The storage is
+// calloc'ed (zero pages cost nothing until touched) and reused by every block a thread optimizes, so no block allocates a hash
+// node (these were `unordered_map`s of vregs, about 3% of an ART startup's samples in hash-table code and `malloc`). keys_ lists
+// what was written this epoch, for the scans that look at every entry; an erased key listed again after a re-set is visited twice,
+// which the scans (erase if the value matches) tolerate.
+template <class T, size_t N>
+class EpochTable {
+    struct Slot { uint32_t epoch; T value; };
+public:
+    EpochTable() : slots_(static_cast<Slot*>(std::calloc(N, sizeof(Slot)))) {
+        if (!slots_) throw std::bad_alloc();
+    }
+    ~EpochTable() { std::free(slots_); }
+    EpochTable(const EpochTable&) = delete;
+    EpochTable& operator=(const EpochTable&) = delete;
+    void clear() {
+        keys_.clear();
+        if (++epoch_ == 0) { std::memset(slots_, 0, N * sizeof(Slot)); epoch_ = 1; }
+    }
+    bool has(uint32_t k) const { return slots_[k].epoch == epoch_; }
+    T get(uint32_t k) const { return slots_[k].value; }
+    T* find(uint32_t k) { return slots_[k].epoch == epoch_ ? &slots_[k].value : nullptr; }
+    void set(uint32_t k, T v) {
+        Slot& slot = slots_[k];
+        if (slot.epoch != epoch_) { slot.epoch = epoch_; keys_.push_back(k); }
+        slot.value = v;
+    }
+    void erase(uint32_t k) { slots_[k].epoch = 0; }
+    template <class F> void for_each(F&& f) {
+        for (size_t i = 0; i < keys_.size(); ++i) {
+            const uint32_t k = keys_[i];
+            if (has(k)) f(k, slots_[k].value);
+        }
+    }
+private:
+    Slot* slots_;
+    uint32_t epoch_ = 1;
+    std::vector<uint32_t> keys_;
+};
+constexpr size_t kVregKeys = 65536;       // every uint16_t vreg or ARM register number
+constexpr size_t kStoreKeys = 2 * 65536;  // (register << 1) | file, for the dead-store pass
 // ── Constant table ─────────────────────────────────────────────────────
 // Maps vreg → known constant value. Populated by IMM, updated by const
 // folding, invalidated by any non-constant op or by CALL_INTERP/SVC.
 struct ConstMap {
-    std::unordered_map<uint16_t, uint64_t> vals;
-    bool has(uint16_t v) const { return vals.find(v) != vals.end(); }
-    uint64_t get(uint16_t v) const { return vals.at(v); }
-    void set(uint16_t v, uint64_t val) { vals[v] = val; }
+    EpochTable<uint64_t, kVregKeys> vals;
+    bool has(uint16_t v) const { return vals.has(v); }
+    uint64_t get(uint16_t v) const { return vals.get(v); }
+    void set(uint16_t v, uint64_t val) { vals.set(v, val); }
     void clear(uint16_t v) { vals.erase(v); }
     void clear_all() { vals.clear(); }
 };
@@ -46,26 +89,32 @@ struct ConstMap {
 // Keys are full uint16_t vregs: the monotonic allocator exceeds 255 in any
 // non-trivial block, and 8-bit keys would alias v with v+256k.
 struct CopyMap {
-    std::unordered_map<uint16_t, uint16_t> parent;
+    EpochTable<uint16_t, kVregKeys> parent;
+    bool has(uint16_t v) const { return parent.has(v); }
     uint16_t find(uint16_t v) {
         // Path-compressing find.
-        auto it = parent.find(v);
-        if (it == parent.end()) return v;
-        uint16_t root = find(it->second);
-        if (it->second != root) parent[v] = root;
+        uint16_t* link = parent.find(v);
+        if (!link) return v;
+        uint16_t root = find(*link);
+        if (*link != root) *link = root;
         return root;
     }
-    void set(uint16_t v, uint16_t src) { parent[v] = src; }
+    void set(uint16_t v, uint16_t src) { parent.set(v, src); }
     void clear(uint16_t v) { parent.erase(v); }
     void clear_all() { parent.clear(); }
     // Invalidate all copies where `src` is the source vreg.
     // Called when `src` is modified — any copy of `src` becomes stale.
     void clear_source(uint16_t src) {
-        for (auto it = parent.begin(); it != parent.end(); ) {
-            if (it->second == src) it = parent.erase(it);
-            else ++it;
-        }
+        parent.for_each([&](uint32_t k, uint16_t& source) { if (source == src) parent.erase(k); });
     }
+};
+// The tables one optimize_ir call needs, kept per thread and cleared per block.
+struct OptimizerTables {
+    ConstMap consts;
+    CopyMap copies;
+    EpochTable<uint16_t, kVregKeys> arm_reg_cache;  // ARM register → vreg holding its value
+    EpochTable<uint8_t, kVregKeys> live;            // dead-code pass: vregs read by a kept op
+    EpochTable<size_t, kStoreKeys> last_store_to;   // dead-store pass: key → index of the pending STORE_REG
 };
 // ── Bitwise helpers for constant folding ──────────────────────────────
 static uint64_t mask_for_width(uint8_t bits) {
@@ -259,24 +308,20 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     }
     bool fwd_enabled = fwd_requested && !block_has_atomics && !block.ssa_optimized;
     block.fwd_enabled = fwd_enabled;
-    ConstMap consts;
-    CopyMap  copies;
-    // Last vreg → index in insts that defined it (for store-load fwd).
-    std::unordered_map<uint16_t, size_t> last_def;
+    static thread_local OptimizerTables tables;
+    ConstMap& consts = tables.consts;
+    CopyMap& copies = tables.copies;
+    consts.clear_all();
+    copies.clear_all();
     // Per-vreg "currently in ARM64 reg" cache: arm_reg → vreg holding
     // its current value. LOAD_REG can reuse this.
-    std::unordered_map<uint16_t, uint16_t> arm_reg_cache;
+    auto& arm_reg_cache = tables.arm_reg_cache;
+    arm_reg_cache.clear();
     // Helper: invalidate any arm_reg_cache entries that point to vreg `v`.
     // This must be called whenever vreg `v` is redefined, because a
     // cached LOAD_REG that reused `v` would now read the wrong value.
     auto invalidate_vreg_in_cache = [&](uint16_t v) {
-        for (auto it = arm_reg_cache.begin(); it != arm_reg_cache.end(); ) {
-            if (it->second == v) {
-                it = arm_reg_cache.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        arm_reg_cache.for_each([&](uint32_t k, uint16_t& cached) { if (cached == v) arm_reg_cache.erase(k); });
     };
     // ── Helper: dead-store elimination for STORE_REG ───────────────
     // If a STORE_REG to arch reg R is followed by another STORE_REG to
@@ -289,22 +334,22 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     // memory — clear all pending store info to be safe.
     //
     // Used by both Pass 0 (pre-FWD) and Pass 1.5 (post-substitution).
-    auto dse_pass = [&block]() {
+    auto& last_store_to = tables.last_store_to;
+    auto dse_pass = [&block, &last_store_to]() {
         // to the same register index are treated as different destinations.
         // GPR reg 0 writes cpu.regs[0]; FP reg 0 writes cpu.v[0].lo.
         auto store_key = [](const IRInst& inst) -> uint32_t {
             return (static_cast<uint32_t>(inst.dest) << 1) | inst.sf;
         };
-        std::unordered_map<uint32_t, size_t> last_store_to;
+        last_store_to.clear();
         for (size_t i = 0; i < block.insts.size(); i++) {
             IRInst& inst = block.insts[i];
             if (inst.op == IROp::STORE_REG) {
                 uint32_t key = store_key(inst);
-                auto it = last_store_to.find(key);
-                if (it != last_store_to.end()) {
-                    block.insts[it->second].op = IROp::NOP;
+                if (size_t* pending = last_store_to.find(key)) {
+                    block.insts[*pending].op = IROp::NOP;
                 }
-                last_store_to[key] = i;
+                last_store_to.set(key, i);
             } else if (inst.op == IROp::LOAD_REG) {
                 // loads don't cross-invalidate each other's stores.
                 uint32_t key = (static_cast<uint32_t>(inst.src1) << 1) | inst.sf;
@@ -412,11 +457,11 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
             copies.clear_source(inst.dest);
         }
         // Substitute copy sources.
-        if (inst.src1 && copies.parent.count(inst.src1))
+        if (inst.src1 && copies.has(inst.src1))
             inst.src1 = copies.find(inst.src1);
-        if (inst.src2 && copies.parent.count(inst.src2))
+        if (inst.src2 && copies.has(inst.src2))
             inst.src2 = copies.find(inst.src2);
-        if (inst.aux && copies.parent.count(inst.aux))
+        if (inst.aux && copies.has(inst.aux))
             inst.aux = copies.find(inst.aux);
         switch (inst.op) {
             case IROp::NOP:
@@ -425,7 +470,6 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 invalidate_vreg_in_cache(inst.dest);
                 consts.set(inst.dest, inst.imm);
                 copies.clear(inst.dest);
-                last_def[inst.dest] = i;
                 break;
             case IROp::MOV: {
                 // dest = src1. Replace subsequent uses of dest with src1.
@@ -439,7 +483,6 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                     copies.set(inst.dest, inst.src1);
                     consts.clear(inst.dest);
                 }
-                last_def[inst.dest] = i;
                 break;
             }
             case IROp::LOAD_REG: {
@@ -464,33 +507,33 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // On by default (BIFROST_NO_FWD=1 opts out; bench_mips gets
                 // ~10% from it). Disabled for blocks containing ATOMIC/LL/SC ops (see
                 // block_has_atomics above).
-                auto it = fwd_enabled ? arm_reg_cache.find(ar) : arm_reg_cache.end();
-                if (it != arm_reg_cache.end()) {
+                const uint16_t* cached_slot = fwd_enabled ? arm_reg_cache.find(ar) : nullptr;
+                if (cached_slot) {
+                    const uint16_t cached = *cached_slot;
                     // Reuse cached vreg: turn this into MOV.
                     inst.op = IROp::MOV;
-                    inst.src1 = it->second;
-                    if (consts.has(it->second)) {
+                    inst.src1 = cached;
+                    if (consts.has(cached)) {
                         inst.op = IROp::IMM;
-                        inst.imm = consts.get(it->second);
+                        inst.imm = consts.get(cached);
                         consts.set(inst.dest, inst.imm);
                     } else {
-                        copies.set(inst.dest, it->second);
+                        copies.set(inst.dest, cached);
                     }
                 } else {
                     // Cache this load as the canonical source for ar.
                     // First, invalidate any old cache entry pointing to
                     // inst.dest (it's about to be redefined).
                     invalidate_vreg_in_cache(inst.dest);
-                    arm_reg_cache[ar] = inst.dest;
+                    arm_reg_cache.set(ar, inst.dest);
                     consts.clear(inst.dest);
                     copies.clear(inst.dest);
                 }
-                last_def[inst.dest] = i;
                 break;
             }
             case IROp::STORE_REG: {
                 // dest is the ARM64 reg index; src1 is the vreg being stored.
-                arm_reg_cache[inst.dest] = inst.src1;
+                arm_reg_cache.set(inst.dest, inst.src1);
                 // The stored value becomes the cached value of arm_reg[dest].
                 if (consts.has(inst.src1))
                     consts.set(inst.dest, consts.get(inst.src1)); // unlikely useful
@@ -500,7 +543,6 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 invalidate_vreg_in_cache(inst.dest);
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
-                last_def[inst.dest] = i;
                 break;
             }
             case IROp::STORE_MEM:
@@ -635,8 +677,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                     }
                 }
                 invalidate_vreg_in_cache(inst.dest);
-                last_def[inst.dest] = i;
-                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                if (inst.dest <= 31) arm_reg_cache.set(inst.dest, inst.dest);
                 break;
             }
             case IROp::NOT: case IROp::NEG:
@@ -656,18 +697,16 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                     copies.clear(inst.dest);
                 }
                 invalidate_vreg_in_cache(inst.dest);
-                last_def[inst.dest] = i;
-                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                if (inst.dest <= 31) arm_reg_cache.set(inst.dest, inst.dest);
                 break;
             }
             case IROp::ADDS: case IROp::SUBS: case IROp::TST:
             case IROp::ADCS: case IROp::SBCS:
                 // Flag-setting ops also write to dest (if != 0).
                 invalidate_vreg_in_cache(inst.dest);
-                if (inst.dest != 0 && inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                if (inst.dest != 0 && inst.dest <= 31) arm_reg_cache.set(inst.dest, inst.dest);
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
-                last_def[inst.dest] = i;
                 break;
             case IROp::CSEL: case IROp::CSINC:
             case IROp::CSINV: case IROp::CSNEG:
@@ -739,12 +778,11 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // (never reaches here as IROp::BFM). All ops in this case
                 // are native — only need dest invalidation.
                 invalidate_vreg_in_cache(inst.dest);
-                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                if (inst.dest <= 31) arm_reg_cache.set(inst.dest, inst.dest);
                 if (inst.op != IROp::IMM) {  // don't clear if we just folded
                     consts.clear(inst.dest);
                     copies.clear(inst.dest);
                 }
-                last_def[inst.dest] = i;
                 break;
             }
             case IROp::CCMP:
@@ -780,20 +818,18 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // with a MOV pointing at the pre-conversion vreg, losing
                 // the FP_F2I result.
                 invalidate_vreg_in_cache(inst.dest);
-                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                if (inst.dest <= 31) arm_reg_cache.set(inst.dest, inst.dest);
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
-                last_def[inst.dest] = i;
                 break;
             }
             case IROp::FP_F2I_FIXED: {
                 // Same as FP_F2I: writes directly to ARM reg vreg dest.
                 // See comment above for why arm_reg_cache must be updated.
                 invalidate_vreg_in_cache(inst.dest);
-                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                if (inst.dest <= 31) arm_reg_cache.set(inst.dest, inst.dest);
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
-                last_def[inst.dest] = i;
                 break;
             }
             case IROp::SIMD_UMOV: {
@@ -804,10 +840,9 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // stale cached vreg holding the pre-UMOV value. This broke
                 // `jit_neon`'s umov tests under BIFROST_ENABLE_FWD=1.
                 invalidate_vreg_in_cache(inst.dest);
-                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                if (inst.dest <= 31) arm_reg_cache.set(inst.dest, inst.dest);
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
-                last_def[inst.dest] = i;
                 break;
             }
             case IROp::SIMD_SMOV: {
@@ -816,10 +851,9 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // or a later LOAD_REG of `dest` reads the pre-SMOV value.
                 // This broke `test_simd_sat`'s smov case under FWD=1.
                 invalidate_vreg_in_cache(inst.dest);
-                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                if (inst.dest <= 31) arm_reg_cache.set(inst.dest, inst.dest);
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
-                last_def[inst.dest] = i;
                 break;
             }
             case IROp::FP_I2F_FIXED: {
@@ -829,7 +863,6 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 invalidate_vreg_in_cache(inst.dest);
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
-                last_def[inst.dest] = i;
                 break;
             }
             default:
@@ -843,7 +876,6 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                     invalidate_vreg_in_cache(inst.dest);
                     consts.clear(inst.dest);
                     copies.clear(inst.dest);
-                    last_def[inst.dest] = i;
                 }
                 break;
         }
@@ -883,7 +915,8 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     size_t kept = 0;
     // We mark an instruction as "used" if it has a side effect, OR if
     // its dest is read by a later used instruction. Walk backward.
-    std::unordered_set<uint16_t> live;
+    auto& live = tables.live;
+    live.clear();
     // ARM64 reg writes are always "used" (they're side-effecting).
     // Branches / mem ops / syscalls are always used.
     for (size_t i = block.insts.size(); i > 0; i--) {
@@ -893,7 +926,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
             keep = true;
         }
         // If dest is live, keep it.
-        if (inst.dest != 0 && live.count(inst.dest)) {
+        if (inst.dest != 0 && live.has(inst.dest)) {
             keep = true;
         }
         if (keep) {
@@ -905,14 +938,14 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
             // writes to vreg src1 (e.g., SBFM dest=2) must be kept.
             // We add src1 to live (don't erase it).
             if (inst.op == IROp::LOAD_REG) {
-                if (inst.src1 <= 31) live.insert(inst.src1);
+                if (inst.src1 <= 31) live.set(inst.src1, 1);
             } else if (inst.op == IROp::STORE_REG) {
                 // dest is the ARM64 reg index, src1 is the vreg being stored.
-                live.insert(inst.src1);
+                live.set(inst.src1, 1);
             } else if (inst.op == IROp::FP_I2F || inst.op == IROp::FP_I2F_FIXED) {
                 // index 0-31) and writes an FP reg (dest). The GPR store
                 // must be kept, so mark src1 as live (same as LOAD_REG).
-                if (inst.src1 <= 31) live.insert(inst.src1);
+                if (inst.src1 <= 31) live.set(inst.src1, 1);
             } else if (inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED) {
                 // FP_F2I (fcvtzs/fcvtzu) reads an FP reg (src1 = FP reg index)
                 // and writes a GPR (dest). FP stores use inst.sf=1, so they
@@ -924,10 +957,10 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // No GPR vregs to mark live.
             } else {
                 // Normal op: src1 and src2 are vregs.
-                if (inst.src1) live.insert(inst.src1);
-                if (inst.src2) live.insert(inst.src2);
+                if (inst.src1) live.set(inst.src1, 1);
+                if (inst.src2) live.set(inst.src2, 1);
                 // aux: no op keeps a vreg there today; if one does, keep its definition live.
-                if (inst.aux) live.insert(inst.aux);
+                if (inst.aux) live.set(inst.aux, 1);
             }
         } else {
             used[i - 1] = false;

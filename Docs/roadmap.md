@@ -341,11 +341,12 @@ it), and on a reconstructed set of nine game-style kernels the JIT is 4.8 times 
 
 Open, in priority order (the maintainer put translation speed ahead of the cross-block work on 2026-11-23, so item 1 comes first):
 
-1. **Translation cost.** Translating the ART bootstrap's 93 thousand blocks took 1,050 ms; dropping the Tier-1 SSA adapter and the
-   per-block verification footprints made it 635 ms (6.8 us per block, [details](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-2026-11-23)).
-   Left in the profile: `optimize_ir` and its per-block `unordered_map`s of vregs (about 9% of samples, plus hash-table and `malloc`
-   time), `translate_block` itself (7%), the guard bookkeeping (`compile_guarded_mem`, `swap_guard_state`, 2.4%), the vector and FP cache
-   scans and `remember_code_granules`. Not measured: a game, or several threads compiling at once. Open: whether Tier-1 should run SSA on
+1. **Translation cost.** Translating the ART bootstrap's 93 thousand blocks took 1,056 ms; dropping the Tier-1 SSA adapter, the per-block
+   verification footprints and the hash maps of `optimize_ir` made it about 500 ms (5.4 us per block; the startup 1.57 s to 1.02 s,
+   [details](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
+   Left in the profile: `translate_block` itself (7.6%), `optimize_ir` (6.8%, spread over its passes), the guard bookkeeping
+   (`compile_guarded_mem`, `swap_guard_state`, 2.7%: every deferred guard copies a ~460-byte `GuardState`), the vector and FP cache scans
+   and `remember_code_granules` (about 2% each). Not measured: a game, or several threads compiling at once. Open: whether Tier-1 should run SSA on
    hot blocks only (about 2% of CoreMark's cycles).
 2. **State moves and copies around the arithmetic.** Real FP math is 2-7% of the generated ops in games and in the game-style
    kernels; the rest is moving guest state, copying vector registers and checking results. One track, in three parts:

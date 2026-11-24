@@ -298,7 +298,7 @@ remain ordered effects because NZCV is not yet an SSA value.
 
 Tier-2 region planning runs this pipeline (`BIFROST_NO_SSA=1` turns that off). Tier-1 does not by default: the adapter was a third of
 translation time for 0.6% fewer instructions and about 2% fewer cycles on CoreMark
-([measured](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-2026-11-23)).
+([measured](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
 `BIFROST_TIER1_SSA=1` runs it on supported scalar blocks before the existing constant folding passes (`BIFROST_NO_FWD=1` and FWD
 range restrictions bypass its forwarding); the legacy forwarding cache does not run again on an SSA-lowered block.
 `BRCOND_SKIP`, direct FP/SIMD operations, calls/helpers, and atomics retain their
@@ -1906,7 +1906,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
-- [Translation cost: no Tier-1 SSA, no store footprints outside verify (2026-11-23)](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-2026-11-23)
+- [Translation cost: no Tier-1 SSA, no store footprints outside verify, flat vreg tables (2026-11-23)](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)
 - [FP compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)
 - [Widening multiply-accumulate is extend, multiply and add (2026-11-23)](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)
 - [Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)

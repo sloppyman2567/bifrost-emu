@@ -152,7 +152,9 @@ it under the guide's Recorded changes.
 - Translation cost counts: a pass that costs more translation time than the code it saves is not worth running on every block
   (`[JIT] compile:` in `-v`; the Tier-1 SSA adapter was dropped for that, `BIFROST_TIER1_SSA=1` brings it back). Per-block state
   that only a debug mode reads is built only in that mode: `record_verification_stores` runs under `BIFROST_JIT_VERIFY` alone, so
-  anything new that replay needs from a block must be recorded there too. Clearing a 4096-entry table per block is a cost.
+  anything new that replay needs from a block must be recorded there too. Clearing a 4096-entry table per block is a cost, and so is a hash
+  node per vreg: `optimize_ir` keeps its per-block state in thread-local `EpochTable`s (O(1) clear, no allocation), so a new per-block map
+  keyed by vreg or ARM register belongs there, not in an `unordered_map`.
 - Run `make verify` and relevant guest regressions after behavior changes. A
   file split also needs a complete link/library build: missing definitions and
   old archive members can evade per-file compilation checks.
