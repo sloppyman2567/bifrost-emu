@@ -2,6 +2,27 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## SpongeBob profile with the stats counters off (2026-11-24)
+
+`BIFROST_PROF=1 asgard start com.tiltingpoint.spongebob`, the installed build, stopped with `asgard stop` after about 83 s (exit 143); the
+maintainer played it, and I did not check which screen it ended on (the log shows loading and ad-SDK start-up, with futex stalls of up to
+16 s on `HeapTaskDaemon`, so treat it as start-up, not steady gameplay). One run; the sampler counts CPU time at 100 Hz and lost 69 samples.
+
+| Where | Share |
+|---|---|
+| Samples | JIT 69.4%, dispatch 12.2%, translate 7.2%, interpreter 2.3%, other 8.9% |
+| JIT samples | entry 10.6%, body 75.7%, exit 11.5%, cold 0.2%, shared stubs 2.1% |
+| Body by operation | guest state moves 40.9%, memory with guards 21.9%, integer ALU 14.4%, branches 14.1%, FP and SIMD 6.0%, flags 2.7% |
+| Code with spills or reloads | 11.7% of body |
+
+Against the first run the same day, which also set `BIFROST_STATS_PERIOD=30`: entry was 24.6% there and 10.6% here. That switch adds two
+read-modify-write instructions to every block entry, so the earlier entry and exit figures were inflated and are not used.
+
+In shares of all samples: body state moves 0.694 x 0.757 x 0.409 = 21.5%; entry plus exit 0.694 x 0.221 = 15.3%; memory with guards
+(the access itself included, not only the bounds compare) 11.5%. If all of entry and exit is register traffic, which was not separated,
+guest register moves are about 37% of the samples. The carry ceiling above (63-84% of moves on CoreMark) would then bound a gain near
+23-31% of CPU time, optimistic for the reasons listed there; this run does not say how much is reachable.
+
 ## Carry ceiling: guest register moves in CoreMark (2026-11-24)
 
 Question: how much of the register traffic at block edges could a second JIT that keeps registers across blocks remove? Method, a simulation

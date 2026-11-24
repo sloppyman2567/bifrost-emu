@@ -1372,8 +1372,9 @@ Rules the design follows (decided 2026-11-24):
 - **Tests.** A forced-promotion hook and a fixed hotness threshold, so a fixture promotes on demand and checks results against a closed-form
   or differential oracle. No decision in a test may depend on the clock; timing belongs to one benchmark that does not gate CI.
 
-Milestones: (1) re-measure a clean gameplay profile with `BIFROST_PROF=1` alone (the stats counters add instructions to every block
-entry) and the window-free workloads; (2) sampled hotness and region discovery that only report; (3) register-resident code for one
+Milestones: (1) a clean start-up profile exists ([2026-11-24](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24):
+guest register moves about 37% of samples); a steady-gameplay profile with `BIFROST_PROF=1` alone (the stats counters add instructions to
+every block entry) and the window-free workloads are still wanted; (2) sampled hotness and region discovery that only report; (3) register-resident code for one
 region behind forced promotion, with recovery maps, passing `make verify` and the fault/signal fixtures; (4) MT promotion and exit cells;
 (5) a game check by the maintainer. Expanding the scope requires measurable benefit and the
 [planned correctness/performance gates](archive/TESTS-history.md#planned-codegen-and-coremark-acceptance).
@@ -1605,6 +1606,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
 - [Carry ceiling: guest register moves in CoreMark (2026-11-24)](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)
 - [Tier-2 regions removed (2026-11-24)](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)
 - [Hotspots from IBS and the allocation profile: tag untag and scalar FMAX/FMIN zeros (2026-11-24)](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)
