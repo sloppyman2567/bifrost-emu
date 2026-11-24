@@ -10,6 +10,19 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- Saturating narrowing shifts (`sqrshrun`, `sqshrn` and the rest of that family, 16- and 32-bit lanes) run as native code instead of
+  in the interpreter. Zenless Zone Zero spent about 7% of its CPU there, in its video decoder; a loop of them is about 47 times
+  faster here. The results and the QC flag are checked against QEMU.
+- "Preparing Android runtime" no longer copies or reads the app's saved data and downloaded resources when it has to rebuild its
+  runtime (after an update, or when you switch between builds). It links them and checks only the runtime's own files. Zenless
+  Zone Zero (38 GB of downloaded resources) went from 105 s to about 3 s at that step, measured on a copy of its real data.
+- Hot loops that count or accumulate in a register (`add x0, x0, #1`, a running sum) update it in place instead of through a
+  scratch copy: fewer instructions per iteration. About 1% on CoreMark and gzip on one machine, nothing on programs without
+  such loops. `BIFROST_NO_PIN_INPLACE=1` switches it off.
+- The README is now a short page for people: what Bifrost is, the quick start, a few screenshots and links. The game list stays in
+  [COMPATIBILITY.md](COMPATIBILITY.md); the CoreMark tables, the screenshot gallery and the build, configuration and
+  contributing notes moved to [PERFORMANCE.md](PERFORMANCE.md), [SCREENSHOTS.md](SCREENSHOTS.md) and [BUILDING.md](BUILDING.md).
+  The project site reads them from there and looks the same.
 - `[stall]` lines stop repeating: a call site prints its first five stalls and the report counts the rest (`repeated stalls:
   ... x179, 179.0 s in all`). A game's 1 s watchdog sleep used to fill the 200-line limit within minutes and hide later freezes.
 - A `[stall]` line for a `read`, `write`, socket call or `ioctl` now says what the descriptor is: a file path, a pipe, a socket
@@ -20,6 +33,12 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - Umamusume's connect freezes (about 4 s each, several in a row) were the app looking up its own hostname: on a host where
   `systemd-resolved` tries LLMNR and mDNS for single-label names, the answer took 3.7 s. The Android DNS service now answers the
   guest's own hostname with loopback itself. Other single-label names still go to the host.
+- The README's performance tables are re-measured (2026-11-23, pinned to one core): CoreMark 16,880 iterations/s on the shipped
+  build, 2.1 times QEMU 11.1.3 (8,024), and the `bench_*` speedups are 61x to 111x. The `wait_stall` test no longer depends on how
+  many cores the machine has (it failed on CI).
+- The README is shorter and easier to scan: Quick start comes right after the highlights, each game in "What runs" has one
+  line, and the long notes moved to the new [Docs/COMPATIBILITY.md](COMPATIBILITY.md). The other install routes and their notes
+  are in [Install and update](INSTALL.md#other-ways-to-install). The project site shows the full notes as before.
 - Review fixes for the stall and hostname work: the generic rootfs writes `/etc/hostname` as `bifrost-emu` too (it said `bifrost`);
   the DNS reply is sent before a slow lookup is logged, so a broken log cannot drop it; the guest's own name keeps itself as the
   canonical name; stall sites are keyed by thread record (a reused tid cannot hide a thread's first stalls), the retry is bounded

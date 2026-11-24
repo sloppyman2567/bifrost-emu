@@ -1,13 +1,15 @@
 name: Pages
 
-# The project page (Tools/Site/build-site.py) is rebuilt from the README, the compatibility
-# records and the version whenever one of them changes. Pages must be enabled with
+# The project page (Tools/Site/build-site.py) is rebuilt from the compatibility, performance and screenshot
+# docs, the compatibility records and the version whenever one of them changes. Pages must be enabled with
 # "GitHub Actions" as its source. Search Console's verification file lives in Tools/Site.
 on:
   push:
     branches: [main]
     paths:
-      - README.md
+      - Docs/COMPATIBILITY.md
+      - Docs/PERFORMANCE.md
+      - Docs/SCREENSHOTS.md
       - Scripts/Android/compatibility.json
       - Include/Bifrost/Version.hpp
       - Docs/Images/**

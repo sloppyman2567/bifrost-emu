@@ -1247,6 +1247,23 @@ def parse_cache_code(dex):
         return None
 
 
+def link_or_copy(source, target, *, follow_symlinks=True):
+    """Carry one retained data file into the replacement root: a hard link, else a copy.
+
+    The old root is deleted once the replacement is in place, so a link is a move. It costs no time or disk however much the
+    app keeps there (a game's downloaded resources are tens of GB; copying them took minutes). Files whose directory sits on
+    another filesystem, or that the host will not link, are copied."""
+    try:
+        os.link(source, target, follow_symlinks=follow_symlinks)
+    except FileExistsError:
+        os.unlink(target)
+        try: os.link(source, target, follow_symlinks=follow_symlinks)
+        except OSError: shutil.copy2(source, target, follow_symlinks=follow_symlinks)
+    except OSError:
+        shutil.copy2(source, target, follow_symlinks=follow_symlinks)
+    return target
+
+
 def prepare_root(app, metadata, code, installed_root, framework, art, adapters, dex, media_mask=15):
     """Rebuild only the runtime; retain app data across starts and upgrades.
 
@@ -1332,14 +1349,14 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         if installed_root is not None:
             shutil.copytree(installed_root / code.lstrip("/"), fresh / code.lstrip("/"))
         # Guest writes are live in this root, including if the host crashes.
-        # Copy them into a replacement root before exchanging runtimes.
+        # Carry them into a replacement root (linked, not copied) before exchanging runtimes.
         data_source = root if root.is_dir() else installed_root
         for relative in ("data/user", "data/user_de", "data/misc/profiles", "data/misc/keystore", "storage"):
             if data_source is None: break
             source = data_source / relative
             target = fresh / relative
             if source.is_dir():
-                shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
+                shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True, copy_function=link_or_copy)
         for retained in ("data/system/users/0/bifrost-system-settings.xml",
                          "data/system/users/0/bifrost-accounts.json"):
             if data_source is not None and (data_source / retained).is_file():
@@ -1350,11 +1367,11 @@ def prepare_root(app, metadata, code, installed_root, framework, art, adapters, 
         (fresh / "storage/emulated/0").mkdir(parents=True, exist_ok=True)
         retained_dexopt = retain_dexopt(managed, root, fresh, identity, metadata, code, environment)
         import android_art
-        immutable = {name: value for name, value in android_art.inventory(fresh).items()
-                     if (name.startswith(("system/", "system_ext/", "product/", "vendor/", "apex/",
-                                         "data/app/", "data/local/tmp/"))
-                     or name in ("data/system/users/0/bifrost-ssaid-key", "debug_ramdisk/adb_debug.prop"))
-                     and not name.startswith((code.lstrip("/") + "/oat/", PARSE_CACHE + "/"))}
+        # Only these are checked before reuse; the guest's data (`storage`, `data/user`) is never hashed.
+        immutable = android_art.inventory(fresh, lambda name: (
+            name.startswith(("system/", "system_ext/", "product/", "vendor/", "apex/", "data/app/", "data/local/tmp/"))
+            or name in ("data/system/users/0/bifrost-ssaid-key", "debug_ramdisk/adb_debug.prop"))
+            and not name.startswith((code.lstrip("/") + "/oat/", PARSE_CACHE + "/")))
         backup = managed / "previous-rootfs"
         if backup.exists():
             raise ValueError("Interrupted managed runtime replacement; preserve previous-rootfs before retrying")

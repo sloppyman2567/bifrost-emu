@@ -1069,6 +1069,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
     scan_w32_and_sext_loads(ir_block.insts);
     scan_covered_guards(ir_block.insts);
+    scan_pin_inplace(ir_block.insts);
     // Loads into cached XMMs and compares against a register's memory home
     // (see fp_load_ and lazy_load_). They read the last-use table as it
     // stands and change nothing; both need this compile loop's materializers.
@@ -1177,7 +1178,23 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
         if (lazy_load_vreg_ >= 0 && inst.op != IROp::SUBS) materialize_lazy_load();
         if (scaled_vreg_ >= 0 && inst.op != IROp::ADD && inst.op != IROp::LOAD_REG) materialize_scaled();
-        if (compile_ir_inst(inst)) break;
+        // Folded into an in-place update of a pinned register (scan_pin_inplace): the producer emits it all.
+        if (i < pin_skip_.size() && pin_skip_[i]) continue;
+        IRInst in_place;
+        const IRInst* to_compile = &inst;
+        const bool pin_in_place = i < pin_inplace_.size() && pin_inplace_[i];
+        if (pin_in_place) {
+            in_place = inst;
+            in_place.dest = in_place.src1 = static_cast<uint16_t>(pin_inplace_[i] - 1);
+            to_compile = &in_place;
+        }
+        if (compile_ir_inst(*to_compile)) break;
+        if (pin_in_place && pin_result_[i]) {
+            // The new value is read after the STORE_REG: those readers get a copy, off the loop-carried chain.
+            const int copy = alloc_reg();
+            emit_mov_reg(copy, arch_pin_[pin_inplace_[i] - 1]);
+            set_vreg_reg(pin_result_[i], copy);
+        }
         // A non-IMM op defining a vreg invalidates any const entry for it
         // (defensive; the monotonic allocator makes collisions impossible).
         if (inst.op != IROp::IMM) jit_consts_.erase(inst.dest);
@@ -1215,6 +1232,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     fp_load_done_ = SIZE_MAX;
     lazy_load_.clear();
     scaled_add_.clear();
+    pin_inplace_.clear();
+    pin_skip_.clear();
+    pin_result_.clear();
     sext_load_done_ = SIZE_MAX;
     lazy_load_vreg_ = -1;
     scaled_vreg_ = -1;
@@ -1615,6 +1635,63 @@ void FrostJIT::scan_w32_and_sext_loads(const std::vector<IRInst>& insts) {
         if (nx.sext_bits() != width * 8) continue;
         if (width == 4 || ((width == 1 || width == 2) && zext32_fused_[i + 1]))
             sext_load_[i] = 1;
+    }
+}
+// A loop-carried update of a pinned register, `add x0, x0, #1` and its kind: the ALU op reads the pin's LOAD_REG copy and the
+// result is copied back by STORE_REG. Marks the op so the compile loop emits it on the pin itself (see pin_inplace_). Only
+// the exact adjacent shape qualifies, so that no op can fault or exit between the pin's rewrite and the end of the guest
+// instruction: OP, an optional ZEXT 32 fused into it (zext32_fused_), then the STORE_REG to the same register. The
+// register's old value may be read by earlier ops (they use the LOAD_REG copy) but not after the OP, and no STORE_REG to
+// the register sits between the LOAD_REG and the OP.
+void FrostJIT::scan_pin_inplace(const std::vector<IRInst>& insts) {
+    pin_inplace_.clear();
+    pin_skip_.clear();
+    pin_result_.clear();
+    if (!keep_store_dest_ || pinned_host_regs_ == 0 || dbg().no_pin_inplace) return;
+    const size_t n = insts.size();
+    pin_inplace_.assign(n, 0);
+    pin_skip_.assign(n, 0);
+    pin_result_.assign(n, 0);
+    for (size_t i = 1; i + 1 < n; i++) {
+        const IRInst& op = insts[i];
+        switch (op.op) {
+            case IROp::ADD: case IROp::SUB: case IROp::AND:
+            case IROp::OR:  case IROp::XOR: case IROp::MUL: break;
+            default: continue;
+        }
+        const uint16_t t = op.src1, y = op.src2;
+        if (!(op.dest > 32 && op.dest < 4096 && t > 32 && t < 4096 && y > 32 && y < 4096) || t == y) continue;
+        // t is the LOAD_REG copy of a pinned register, read last by this op.
+        if (vreg_last_use_op_[t] != static_cast<int>(i)) continue;
+        size_t j = i;
+        while (j-- > 0 && insts[j].dest != t) {}
+        if (j >= i || insts[j].op != IROp::LOAD_REG || insts[j].is_fp_load() || insts[j].src1 > 30) continue;
+        const int a = insts[j].src1;
+        if (arch_pin_[a] < 0) continue;
+        bool rewritten = false;
+        for (size_t k = j + 1; k < i; k++)
+            if (insts[k].op == IROp::STORE_REG && !insts[k].is_fp_store() && insts[k].dest == a) rewritten = true;
+        if (rewritten) continue;
+        // The chain: [ZEXT 32 fused into the op], then STORE_REG a <- result.
+        size_t k = i + 1;
+        uint16_t result = op.dest;
+        if (insts[k].op == IROp::ZEXT) {
+            if (!zext32_fused_[i] || insts[k].src1 != op.dest) continue;
+            result = insts[k].dest;
+            if (!(result > 32 && result < 4096) || ++k >= n) continue;
+        }
+        const IRInst& st = insts[k];
+        if (st.op != IROp::STORE_REG || st.is_fp_store() || st.dest != a || st.src1 != result) continue;
+        // A copy of the new value is needed only for readers after the STORE_REG.
+        const bool later_reader = vreg_last_use_op_[result] > static_cast<int>(k);
+        // The LOAD_REG needs no copy when this op is its only reader.
+        bool only_reader = true;
+        for (uint16_t u : vreg_uses_[t]) if (u != i) only_reader = false;
+        pin_inplace_[i] = static_cast<uint8_t>(a + 1);
+        if (later_reader) pin_result_[i] = result;
+        if (only_reader) pin_skip_[j] = 1;
+        for (size_t m = i + 1; m <= k; m++) pin_skip_[m] = 1;
+        i = k;  // the chain's ops are consumed
     }
 }
 // A guarded scalar access whose address an earlier access of the same block already checked (the same base value

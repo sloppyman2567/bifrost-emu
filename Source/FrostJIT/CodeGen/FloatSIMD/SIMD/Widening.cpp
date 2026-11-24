@@ -345,12 +345,73 @@ bool FrostJIT::compile_simd_widening_(const IRInst& inst) {
             }
             return true;
         }
-        // Saturating narrowing shifts use the reference handler. Native
-        // lowering must widen before rounding, preserve destination halves,
-        // and report saturation through FPSR.QC before it can be reinstated.
-        case IROp::SIMD_SHRN_SAT:
-            emit_call_interp(inst.arm_pc, false);
+        // ── SIMD SHRN_SAT (SQSHRN/UQSHRN/SQRSHRN/UQRSHRN/SQSHRUN/SQRSHRUN) ──
+        // width = SOURCE esize (2/4/8), imm = subop | (shift << 8), flags_op = Q: all
+        // lanes of the full 128-bit source are used, Q picks the destination half
+        // (0 = v_lo + zeroed v_hi, 1 = v_hi, v_lo kept). subop 0 SQSHRN, 1 UQSHRN, 2 SQRSHRN,
+        // 3 UQRSHRN, 4 SQSHRUN, 5 SQRSHRUN.
+        // The result is the exact value (x + round) >> shift saturated to the destination,
+        // so the rounding must not wrap in the source width: with an arithmetic (signed
+        // source) or logical (unsigned source) shift, (x + 2^(s-1)) >> s equals
+        // (x >> s) + ((x >> (s-1)) & 1), which cannot overflow. FPSR.QC is set when any lane
+        // saturates, found by comparing the shifted value with its saturated form. 64-bit
+        // sources (no packed 64-bit arithmetic shift) and, without SSE4.1, the forms that need
+        // unsigned min or packusdw stay on the interpreter.
+        case IROp::SIMD_SHRN_SAT: {
+            const SimdShrnSatParams sp = inst.shrn_sat_params();
+            const int esize = static_cast<int>(sp.esize);
+            const int subop = static_cast<int>(sp.subop);
+            const int shift = static_cast<int>(sp.shift);
+            const bool round = subop == 2 || subop == 3 || subop == 5;
+            const bool uns_src = subop == 1 || subop == 3;
+            const bool uns_dst = subop != 0 && subop != 2;
+            const bool need_sse41 = uns_src || (esize == 4 && uns_dst);
+            if (vec_cache_active_ || (esize != 2 && esize != 4) || shift < 1 || shift > esize * 4 ||
+                (need_sse41 && !has_sse41())) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));      // all lanes; Vd may alias Vn
+            const int shift_op = esize == 2 ? 0x71 : 0x72;  // psrlw/psraw : psrld/psrad
+            if (round) {
+                movdqa(1, 0);
+                if (shift > 1) sse2_imm(shift_op, 1, 2, static_cast<uint8_t>(shift - 1));  // psrl
+                emit_mask(2, esize == 2 ? 0x0001000100010001ULL : 0x0000000100000001ULL);
+                sse2_op(0xDB, 1, 2);                        // pand: the rounding bit of each lane
+            }
+            sse2_imm(shift_op, 0, uns_src ? 2 : 4, static_cast<uint8_t>(shift));  // psrl / psra
+            if (round) sse2_op(esize == 2 ? 0xFD : 0xFE, 0, 1);                    // paddw / paddd
+            // xmm0 = the shifted lanes in the source width; xmm1 ends up as the saturated form.
+            movdqa(1, 0);
+            movdqa(2, 0);
+            if (uns_src) {
+                emit_mask(3, esize == 2 ? 0x00FF00FF00FF00FFULL : 0x0000FFFF0000FFFFULL);
+                sse2_38(esize == 2 ? 0x3A : 0x3B, 1, 3);    // pminuw / pminud: the saturated lanes
+                movdqa(0, 1);                               // pack the saturated lanes
+            } else if (!uns_dst) {                          // signed: the low half sign-extended back
+                sse2_imm(shift_op, 1, 6, static_cast<uint8_t>(esize * 4));  // psll
+                sse2_imm(shift_op, 1, 4, static_cast<uint8_t>(esize * 4));  // psra
+            } else {                                        // signed to unsigned: only 0..max survives a mask
+                emit_mask(3, esize == 2 ? 0x00FF00FF00FF00FFULL : 0x0000FFFF0000FFFFULL);
+                sse2_op(0xDB, 1, 3);                        // pand
+            }
+            emit_simd_qc_unless_equal(1, 2, true);
+            if (esize == 2) {
+                sse2_op(uns_dst ? 0x67 : 0x63, 0, 0);       // packuswb / packsswb
+            } else if (uns_dst) {
+                sse2_38(0x2B, 0, 0);                        // packusdw
+            } else {
+                sse2_op(0x6B, 0, 0);                        // packssdw
+            }
+            if (sp.q) {
+                store_lo(0, vhi_off(static_cast<int>(inst.dest)));
+            } else {
+                store_lo(0, vlo_off(static_cast<int>(inst.dest)));
+                fp_zero_hi(static_cast<int>(inst.dest));
+            }
             return true;
+        }
         // ── SIMD MUL_ELEM (integer vector x indexed element) ──────────
         // width = SOURCE esize; imm = subop | (idx << 8); flags_op = Q.
         // subop: 0=MUL 1=MLA 2=MLS 3=SMULL 4=UMULL 5=SMLAL 6=UMLAL

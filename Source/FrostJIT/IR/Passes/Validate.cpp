@@ -783,8 +783,8 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
             }
             case IROp::SIMD_SHRN_SAT: {
                 // imm=subop | (shift<<8), width=SOURCE esize, flags_op=Q.
-                // subop 0..5 (table rows); shift is 1..esize*8 (the
-                // immh!=0 guard); esize from 1<<size.
+                // subop 0..5 (table rows); shift is 1..esize*4, the destination
+                // lane width (the immh!=0 guard); esize is the source lane size.
                 const uint8_t subop = static_cast<uint8_t>(inst.imm & 0xFF);
                 const uint8_t shift = static_cast<uint8_t>((inst.imm >> 8) & 0xFF);
                 if (subop > 5) {
@@ -801,10 +801,10 @@ bool validate_ir_block(const IRBlock& block, FILE* out) {
                         "esize=%u invalid (want 1/2/4/8, arm_pc=0x%lx)\n",
                         block.start_pc, i, inst.width, inst.arm_pc);
                     ok = false;
-                } else if (shift < 1 || shift > inst.width * 8) {
+                } else if (shift < 1 || shift > inst.width * 4) {
                     std::fprintf(out,
                         "[ir-validate] block pc=0x%lx inst %zu: SIMD_SHRN_SAT "
-                        "shift=%u out of range 1..esize*8 (esize=%u, arm_pc=0x%lx)\n",
+                        "shift=%u out of range 1..esize*4 (esize=%u, arm_pc=0x%lx)\n",
                         block.start_pc, i, shift, inst.width, inst.arm_pc);
                     ok = false;
                 }

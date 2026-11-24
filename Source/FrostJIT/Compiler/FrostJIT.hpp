@@ -2150,6 +2150,17 @@ private:
     // scaled_shift_ say so) and the ADD is `lea d, [a + b*2^n]`.
     // materialize_scaled() emits the shift after all. Tier-1 only.
     std::vector<uint8_t> scaled_add_;
+    // In-place updates of pinned registers (scan_pin_inplace; Tier-1 self-loops with pins, empty elsewhere). A guest
+    // `add x0, x0, #1` is LOAD_REG t <- x0; OP s <- t, y; [ZEXT 32 s']; STORE_REG x0 <- s'. With x0 pinned the generic
+    // path computes into a scratch copy of the pin and copies the result back: three host instructions on the
+    // loop-carried chain. For such a chain, pin_inplace_[i] = a + 1 on the OP: the compile loop emits it as `a <- a OP y`
+    // (an IRInst copy with dest = src1 = a, the existing in-place form) on the pin itself, skips the ops folded into it
+    // (pin_skip_[j] = 1: the LOAD_REG when the OP is its only reader, the ZEXT, the STORE_REG), and pin_result_[i] names
+    // the vreg that later ops read when the new value has readers after the STORE_REG: they get a copy of the pin.
+    std::vector<uint8_t> pin_inplace_;
+    std::vector<uint8_t> pin_skip_;
+    std::vector<uint16_t> pin_result_;
+    void scan_pin_inplace(const std::vector<IRInst>& insts);
     int scaled_vreg_ = -1;
     int scaled_shift_ = 0;
     void materialize_scaled();

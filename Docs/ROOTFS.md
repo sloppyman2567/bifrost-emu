@@ -103,6 +103,13 @@ A program that fails with `libcurl.so.4: cannot open shared object file` was run
 `--rootfs-profile games`. `bifrost-emu --setup-rootfs --games` runs it; then `bifrost-emu --rootfs-profile games ./game`
 (add `--guest-ld` to run under the rootfs's own `ld.so`). dhewm3 ran 120 s under each linker this way.
 
+### `--guest-ld` (experimental)
+
+`--guest-ld` is not the default. It runs dynamic programs under the rootfs's own `ld.so`, as a kernel exec would, instead of the
+built-in linker. It needs the `ld.so.cache` that the rootfs setup writes. Thunked libraries (GL, SDL2, Vulkan, audio) are served to
+it as in-memory stubs, and it works with an automatically found rootfs as well as with `--rootfs`. It passes the same test suites as
+the built-in linker; dhewm3 (120 s) and neverball ran under it, but other games and `make verify` have not been run with it.
+
 ## Contents
 
 `lib/` and `lib64/` (glibc and musl loaders, libc, libm, libgcc_s, NSS modules),

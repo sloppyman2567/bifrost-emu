@@ -4,6 +4,12 @@ How the suite is organized and run. Passing fixtures do not establish untested a
 launch is not game playability. The dated checkpoints that used to live here (what was run, when, and what it found)
 are kept unchanged in [the test history](archive/TESTS-history.md); the changelog records what changed.
 
+## Last full run
+
+On 2026-11-01, with every fixture provisioned, the strict suite passed **377/377** under the JIT and **362/362** under the interpreter
+(15 JIT-only tests are not run there), and `make verify` passed 100 differential fixtures plus ten threaded oracle runs. Missing
+fixtures fail strict mode; environment skips (exit 77) stay visible. This is a dated figure, not a claim about the current tree.
+
 ## Test inventory
 
 Original regression sources ship under Bifrost's Unlicense. Generated guest
@@ -30,13 +36,32 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### Saturating narrowing shifts (2026-11-23)
+
+`Tests/Unit/jit_shrn_sat.c` (`run_tests.sh` entry `jit_shrn_sat`) builds the instruction word for every one of SQSHRN, UQSHRN,
+SQRSHRN, UQRSHRN, SQSHRUN and SQRSHRUN at every shift for 16-, 32- and 64-bit source lanes, in both destination halves and with
+`Vd == Vn`, runs each on lanes at the rounding, saturation and sign boundaries plus pseudo-random ones, and compares the
+result and FPSR.QC with an exact `__int128` model (32,257 checks); a last loop keeps the source in a vector register. The
+model and the encodings pass under QEMU, the interpreter and both JITs, and the fixture fails on a JIT without the QC update
+or without the rounding add. It does not run Tier-2 regions or a host without SSE4.1.
+
+### In-place pin updates (2026-11-23)
+
+`Tests/Unit/jit_pin_inplace.c` (`run_tests.sh` entry `jit_pin_inplace`) runs self-loops that update pinned registers in the
+shapes the optimisation takes: a counter in `x0` with a later reader of the new value, 64-bit add/sub/eor/orr, 32-bit
+add/sub/eor/mul, the old value read before the update, a `madd`, each checked against plain C for several trip counts, and a
+faulting load on either side of the update (the registers in the signal frame must show the update done or not). It passes
+under the interpreter and the JIT, with and without `BIFROST_NO_PIN_INPLACE`, and it fails (7 `madd_shape` checks) with the
+`ADD` guard in `Arithmetic.cpp` removed. It does not run Tier-2 regions, threads or a game.
+
 ### Stall lines (2026-11-19)
 
 `Tests/Unit/test_wait_stall.c` and `Scripts/Testing/test_wait_stall.sh` (`run_tests.sh` entry `wait_stall`) check, with the JIT and with
 `--no-jit`, that `BIFROST_PROF` prints one `[stall]` line for a busy thread's futex wait and for a busy thread's `nanosleep` (with the
 thread name, the futex address, a caller and the time of day), for a busy thread blocked in `read` on a pipe and on a unix socket (with
 what the descriptor is), only five lines for a call site that stalls nine times (the report counts all of them, lists twelve such sites and says how many more there are), none for a thread that only waits, none without `BIFROST_PROF`, and none
-for calls under a second. It fails on a build without the lines, and without the busy-thread rule. It does not cover a real game.
+for calls under a second. It fails on a build without the lines, and without the busy-thread rule. Its threads spin in CPU time and the waiters are timed from a
+handshake, so it gives the same result on one core as on sixteen. It does not cover a real game.
 
 ### Guest identity (2026-11-23)
 

@@ -2,6 +2,118 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)
+
+Read-only measurements, one unattended run of each (the title, loading or connect screen, not gameplay), HEAD `c5b66667`.
+Method: `perf record -e ibs_op/cnt_ctl=1,swfilt=1/u -c 200003` on the whole launch with `BIFROST_PERF_MAP=1`; the launching script reads
+the game process's JIT code buffer through `/proc/PID/mem` at about 60 s (`ptrace_scope=1` allows it for descendants) and, for edges, the
+chain cells, then every sampled host instruction is classified by pattern. `BIFROST_JIT_DUMP` is useless on a game (printing the dump
+dominates the run). `BIFROST_CLASS_PROF` in the game process names the interpreter's fallback words. Shares are of dispatched uops:
+`cnt_ctl=1` counts uops, so a `jmp [mem]` (two uops) is sampled twice as often as a `mov`.
+
+**Zenless Zone Zero** (5.47 M samples): generated code 53.7% of the game process, the emulator's C++ 37.6%. In the C++ the largest function
+was `Emulator::exec_simd_imm` at 7.0%: the interpreter running `sqrshrun v.8b, v.8h, #7` (about 20 M executions in the sampled windows, the
+pixel conversion of the CRI Mana video decoder), about 11% with the interpreter's other entry points, since fixed
+([native lowering](#saturating-narrowing-shifts-are-native-2026-11-23)); texture transcoding (ASTC to BC7) 6.7%. Of the generated-code uops, guest
+state traffic is 24% (GPR loads and stores 13.9, vector 3.4, other cpu fields 3.8, PC 1.9, NZCV 1.0), guards 10.3, flag packing 7.2, chain
+jumps 6.5, register copies 2.1. By block size most ops are in long blocks: 53% in blocks of 8 or more guest instructions (state 15%), 30% in 4 to 7
+(24%), 17% in 1 to 3 (state 31% plus chaining 17%). A rebuilt runtime took 105 s before the game started; see the
+[changelog](../CHANGELOG.md).
+
+**Umamusume Global** (5.25 M samples): generated code 83%, the emulator's C++ 12% (no interpreter function above 0.3%). Uops: integer ALU and
+other 29.7, guards 10.5, guest memory 8.5, GPR state loads and stores 15.2 (all state traffic about 23), address arithmetic 7.9, chain jumps
+6.3, copies 3.0, flag packing 2.9; FP and SIMD in total about 4%. 35% of the uops are in blocks of 1 to 3 guest instructions (state 29%, chaining
+14%). Threads: `UnityMain` 34.8%, the thread named `games.umamusume` 34.8% (the name of the protector thread found earlier; not re-checked),
+`UnityGfxDeviceW` 10.8%. The game caps itself at 30 FPS.
+
+Umamusume's block boundaries, dynamic (multi-threaded code never patches instructions: an exit is `movabs r11, CELL; jmp [r11]`, the cell
+holds the target's chain entry; an edge's weight is the samples on its `jmp`, halved for the two uops). Direct chained edges are 1.93% of uops
+and their exit pair 5.8%; the stores before those exits are 0.57% and the loads at the targets' entries 4.78%, of which 49% (2.3%) are
+redundant because the value is still in a host register (2.0% with at most four registers per edge); dead stores are about 0. Edges whose
+target has one dominant chained predecessor are 1.58% of uops; merging them would save up to 6.6% (the exit pair and the redundant loads;
+the targets' calls and indirect entries are not measured). Guest-register stores are 8.4% of uops but only 0.57% sit at exits, so about 9% are
+stores inside blocks. The exact MT preemption poll (seven instructions) is 1.5%. Most-moved registers: `x0` to `x3`, `x19` to `x22`, `sp`,
+`x30`, NZCV. An extrapolation from the epoch compare alone gave 16% for the poll; counting the whole sequence gives 1.5%, because the compare
+also occurs in other sequences.
+
+**Game-style kernels** (nine kernels reconstructed in one source, built with gcc `-O3` for AArch64 and for x86-64-v3, so not comparable with the
+earlier clang set; one pinned core): host instructions per guest instruction 3.3 (hash), 4.9 (vm), 6.3 (audio mix), 7.6 (collide), 8.6 (particles),
+9.9 (cull), 10.0 (anim), 10.3 (skinning), 10.5 (4x4 matmul). Wall time against native: 4.8 times on average (1.4 to 14.6), QEMU user mode 14.3
+times (2.6 to 59.5), so the JIT is about 3 times faster than QEMU (1.4 to 6.9). In the four slowest, SIMD/FP moves and zeroing are 28-36% of
+the generated ops, vector state loads and stores 15-21%, NaN checks 11-14%, FP math 5-7%.
+
+Not measured: gameplay, a second run, frame times, the targets' non-chained entries, the cost of the changes proposed here.
+
+## Saturating narrowing shifts are native (2026-11-23)
+
+Chosen from a profile of Zenless Zone Zero (IBS op sampling of the game process, generated code read from its memory at 62 s
+of a 90 s unattended run): 53.7% of the process was generated code, 37.6% the emulator's own C++, and the biggest
+function in that C++ was `Emulator::exec_simd_imm` at 7.0% of all samples, with the interpreter's other SIMD/FP
+entry points bringing the fallback total to about 11%. `BIFROST_CLASS_PROF` named the instruction: `sqrshrun v.8b, v.8h,
+#7` and its `2` form, about 20 million executions in the sampled windows (the pixel conversion of the game's CRI Mana video
+decoder). The translator sent the whole family to `CALL_INTERP`, with a comment that native lowering was "disabled until
+rounding overflow and FPSR.QC are implemented correctly". Mechanism: [the guide](../JIT.md#saturating-narrowing-shifts).
+
+Measured: a loop of `sqrshrun`, `sqrshrun2` and two `add`s (20,000,000 iterations, one pinned core, checksum and QC equal to QEMU's):
+4.22 s with the interpreter fallback, 0.09 s native, about 47 times faster on that loop. `jit_shrn_sat` runs 32,257 checks
+(6 subops, 56 shifts across the three source widths, both halves, aliasing, boundary and random lanes) with the JIT, the
+interpreter and QEMU: all agree; the old JIT also passes (it interprets). Mutants fail it: no QC update (3,176 failures), no
+rounding add (2,802). `jit_simd_sat_narrow` (672 checks), the 106 JIT-named unit fixtures and `verify_jit.sh` (112 differential fixtures, 12 threaded oracle runs) pass. On
+`jit_simd_sat_narrow` the interpreter-executed instructions drop from 576 to 192, the 64-bit-source forms that remain.
+
+The game afterwards (one unattended run, BIFROST_PROF sampler): the share of samples in the interpreter was 2.6%, 4.1% and 4.9% at 40,
+80 and 120 s against 0.4%, 5.5% and 8.5% before (the two runs reach different scenes at slightly different times, so the figures are
+only roughly comparable), and `sqrshrun` no longer appears in the interpreter's top words. What is left there, by
+`BIFROST_CLASS_PROF`: the exclusive-pair atomics `ldxp`/`stxp`/`ldaxp`/`stlxp` with their `cbnz` retry loops, and scalar
+`fmax`/`fmin`.
+
+Not measured: a host without SSE4.1, Tier-2 regions containing the op, the game's picture (no screenshot, so a visual
+difference in the video cannot be ruled out beyond the QEMU-matching fixture), 64-bit source lanes (still interpreted: no
+packed 64-bit arithmetic shift before AVX-512).
+
+## In-place updates of pinned registers (2026-11-23)
+
+Chosen from a read-only profile of the same day (CoreMark, busybox gzip, zstd, sort, fib, dispatch, memcpy, matrix; one pinned
+core; IBS op sampling classified per host instruction): the generated code runs about 3.5 host instructions per guest
+instruction on CoreMark (19.62 G host over 20,000 iterations of 279,918 guest instructions) against about 1.2 for a native
+x86 build of the same C (328,013 instructions per iteration, gcc 16.2.1 `-O2`), so the gap is the JIT's instruction count and not
+the compiler: the AArch64 guest is the shorter program. 31% of CoreMark's executed ops are in eight self-loop blocks. Reading the
+hottest, `matrix_mul_matrix` (guest 0x401de0, 8 ARM instructions, 29 host per iteration against 10 in the native loop):
+8 register copies, 3 loop-invariant state loads (only R12-R15 are pins), 3 dead-looking state stores and 4 guard instructions.
+Mechanism: [the guide](../JIT.md#loop-pins).
+
+Microbenchmark (the 29 executed instructions transcribed into an inline-asm harness with hand-optimised variants of the same
+dataflow, results compared, one pinned core, median of 16 loop alignments because placement alone moved a variant by 15 to
+20%; ns per 16-iteration visit, A 18.5):
+
+| Variant | Change vs A |
+|---|---|
+| everything fixed (no copies, no dead stores, invariants in registers) | -26% |
+| copies fixed (reads from the pin, results in place) | -21% |
+| state traffic fixed (3 invariant loads, 3 stores) | -18% |
+| dead stores only | -6% |
+| write side only / read side only | -6.5% / -4% |
+| two extra pins for x20 and x21 (RSI/RDI), stores and copies kept | +0.5% |
+| chains updated in place, side copies kept | -12% |
+| exactly what the JIT now emits (chains in place, one side copy of the new counter) | -6.7% |
+
+The loop is bound by instruction dispatch (about 5.7 instructions per cycle), so each removed instruction is about 3.5% of it,
+and the pieces are not additive. One extra `mov` was worth 5 points.
+
+Result of the change (new binary against the previous one, alternating runs, one pinned core, host counters): CoreMark 40,000
+iterations, 15 pairs: 16,681 to 16,821 it/s (+0.8% median, +0.4% mean; the stdev of one run is 1.1 to 1.5%), instructions -1.8%,
+cycles -0.8%, fewer cycles in 10 of 15 pairs. busybox gzip of 6.7 MB: cycles -1.3% (12 of 15 pairs). `bench_mips` -4.7%
+instructions, cycles +0.1%. `bench_sort`, zstd and `bench_fib` within noise (no pinned counter loops). The code is correct on
+`jit_pin_inplace`, the 103 JIT-named unit fixtures and 65 toybox/real-world tests; gzip and zstd output is byte-identical. Not
+measured: a game, the Android runtime, Tier-2 (it keeps its own allocator), a second machine. `make verify` cannot cover this: it
+sets `BIFROST_JIT_VERIFY`, which turns pinning off.
+
+Rejected, do not repeat: a non-owning register alias for the `LOAD_REG` copy (the allocator holds `reg_vreg_[vreg_home_[v]] == v`
+in about 55 places and `drop_vreg` reports a violation); renaming operands to architectural vregs (x0 is vreg 0, the IR's "no
+operand"); more pins in RSI/RDI (not callee-saved, so a block with any C-call slow path would clobber them, and the measured gain
+alone is zero). Left: a reader of the new value after the update still takes a copy (the single cheapest further step, about 5
+points on this loop), the three invariant loads and the stores of `x5`/`x6` (not pin candidates: written before read).
+
 ## Host-native memcpy, memmove and memset (2026-11-16)
 
 Chosen from the game profile of the same day: in Minecraft Weekend the hottest translated block was the guest's `memset`
@@ -400,7 +512,55 @@ whose blocks each start with a load packs seven instructions on every edge), one
 same-base stack accesses, guest-state stores overwritten later in the block, the 17-instruction indirect-branch probe, copies to
 and from pinned registers, and the `movabs` of the window base on every chain entry.
 
+## CoreMark and benchmark re-measurement (2026-11-23)
+
+The README's performance figures, measured again with the November 8 method and two changes: every run is pinned to one core
+(`taskset -c 5`), and the count is 200,000 iterations, because the current build at 160,000 would run under CoreMark's ten-second
+minimum. `Tests/Unit/coremark.elf` as `coremark.elf 0 0 0 200000`, one warmup and three measured runs interleaved across the four
+binaries, every run with the expected CRCs (`crclist` 0xe714, `crcmatrix` 0x1fd7, `crcstate` 0x8e3a, `crcfinal` 0x4983, the value
+QEMU prints at this count). The CPU governor was `performance` with boost on (`/sys`), and the runs started after the 1-minute load
+average had fallen below 1.0 (it then sat near 1.0: the benchmark itself). Each bifrost-emu binary was built from `git archive` in a
+temporary directory (the shipped one with `USE_SDL2=1 USE_THUNK_GL=1`, the headless ones with
+`USE_SDL2=0 USE_SDL3=0 USE_THUNK_GL=0 USE_MEDIA=0`), so no shared build was replaced.
+
+| Build | Runs (iterations/s) | Median |
+|---|---|---|
+| tree at `68a384ca`, shipped SDL/GL build | 16,880 / 16,913 / 16,828 | 16,880 |
+| same source, headless build | 16,810 / 16,889 / 16,919 | 16,889 |
+| 2.0.0-alpha.2 release commit (`556557b0`), headless build | 12,628 / 12,665 / 12,635 | 12,635 |
+| QEMU 11.1.3 user mode | 8,024 / 8,010 / 8,030 | 8,024 |
+
+The shipped build is 2.10 times QEMU; the headless build is 1.34 times alpha.2; the shipped and headless builds differ by 0.1%.
+Against November 8 the shipped build is 13% faster (14,874 to 16,880), which fits the 2026-11-10 and 11-11 JIT changes (see the
+changelog); the alpha.2 binary measured 12,635 against 12,711 then, 0.6% apart despite the pinning and the higher count.
+
+The `bench_*` table in the README comes from `taskset -c 5 bifrost-emu [--no-jit] Tests/Apps/bench_NAME.elf`, one warmup and three
+measured runs per mode on the shipped build, each program's own timer except `bench_mips` (process wall time), medians:
+
+| Program | Interpreter | JIT | Speedup |
+|---|---|---|---|
+| fib(35) | 7.221 s (7.227 / 7.221 / 7.128) | 0.065 s | 111x |
+| memcpy 256 MiB | 185.0 MiB/s | 13,956 MiB/s | 75x |
+| qsort 100K ints | 4.350 s | 0.071 s | 61x |
+| matrix 256x256 | 12.7 MFLOPS | 1,086 MFLOPS | 86x |
+| `bench_mips` | 15.407 s, 51.9 MIPS | 0.178 s, 4,482 MIPS | 86x |
+
+This run used a small harness around the same commands, not `Scripts/Bench/run_benchmarks.py --mode both`, which the November 8 run
+used for `bench_mips`; the program output was checked for its `VALID:` line each time. Compared with November 8: the JIT `memcpy`
+is 49% faster (9,390 to 13,956 MiB/s; large copies now run the host's routine, commit `7be92eb5`), JIT `fib(35)` is 14% faster
+(0.076 to 0.065 s) and JIT `qsort` 7% (0.076 to 0.071 s), and the JIT `matrix` is 4% slower (1,129 to 1,086 MFLOPS), which is one
+millisecond of the 31 ms timer. The interpreter figures are 2% to 8% faster (fib 7.35 to 7.22 s, qsort 4.51 to 4.35 s, matrix 11.9
+to 12.7 MFLOPS, memcpy 171 to 185 MiB/s, `bench_mips` 51 to 52 MIPS), which this note does not explain.
+
+Limits: one host and one benchmark; the JIT times of the small programs are millisecond-scale. Pinning one core removes scheduler
+noise but is a different condition from the unpinned November 8 runs, so the two sets are comparable only loosely (the alpha.2
+cross-check above is the evidence they are close). Core 5 read 4,441 MHz after nearly every run and 3,589 MHz after one (the first
+shipped-build run of round 1, 16,880 iterations/s, in line with the others). No `BIFROST_TIER2=1` run. CoreMark does not predict
+game frame rates.
+
 ## CoreMark re-measurement (2026-11-08)
+
+Superseded by the [2026-11-23 re-measurement](#coremark-and-benchmark-re-measurement-2026-11-23); kept as the record of these numbers.
 
 The October 27 method on the same Ryzen 7 5800X3D desktop, now with the CPU governor on `performance` (boost on, checked in
 `/sys`). `Tests/Unit/coremark.elf` as `coremark.elf 0 0 0 160000`, one warmup and three measured runs interleaved across the four

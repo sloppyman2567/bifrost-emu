@@ -133,6 +133,10 @@ it under the guide's Recorded changes.
 - Vn is `CPU::v[n]`, 16 contiguous bytes (`lo` bits 63:0, then `hi`), addressed as `vlo_off(n)`/`vhi_off(n)`; byte `b` of
   Vn is `vlo_off(n) + b`. Move a whole register with one 16-byte access (`load_v16`/`store_v16`), never a lo/hi pair, but the
   lo-only scalar FP cache stores 8 bytes: its XMM does not hold `v_hi`.
+- Saturating narrowing shifts (`SIMD_SHRN_SAT`) add the rounding bit after the shift, `(x >> s) + ((x >> (s-1)) & 1)`, never `x + 2^(s-1)`
+  in the source lane (that wraps). The translator takes the shift from `immh:immb` (source bits minus the field) and the
+  source lane size from `immh` (twice the destination's); 64-bit sources stay interpreted in the emitter and in
+  `BlockAnalysis` alike. `jit_shrn_sat` (matches QEMU) covers every subop, shift and half.
 - Native saturating integer SIMD must set FPSR.QC like the interpreter
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.
@@ -281,6 +285,12 @@ it under the guide's Recorded changes.
   inline store and the stub after the block. Anything emitted between an exit's `mov eax, pc` and its frame return must
   keep RAX: it is the block function's return value. A new chain target that reads `cpu.pc` stores its own PC first, as the
   Tier-2 trial wrapper's tails and a region's chain entry do.
+- A pinned register's update runs in its pin only for the exact adjacent shape `scan_pin_inplace` accepts (OP, an optional fused
+  ZEXT 32, STORE_REG to the same register, the LOAD_REG's value not read after the OP). The compile loop compiles a patched
+  `IRInst` with `dest = src1 = a`, so the emitters' `dest == src1` forms must keep the result in `src1`'s register: the `ADD`
+  path's dead-`src2` reuse is skipped for `dest == src1`. Widen the shape (an op between, a later write) only with the fault and
+  exit argument: the pin must not change before the end of the guest instruction. Never alias a vreg to a pin's register: the
+  allocator keeps `reg_vreg_[vreg_home_[v]] == v`. `jit_pin_inplace` covers it; `BIFROST_NO_PIN_INPLACE=1` turns it off.
 - No self-loop back-edge (`BRCOND` through `flush_all_vregs_but_pins`, `BRCOND_ZERO`, `BRCOND_BIT`) stores the loop pins
   (R12-R15), so inside the body a pin can be ahead of `cpu.regs[]` although it is mapped clean. The body must read a pin
   through its mapping: the preload raises `max_vreg_`, because `load_vreg_to_reg` and `store_reg_to_vreg` trust

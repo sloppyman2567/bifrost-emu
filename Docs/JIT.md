@@ -221,6 +221,16 @@ allocated (`scvtf s0, w1` at a loop head) would read the stale `cpu.regs` slot. 
 architectural vreg (`store_dirty_unpinned_arch_regs`) before its slot. `jit_selfloop_pins` and `jit_fp_ldst_cache` cover
 both.
 
+A pinned register that the loop updates (`add x0, x0, #1`, `add w3, w3, w4`, `madd x3, x9, x8, x3`) is updated in its pin.
+The IR is `LOAD_REG t <- a; OP s <- t, y; [ZEXT 32]; STORE_REG a <- s` and the generic path computes in a scratch copy of the
+pin and moves the result back, three instructions on the loop-carried chain. `scan_pin_inplace` marks an `ADD`/`SUB`/`AND`/
+`OR`/`XOR`/`MUL` of exactly that adjacent shape (the ZEXT only when `zext32_fused_` fused it into the op); the compile loop
+emits it as `a <- a OP y`, the existing `dest == src1` form, on the pin, skips the `STORE_REG`, the `ZEXT` and a `LOAD_REG`
+that only the op read, and gives readers of the new value after the `STORE_REG` a copy of the pin. Nothing sits between the
+op and the end of the guest instruction, so no fault or exit can see the new value early. Readers of the old value before the
+op keep their `LOAD_REG` copy. An `ADD` with `dest == src1` never moves its result into a dead second operand's register
+(the pin would lose the value). `BIFROST_NO_PIN_INPLACE=1` goes back to the scratch copy. `jit_pin_inplace` covers it.
+
 ### Peepholes
 
 Tier-1 decides each with a pre-scan and the emitter re-checks it:
@@ -736,6 +746,24 @@ the architectural vector width through the factory, translator and codegen:
 Q=0 writes the low 64 bits and clears `v_hi`; Q=1 computes both halves.
 `Tests/Unit/jit_simd_mul32.c` covers overflow, source/destination aliasing and both
 widths with fixed expected products, independently checked under QEMU.
+
+## Saturating narrowing shifts
+
+`SQSHRN`, `UQSHRN`, `SQRSHRN`, `UQRSHRN`, `SQSHRUN` and `SQRSHRUN` (vector forms) are native for 16- and 32-bit source lanes
+(`SIMD_SHRN_SAT`, `Widening.cpp`). They used to be left to the interpreter by the translator itself, which a game's video
+decoder exposed: `sqrshrun v.8b, v.8h, #7` is the last step of a fixed-point pixel conversion, and the interpreter ran it
+for about 7% of the process. The destination lane size comes from `immh`, the source lanes are twice as wide and all of
+them are read (`Q` picks the destination half only: 0 writes `v_lo` and clears `v_hi`, 1 writes `v_hi` and keeps `v_lo`),
+and the shift is the source bits minus `immh:immb`.
+
+The result is the exact `(x + round) >> shift`, saturated to the destination, so the rounding must not wrap in the source
+lane. The emitter uses `(x >> s) + ((x >> (s-1)) & 1)`, which equals `(x + 2^(s-1)) >> s` for an arithmetic shift (signed
+source) and a logical shift (unsigned source) and cannot overflow. The pack then saturates (`packsswb`/`packssdw` for a
+signed destination, `packuswb`/`packusdw` for an unsigned one; an unsigned source clamps with `pminuw`/`pminud` first).
+FPSR.QC is set when any lane saturates, found by comparing the shifted lanes with their saturated form
+(`emit_simd_qc_unless_equal`). 64-bit sources (immh >= 4) and, without SSE4.1, the forms that need `pminu*` or `packusdw`
+stay on the interpreter; `BlockAnalysis` predicts exactly that. `jit_shrn_sat` covers every subop, shift and half and
+`Vd == Vn` against an exact model that matches QEMU; `jit_simd_sat_narrow` covers the JPEG IDCT shapes.
 
 ## Shared SIMD fallback semantics
 
@@ -1846,14 +1874,17 @@ by method rather than by fixed address ranges.
   prints). A run under ten seconds is invalid, and a new count needs its CRC from QEMU. Fix the CPU governor to
   `performance`. Whole-process cache-miss counts mostly measure startup and translation (the dynamic loader, thunk
   registration), not generated code. CoreMark does not predict game frame rates.
-- **Latest recorded figures.** CoreMark 14,874 iterations/s on the shipped build against 7,992 for QEMU 11.1.1 (Ryzen 7
-  5800X3D, 2026-11-08), and 37,951 natively (gcc `-O2`, same host, 2026-11-07); records and methods are under
-  [Recorded changes](#recorded-changes). The README's performance tables are the published figures.
+- **Latest recorded figures.** CoreMark 16,880 iterations/s on the shipped build against 8,024 for QEMU 11.1.3 (Ryzen 7
+  5800X3D, pinned to one core, 2026-11-23), and 37,951 natively (gcc `-O2`, same host, 2026-11-07); records and methods are under
+  [Recorded changes](#recorded-changes). The tables in [PERFORMANCE.md](PERFORMANCE.md) are the published figures.
 
 ## Recorded changes
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)
+- [Saturating narrowing shifts are native (2026-11-23)](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)
+- [In-place updates of pinned registers (2026-11-23)](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23)
 - [One jump per loop iteration and one check per repeated access (2026-11-16)](archive/JIT-history.md#one-jump-per-loop-iteration-and-one-check-per-repeated-access-2026-11-16)
 - [Host-native memcpy, memmove and memset (2026-11-16)](archive/JIT-history.md#host-native-memcpy-memmove-and-memset-2026-11-16)
 - [A fork child keeps the JIT (2026-11-11)](archive/JIT-history.md#a-fork-child-keeps-the-jit-2026-11-11)

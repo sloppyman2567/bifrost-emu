@@ -257,7 +257,8 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             int d;
             if (inst.op == IROp::ADD) {
-                if (inst.dest == inst.src2 || (inst.src2 > 32 &&
+                // dest == src1 computes in place (a pinned register's update must stay in its pin).
+                if (inst.dest == inst.src2 || (inst.dest != inst.src1 && inst.src2 > 32 &&
                     vreg_last_use_this_op(inst.src2) &&
                     !(pinned_host_regs_ & (1u << s2)))) d = s2;
                 else d = result_reg(inst.src1, s1, s2 == s1 ? -1 : s2);

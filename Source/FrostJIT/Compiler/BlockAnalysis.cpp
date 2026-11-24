@@ -31,7 +31,9 @@ bool instr_will_call_interp(const DecodedInst& d) {
             // silently drifting — AND/ORR/EOR/DUP native paths were missing,
             // forcing those blocks down the interpreter).
             const auto family = simd::classify(d.raw).family;
-            return family == simd::Family::UNKNOWN || family == simd::Family::SHRN_SAT;
+            // SHRN_SAT is native except for 64-bit source lanes (immh >= 4: a 32-bit destination).
+            return family == simd::Family::UNKNOWN ||
+                   (family == simd::Family::SHRN_SAT && ((d.raw >> 19) & 0xF) >= 4);
         }
         case InstClass::FP_SCALAR: {
             uint32_t op = d.raw;

@@ -4,6 +4,23 @@ Bifrost is an AArch64 Linux user-mode emulator for x86_64 Linux hosts. Guest
 instructions run through FrostJIT or the reference interpreter; both share
 the emulator's memory, signal, syscall, loader and host-service implementations.
 
+## Overview
+
+```mermaid
+flowchart LR
+    ELF["ARM64 ELF / APK"] --> Loader["Loader + dynamic linker"]
+    Loader --> Decoder
+    Decoder --> IR["IR translator<br/>scalar SSA + passes"]
+    IR --> JIT["FrostJIT<br/>x86_64 codegen"]
+    Decoder --> Interp["Reference interpreter"]
+    JIT <-->|"fallback, verify"| Interp
+    JIT --> Sys["Syscalls + Yggdrasil VFS"]
+    Interp --> Sys
+    JIT --> Thunks["GL / Vulkan / SDL / audio thunks"]
+    Sys --> Host[("x86_64 Linux host")]
+    Thunks --> Host
+```
+
 ## Where to start
 
 | Responsibility | Directory and entry points |
@@ -140,7 +157,7 @@ decoder or syscall dispatch table can reasonably remain large.
 | `Tools/Fetch/` | Toolchain/header fetchers, and the SDL3 source build (`fetch-sdl3.py`) |
 | `Tools/Reference/` | Independent instruction and reference implementation utilities |
 | `Assets/Branding/` | The project icon (`bifrost-emu-icon.svg`) and the 1280×640 GitHub social preview card |
-| `Tools/Site/` | The project site (home, install, games, screenshots and JIT pages, with a collapsible sidebar): `build-site.py` builds it from the README (including its Performance tables), `compatibility.json` and the version into `layout.html` (sidebar) with `home.html`, `install.html`, `games.html`, `screenshots.html` and `jit.html` (`.github/workflows/pages.yml` deploys it) |
+| `Tools/Site/` | The project site (home, install, games, screenshots and JIT pages, with a collapsible sidebar): `build-site.py` builds it from `Docs/COMPATIBILITY.md`, `Docs/PERFORMANCE.md`, `Docs/SCREENSHOTS.md`, `compatibility.json` and the version into `layout.html` (sidebar) with `home.html`, `install.html`, `games.html`, `screenshots.html` and `jit.html` (`.github/workflows/pages.yml` deploys it) |
 | `Tests/Unit/`, `Tests/Apps/`, `Tests/Asm/` | Guest fixtures, application probes and assembly tests |
 | `Tests/Host/` | Native host checks and Java framework probe sources |
 | `ThirdParty/` | Vendored headers, registries and dependencies |

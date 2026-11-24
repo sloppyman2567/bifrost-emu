@@ -92,6 +92,7 @@ struct DebugFlags {
     bool class_prof = false;  // BIFROST_CLASS_PROF: instruction-class counts for blocks that fall back to the interpreter
     bool jit_dump = false;  // BIFROST_JIT_DUMP: dump the IR of every compiled block
     bool no_pin = false;  // BIFROST_NO_PIN: no pinned host registers in loops
+    bool no_pin_inplace = false;  // BIFROST_NO_PIN_INPLACE: pinned registers update through a scratch copy, not in place
     bool no_rdce = false;  // BIFROST_NO_RDCE: Tier-2 planner: no redundant-store elimination
     bool no_licm = false;  // BIFROST_NO_LICM: Tier-2 planner: no loop-invariant hoisting
     bool no_destsrc = false;  // BIFROST_NO_DESTSRC: Tier-2 planner: no destination-as-source reuse
@@ -327,6 +328,7 @@ struct DebugFlags {
         f.class_prof = env("BIFROST_CLASS_PROF");
         f.jit_dump = env("BIFROST_JIT_DUMP");
         f.no_pin = env("BIFROST_NO_PIN");
+        f.no_pin_inplace = env("BIFROST_NO_PIN_INPLACE");
         f.no_rdce = env("BIFROST_NO_RDCE");
         f.no_licm = env("BIFROST_NO_LICM");
         f.no_destsrc = env("BIFROST_NO_DESTSRC");
