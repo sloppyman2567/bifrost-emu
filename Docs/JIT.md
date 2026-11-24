@@ -222,6 +222,24 @@ op and the end of the guest instruction, so no fault or exit can see the new val
 op keep their `LOAD_REG` copy. An `ADD` with `dest == src1` never moves its result into a dead second operand's register
 (the pin would lose the value). `BIFROST_NO_PIN_INPLACE=1` goes back to the scratch copy. `jit_pin_inplace` covers it.
 
+### Loops with CBZ/CBNZ exits
+
+A loop that ends in a branch back to its first instruction, and whose only other branches are `cbz`/`cbnz` leaving it (a null-terminated list
+walk, a search that stops on a match), is one block with mid-block exits. `side_exit_loop_extent` (`Compiler/SideExit.cpp`) scans from the block
+start when `translate_block` meets the first `cbz`/`cbnz`; every other branch, a call, a return or an exit whose target lies inside the loop
+leaves the loop split as before. Each exit is a `BRCOND_ZERO` with `aux = 1`: `compile_cbz_side_exit` commits NZCV, tests the register and emits a
+`jcc`, and the block goes on. The exit itself is emitted after the block from the allocator layout captured at the branch (the deferred-guard
+mechanism): it stores every mapped guest register, clean or not (a loop pin is ahead of memory), writes the pinned vectors back and takes the
+chain slot of `emit_taken_path_epilogue`. The loop's pins then cover the whole loop, so a list walk keeps its pointer and key in host registers.
+
+Each exit's slot is published as a stub entry in `blocks_` under `side_exit_key(pc, index)` (bit 63 set, so no guest pc collides), with the exit
+target as its only successor. Patching, `back_refs_`, MT cells (`edge_source_override_` files them under the stub key), unpatching, invalidation and
+retirement then treat it as any block with one successor; `retire_blocks_locked` retires a block's stubs with it. A block with a mid-block exit runs
+a different number of instructions per entry, so it is marked `has_call` (differential replay skips it), is not recorded in the persistent cache,
+and is never formed under `BIFROST_JIT_VERIFY`. `BIFROST_NO_SIDE_EXIT=1` turns the formation off. `jit_side_exit` (`test_jit_side_exit.sh`) checks
+six loop shapes against C, a fault inside a loop (the signal frame shows the finished iterations) and five threads; `[JIT] side-exit blocks`
+in `-v` shows how many blocks were formed. On CoreMark it removes 1.8% of host instructions.
+
 ### Peepholes
 
 Tier-1 decides each with a pre-scan and the emitter re-checks it:
@@ -1624,6 +1642,7 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
+- [Loops with CBZ/CBNZ exits become one block (2026-11-24)](archive/JIT-history.md#loops-with-cbzcbnz-exits-become-one-block-2026-11-24)
 - [Window register loaded once per chain (2026-11-24)](archive/JIT-history.md#window-register-loaded-once-per-chain-2026-11-24)
 - [SpongeBob host profile with perf: dispatch and translation after loading (2026-11-24)](archive/JIT-history.md#spongebob-host-profile-with-perf-dispatch-and-translation-after-loading-2026-11-24)
 - [Carry loop report on a game, and chain-edge carrying (2026-11-24)](archive/JIT-history.md#carry-loop-report-on-a-game-and-chain-edge-carrying-2026-11-24)

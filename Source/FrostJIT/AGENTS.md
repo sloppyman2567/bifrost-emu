@@ -26,6 +26,11 @@ A new history section can make an older "not measured" or "next section" line wr
   chain targets and `carry_info_`, print the `[carry]` lines of the `BIFROST_PROF`/`BIFROST_PC_HIST` report and emit no code. `carry_info_` is
   written under the compile lock, so the reader takes `compile_mutex_` (try-lock, as `dump_memory_stats` does) and then the table lock.
   `carry_report` covers it.
+- A mid-block exit (`BRCOND_ZERO` with `aux = 1`, `Compiler/SideExit.cpp`) leaves through a tail emitted after the block from a captured layout: it
+  must store every mapped guest register, not only the dirty ones (a loop pin is statically clean and ahead of memory), and the optimizer's
+  branch barriers must stay (dead-store elimination clears at a branch). Its chain slot lives in a stub `BlockEntry` under `side_exit_key`; anything
+  that enumerates `blocks_` must tolerate those entries (no guest pc, `fn` null), anything that retires a block must retire its `side_stubs_`, and
+  a new place that creates MT edges for a tail sets `edge_source_override_`. Such a block is `has_call` and unrecordable; `jit_side_exit` covers it.
 - `IR/` owns typed instructions, translation, scalar SSA, optimization and
   validation. Factories/readers are the parameter contract. SSA currently models
   scalar values; do not assume MemorySSA or complete vector/FP state coverage.

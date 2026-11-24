@@ -16,6 +16,8 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   game was shown to gain. `BIFROST_TIER2`, `BIFROST_TIER2_*`, `BIFROST_T2_REGIONDUMP` and the region-only `BIFROST_NO_*` switches
   (`CALLREGION`, `DESTSRC`, `RDCE`, `LICM`, `KEEPRES`, `EXITCHAIN`) do nothing now, and the `tier2:` and `block-runs` lines are gone
   from the JIT stats. Nothing changes in a default run, and the emulator binary is about 150 KB smaller.
+- Loops that test a register and leave (walking a list until a null pointer, scanning until a zero byte) now run as one block that keeps
+  the loop's registers in host registers (CoreMark: 1.8% fewer host instructions). `BIFROST_NO_SIDE_EXIT=1` turns it off.
 - Code that reads and writes memory runs a little faster: the window address is loaded once per call chain instead of at every block
   (CoreMark: 2.8% fewer host instructions and about 2.4% fewer cycles, five alternating runs; no game has been timed).
 - `BIFROST_PROF` with `BIFROST_PC_HIST=1` also lists the hot loops of several blocks (`[carry]` lines): how much of the JIT time they take and how many

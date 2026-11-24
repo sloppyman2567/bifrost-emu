@@ -283,6 +283,7 @@ void FrostJIT::dump_code_cache_stats() {
         fprintf(stderr, "[JIT] code-shape by instrs (blocks@avg bytes):%s\n", by_size.c_str());
     }
     fprintf(stderr, "[JIT] MT publication: edges=%llu\n", (unsigned long long)mt_edges_published_.load());
+    fprintf(stderr, "[JIT] side-exit blocks: %llu\n", (unsigned long long)side_exit_blocks.load());
     if (dispatch_stats_enabled_) {
         fprintf(stderr, "[JIT] dispatch-cache: last=%llu way0=%llu way1=%llu table=%llu evictions=%llu sets=%d ways=2\n",
                 (unsigned long long)dispatch_last_hits_.load(std::memory_order_relaxed),
@@ -314,14 +315,15 @@ void FrostJIT::emit_preempt_compare(int cpu_reg, int scratch) {
 // lease; expiry or a host callback sentinel returns through the cold tail.
 FrostJIT::MtEdge* FrostJIT::create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off) {
     auto cell = std::make_unique<MtEdge>();
-    cell->source_pc = current_start_pc_;
+    const uint64_t source = edge_source_override_ ? edge_source_override_ : current_start_pc_;
+    cell->source_pc = source;
     cell->cold_entry = cold_entry;
     cell->target_pc = target_pc;
     cell->slot = static_cast<uint32_t>(off);
     MtEdge* edge = cell.get();
     mt_edges_.push_back(std::move(cell));
     mt_edge_refs_[target_pc].push_back(edge);
-    mt_source_refs_[current_start_pc_].push_back(edge);
+    mt_source_refs_[source].push_back(edge);
     return edge;
 }
 FrostJIT::MtEdge* FrostJIT::mt_slot_edge(uint64_t source_pc, size_t slot) {
@@ -863,9 +865,22 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
     retire_blocks_locked(victims);
 }
 
-void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
+void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& selected) {
     // Caller holds the compiler lock and has selected exact victims.
-    if (victims.empty()) return;
+    if (selected.empty()) return;
+    // A block with mid-block exits owns stub entries (SideExit.cpp); they go with it.
+    std::vector<uint64_t> with_stubs;
+    if (!side_stubs_.empty()) {
+        with_stubs = selected;
+        for (uint64_t pc : selected) {
+            auto stubs = side_stubs_.find(pc);
+            if (stubs == side_stubs_.end()) continue;
+            with_stubs.insert(with_stubs.end(), stubs->second.begin(), stubs->second.end());
+            side_stubs_.erase(stubs);
+        }
+        for (uint64_t pc : selected) side_exit_table_.erase(pc);
+    }
+    const std::vector<uint64_t>& victims = with_stubs.empty() ? selected : with_stubs;
     invalidate_dispatch_cache();
     auto unpatch_slot = [&](uint64_t source_pc, size_t off) {
         if (mt_active()) {
@@ -922,6 +937,8 @@ void FrostJIT::invalidate_all() {
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     invalidate_dispatch_cache();
     code_index_.clear();
+    side_stubs_.clear();
+    side_exit_table_.clear();
     for (auto& edge : mt_edges_) {
         edge->live = false;
         edge->target.store(0, std::memory_order_release);

@@ -2,6 +2,26 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Loops with CBZ/CBNZ exits become one block (2026-11-24)
+
+First piece of the Carry plan that changes code: the primitive every merge needs, a conditional exit out of the middle of a block (design in
+`Docs/JIT.md`, "Loops with CBZ/CBNZ exits"). CoreMark's list loop (`0x400f58`: `ldr x2,[x2]; cbz x2,exit; ldr x3,[x2,#8]; ldrsh w5,[x3,#2];
+cmp w5,w28; b.ne 400f58`) used to be two blocks, so its pointer and key were stored and reloaded each iteration; it is now one block with `x2` and
+`x28` in R12 and R13. A first version skipped `optimize_ir` for such blocks (it assumes a branch ends the block) and came out 1.8% worse in
+instructions, because every `STORE_REG` was followed by a reload of the same register; the optimizer's dead-store pass already clears its pending
+stores at a branch and its forwarding keeps its cache across one, so it now runs. Another slip along the way: `compile_ir_branch` did not route the
+marked op to the new compile function at first, so the block ended at the first exit with the normal fall-through chain, which was still correct
+and is why CoreMark validated; the dump of the generated code (a block that stopped after the first test) is what showed it.
+
+CoreMark, 40,000 iterations, one pinned core, five alternating runs with `BIFROST_NO_SIDE_EXIT=1` and without: host instructions 37.368 G to
+36.695 G (-1.8%); cycles best-of-five 10.679 G to 10.379 G (-2.8%), but the machine was busy and the cycle counts swing by 10% between runs, so
+only the instruction count is trusted. The full 200,000-iteration run validates all CRCs. Not measured in a game. The two stores of `x3` and `x5`
+per iteration remain: they are live-out as far as the block knows.
+
+Checked: `jit_side_exit` (the fixture and its script, six loop shapes against C, a fault inside a loop, five threads, in the default mode, with
+exits off, `BIFROST_NO_CHAIN=1`, `BIFROST_NO_CHAIN_SKIP=1` and `BIFROST_IR_VALIDATE=1`), `make verify` and the strict quick suite (results in the
+commit). Only CBZ/CBNZ exits are handled; `b.cond` and `tbz` exits, a loop with an inner branch that stays inside it, and exits through calls are not.
+
 ## Window register loaded once per chain (2026-11-24)
 
 Found by reading the generated code of CoreMark's list loop (`BIFROST_JIT_DUMP=1`, bytes through `objdump -D -b binary -mi386:x86-64`): every block

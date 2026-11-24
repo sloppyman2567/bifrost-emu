@@ -123,6 +123,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     selfloop_jcc_off_ = 0;
     selfloop_target_off_ = 0;
     selfloop_reconcile_after_ = false;
+    block_has_side_exit_ = false;
+    compiled_side_exits_.clear();
+    deferred_side_exits_.clear();
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
@@ -214,6 +217,11 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     bool has_inlined_leaf = false;  // cannot use contiguous interpreter step counts
     bool has_brcond_skip = false;   // blocks with BRCOND_SKIP skip optimize_ir (op-count stability)
     uint64_t loop_tail_end = 0;
+    // A loop whose only inner branches are CBZ/CBNZ exits stays one block: the exits become mid-block exits (SideExit.cpp).
+    const bool side_exits_allowed = !dbg().no_side_exit && !dbg().no_selfloop && !dbg().jit_verify && !leaf_inline_enabled_ &&
+                                    !(mt_active() && dbg().no_chain);
+    bool side_exit_scanned = false;
+    std::vector<uint64_t> side_exit_pcs;
     // A loop body up to twice the cap stays one block (selfloop_extent).
     int block_cap = max_block_insts;
     bool loop_probed = false;
@@ -358,7 +366,24 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             chain_target_pc_ = cur_pc;
             break;
         }
+        bool side_exit_here = false;
+        if (side_exits_allowed && (d.cls == InstClass::CBZ || d.cls == InstClass::CBNZ)) {
+            if (!side_exit_scanned) {
+                side_exit_scanned = true;
+                const int n = side_exit_loop_extent(start_pc, 2 * max_block_insts, side_exit_pcs);
+                if (n > 0) {
+                    block_cap = std::max(block_cap, n);
+                    loop_probed = true;
+                }
+            }
+            side_exit_here = std::find(side_exit_pcs.begin(), side_exit_pcs.end(), cur_pc) != side_exit_pcs.end();
+        }
         bool ends = translate_to_ir(ir_block, d, cur_pc);
+        if (side_exit_here && ends && ir_block.insts.back().op == IROp::BRCOND_ZERO) {
+            ir_block.insts.back().aux = 1;  // a mid-block exit: the block goes on
+            ends = false;
+            block_has_side_exit_ = true;
+        }
         if (will_call_interp) call_interp_count++;
         // Track BL_CALL count for block splitting (BLR_CALL too — both
         // keep the block alive past the call and grow register pressure).
@@ -1245,6 +1270,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     const size_t recovery_start = code_buf_used_;
     flush_deferred_guards();
     flush_deferred_fp_steps();
+    flush_deferred_side_exits();
     // The chain entry to publish (see chain_entry_pc_off_). A block that
     // called out without the inline PC store gets it here, ahead of a jump
     // to the plain entry.
@@ -1340,7 +1366,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // predictor is intentionally only a block-splitting heuristic and may
     // overestimate native FP/SIMD instructions.
     entry.call_interp_count = actual_call_interp;
-    entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf;
+    entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf || block_has_side_exit_;
     // SVC presence: the verify-mode interp re-run re-executes the syscall —
     // non-idempotent syscalls (read/poll/...) return different values the
     // second time, so verify quarantines SVC blocks (see run_block gate).
@@ -1348,7 +1374,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Calls mid-block break the fixed-step re-run the same way (it steps
     // INTO the callee while the JIT called-and-continued), so they share
     // the quarantine.
-    entry.has_call = has_bl_call || has_call_interp;
+    // A block with a mid-block exit runs a different number of instructions per entry, so differential replay (a fixed count) skips it
+    // as it skips a block with a call; formation is off under BIFROST_JIT_VERIFY, so verify never meets one.
+    entry.has_call = has_bl_call || has_call_interp || block_has_side_exit_;
     // Local input analysis is used only to limit verification comparisons;
     // cross-block exits always preserve NZCV for transitive consumers.
     entry.reads_pstate_before_set = flags_loop_carried_;
@@ -1398,6 +1426,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // 4096-entry tables (36 KB cleared) per translated block.
     if (dbg().jit_verify) record_verification_stores(ir_block, start_pc, entry);
     attach_code_words(entry, !has_inlined_leaf);
+    if (!compiled_side_exits_.empty()) { side_exit_table_[start_pc] = compiled_side_exits_; ++side_exit_blocks; }
+    else side_exit_table_.erase(start_pc);
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
     // Verify dirty_host_regs_ invariant (active in debug or with
@@ -1439,6 +1469,7 @@ void FrostJIT::publish_translation(uint64_t start_pc, const BlockEntry& entry) {
     // that target this block to call `fn` directly.
     if (direct_call_enabled())
         patch_pending_calls(start_pc, reinterpret_cast<const uint8_t*>(entry.fn));
+    register_side_exit_stubs(start_pc);
 }
 void FrostJIT::publish_or_stage(uint64_t pc, const BlockEntry& entry) {
     if (record_oracle_) return;

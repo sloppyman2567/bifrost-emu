@@ -802,6 +802,26 @@ private:
         size_t extra = 0;  // a second branch to the same step (scalar min/max), 0 when unused
     };
     std::vector<DeferredFpStep> deferred_fp_steps_;
+    // A conditional exit out of the middle of a block (CBZ/CBNZ whose IR `aux` is 1): the test and a jcc stay in the hot path, and the
+    // exit (commit every mapped guest register, then a chain slot to `target`) is emitted after the block from the captured layout.
+    // Each exit's slot is recorded in side_exit_table_ and published as a stub entry of its own (publish_translation), so chaining,
+    // unpatching and invalidation treat it like any block that has one successor.
+    struct DeferredSideExit { size_t branch; uint64_t target; GuardState state; };
+    struct SideExitSlot { uint64_t target; size_t slot; };
+    std::vector<DeferredSideExit> deferred_side_exits_;
+    std::vector<SideExitSlot> compiled_side_exits_;                       // this compile
+    std::unordered_map<uint64_t, std::vector<SideExitSlot>> side_exit_table_;  // block pc -> its exits, until published
+    std::unordered_map<uint64_t, std::vector<uint64_t>> side_stubs_;      // block pc -> the stub keys in blocks_
+    bool block_has_side_exit_ = false;
+    std::atomic<uint64_t> side_exit_blocks{0};  // blocks translated with a mid-block exit (-v)
+    uint64_t edge_source_override_ = 0;  // create_chain_edge's source while a side-exit tail is emitted
+    static constexpr uint64_t kSideExitKeyBit = 1ull << 63;
+    static uint64_t side_exit_key(uint64_t pc, size_t index) { return kSideExitKeyBit | (pc << 8) | index; }
+    // Scan from the block start for a loop whose only inner branches are CBZ/CBNZ exits (see translate_block).
+    int side_exit_loop_extent(uint64_t start_pc, int limit, std::vector<uint64_t>& exits);
+    void flush_deferred_side_exits();
+    int compile_cbz_side_exit(const IRInst& inst);
+    void register_side_exit_stubs(uint64_t start_pc);
     GuardState capture_guard_state() const;
     void swap_guard_state(GuardState& state);  // exchange with the live state
     void flush_deferred_guards();

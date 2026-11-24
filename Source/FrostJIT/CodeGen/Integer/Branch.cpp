@@ -280,6 +280,7 @@ void FrostJIT::emit_taken_path_epilogue() {
 int FrostJIT::compile_ir_branch(const IRInst& inst) {
     switch (inst.op) {
         case IROp::BRCOND_ZERO: {
+            if (inst.aux == 1) return compile_cbz_side_exit(inst);  // a mid-block exit (SideExit.cpp)
             const BrCondZeroParams bp = inst.brcond_zero_params();
             // NZCV is authoritative in pstate after clobber_flags(). TEST
             // may overwrite host flags; neither edge needs PUSHFQ/POPFQ.

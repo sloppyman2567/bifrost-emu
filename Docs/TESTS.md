@@ -86,6 +86,14 @@ program that forks 40 times with the profiler started (a smoke check: short-live
 It does not check the timeline. That was checked by hand with Tracy's `capture` and `csvexport` (built from the 0.15.0 release): zone and
 thread names, GL symbol zones, frames, and the fork program with a viewer connected.
 
+### Mid-block CBZ/CBNZ exits (2026-11-24)
+
+`Tests/Unit/jit_side_exit.c` and `Scripts/Testing/test_jit_side_exit.sh` (`run_tests.sh` entry `jit_side_exit`, also a threaded oracle in
+`make verify`) run six hand-written loop shapes (a list walk, a byte scan with four carried registers, two exits in one loop, a loop faulting
+mid-iteration) against C, check that a fault shows the finished iterations' registers in the signal frame, and repeat the loops on five threads, with
+exits on and off, chaining off, the ordinary frame layout and IR validation. With exits on, `-v` must report at least four blocks formed with a
+mid-block exit. It does not cover `b.cond` or `tbz` exits, loops with an inner branch, a game, or the persistent cache (such blocks are not recorded).
+
 ### Carry loop report (2026-11-24)
 
 `Tests/Unit/carry_loop.c` and `Scripts/Testing/test_carry_report.sh` (`run_tests.sh` entry `carry_report`) run a hand-written four-block loop over five

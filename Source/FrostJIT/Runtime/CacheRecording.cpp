@@ -221,7 +221,7 @@ bool FrostJIT::begin_recording(uint64_t start_pc) {
 
 void FrostJIT::capture_compile(CompileCapture& c, uint64_t start_pc, size_t block_start,
                                const BlockEntry& entry, bool inlined_leaf) {
-    c.ok = !record_unrecordable_ && !inlined_leaf && !code_buf_overflow_ && call_site_end_ == record_call_end_ &&
+    c.ok = !record_unrecordable_ && !inlined_leaf && !block_has_side_exit_ && !code_buf_overflow_ && call_site_end_ == record_call_end_ &&
            entry.fn && !entry.interp_only && entry.inlined_ranges_.empty();
     c.start_pc = start_pc;
     c.block_start = block_start;
