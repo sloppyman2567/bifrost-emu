@@ -1338,50 +1338,46 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
 
 ## Planned codegen: retaining guest state across regions
 
-This is the proposed v2 compiler direction, with milestones and performance
-targets in [the roadmap](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions).
+This is the proposed direction, with milestones and targets in [the roadmap](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions).
+Nothing in this section is built. **Lean** is the working name for today's first JIT (what these docs still call Tier-1: cheap
+translation and chaining); **Carry** is the planned second JIT. The names are used for new work only; Tier-1 has not been renamed.
 Tier-2 regions, the only code that fused blocks, were removed on 2026-11-24
-([why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)); a cross-block layout starts again from Tier-1 blocks.
-Scalar SSA does not yet model complete vector/FP architectural state. The proposal extends those foundations in
-stages rather than assuming cross-region state is already supported.
+([why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)); Carry starts again from Lean blocks. Scalar SSA does not yet model
+complete vector/FP architectural state.
 
-- **Explicit guest values.** Track GPR widths, vector lanes and scalar FP
-  aliases, including partial writes and upper-lane clearing, together with
-  lazy NZCV. Start with mixed FP/vector allocation within current regions.
-  Keep FPCR/FPSR, NaN, helper and fallback behavior observable under the
-  existing instruction contracts. Extend integer allocation and flags based
-  on the measured CoreMark hot path.
-- **Recovery descriptions.** Before deferring architectural stores across
-  regions, define metadata that maps host PCs and value locations to the
-  precise guest PC, GPR/FP state and NZCV. Handle completed memory effects,
-  faulting accesses, asynchronous signal delivery and interpreter/host-call
-  boundaries. Metadata lifetime must cover in-flight code. Safe fallback
-  commits state through the existing memory representation; memory guards
-  remain intact.
-- **Helper effects.** Record each classified helper's guest reads/writes,
-  host-register clobbers and possible fault/control-flow effects. Save and
-  reload only the state proven necessary. Unknown helpers retain full
-  synchronization, and exceptions must not unwind through generated frames.
-- **Entry/exit layouts.** Begin with two connected regions and a canonical
-  entry that loads architectural memory state. A specialized entry accepts
-  a specified host-register layout. Compatible edges pass values directly;
-  adapters implement parallel copies, including cycles, or use the canonical
-  path. Register/spill ownership, frame compatibility, lazy flags, helper
-  scratch registers and per-vCPU state must be explicit.
-- **Bounded adaptation.** Evaluate at most two layout variants per head per
-  search, sharing the existing compilation, code and phase budgets. Count
-  adapters and recovery metadata, and measure compile amortization separately
-  from instrumented execution gain. Preserve work/exit matching in trials;
-  evaluate layouts over equivalent guest paths. Publish and revoke variants
-  through immutable MT code and tracked target cells. Invalidation must cover
-  every constituent guest range and stale entry/adapter dependency.
+The target is the guest-register traffic at block edges: Lean loads each live-in register at block entry and stores each written one at
+exit. A simulation on CoreMark puts that at 0.93 moves per guest instruction, and an oracle choice of the 4 to 8 busiest registers per
+window removes 63 to 84% of them ([the measurement and its limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)).
+It is an upper bound on one small workload, not a promise.
 
-The first milestones are mixed FP/vector allocation and validated recovery
-contracts, followed by handoff between two regions. Expanding the scope
-requires measurable benefit and the
+Rules the design follows (decided 2026-11-24):
+
+- **Cheap hotness.** No counter in block entries (Tier-2's hot and branch counters cost CoreMark 18-29%, and its entry counter was a `lock xadd` in MT). Hot blocks
+  come from the host-pc samples the `BIFROST_PROF` sampler already takes, or from a counter on back edges only. Admission uses the region's
+  static shape and a cheap check afterwards; there are no timed A/B trials and no sampling copies.
+- **Region shape.** Loop trees or small CFGs, not linear traces: Tier-2 declined loops whose iterations take different arms, loops with an
+  inner loop and dispatch loops, and raising its block cap alone admitted none of them.
+- **Register-resident.** A region keeps its own working set of guest registers in host registers across blocks and back edges. Joins use
+  edge-copy moves (parallel copies, including cycles). Dirty guest registers are written to `cpu.regs[]` only at exits, calls, helper
+  boundaries and fault stubs. A second entry accepts a host-register layout; the canonical entry loads from `cpu.regs[]`. RBP stays the
+  chain-skip frame base: freeing it for an eleventh register gains little for the risk.
+- **Recovery.** Every fault site, helper call, signal boundary and interpreter step needs a map from carried host registers to guest
+  registers, so its stub commits exactly what the instruction needs. Lean's per-guard `GuardState` is the starting point. The stubs grow
+  the code, so the code-cache budget is a design input.
+- **Helper effects.** Record each classified helper's guest reads and writes and its host-register clobbers; save and reload only what is
+  proven necessary. Unknown helpers keep full synchronization, and exceptions must not unwind through generated frames.
+- **MT.** Promotion swaps an atomic target cell, as Lean chaining does. Loops use the immutable back edge with the epoch poll and the stop
+  check (`emit_selfloop_stop_entry_check`); exits go through chain-skip cells that enter past the prologue. No stale-pc rings and no trials.
+- **Disk cache.** Lean's persistent cache stays on; Carry code is not recorded at first.
+- **Tests.** A forced-promotion hook and a fixed hotness threshold, so a fixture promotes on demand and checks results against a closed-form
+  or differential oracle. No decision in a test may depend on the clock; timing belongs to one benchmark that does not gate CI.
+
+Milestones: (1) re-measure a clean gameplay profile with `BIFROST_PROF=1` alone (the stats counters add instructions to every block
+entry) and the window-free workloads; (2) sampled hotness and region discovery that only report; (3) register-resident code for one
+region behind forced promotion, with recovery maps, passing `make verify` and the fault/signal fixtures; (4) MT promotion and exit cells;
+(5) a game check by the maintainer. Expanding the scope requires measurable benefit and the
 [planned correctness/performance gates](archive/TESTS-history.md#planned-codegen-and-coremark-acceptance).
-CoreMark's integer/control workload requires its own profile; FP throughput
-alone does not predict progress toward 10,000 iterations/s.
+CoreMark's integer/control workload requires its own profile; FP throughput alone does not predict progress toward 10,000 iterations/s.
 
 Primary design references: QEMU's
 [block chaining and exception recovery](https://www.qemu.org/docs/master/devel/tcg.html)
@@ -1609,6 +1605,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Carry ceiling: guest register moves in CoreMark (2026-11-24)](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)
 - [Tier-2 regions removed (2026-11-24)](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)
 - [Hotspots from IBS and the allocation profile: tag untag and scalar FMAX/FMIN zeros (2026-11-24)](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)
 - [FP equality compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-equality-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)

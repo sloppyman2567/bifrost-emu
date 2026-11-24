@@ -2,6 +2,36 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Carry ceiling: guest register moves in CoreMark (2026-11-24)
+
+Question: how much of the register traffic at block edges could a second JIT that keeps registers across blocks remove? Method, a simulation
+and not emitted code: `BIFROST_BLOCK_TRACE=0-0xffffffffffffffff` on `Tests/Unit/coremark.elf` (30 iterations; arguments `0x0 0x0 0x66 30`)
+logs every cold and chained block entry (self-loop iterations are not logged, and those loops are already pinned). Each logged pc was
+turned into a block from `aarch64-linux-gnu-objdump -d` (it ends at the first branch, call, return or `svc`, at most 32 instructions), with
+guest registers read and written taken from a mnemonic table. Cost per block entry: one load for each register read before it is written, one
+store for each register written (what Lean does at exit). Carry was modelled by choosing, for each window of consecutive block entries, the
+K busiest registers (with foresight) and charging them one load and one store per window. The throwaway script is not in the repository.
+
+Result: 1,451,564 block entries, 6,133,370 guest instructions, 1,156 distinct blocks; 5,679,769 moves, 0.93 per guest instruction and 3.91 per
+block entry. Moves removed:
+
+| Window (blocks) | K=4 | K=6 | K=8 |
+|---|---|---|---|
+| 32 | 63% | 71% | 76% |
+| 128 | 66% | 77% | 83% |
+| 512 | 66% | 77% | 84% |
+| 2048 | 64% | 75% | 82% |
+
+The busiest registers by share of all moves: x2 27%, x3 13%, x0 10%, x4 8%, x5 6%, x1 5%. If a move is one host instruction and CoreMark runs
+about 3.5 host instructions per guest instruction (an earlier profile in this file, an older build, not re-measured), moves are about a quarter of host instructions
+and the table is worth up to about 17-20% of them.
+
+Limits: one workload with a small hot set (1,156 blocks), where a game has far more; foresight in choosing the registers; the register
+sets come from a mnemonic table (atomics and SIMD-to-GPR moves are rough); Lean's forwarding inside a block is not modelled beyond "one load
+per live-in"; flags, PC stores and FP/vector state are not counted; calls, helpers, fault stubs and the spills caused by reserving K host
+registers are not charged beyond two moves per pinned register per window; nothing was checked against emitted host code. Read it as an upper
+bound for CoreMark, probably optimistic for games.
+
 ## Tier-2 regions removed (2026-11-24)
 
 The maintainer decided to remove Tier-2: it was written before the JIT had MT chaining, it was not designed for MT, and it was not cheap

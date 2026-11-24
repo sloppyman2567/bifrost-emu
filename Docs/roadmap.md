@@ -397,9 +397,11 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    still runs in the interpreter (Zenless Zone Zero, 2026-11-23, `BIFROST_CLASS_PROF`): the exclusive pairs `ldxp`/`stxp`/`ldaxp`/
    `stlxp` with their retry loops; 64-bit-lane saturating narrowing shifts stay interpreted too (scalar `fmax`/`fmin` stepped
    the interpreter for every zero result until 2026-11-24; now only a NaN input does).
-4. **Tier-2 was removed on 2026-11-24** (it never beat Tier-1 by more than a few percent and no game was shown to gain). Any
-   cross-block work starts again from Tier-1 blocks and sampled, MT-aware promotion
-   ([why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)).
+4. **Carry** (planned second JIT; Tier-2 was removed on 2026-11-24 because it never beat Tier-1 by more than a few percent and no game was
+   shown to gain, [why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)). It keeps guest registers in host registers across blocks and
+   back edges, with sampled hotness and no timed trials. A CoreMark simulation puts the ceiling at 63-84% of register moves
+   ([limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)). Next: a clean gameplay profile, then the
+   [design](JIT.md#planned-codegen-retaining-guest-state-across-regions). Nothing is built.
 5. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the
