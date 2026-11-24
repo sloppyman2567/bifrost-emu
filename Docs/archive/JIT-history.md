@@ -20,7 +20,17 @@ per iteration remain: they are live-out as far as the block knows.
 
 Checked: `jit_side_exit` (the fixture and its script, six loop shapes against C, a fault inside a loop, five threads, in the default mode, with
 exits off, `BIFROST_NO_CHAIN=1`, `BIFROST_NO_CHAIN_SKIP=1` and `BIFROST_IR_VALIDATE=1`), `make verify` and the strict quick suite (results in the
-commit). Only CBZ/CBNZ exits are handled; `b.cond` and `tbz` exits, a loop with an inner branch that stays inside it, and exits through calls are not.
+commit). Only CBZ/CBNZ exits were handled in this first step; `tbz`, `tbnz` and `b.cond` exits followed the same day (below). A loop with an inner branch that stays inside it, a `b.cond` after an `FP_CMP`, and exits through calls are not handled.
+
+`b.cond` and `tbz`/`tbnz` exits (same day): `compile_bit_side_exit` is the `bt` of `BRCOND_BIT` with the block going on; `compile_cond_side_exit` repeats
+`BRCOND`'s choice (a single-flag test of `cpu.nzcv_host`, or host flags loaded from pstate, with `resolve_arm_cond_with_carry`'s CF inversion undone
+right after the `jcc`) and records `flags_in_host_`, `flags_from_sub_`, `flags_match_pstate_` and the inversion at the branch, so the tail can commit NZCV
+(`materialize_flags_to_pstate`, which clobbers RAX, after the register stores) and unmap RAX before the chain slot. The fixture gained one loop for each of
+the 14 ARM conditions, each run on ten edge values (zero, one, `INT64_MIN`, `INT64_MAX`, all ones) against a C model of the flags of `cmp`, and `tbz`/`tbnz`
+loops on bits 0 and 63; 55 blocks form with exits on, 0 with `BIFROST_NO_SIDE_EXIT=1`. `make verify` passes (112 fixtures, 13 threaded runs). The strict
+quick suite passed 413 of 415 on the final run: `test_fork_lock_contention` (the known flake) and `xwayland_wire`, which opens a window on the real X
+display. `xwayland_wire` failed the same way on every build tried afterwards, including the 09:35 binary that had passed it in the earlier suite run
+(guest SIGSEGV with a core dump on older builds, a hang on this one), so the cause is the desktop session, not the JIT; it was not traced further.
 
 ## Window register loaded once per chain (2026-11-24)
 

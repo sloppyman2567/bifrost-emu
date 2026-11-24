@@ -367,7 +367,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             break;
         }
         bool side_exit_here = false;
-        if (side_exits_allowed && (d.cls == InstClass::CBZ || d.cls == InstClass::CBNZ)) {
+        if (side_exits_allowed && (d.cls == InstClass::CBZ || d.cls == InstClass::CBNZ || d.cls == InstClass::TBZ ||
+                                   d.cls == InstClass::TBNZ || d.cls == InstClass::Bcond)) {
             if (!side_exit_scanned) {
                 side_exit_scanned = true;
                 const int n = side_exit_loop_extent(start_pc, 2 * max_block_insts, side_exit_pcs);
@@ -379,7 +380,11 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             side_exit_here = std::find(side_exit_pcs.begin(), side_exit_pcs.end(), cur_pc) != side_exit_pcs.end();
         }
         bool ends = translate_to_ir(ir_block, d, cur_pc);
-        if (side_exit_here && ends && ir_block.insts.back().op == IROp::BRCOND_ZERO) {
+        // A B.cond right after an FP_CMP reads raw ucomis flags with exits of its own: it stays a block end.
+        const IROp last_op = ir_block.insts.empty() ? IROp::NOP : ir_block.insts.back().op;
+        const bool after_fp_cmp = ir_block.insts.size() >= 2 && ir_block.insts[ir_block.insts.size() - 2].op == IROp::FP_CMP;
+        if (side_exit_here && ends && (last_op == IROp::BRCOND_ZERO || last_op == IROp::BRCOND_BIT ||
+                                       (last_op == IROp::BRCOND && !after_fp_cmp))) {
             ir_block.insts.back().aux = 1;  // a mid-block exit: the block goes on
             ends = false;
             block_has_side_exit_ = true;

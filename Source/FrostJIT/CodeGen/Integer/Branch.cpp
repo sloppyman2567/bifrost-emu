@@ -346,6 +346,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             return 1;
         }
         case IROp::BRCOND_BIT: {
+            if (inst.aux == 1) return compile_bit_side_exit(inst);  // a mid-block exit (SideExit.cpp)
             const BrCondBitParams bp = inst.brcond_bit_params();
             // As with CBZ, guest NZCV has been committed before BT.
             // Use the operand in place and let BT overwrite dead host CF.
@@ -402,6 +403,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             return 1;
         }
         case IROp::BRCOND: {
+            if (inst.aux == 1) return compile_cond_side_exit(inst);  // a mid-block exit (SideExit.cpp)
             const BrCondParams bp = inst.brcond_params();
             // A condition on a single flag (EQ/NE: Z, CS/CC: C, MI/PL: N, VS/VC: V)
             // needs no host flags when they are still in cpu.nzcv_host: test that

@@ -806,7 +806,11 @@ private:
     // exit (commit every mapped guest register, then a chain slot to `target`) is emitted after the block from the captured layout.
     // Each exit's slot is recorded in side_exit_table_ and published as a stub entry of its own (publish_translation), so chaining,
     // unpatching and invalidation treat it like any block that has one successor.
-    struct DeferredSideExit { size_t branch; uint64_t target; GuardState state; };
+    // The host-flag state at the jcc, for a b.cond exit: the tail commits NZCV from it (after undoing a CF inversion the test applied).
+    struct DeferredSideExit {
+        size_t branch; uint64_t target; GuardState state;
+        bool flags_in_host = false, flags_from_sub = false, flags_match_pstate = false, need_cmc = false;
+    };
     struct SideExitSlot { uint64_t target; size_t slot; };
     std::vector<DeferredSideExit> deferred_side_exits_;
     std::vector<SideExitSlot> compiled_side_exits_;                       // this compile
@@ -821,6 +825,8 @@ private:
     int side_exit_loop_extent(uint64_t start_pc, int limit, std::vector<uint64_t>& exits);
     void flush_deferred_side_exits();
     int compile_cbz_side_exit(const IRInst& inst);
+    int compile_bit_side_exit(const IRInst& inst);
+    int compile_cond_side_exit(const IRInst& inst);
     void register_side_exit_stubs(uint64_t start_pc);
     GuardState capture_guard_state() const;
     void swap_guard_state(GuardState& state);  // exchange with the live state

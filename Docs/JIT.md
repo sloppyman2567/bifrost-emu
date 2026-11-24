@@ -224,11 +224,13 @@ op keep their `LOAD_REG` copy. An `ADD` with `dest == src1` never moves its resu
 
 ### Loops with CBZ/CBNZ exits
 
-A loop that ends in a branch back to its first instruction, and whose only other branches are `cbz`/`cbnz` leaving it (a null-terminated list
-walk, a search that stops on a match), is one block with mid-block exits. `side_exit_loop_extent` (`Compiler/SideExit.cpp`) scans from the block
-start when `translate_block` meets the first `cbz`/`cbnz`; every other branch, a call, a return or an exit whose target lies inside the loop
-leaves the loop split as before. Each exit is a `BRCOND_ZERO` with `aux = 1`: `compile_cbz_side_exit` commits NZCV, tests the register and emits a
-`jcc`, and the block goes on. The exit itself is emitted after the block from the allocator layout captured at the branch (the deferred-guard
+A loop that ends in a branch back to its first instruction, and whose only other branches are conditional ones (`cbz`, `cbnz`, `tbz`, `tbnz`,
+`b.cond`) leaving it (a null-terminated list walk, a search that stops on a match), is one block with mid-block exits. `side_exit_loop_extent`
+(`Compiler/SideExit.cpp`) scans from the block start when `translate_block` meets the first such branch; every other branch, a call, a return or an exit whose target lies inside the loop
+leaves the loop split as before. Each exit is a `BRCOND_ZERO`, `BRCOND_BIT` or `BRCOND` with `aux = 1`. `compile_cbz_side_exit` and `compile_bit_side_exit` commit NZCV, test the
+register and emit a `jcc`; `compile_cond_side_exit` picks the condition code as `BRCOND` does (a single-flag test in memory, or host flags with a CF
+inversion that it undoes right after the `jcc`) and records the flag state at the branch, and the tail commits NZCV from it. A `b.cond` right after an
+`FP_CMP` (raw `ucomis` flags) stays a block end. In every case the block goes on. The exit itself is emitted after the block from the allocator layout captured at the branch (the deferred-guard
 mechanism): it stores every mapped guest register, clean or not (a loop pin is ahead of memory), writes the pinned vectors back and takes the
 chain slot of `emit_taken_path_epilogue`. The loop's pins then cover the whole loop, so a list walk keeps its pointer and key in host registers.
 

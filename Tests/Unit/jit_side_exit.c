@@ -1,4 +1,4 @@
-// Loops whose only inner branches are CBZ/CBNZ exits become one block with mid-block exits (SideExit.cpp). Each shape below is
+// Loops whose only inner branches are conditional exits (CBZ, CBNZ, TBZ, TBNZ, B.cond) become one block with mid-block exits (SideExit.cpp). Each shape below is
 // hand-written so the compiler cannot reshape it, and every result is checked against C: the registers a loop carries must be
 // committed at whichever exit is taken, including the first test of the first iteration, and a fault inside the loop must show the
 // state of the iterations that finished. The same loops then run on several threads (multithreaded chaining and exit cells).
@@ -22,6 +22,25 @@ extern void scan(const uint8_t *, uint64_t *);
 extern uint64_t first_zero(uint64_t n, const uint64_t *, uint64_t *taken);
 // x0 = u64 array, x2 = n: sum of n elements (a fault inside the loop shows the sum so far).
 extern uint64_t sum_n(const uint64_t *, uint64_t, uint64_t);
+// Loops that stop on a b.<cond>, tbz or tbnz exit: sum of the elements before the first one for which `element <cond> key` holds (cmp element, key).
+extern uint64_t loop_eq(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_ne(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_cs(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_cc(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_mi(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_pl(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_vs(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_vc(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_hi(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_ls(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_ge(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_lt(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_gt(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_le(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_tbz0(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_tbnz0(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_tbz63(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
+extern uint64_t loop_tbnz63(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
 
 __asm__(".text\n.align 4\n.global walk\n.type walk,%function\nwalk:\n"
         " mov x3, #0\n"
@@ -64,10 +83,277 @@ __asm__(".text\n.align 4\n.global walk\n.type walk,%function\nwalk:\n"
         " sub x2, x2, #1\n"
         " b 1b\n"
         "3: mov x0, x4\n ret\n"
-        ".size sum_n,.-sum_n\n");
+        ".size sum_n,.-sum_n\n"
+        ".global loop_eq\n.type loop_eq,%function\nloop_eq:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.eq 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_eq,.-loop_eq\n"
+        ".global loop_ne\n.type loop_ne,%function\nloop_ne:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.ne 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_ne,.-loop_ne\n"
+        ".global loop_cs\n.type loop_cs,%function\nloop_cs:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.cs 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_cs,.-loop_cs\n"
+        ".global loop_cc\n.type loop_cc,%function\nloop_cc:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.cc 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_cc,.-loop_cc\n"
+        ".global loop_mi\n.type loop_mi,%function\nloop_mi:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.mi 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_mi,.-loop_mi\n"
+        ".global loop_pl\n.type loop_pl,%function\nloop_pl:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.pl 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_pl,.-loop_pl\n"
+        ".global loop_vs\n.type loop_vs,%function\nloop_vs:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.vs 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_vs,.-loop_vs\n"
+        ".global loop_vc\n.type loop_vc,%function\nloop_vc:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.vc 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_vc,.-loop_vc\n"
+        ".global loop_hi\n.type loop_hi,%function\nloop_hi:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.hi 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_hi,.-loop_hi\n"
+        ".global loop_ls\n.type loop_ls,%function\nloop_ls:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.ls 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_ls,.-loop_ls\n"
+        ".global loop_ge\n.type loop_ge,%function\nloop_ge:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.ge 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_ge,.-loop_ge\n"
+        ".global loop_lt\n.type loop_lt,%function\nloop_lt:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.lt 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_lt,.-loop_lt\n"
+        ".global loop_gt\n.type loop_gt,%function\nloop_gt:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.gt 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_gt,.-loop_gt\n"
+        ".global loop_le\n.type loop_le,%function\nloop_le:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " cmp x6, x2\n"
+        " b.le 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_le,.-loop_le\n"
+        ".global loop_tbz0\n.type loop_tbz0,%function\nloop_tbz0:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " tbz x6, #0, 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_tbz0,.-loop_tbz0\n"
+        ".global loop_tbnz0\n.type loop_tbnz0,%function\nloop_tbnz0:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " tbnz x6, #0, 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_tbnz0,.-loop_tbnz0\n"
+        ".global loop_tbz63\n.type loop_tbz63,%function\nloop_tbz63:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " tbz x6, #63, 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_tbz63,.-loop_tbz63\n"
+        ".global loop_tbnz63\n.type loop_tbnz63,%function\nloop_tbnz63:\n"
+        " mov x4, #0\n mov x5, x0\n"
+        "1: cbz x0, 3f\n"
+        " ldr x6, [x1], #8\n"
+        " tbnz x6, #63, 2f\n"
+        " add x4, x4, x6\n"
+        " sub x0, x0, #1\n"
+        " b 1b\n"
+        "2: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        "3: sub x5, x5, x0\n str x5, [x3]\n mov x0, x4\n ret\n"
+        ".size loop_tbnz63,.-loop_tbnz63\n");
 
 static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { printf("FAIL: " __VA_ARGS__); printf("\n"); __atomic_fetch_add(&failures, 1, __ATOMIC_RELAXED); } } while (0)
+
+
+typedef uint64_t (*cond_loop)(uint64_t, const uint64_t *, uint64_t, uint64_t *);
+static int cond_holds(int cond, uint64_t a, uint64_t b) {  // the flags of `cmp a, b`
+    int64_t d;
+    const int v = __builtin_sub_overflow((int64_t)a, (int64_t)b, &d);
+    const int n = d < 0, z = a == b, c = a >= b;
+    switch (cond) {
+        case 0: return z;            case 1: return !z;
+        case 2: return c;            case 3: return !c;
+        case 4: return n;            case 5: return !n;
+        case 6: return v;            case 7: return !v;
+        case 8: return c && !z;      case 9: return !c || z;
+        case 10: return n == v;      case 11: return n != v;
+        case 12: return !z && n == v; default: return z || n != v;
+    }
+}
+static void cond_cases(void) {
+    static const cond_loop loops[14] = {loop_eq, loop_ne, loop_cs, loop_cc, loop_mi, loop_pl, loop_vs, loop_vc, loop_hi, loop_ls,
+                                        loop_ge, loop_lt, loop_gt, loop_le};
+    static const char *names[14] = {"eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le"};
+    const uint64_t interesting[] = {0, 1, 2, 5, 100, 0x7fffffffffffffffull, 0x8000000000000000ull, 0x8000000000000001ull,
+                                    0xffffffffffffffffull, 0xfffffffffffffffeull};
+    const int ni = sizeof interesting / sizeof *interesting;
+    for (int pass = 0; pass < 6; ++pass) {  // the first calls translate each loop, the later ones run it chained
+        for (int cond = 0; cond < 14; ++cond) {
+            for (int ki = 0; ki < ni; ++ki) {
+                const uint64_t key = interesting[ki];
+                uint64_t elements[12];
+                for (int i = 0; i < 12; ++i) elements[i] = interesting[(i * 7 + ki + pass) % ni];
+                for (uint64_t n = 0; n <= 12; n += 3) {
+                    uint64_t want = 0, taken = 0;
+                    while (taken < n && !cond_holds(cond, elements[taken], key)) want += elements[taken++];
+                    uint64_t got_taken = ~0ull, got = loops[cond](n, elements, key, &got_taken);
+                    CHECK(got == want && got_taken == taken, "b.%s key=%llx n=%llu: got %llx/%llu want %llx/%llu", names[cond],
+                          (unsigned long long)key, (unsigned long long)n, (unsigned long long)got, (unsigned long long)got_taken,
+                          (unsigned long long)want, (unsigned long long)taken);
+                }
+            }
+        }
+        const struct { cond_loop f; int bit; int set; const char *name; } bits[4] = {{loop_tbz0, 0, 0, "tbz #0"}, {loop_tbnz0, 0, 1, "tbnz #0"},
+                                                                                       {loop_tbz63, 63, 0, "tbz #63"}, {loop_tbnz63, 63, 1, "tbnz #63"}};
+        for (int b = 0; b < 4; ++b) {
+            uint64_t elements[12];
+            for (int i = 0; i < 12; ++i) elements[i] = interesting[(i * 3 + pass + b) % ni];
+            for (uint64_t n = 0; n <= 12; n += 2) {
+                uint64_t want = 0, taken = 0;
+                while (taken < n && (int)((elements[taken] >> bits[b].bit) & 1) != bits[b].set) want += elements[taken++];
+                uint64_t got_taken = ~0ull, got = bits[b].f(n, elements, 0, &got_taken);
+                CHECK(got == want && got_taken == taken, "%s n=%llu: got %llx/%llu want %llx/%llu", bits[b].name, (unsigned long long)n,
+                      (unsigned long long)got, (unsigned long long)got_taken, (unsigned long long)want, (unsigned long long)taken);
+            }
+        }
+    }
+}
 
 static void run_all(unsigned rounds) {
     enum { N = 40 };
@@ -85,6 +371,7 @@ static void run_all(unsigned rounds) {
             CHECK(got == want, "walk key %d: got %lld want %lld", hit, (long long)got, (long long)want);
         }
         CHECK(walk(NULL, 1) == -1, "walk of an empty list");
+        if (round == 0) cond_cases();
         // scan: strings of every length, so the exit is taken at the first test and at the last
         for (int len = 0; len < 40; ++len) {
             for (int i = 0; i < len; ++i) text[i] = (uint8_t)(1 + (i * 37 + round) % 250);

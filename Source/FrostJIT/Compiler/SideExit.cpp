@@ -20,7 +20,7 @@
 namespace arm64emu {
 
 // The extent in instructions of a loop that starts at start_pc and ends in a branch back to it, when every other branch inside is
-// a CBZ/CBNZ whose target lies outside the loop; the exits are listed in `exits`. 0 for anything else, including a loop with no
+// a conditional one (CBZ, CBNZ, TBZ, TBNZ, B.cond) whose target lies outside the loop; the exits are listed in `exits`. 0 for anything else, including a loop with no
 // exit (selfloop_extent covers that one). Like selfloop_extent it reads plainly mapped executable pages directly and is only a
 // hint: the words are translated (and recorded) by translate_block itself.
 int FrostJIT::side_exit_loop_extent(uint64_t start_pc, int limit, std::vector<uint64_t>& exits) {
@@ -52,7 +52,7 @@ int FrostJIT::side_exit_loop_extent(uint64_t start_pc, int limit, std::vector<ui
                     for (const auto& c : candidates) exits.push_back(c.first);
                     return exits.empty() ? 0 : n + 1;
                 }
-                if (d.cls != InstClass::CBZ && d.cls != InstClass::CBNZ) return 0;
+                if (d.cls == InstClass::B) return 0;  // an unconditional jump to somewhere else: not a loop with exits
                 candidates.push_back({pc, target});
                 break;
             case InstClass::BL: case InstClass::BLR: case InstClass::BR: case InstClass::RET:
@@ -79,6 +79,69 @@ int FrostJIT::compile_cbz_side_exit(const IRInst& inst) {
     return 0;
 }
 
+// TBZ/TBNZ: the same bit test as BRCOND_BIT, the block goes on.
+int FrostJIT::compile_bit_side_exit(const IRInst& inst) {
+    const BrCondBitParams bp = inst.brcond_bit_params();
+    clobber_flags(false);
+    const int s1 = ensure_vreg(inst.src1);
+    emit_byte(rex(true, false, false, s1 >= 8));
+    emit_byte(0x0F); emit_byte(0xBA); emit_byte(modrm(3, 4, s1 & 7)); emit_byte(bp.bit);  // bt s1, bit
+    const size_t jcc = emit_jcc_rel32_placeholder(bp.cond == 0 ? 3 /*JNC: bit clear*/ : 2 /*JC: bit set*/);
+    deferred_side_exits_.push_back({jcc, bp.target, capture_guard_state()});
+    block_has_side_exit_ = true;
+    return 0;
+}
+
+// B.cond: the condition code BRCOND would use, but the block goes on. The test may need CF inverted (HI/LS after an ADD or a TST); the
+// hot path undoes that right after the jcc, and the tail does too before it commits NZCV. Formation never marks a branch that
+// follows an FP_CMP (raw ucomis flags have their own exits), so those are not handled here.
+int FrostJIT::compile_cond_side_exit(const IRInst& inst) {
+    const BrCondParams bp = inst.brcond_params();
+    uint32_t direct_mask = 0;
+    bool direct_taken_if_set = false;
+    if (!flags_in_host_) {
+        switch (bp.cond & 0xF) {
+            case 0: direct_mask = kHostZ; direct_taken_if_set = true;  break;
+            case 1: direct_mask = kHostZ; direct_taken_if_set = false; break;
+            case 2: direct_mask = kHostC; direct_taken_if_set = false; break;
+            case 3: direct_mask = kHostC; direct_taken_if_set = true;  break;
+            case 4: direct_mask = kHostN; direct_taken_if_set = true;  break;
+            case 5: direct_mask = kHostN; direct_taken_if_set = false; break;
+            case 6: direct_mask = kHostV; direct_taken_if_set = true;  break;
+            case 7: direct_mask = kHostV; direct_taken_if_set = false; break;
+            default: break;
+        }
+    }
+    if (!flags_in_host_ && !direct_mask) {
+        flush_dirty_host_regs(1u << RAX);
+        flush_scratch_host_regs(1u << RAX);
+        emit_load_flags_from_pstate();
+        invalidate_host_regs(1u << RAX);
+        flags_from_sub_ = true;
+        flags_in_host_ = true;
+        flags_match_pstate_ = true;
+    }
+    bool need_cmc = false;
+    const uint8_t cc = direct_mask ? (direct_taken_if_set ? 5 /*JNE: bit set*/ : 4 /*JE: bit clear*/)
+                                   : resolve_arm_cond_with_carry(bp.cond, need_cmc);
+    if (direct_mask) {
+        emit_byte(0xF7); emit_modrm_disp(0, CPU_REG, NZCV_OFF);  // test dword [nzcv], mask
+        emit_u32(direct_mask);
+    } else if (need_cmc) {
+        emit_byte(0xF5);  // cmc
+    }
+    const size_t jcc = emit_jcc_rel32_placeholder(cc);
+    DeferredSideExit exit{jcc, bp.target, capture_guard_state()};
+    exit.flags_in_host = flags_in_host_ && !direct_mask;  // a direct test left nothing in RFLAGS
+    exit.flags_from_sub = flags_from_sub_;
+    exit.flags_match_pstate = flags_match_pstate_;
+    exit.need_cmc = need_cmc;
+    if (need_cmc) emit_byte(0xF5);  // the continuing path sees the flags as they were
+    deferred_side_exits_.push_back(std::move(exit));
+    block_has_side_exit_ = true;
+    return 0;
+}
+
 // The exits, after the block. Each one runs on the layout captured at its branch: every mapped guest register is stored (a pin is
 // ahead of memory and statically clean, as in emit_memory_fault_exit), the pinned vectors are written back, and the chain slot of
 // emit_taken_path_epilogue takes the target. The compile-time state is swapped back afterwards.
@@ -90,11 +153,21 @@ void FrostJIT::flush_deferred_side_exits() {
         patch_jcc_rel32(exit.branch, static_cast<int32_t>(code_buf_used_ - (exit.branch + 6)));
         GuardState state = exit.state;
         swap_guard_state(state);
+        if (exit.need_cmc) emit_byte(0xF5);  // CF back to ARM's meaning, as the host flags still hold the inverted one
         for (int v = 0; v < 32; ++v)
             if (vreg_home_[v] >= 0) emit_store_arm(v, vreg_home_[v]);
         vec_cache_writeback_all_pinned(false);
+        // NZCV: the stores above leave RFLAGS alone. When the host flags are the only copy, pack them (this clobbers RAX).
+        const bool saved_in_host = flags_in_host_, saved_from_sub = flags_from_sub_, saved_match = flags_match_pstate_;
+        flags_in_host_ = exit.flags_in_host;
+        flags_from_sub_ = exit.flags_from_sub;
+        flags_match_pstate_ = exit.flags_match_pstate;
+        if (exit.flags_in_host && !host_flags_match_pstate()) materialize_flags_to_pstate(false, false);
+        flags_in_host_ = saved_in_host;
+        flags_from_sub_ = saved_from_sub;
+        flags_match_pstate_ = saved_match;
         // RAX is about to carry the target PC: its occupant is already stored above, and must not be stored again as a PC.
-        clobber_host_reg(RAX);
+        invalidate_host_regs(1u << RAX);
         taken_chain_target_pc_ = exit.target;
         edge_source_override_ = side_exit_key(current_start_pc_, compiled_side_exits_.size());
         emit_taken_path_epilogue();
