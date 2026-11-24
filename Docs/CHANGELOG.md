@@ -8,7 +8,7 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
+## [2.0.0-beta.3] — a JIT that translates twice as fast, cheaper float compares and multiplies, profile reports, a launcher log and uninstall hints (2026-11-24)
 
 - `make uninstall`, `make uninstall-asgard` and `make uninstall-rootfs` look in `/usr/local` unless you pass `PREFIX`, so they found nothing
   for a `make bootstrap` install and said so without a hint. They now say where the install is and which command removes it (also under
