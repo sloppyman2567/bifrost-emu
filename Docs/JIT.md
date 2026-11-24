@@ -406,8 +406,10 @@ Vector FSQRT uses the same guard.
 Scalar FP uses the same contract. FADD/FSUB/FMUL/FDIV/FNMUL/FABD, FSQRT,
 FMADD/FMSUB/FNMADD/FNMSUB, FCVT S↔D and FRINT* compute in scratch XMM0 and
 test it with `ucomis xmm0,xmm0; jp` before the commit. FMAX/FMIN/FMAXNM/
-FMINNM also branch on unordered inputs and zero results, so FMAX/FMIN are
-now native instead of CALL_INTERP. `emit_fp_cold_tail` places the
+FMINNM branch on unordered inputs instead, and fix equal operands (the signed
+zeros) inline as the vector forms do: the operation runs in both operand orders
+and the results are ANDed (max) or ORed (min), so a clamp to zero stays native.
+FMAX/FMIN are native instead of CALL_INTERP. `emit_fp_cold_tail` places the
 interpreter step after the commit and rejoins past it (`emit_fp_interp_step`
 is shared with the vector guard). FMADD no longer writes a pinned Vd in
 place, so the step sees aliased sources. Hosts without FMA3 step the
@@ -487,6 +489,11 @@ References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsi
   and Tier-2 keep the older path. `jit_guard_stubs`.
 
 ## Android interpreter and generated-code contracts
+
+Android data pointers carry a tag in bits 63:56 (Bionic's allocator uses top-byte tags even without MTE), which data accesses
+ignore (`Memory::data_address`). A Tier-1 memory guard copies the address (adding the offset), clears the tag with one
+`and reg, [window_base - 16]` against a mask word in the window's header page, then bound-checks and accesses; the guest register
+keeps its tag. Tag 0, 2, 0xb4 and 0xff are compared with the interpreter, with no interpreter steps, in `android_loader_host`.
 
 `BLR` must capture its target before updating X30. ART's nterp uses
 `ldr lr, [method, ...]; blr lr`; reading X30 after writing the return address
@@ -1907,6 +1914,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Hotspots from IBS and the allocation profile: tag untag and scalar FMAX/FMIN zeros (2026-11-24)](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)
 - [FP equality compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-equality-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)
 - [Translation cost: no Tier-1 SSA, no store footprints outside verify, flat vreg tables (2026-11-23)](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)
 - [FP compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)

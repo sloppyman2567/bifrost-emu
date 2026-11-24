@@ -13,7 +13,8 @@ State shared between them goes in `MemoryInternal.hpp`.
   broker's per-endpoint mirrors use `BINDER_REALM_WINDOW_SIZE` (512 GiB, a
   Android 15 GKI's 39-bit address space): one broker process holds up to 128 mirrors,
   and full-size windows exhaust the host's 47-bit user space after eight.
-- The readable page before the window holds the JIT's software-check flag and
+- The readable page before the window holds the JIT's software-check flag, the
+  top-byte mask (`JIT_UNTAG_MASK_OFF`, `DATA_ADDRESS_MASK`) and
   two per-width tables of bounds (`window_size - width + 1`): the gate
   (`JIT_WINDOW_LIMITS_OFF`, 0 while software checks are on) and the real bounds
   (`JIT_WINDOW_BOUNDS_OFF`), plus the address of `direct_page_flags_`

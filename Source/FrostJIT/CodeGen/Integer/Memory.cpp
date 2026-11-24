@@ -79,10 +79,15 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     if (mp.offset || data_tbi()) {
         effective = alloc_reg();
         pinned_host_regs_ |= (1u << effective);
-        emit_byte(rex(true, effective >= 8, false, address >= 8));
-        emit_byte(0x8D);
-        emit_modrm_disp(effective, address, static_cast<int32_t>(mp.offset));
-        emit_untag_data_address(effective);
+        // WIN_REG holds the window base here: the bound compare below reads its header page too.
+        if (mp.offset) {
+            emit_byte(rex(true, effective >= 8, false, address >= 8));
+            emit_byte(0x8D);
+            emit_modrm_disp(effective, address, static_cast<int32_t>(mp.offset));
+        } else {
+            emit_mov_reg(effective, address);
+        }
+        emit_untag_data_address(effective, true);
     }
     // A covered access needs no scratch register for the compare.
     const int temp = covered ? -1 : alloc_reg();
@@ -220,10 +225,14 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
     if (disp || data_tbi()) {
         effective = alloc_reg();
         pinned_host_regs_ |= (1u << effective);
-        emit_byte(rex(true, effective >= 8, false, address >= 8));
-        emit_byte(0x8D);
-        emit_modrm_disp(effective, address, static_cast<int32_t>(disp));
-        emit_untag_data_address(effective);
+        if (disp) {
+            emit_byte(rex(true, effective >= 8, false, address >= 8));
+            emit_byte(0x8D);
+            emit_modrm_disp(effective, address, static_cast<int32_t>(disp));
+        } else {
+            emit_mov_reg(effective, address);
+        }
+        emit_untag_data_address(effective, true);  // WIN_REG holds the window base: the bound compare reads it too
     }
     const int temp = alloc_reg();
     pinned_host_regs_ |= (1u << temp);

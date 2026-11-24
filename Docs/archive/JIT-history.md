@@ -2,6 +2,52 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Hotspots from IBS and the allocation profile: tag untag and scalar FMAX/FMIN zeros (2026-11-24)
+
+Method: one run of the headless ART bootstrap (the translation yardstick's root, `BIFROST_NO_ASLR=1`, pinned to one core) under
+`perf record -e 'ibs_op/cnt_ctl=1,swfilt=1/u' -c 50021` with `BIFROST_REGALLOC_PROFILE` set. The profile's rows give the host byte range of
+every emitted IR op (`host_begin`, `host_end`, `ir_op`), so each sampled ip attributes to an IR op kind without disassembly, and
+`BIFROST_JIT_DUMP=1` plus `objdump` in the same run gives the instruction under each ip. IBS counts dispatched ops, so the counts are
+valid on a loaded machine (a game was running). Only 17% of the samples were in generated code (the rest is translation); the
+generated-code samples were 43% `LOAD_MEM`/`STORE_MEM`, and `shl r,8` plus `shr r,8` were 13.6% of all of them.
+
+**Tag untag in one instruction.** Android data accesses untag their address (`Memory::data_address`) with `shl 8; shr 8`, after a `lea`
+or copy: six host instructions per access. The Tier-1 scalar and 16-byte guards now clear the tag with `and reg, [window_base - 16]`
+against a mask word in the header page (`Memory::JIT_UNTAG_MASK_OFF`, next to the software-check flag, so it is a 4-byte instruction;
+the two bound tables moved down by 8), and an access with no offset copies with `mov` instead of `lea`. Elsewhere (helpers whose limit is
+an immediate, where `WIN_REG` may not be loaded) the shift pair stays. Same workload, same sampling, base against new: generated-code
+samples 37,683 to 35,741 (-5.2%); `LOAD_MEM` 10,022 to 8,442 (-15.8%), `STORE_MEM` 4,119 to 3,538 (-14.1%), bytes per row 30.2 to 26.2 and
+29.5 to 25.5; `STORE_REG` and `LOAD_REG` moved by 1.5% (noise). Cycles were not compared.
+
+**Scalar FMAX/FMIN with a zero result stay native.** The vector forms had been fixed for this on 2026-10-16 (see below); the scalar
+emitter still sent every zero result to the interpreter step (`xorps; ucomis; je`), so `fmax(x, 0)` stepped the interpreter for every
+negative `x`. It now runs the operation in both operand orders and ANDs (max) or ORs (min) the results: six instructions in either
+version, no zero case, NaN inputs still take the cold step. A throwaway loop (`fmax s, x, 0` then `fmin s, y, 5`, half the inputs
+negative, 5.12 million iterations, base against new): 864 to 44 host instructions and 254 to 11.2 cycles per iteration; the result equals
+QEMU's. Not measured in a game; the 2026-10-16 SpongeBob profile that found the vector case listed scalar FMAX/FMIN as the same
+pattern.
+
+Checked: `jit_fp_scalar_fminmax` (new: every pair of 12 special values, S and D, all four operations, upper bits of the result; passes
+on the interpreter, QEMU and the old JIT before the change; a mutant that ORs for max fails it), `android_loader_host`'s tagged-access
+check (tags 0, 2, 0xb4 and 0xff against the interpreter, with no interpreter steps; a mutant that clears bit 20 of the mask word fails it),
+`verify_jit.sh` (114 differential fixtures, 12 threaded oracle runs) and the unit, Toybox and real-world sets except the window-opening
+stats test: 286 of 287 pass. The failure, `test_fork_lock_contention`, is load-sensitive and fails on the old build too (alone, base 5 of 5
+passes and new 7 of 8 pass, the one failure while the machine was compiling). Not tested: a game with these changes, Tier-2 with tagged
+pointers beyond that check, a disk cache written by an older build (the cache key includes the build id, so none is reused).
+
+**A live game, before these two changes.** SpongeBob (installed build) under IBS for 60 s on all its threads (`perf record -p`, with
+`ptrace_scope` 0 so the code bytes under each sampled ip could be read from `/proc/PID/mem` and classified by instruction shape):
+84.1% of the samples were generated code, 7.6% the Mesa driver and 6.4% the emulator's C++. Of the generated-code ops: `shl`+`shr` (the
+untag above) 11.9%, guest state loads 11.7% and stores 11.0%, bound compares `cmp r,[r10-N]` 9.8%, `lea` 7.0%, FP and SIMD 7.2%, flag pack
+2.8%. The hottest loops are byte-wise pixel and copy loops, and each iteration of an MT self-loop pays its back edge: the preemption poll
+(`movabs rax,&epoch; mov eax,[rax]; cmp eax,[rbx+seen]; jne`) is about 6.3% of all generated-code ops and the callback-sentinel check
+(`movabs rax,<pc>; cmp rax,[rbx+jit_stop_pc]; je`, three ops because an Android pc does not fit the imm32 form) about 4.7%. A chain exit
+(`movabs r11,<cell>; jmp [r11]`) is 4.4% on the jump alone. `BIFROST_PROF` on the same game: entry 11.8%, body 75.4%, exit 11.9% of JIT
+time; body by operation: state moves 37.8%, memory with guards 26.1%, branches 13.1%, integer ALU 11.1%, FP and SIMD 9.9%. Candidates not
+done: compare only the low 32 bits of `jit_stop_pc` against the target (exact, since a mismatch there is a mismatch of the whole, and a
+false hit only costs an exit), or skip the check for targets the sentinel (`0x1000`, its only value) can never equal; an epoch word
+reachable from a live register instead of a 64-bit constant; chain cells inside the code buffer's reach (`jmp [rip+disp32]`).
+
 ## FP equality compare and branch on the raw ucomis flags (2026-11-23)
 
 The scalar `fcmp` + `BRCOND` fusion (the section two down) left EQ and NE on the old sequence: `ucomis` sets ZF for an unordered compare as
@@ -1991,7 +2037,7 @@ are resolved with an equal-lane mask and AND/OR (see the native vector FP
 special cases below). The uncached path reloads the first input from
 `cpu.v`, which is current there. A loop of zero-heavy FMAX/FMIN/FMINNM
 clamps drops from about 302 ms to 5.4 ms with the same result as QEMU.
-Scalar FMAX/FMIN still take the cold step for zero results.
+Scalar FMAX/FMIN still took the cold step for zero results then; that was fixed on 2026-11-24 (see the first section).
 
 The same profile also lists UMIN/UMAX `.8h`, FCVTNU, four-register TBL,
 URSHR, FRECPS/FRECPE and plain stores (`stp q`, `stur x`) as interpreted.

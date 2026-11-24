@@ -1463,9 +1463,11 @@ private:
     // Android data TBI (Memory::data_address): clear bits 63:56 of the final
     // data address in `reg` before its bound check and access. `reg` must be a
     // scratch copy; the guest register keeps its tag. Emits nothing without
-    // TBI, and clobbers host flags otherwise.
+    // TBI, and clobbers host flags otherwise. With `window_valid` (WIN_REG holds
+    // the window base here) it is one `and reg, [WIN_REG + JIT_UNTAG_MASK_OFF]`;
+    // without it, `shl reg, 8; shr reg, 8`, which needs no register.
     bool data_tbi() const { return guest_memory_ && guest_memory_->data_top_byte_ignore(); }
-    void emit_untag_data_address(int reg);
+    void emit_untag_data_address(int reg, bool window_valid = false);
     void emit_mov_reg(int dst, int src);
     void emit_load(int dst, int base, int32_t off);
     void emit_store(int base, int32_t off, int src);

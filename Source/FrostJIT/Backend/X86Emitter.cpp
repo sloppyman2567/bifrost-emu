@@ -744,8 +744,15 @@ void FrostJIT::emit_window_limit(int dst, uint64_t width) {
     if (limit <= 0xFFFFFFFFULL) emit_mov_imm32_zext(dst, static_cast<uint32_t>(limit));
     else emit_mov_imm64(dst, limit);
 }
-void FrostJIT::emit_untag_data_address(int reg) {
+void FrostJIT::emit_untag_data_address(int reg, bool window_valid) {
     if (!data_tbi()) return;
+    if (window_valid) {
+        // and r64, r/m64 (REX.W 23 /r): one op instead of two, and a dependency of one cycle instead of two.
+        emit_byte(rex(true, reg >= 8, false, WIN_REG >= 8));
+        emit_byte(0x23);
+        emit_modrm_disp(reg, WIN_REG, Memory::JIT_UNTAG_MASK_OFF);
+        return;
+    }
     emit_shift_imm8(reg, 4, 8);  // shl reg, 8
     emit_shift_imm8(reg, 5, 8);  // shr reg, 8
 }

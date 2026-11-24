@@ -346,6 +346,11 @@ and a scalar `fcmp` followed by a branch is one compare and one or two jumps
 ([details](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23),
 [equal and not-equal](archive/JIT-history.md#fp-equality-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)): up to 14% (multiply)
 and 12% (compare) fewer host instructions per frame in the kernels that use them. No game was run with either.
+Also done on 2026-11-24, found by IBS samples attributed to IR ops through the allocation profile on the ART bootstrap: the Android
+tag untag is one `and` against a mask word in the window's header page (`LOAD_MEM` and `STORE_MEM` host ops -15% and -14%, -5.2% of all
+generated-code ops in that workload), and scalar `fmax`/`fmin` no longer step the interpreter when the result is zero (a clamp loop went
+from 864 to 44 host instructions per iteration; checked against QEMU, no game run;
+[details](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)).
 Measured the same day: Tier-2 regions are +4.7% on CoreMark at 200,000 iterations (+2.1% at 40,000; still opt-in, no game run with
 it), and on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
 
@@ -367,6 +372,10 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
      several code placements ([details](archive/JIT-history.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
      Reading a hot block's generated code found the widening-multiply emitter and the scalar `fcmp` + branch pair (both done, above);
      the other fixed-register emitters have not been audited, and the dead-flags scan stops at FP loads and stores and at vector instructions.
+   - *Loop back edges and block entry/exit* (SpongeBob, 2026-11-24, 60 s of IBS on the live game): in MT code each iteration of a
+     self-loop pays the preemption poll (about 6.3% of generated-code ops) and the callback-sentinel compare (about 4.7%, three ops
+     because an Android pc is wider than imm32); `BIFROST_PROF` puts block entry and exit at 11.8% and 11.9% of JIT time
+     ([details](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)).
    - *Across blocks* (games, 2026-11-23, dispatched uops of the generated code): guest state traffic is about 24% (Zenless Zone
      Zero) and 23% (Umamusume). On Umamusume's direct chained edges the exit sequence (`movabs r11, cell; jmp [r11]`) is 5.8%, the
      loads at block entries 4.8% of which 49% are redundant (2.3%), and about 9% of uops are guest-register stores inside
@@ -386,7 +395,8 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    traffic, copies, memory guards, math) of the generated code on a game, so the next fix is chosen from numbers. Then
    **paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics. What a game
    still runs in the interpreter (Zenless Zone Zero, 2026-11-23, `BIFROST_CLASS_PROF`): the exclusive pairs `ldxp`/`stxp`/`ldaxp`/
-   `stlxp` with their retry loops, and scalar `fmax`/`fmin`; 64-bit-lane saturating narrowing shifts stay interpreted too.
+   `stlxp` with their retry loops; 64-bit-lane saturating narrowing shifts stay interpreted too (scalar `fmax`/`fmin` stepped
+   the interpreter for every zero result until 2026-11-24; now only a NaN input does).
 4. **Tier-2**: regions now follow calls and returns, every side exit chains, a kept region retires when its exit rate
    outgrows its trial, and enabling it no longer slows Tier-1 code (2026-11-11). CoreMark runs 1.2% fewer host instructions
    than Tier-1 (run time within placement noise) and a particle loop 7.7% fewer cycles. It does not take single-block loops,

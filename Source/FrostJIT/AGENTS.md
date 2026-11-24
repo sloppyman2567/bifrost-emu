@@ -101,6 +101,10 @@ A new history section can make an older "not measured" or "next section" line wr
   skipped `mov` whose consumer then does not fold leaves the vreg unmapped. Kind 3 is the CSET
   form of CSEL (constants 0 and 1, read through `csel_const`). Pass 0b of
   `optimize_ir` relies on `LOAD_MEM` and the shared 32-bit `ADDS/SUBS` emitter zero-extending.
+- Scalar FMAX/FMIN/FMAXNM/FMINNM (`FP_BINOP` 4-7) take the cold step for NaN inputs only. Equal operands are exact
+  inline: the operation in both operand orders, ANDed for max and ORed for min (x86 returns the second operand on a tie,
+  Arm orders +0 above -0). Do not test the result for zero: `max(x, 0)` is zero for every negative input, and each such
+  result was an interpreter step (about 800 host instructions). `jit_fp_scalar_fminmax` covers every special pair.
 - Scalar FMUL/FMULX/FMLA/FMLS by element are `FP_BINOP`/`FMADD`/`FMSUB` with a source element
   (`lane`, IR `cond` = element + 1); `fp_decode::scalar_fp_by_element` decides for the translator
   and `BlockAnalysis` alike. The element comes from `fp_load_lane`: under the low-half FP cache an
@@ -141,7 +145,10 @@ A new history section can make an older "not measured" or "next section" line wr
   reads mapped executable pages directly and must stay a hint that adds no code-word dependency.
 - Android data TBI (`Memory::data_address`): every native data access untags its final address
   (base + offset) with `emit_untag_data_address` in a scratch copy before the bound and page checks;
-  the guest register keeps its tag. A new access path that skips it is correct but interprets every
+  the guest register keeps its tag. Where `WIN_REG` holds the window base (the Tier-1 scalar and 16-byte
+  guards, whose bound compare reads the header page through it) the untag is one `and reg, [WIN_REG +
+  Memory::JIT_UNTAG_MASK_OFF]`; call it with `window_valid = true` only there. Elsewhere, where the limit
+  is an immediate and `WIN_REG` may not be loaded, it stays `shl reg, 8; shr reg, 8`. A new access path that skips it is correct but interprets every
   tagged (Scudo heap) access. `data_tbi()` is part of the disk-cache fingerprint.
 - A scalar FP load or store is `LOAD_MEM` + `FMOV_G2F` or `FMOV_F2G` + `STORE_MEM`,
   never `SIMD_LDST`: that op is not cache-compatible and would veto the XMM cache

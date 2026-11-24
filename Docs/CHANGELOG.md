@@ -12,6 +12,10 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagnostics.
 
+- Android apps run memory-heavy code with fewer instructions: an access through a tagged pointer (Android's allocator tags them) is one
+  instruction shorter, about 5% fewer in the Android runtime's start-up code.
+- A game that clamps with `fmax(x, 0)` or `fmin` no longer drops into the slow interpreter when the result is zero (a loop of them runs
+  about 20 times faster here). Checked against QEMU; no game has been timed.
 - The stats overlay is restyled after MangoHud: a half-transparent panel with smooth, outlined text, a coloured label for GPU, CPU,
   VRAM and RAM, small units beside the figures (`58 %`, `64 °C`, `1.2 GB`) and a green graph of the last 120 frame times. The
   pixel font and the load meters are gone; the text size follows the window height. Turn it on as before (`--window-stats-mode overlay`).
