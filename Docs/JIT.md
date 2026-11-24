@@ -1622,6 +1622,7 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
+- [SpongeBob host profile with perf: dispatch and translation after loading (2026-11-24)](archive/JIT-history.md#spongebob-host-profile-with-perf-dispatch-and-translation-after-loading-2026-11-24)
 - [Carry loop report on a game, and chain-edge carrying (2026-11-24)](archive/JIT-history.md#carry-loop-report-on-a-game-and-chain-edge-carrying-2026-11-24)
 - [Carry loop report: first numbers (2026-11-24)](archive/JIT-history.md#carry-loop-report-first-numbers-2026-11-24)
 - [Carry ceiling: guest register moves in CoreMark (2026-11-24)](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)

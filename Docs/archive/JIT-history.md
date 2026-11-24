@@ -2,6 +2,17 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## SpongeBob host profile with perf: dispatch and translation after loading (2026-11-24)
+
+`perf record -F 997 -p <app pid>` for 45 s starting 33 s after launch (the game was loading into the lobby by itself; nobody interacted; the repo build,
+`asgard --emu`), 56,345 samples, one run. By library: generated code 82.4%, the emulator binary 7.0%, the GPU driver (`libgallium`) 5.5%, kernel and
+unresolved 2.5%, libc 1.4%, libm 0.7%. The named emulator symbols are small: `FrostJIT::run_block` 1.16%, `native_structure` 0.33%, `translate_block`
+0.32%, `optimize_ir` 0.17%, `bind_ibl` 0.11%, `try_chain_block` 0.09%; the dispatcher and translator together come to about 3% of the samples. The
+12.2% dispatch and 7.0% translate in the `BIFROST_PROF` exit report of the same game cover the whole run, so they belong to the first half minute of
+loading (about a million blocks translated), which the persistent JIT cache is for, not to steady state. No cheap win is left in dispatch or
+translation once the game is past loading; the time is in generated code, where entry plus exit are about 22% of the JIT samples and guest state moves
+39.5% of the body (previous section).
+
 ## Carry loop report on a game, and chain-edge carrying (2026-11-24)
 
 `BIFROST_PROF=1 BIFROST_PC_HIST=1 asgard --emu <repo build> start com.tiltingpoint.spongebob`, 100 s through loading into the lobby, which the game reaches by itself (the maintainer
