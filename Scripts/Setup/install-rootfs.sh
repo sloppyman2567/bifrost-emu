@@ -64,7 +64,16 @@ has_loader() {
 }
 
 if [ "$UNINSTALL" = 1 ]; then
-    if [ ! -e "$DEST" ]; then echo "nothing to remove at $DEST"; exit 0; fi
+    if [ ! -e "$DEST" ]; then
+        echo "nothing to remove at $DEST"
+        # The same rootfs in the other standard place (make uses /usr/local unless PREFIX is set).
+        REL="${DEST#"$BASE"/}"
+        for where in "user:${XDG_DATA_HOME:-${HOME:?HOME is not set}/.local/share}/bifrost" "system:/usr/local/share/bifrost"; do
+            [ "${where#*:}" != "$BASE" ] && [ -e "${where#*:}/$REL" ] &&
+                echo "  there is one at ${where#*:}/$REL: run $0 --uninstall --${where%%:*}${PROFILE:+ --profile $PROFILE}"
+        done
+        exit 0
+    fi
     # Only delete something that looks like a rootfs, never an arbitrary directory.
     has_loader "$DEST" || { echo "refusing to remove $DEST: no AArch64 loader inside" >&2; exit 1; }
     rm -rf -- "$DEST"

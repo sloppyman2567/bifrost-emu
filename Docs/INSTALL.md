@@ -52,8 +52,9 @@ make uninstall                    # the emulator
 make uninstall-rootfs             # the Linux library root, if you installed one
 ```
 
-Add `PREFIX=$HOME/.local` to each if you installed with `make bootstrap`. Your apps and their data stay in
-`~/.local/share/bifrost` until you delete that folder.
+Add `PREFIX=$HOME/.local` to each if you installed with `make bootstrap` (without it they look under `/usr/local` and report
+nothing to remove). The Linux game libraries are a separate root: `./Scripts/Setup/install-rootfs.sh --uninstall --profile games`.
+Your apps and their data stay in `~/.local/share/bifrost` until you delete that folder.
 
 ## Other ways to install
 
