@@ -147,6 +147,12 @@ A new history section can make an older "not measured" or "next section" line wr
   tail: the shared cold stubs exist for widths up to 8 (`flush_deferred_guards` checks `g.width`).
 - Block growth past the cap is only for loops (`selfloop_extent`, at most twice the cap); its look-ahead
   reads mapped executable pages directly and must stay a hint that adds no code-word dependency.
+- `WIN_REG` (R10) holds the window base for a whole chain: the cold prologue loads it once, and a chain entry, an IBL probe hit or an MT cell
+  jump enters past that load, so nothing reloads it per block. Every path that calls C++ and then continues in generated code must save
+  and restore it around the call (`emit_push(WIN_REG)` / `emit_pop(WIN_REG)`, with `emit_call_aligned` told about the push); a path that
+  ends the frame need not. A new call site, or a new entry that skips the cold prologue, keeps that contract. A build with a compare-and-trap
+  of R10 at every chain entry (a temporary `cmp r10, imm64; je; ud2` after `chain_entry_off_`, not kept) caught `emit_native_libc_entry`,
+  which called its helper without saving R10; `native_libc` and `jit_native_libc` run it.
 - Android data TBI (`Memory::data_address`): every native data access untags its final address
   (base + offset) with `emit_untag_data_address` in a scratch copy before the bound and page checks;
   the guest register keeps its tag. Where `WIN_REG` holds the window base (the Tier-1 scalar and 16-byte

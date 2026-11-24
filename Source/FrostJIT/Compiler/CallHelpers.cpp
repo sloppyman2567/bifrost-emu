@@ -484,7 +484,9 @@ void FrostJIT::emit_native_libc_entry(uint64_t start_pc, uint32_t kind) {
     emit_load_emu(RDI);
     emit_mov_reg(RSI, CPU_REG);
     emit_mov_imm32(RDX, static_cast<int32_t>(kind));
-    emit_call_aligned(reinterpret_cast<void*>(&jit_native_libc), /*num_pushed=*/0);
+    emit_push(WIN_REG);  // R10 is the window base for the whole chain; the helper may clobber it (caller-saved)
+    emit_call_aligned(reinterpret_cast<void*>(&jit_native_libc), /*num_pushed=*/1);
+    emit_pop(WIN_REG);
     emit_load(RAX, CPU_REG, PC_OFF);                        // the pc the helper left
     if (start_pc <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RCX, static_cast<uint32_t>(start_pc));
     else emit_mov_imm64(RCX, start_pc);

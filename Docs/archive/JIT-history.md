@@ -2,6 +2,27 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Window register loaded once per chain (2026-11-24)
+
+Found by reading the generated code of CoreMark's list loop (`BIFROST_JIT_DUMP=1`, bytes through `objdump -D -b binary -mi386:x86-64`): every block
+that touches memory began its chained entry with `movabs r10, <window>`, a 10-byte instruction, because a chain into a memory block from a block
+that never loaded R10 could carry a stale value. The cold prologue now always loads R10 (before the chain entry) and the per-block load is gone, so
+the rule is that R10 stays the window base along a whole chain; the call sites already pushed and popped it around helpers.
+
+Verification used a temporary build that compares R10 with the window base at every chain entry and traps (`ud2`) on a mismatch, run over the strict
+quick suite: it caught `emit_native_libc_entry`, which called `jit_native_libc` without saving R10 (the old per-block load had hidden it). With
+that fixed, `native_libc`, `native_libc_mt`, `jit_native_libc` and `jit_native_libc_glibc` pass under the checking build. The check was removed from
+the source afterwards. Two other failures under that build were artifacts of the copied binary: `fork_stuck_report` counts host stack lines named
+`bifrost-emu(`, and `jit_disk_cache` also differs under the checking build; both pass on the installed build and on the final binary.
+The full strict quick suite on the final binary passed everything except `test_fork_lock_contention` (the fork quiesce flake recorded in the
+Tier-2 removal entry, which fails on the older build too).
+
+CoreMark, 40,000 iterations, pinned to one core, five alternating runs of the installed build and this one: host instructions 38.44 G to 37.37 G
+(-2.8%), cycles best-of-five 10.59 G to 10.34 G (-2.4%), iterations per second best-of-five 16,828 to 17,219 (+2.3%). One benchmark; no game was
+timed. The rest of the code on that path, read the same way and not changed: the flag pack (`lahf; seto; mov`, needed for a precise fault in
+the successor), the effective-address `lea` before each guarded access with an offset, and the `jmp` the fall-through exit of a conditional
+branch takes to the shared epilogue.
+
 ## SpongeBob host profile with perf: dispatch and translation after loading (2026-11-24)
 
 `perf record -F 997 -p <app pid>` for 45 s starting 33 s after launch (the game was loading into the lobby by itself; nobody interacted; the repo build,

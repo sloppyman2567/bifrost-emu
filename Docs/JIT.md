@@ -1182,6 +1182,8 @@ They are typed, validated IR operations and optimizer barriers. Flush GPR
 state before helpers that read `cpu.regs`, disable incompatible pinning, and
 preserve `WIN_REG` across every SysV call: it is caller-saved R10, so an
 otherwise correct C++ helper can corrupt all later direct-window accesses.
+R10 is loaded once by the cold prologue and stays valid along a whole chain (chain entries do not reload it), so a call that returns into
+generated code must restore it.
 The translator checks `classify_native_simd` before the interpreter
 fallback, so a classified encoding must be one its `run<K>` implements.
 The classifier, the kind enum and the dispatch list are generated from
@@ -1622,6 +1624,7 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
+- [Window register loaded once per chain (2026-11-24)](archive/JIT-history.md#window-register-loaded-once-per-chain-2026-11-24)
 - [SpongeBob host profile with perf: dispatch and translation after loading (2026-11-24)](archive/JIT-history.md#spongebob-host-profile-with-perf-dispatch-and-translation-after-loading-2026-11-24)
 - [Carry loop report on a game, and chain-edge carrying (2026-11-24)](archive/JIT-history.md#carry-loop-report-on-a-game-and-chain-edge-carrying-2026-11-24)
 - [Carry loop report: first numbers (2026-11-24)](archive/JIT-history.md#carry-loop-report-first-numbers-2026-11-24)

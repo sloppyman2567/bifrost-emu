@@ -620,15 +620,18 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // load emu from there instead of R14. RSI still holds
     // emu at this point (entry arg), untouched since the prologue started.
     emit_store_emu(RSI);
+    // R10 holds the window base for the whole chain: loaded here, by the cold entry only. A chain edge enters past this
+    // point, so every path that continues in generated code after a call must leave R10 intact (the call sites push and pop it).
+    if (window_base_)
+        emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_)), note_host_reloc(HostReloc::Window);
     // Chain-skip entry (BIFROST_CHAIN_SKIP=1): recorded here, BEFORE the
-    // window load and the vector-cache prologue loads. Chain edges jump to
+    // vector-cache prologue loads. Chain edges jump to
     // this offset, skipping the predecessor's frame teardown and THIS
     // block's push/frame/reg-setup (~17 instructions) while still
-    // re-running the R10 window load and the vec loads. Both are required:
-    // R10 is only loaded by window-using blocks, so a chain into a window
-    // block from a non-window predecessor carries stale R10; and a chain
-    // successor must pin the CURRENT guest vectors (the predecessor's
-    // epilogue wrote its dirty vectors back to cpu.v_lo/v_hi). RBX needs no
+    // re-running the vec loads: a chain successor must pin the CURRENT
+    // guest vectors (the predecessor's epilogue wrote its dirty vectors
+    // back to cpu.v_lo/v_hi). R10 is not reloaded: it is the window base
+    // from the cold entry (loaded above). RBX needs no
     // setup — it holds cpu persistently across the chain edge (reserved
     // reg). R14 is allocatable, so emu does NOT flow through
     // a register: the predecessor's epilogue set RSI=emu from CPU::jit_emu,
@@ -693,42 +696,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         fault_sites_ && !record_oracle_) {
         const NativeLibcKind libc_kind = emu.native_libc().find(start_pc);
         if (libc_kind != NativeLibcKind::None) emit_native_libc_entry(start_pc, static_cast<uint32_t>(libc_kind));
-    }
-    // load the reservation base into R10 ONLY if the
-    // block actually touches guest memory inline.
-    // Previously every block paid a 10-byte movabs r10, imm64 in its
-    // prologue — pure overhead for the many tiny ALU/FP/vector blocks
-    // that never load or store guest memory (avg 3.5 guest instrs/block,
-    // ~20M block entries/sec). The window-using IR ops are exactly:
-    //   LOAD_MEM / STORE_MEM            (emit_load_mem / emit_store_mem)
-    //   ATOMIC                          (direct-window lock fast path)
-    //   SIMD_LD16 / SIMD_ST16           (16-byte vector memory access)
-    // Everything else either never reads guest memory or calls a C
-    // helper (which goes through Memory, not R10).
-    {
-        bool uses_window = false;
-        for (const auto& inst : ir_block.insts) {
-            switch (inst.op) {
-                case IROp::LOAD_MEM:
-                case IROp::STORE_MEM:
-                case IROp::ATOMIC:
-                case IROp::SIMD_LD16:
-                case IROp::SIMD_ST16:
-                case IROp::SIMD_STRUCT_MEM:
-                    uses_window = true;
-                    break;
-                case IROp::LDXR_FAST:
-                case IROp::STXR_FAST:
-                case IROp::STLR_FAST:
-                    uses_window = true;  // native LDAR and exclusive sequences
-                    break;
-                default:
-                    break;
-            }
-            if (uses_window) break;
-        }
-        if (window_base_ && uses_window)
-            emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_)), note_host_reloc(HostReloc::Window);
     }
     // Vector cache prologue loads MUST be emitted before block_body_start_off_
     // is recorded: self-loop re-entry jumps directly to the body start, so
