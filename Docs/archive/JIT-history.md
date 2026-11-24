@@ -24,6 +24,17 @@ Tried and dropped: deferring the register writes of a non-loop block with exits 
 targets registers other than RAX, RCX, RDX and R8 and most values land there; allowing those registers made it worse (35.907 G against 35.829 G
 instructions, best cycles 9.50 G against 9.36 G), since each clobber then spills the deferred value. Reverted.
 
+Also tried and reverted: pinning guest registers in R12-R15 for a Carry block that is not a loop (the existing loop-pin selection with any register touched
+at least N times, writes deferred, exits storing the dirty pins, every pin preloaded at entry). Carry on CoreMark, host instructions: 35.489 G without
+these pins, 35.532 G with N = 4, 36.021 G with N = 3, 36.859 G with N = 2. The preload at every entry and the stores at exits cost more than the
+eager stores they replace; the optimizer's forwarding has already removed most reads, so a register shows only two or three touches in a block.
+
+What the remaining guest-register traffic could still give, from the CoreMark block trace (Lean blocks, same method as the ceiling above): 53% of the
+register moves are loads at block entry, and a successor that received the registers its predecessor holds in host registers would skip 56% of those
+loads, 30% of all moves, which is at most about 9% of host instructions before Carry merges some of those edges. It needs a second entry per block that
+expects a register layout, a predecessor compiled knowing the successor's layout, and a patch-time check that the layouts still agree (the
+predecessor still stores what it wrote, so the successor's registers are clean mirrors and recovery stays as it is). Not built.
+
 The generated code of a Carry block still shows, on CoreMark's state machine (`core_state_transition`): a store of each guest register at every
 definition (the dead-store pass clears at each branch and memory op), the flag pack at both exits, one `lea` per guarded access with an offset, and a
 `jmp` hop on the fall-through exit of the block's own final branch.
