@@ -747,6 +747,24 @@ Q=0 writes the low 64 bits and clears `v_hi`; Q=1 computes both halves.
 `Tests/Unit/jit_simd_mul32.c` covers overflow, source/destination aliasing and both
 widths with fixed expected products, independently checked under QEMU.
 
+## Saturating narrowing shifts
+
+`SQSHRN`, `UQSHRN`, `SQRSHRN`, `UQRSHRN`, `SQSHRUN` and `SQRSHRUN` (vector forms) are native for 16- and 32-bit source lanes
+(`SIMD_SHRN_SAT`, `Widening.cpp`). They used to be left to the interpreter by the translator itself, which a game's video
+decoder exposed: `sqrshrun v.8b, v.8h, #7` is the last step of a fixed-point pixel conversion, and the interpreter ran it
+for about 7% of the process. The destination lane size comes from `immh`, the source lanes are twice as wide and all of
+them are read (`Q` picks the destination half only: 0 writes `v_lo` and clears `v_hi`, 1 writes `v_hi` and keeps `v_lo`),
+and the shift is the source bits minus `immh:immb`.
+
+The result is the exact `(x + round) >> shift`, saturated to the destination, so the rounding must not wrap in the source
+lane. The emitter uses `(x >> s) + ((x >> (s-1)) & 1)`, which equals `(x + 2^(s-1)) >> s` for an arithmetic shift (signed
+source) and a logical shift (unsigned source) and cannot overflow. The pack then saturates (`packsswb`/`packssdw` for a
+signed destination, `packuswb`/`packusdw` for an unsigned one; an unsigned source clamps with `pminuw`/`pminud` first).
+FPSR.QC is set when any lane saturates, found by comparing the shifted lanes with their saturated form
+(`emit_simd_qc_unless_equal`). 64-bit sources (immh >= 4) and, without SSE4.1, the forms that need `pminu*` or `packusdw`
+stay on the interpreter; `BlockAnalysis` predicts exactly that. `jit_shrn_sat` covers every subop, shift and half and
+`Vd == Vn` against an exact model that matches QEMU; `jit_simd_sat_narrow` covers the JPEG IDCT shapes.
+
 ## Shared SIMD fallback semantics
 
 Android linker bootstrap exposed SADDLV/UADDLV aliasing the saturating
@@ -1864,6 +1882,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Saturating narrowing shifts are native (2026-11-23)](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)
 - [In-place updates of pinned registers (2026-11-23)](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23)
 - [One jump per loop iteration and one check per repeated access (2026-11-16)](archive/JIT-history.md#one-jump-per-loop-iteration-and-one-check-per-repeated-access-2026-11-16)
 - [Host-native memcpy, memmove and memset (2026-11-16)](archive/JIT-history.md#host-native-memcpy-memmove-and-memset-2026-11-16)

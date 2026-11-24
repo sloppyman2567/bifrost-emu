@@ -1304,9 +1304,19 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return true;
             }
             case simd::Family::SHRN_SAT: {
-                // The native lowering is disabled until rounding overflow
-                // and FPSR.QC are implemented correctly.
-                block.insts.push_back(IRInst::make(IROp::CALL_INTERP, 0, 0, 0, 0, cur_pc));
+                // SQSHRN/UQSHRN/SQRSHRN/UQRSHRN/SQSHRUN/SQRSHRUN (vector). immh (bits
+                // 22:19, 1..7 by the table guard) gives the DESTINATION lane size; the
+                // source lanes are twice as wide and all of them are read (Q only picks
+                // the destination half). shift = source bits - immh:immb, 1..dest bits.
+                // width = SOURCE esize; imm = subop | (shift << 8); flags_op = Q.
+                const uint32_t immh = (op >> 19) & 0xF, immb = (op >> 16) & 7;
+                const int dst_bytes = immh >= 4 ? 4 : immh >= 2 ? 2 : 1;
+                SimdShrnSatParams sp;
+                sp.subop = ct.subop;
+                sp.esize = static_cast<uint8_t>(dst_bytes * 2);
+                sp.shift = static_cast<uint8_t>(16 * dst_bytes - static_cast<int>((immh << 3) | immb));
+                sp.q = Q;
+                emit_shrn_sat(block, d.rd, d.rn, sp, cur_pc);
                 return true;
             }
             case simd::Family::MUL_ELEM: {

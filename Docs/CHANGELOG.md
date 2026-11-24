@@ -10,6 +10,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- Saturating narrowing shifts (`sqrshrun`, `sqshrn` and the rest of that family, 16- and 32-bit lanes) run as native code instead of
+  in the interpreter. Zenless Zone Zero spent about 7% of its CPU there, in its video decoder; a loop of them is about 47 times
+  faster here. The results and the QC flag are checked against QEMU.
 - "Preparing Android runtime" no longer copies or reads the app's saved data and downloaded resources when it has to rebuild its
   runtime (after an update, or when you switch between builds). It links them and checks only the runtime's own files. Zenless
   Zone Zero (38 GB of downloaded resources) went from 105 s to about 3 s at that step, measured on a copy of its real data.

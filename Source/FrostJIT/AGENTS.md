@@ -133,6 +133,10 @@ it under the guide's Recorded changes.
 - Vn is `CPU::v[n]`, 16 contiguous bytes (`lo` bits 63:0, then `hi`), addressed as `vlo_off(n)`/`vhi_off(n)`; byte `b` of
   Vn is `vlo_off(n) + b`. Move a whole register with one 16-byte access (`load_v16`/`store_v16`), never a lo/hi pair, but the
   lo-only scalar FP cache stores 8 bytes: its XMM does not hold `v_hi`.
+- Saturating narrowing shifts (`SIMD_SHRN_SAT`) add the rounding bit after the shift, `(x >> s) + ((x >> (s-1)) & 1)`, never `x + 2^(s-1)`
+  in the source lane (that wraps). The translator takes the shift from `immh:immb` (source bits minus the field) and the
+  source lane size from `immh` (twice the destination's); 64-bit sources stay interpreted in the emitter and in
+  `BlockAnalysis` alike. `jit_shrn_sat` (matches QEMU) covers every subop, shift and half.
 - Native saturating integer SIMD must set FPSR.QC like the interpreter
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.

@@ -36,6 +36,15 @@ it passed (2 s) on every rerun. The likely cause is that, started as `--emu ./bi
 builds the headless library inside that limit (the library's timestamps fit; the log does not say). To avoid it, run with
 `--emu build/release-sdl1-gl1/bifrost-emu`, or build the headless library first (`make USE_SDL2=0 USE_THUNK_GL=0 lib`).
 
+### Saturating narrowing shifts (2026-11-23)
+
+`Tests/Unit/jit_shrn_sat.c` (`run_tests.sh` entry `jit_shrn_sat`) builds the instruction word for every one of SQSHRN, UQSHRN,
+SQRSHRN, UQRSHRN, SQSHRUN and SQRSHRUN at every shift for 16-, 32- and 64-bit source lanes, in both destination halves and with
+`Vd == Vn`, runs each on lanes at the rounding, saturation and sign boundaries plus pseudo-random ones, and compares the
+result and FPSR.QC with an exact `__int128` model (32,257 checks); a last loop keeps the source in a vector register. The
+model and the encodings pass under QEMU, the interpreter and both JITs, and the fixture fails on a JIT without the QC update
+or without the rounding add. It does not run Tier-2 regions or a host without SSE4.1.
+
 ### In-place pin updates (2026-11-23)
 
 `Tests/Unit/jit_pin_inplace.c` (`run_tests.sh` entry `jit_pin_inplace`) runs self-loops that update pinned registers in the

@@ -2,6 +2,33 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Saturating narrowing shifts are native (2026-11-23)
+
+Chosen from a profile of Zenless Zone Zero (IBS op sampling of the game process, generated code read from its memory at 62 s
+of a 90 s unattended run): 53.7% of the process was generated code, 37.6% the emulator's own C++, and the biggest
+function in that C++ was `Emulator::exec_simd_imm` at 7.0% of all samples, with the interpreter's other SIMD/FP
+entry points bringing the fallback total to about 11%. `BIFROST_CLASS_PROF` named the instruction: `sqrshrun v.8b, v.8h,
+#7` and its `2` form, about 20 million executions in the sampled windows (the pixel conversion of the game's CRI Mana video
+decoder). The translator sent the whole family to `CALL_INTERP`, with a comment that native lowering was "disabled until
+rounding overflow and FPSR.QC are implemented correctly". Mechanism: [the guide](../JIT.md#saturating-narrowing-shifts).
+
+Measured: a loop of `sqrshrun`, `sqrshrun2` and two `add`s (20,000,000 iterations, one pinned core, checksum and QC equal to QEMU's):
+4.22 s with the interpreter fallback, 0.09 s native, about 47 times faster on that loop. `jit_shrn_sat` runs 32,257 checks
+(6 subops, 56 shifts across the three source widths, both halves, aliasing, boundary and random lanes) with the JIT, the
+interpreter and QEMU: all agree; the old JIT also passes (it interprets). Mutants fail it: no QC update (3,176 failures), no
+rounding add (2,802). `jit_simd_sat_narrow` (672 checks), the 106 JIT-named unit fixtures and `verify_jit.sh` (112 differential fixtures, 12 threaded oracle runs) pass. On
+`jit_simd_sat_narrow` the interpreter-executed instructions drop from 576 to 192, the 64-bit-source forms that remain.
+
+The game afterwards (one unattended run, BIFROST_PROF sampler): the share of samples in the interpreter was 2.6%, 4.1% and 4.9% at 40,
+80 and 120 s against 0.4%, 5.5% and 8.5% before (the two runs reach different scenes at slightly different times, so the figures are
+only roughly comparable), and `sqrshrun` no longer appears in the interpreter's top words. What is left there, by
+`BIFROST_CLASS_PROF`: the exclusive-pair atomics `ldxp`/`stxp`/`ldaxp`/`stlxp` with their `cbnz` retry loops, and scalar
+`fmax`/`fmin`.
+
+Not measured: a host without SSE4.1, Tier-2 regions containing the op, the game's picture (no screenshot, so a visual
+difference in the video cannot be ruled out beyond the QEMU-matching fixture), 64-bit source lanes (still interpreted: no
+packed 64-bit arithmetic shift before AVX-512).
+
 ## In-place updates of pinned registers (2026-11-23)
 
 Chosen from a read-only profile of the same day (CoreMark, busybox gzip, zstd, sort, fib, dispatch, memcpy, matrix; one pinned

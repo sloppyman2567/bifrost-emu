@@ -386,6 +386,7 @@ UNIT_TESTS=(
     "simd_pmull|Tests/Unit/jit_simd_pmull.elf||15|10240 checks passed"
     "crc32_instructions|Tests/Unit/jit_crc32.elf||5|checks passed"
     "simd_sat_narrow|Tests/Unit/jit_simd_sat_narrow.elf||5|672 checks passed"
+    "jit_shrn_sat|Tests/Unit/jit_shrn_sat.elf||15|jit_shrn_sat: ALL PASS"
     "simd_sat|Tests/Unit/test_simd_sat.elf||5|ALL PASS"
     "fp_pw_elem|Tests/Unit/jit_fp_pw_elem.elf||5|ALL PASS"
     "loop|Tests/Unit/loop.elf||5|Loop value"
