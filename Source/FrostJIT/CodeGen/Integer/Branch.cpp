@@ -101,10 +101,13 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
         emit_u32(offsetof(CPU, jit_stop_pc));
         emit_u32(static_cast<uint32_t>(target_pc));
     } else {
-        emit_mov_imm_to_rax(target_pc);
-        // cmp rax,[rbx+jit_stop_pc]
-        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
+        // A wide pc (Android code lives above 2 GiB) has no imm32 form, and loading it costs a 10-byte movabs on
+        // every iteration. Compare the sentinel's low 32 bits instead: an equal sentinel always matches, and a
+        // different one that shares them only leaves early, where the dispatcher compares the whole pc.
+        // cmp dword [rbx+jit_stop_pc],imm32; je cold exit
+        emit_byte(0x81); emit_byte(0xBB);
         emit_u32(offsetof(CPU, jit_stop_pc));
+        emit_u32(static_cast<uint32_t>(target_pc));
     }
     stop = emit_jcc_rel32_placeholder(0x4);
     // Reconcile the loop layout only after every exit check: a cold exit

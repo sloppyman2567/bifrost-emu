@@ -178,9 +178,11 @@ static bool check_ibl_revocation() {
     std::puts("jit_mt_publication: invalidation revokes a leased IBL entry PASS");
     return true;
 }
-static bool check_selfloops() {
+// `head` below 2 GiB compares the callback sentinel with one imm32 compare; above it (Android code lives there) the
+// back edge compares the sentinel's low 32 bits, so a head near 0x7360000000 covers that form too.
+static bool check_selfloops(uint64_t head) {
     auto e = std::make_unique<Emulator>();
-    constexpr uint64_t head = 0x30000, stop = 0x40000;
+    const uint64_t stop = head + 0x10000;
     e->mem().map_range(head, 4096);
     e->mem().mprotect_guest(head, 4096, 7);
     e->enable_jit();
@@ -416,7 +418,7 @@ int main() {
     j->invalidate_all();
     unchanged("after invalidate_all");
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
-    if (!check_signal_return(false) || !check_signal_return(true) || !check_ibl_revocation() || !check_selfloops() ||
+    if (!check_signal_return(false) || !check_signal_return(true) || !check_ibl_revocation() || !check_selfloops(0x30000) || !check_selfloops(0x7360000000ULL) ||
         !check_entry_order_loops(false) || !check_entry_order_loops(true) || !check_forward_chains()) {
         std::fputs("jit_mt_publication: FAILED after the checks that passed above\n", stderr);
         return 1;

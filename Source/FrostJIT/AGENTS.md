@@ -245,6 +245,9 @@ A new history section can make an older "not measured" or "next section" line wr
 - `emit_mt_chain_slot` reads the CPU through its `cpu_reg`: after an exit pops the callee-saved registers
   (ordinary frames, Tier-2 chain-outs) RBX is the caller's, so those pass RDI. Reading RBX there compares
   whatever the C++ caller left in it, which only crashes when the compiler happens to leave it null.
+- `cpu.jit_stop_pc` is a callback boundary that may name real guest code (`jit_mt_publication` sets it to a loop's own head and expects one
+  iteration), so a self-loop back edge always compares it. For a pc above imm32 the compare covers the low 32 bits only (a false hit
+  leaves early, never the reverse); do not load the pc into a register for it, and do not drop it for targets that look unreachable.
 - MT code stays bounded through `g_jit_preempt_epoch` (`Runtime/Preemption.hpp`), polled with loads only by
   backward edges and IBL probes; new native entries must call `jit_grant_lease(cpu)`, and before `bind_ibl`: MT
   probes have no generation check, so a lease taken after the table sync could accept a stale entry. Anything that retires or

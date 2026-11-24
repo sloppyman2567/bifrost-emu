@@ -374,7 +374,8 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
      the other fixed-register emitters have not been audited, and the dead-flags scan stops at FP loads and stores and at vector instructions.
    - *Loop back edges and block entry/exit* (SpongeBob, 2026-11-24, 60 s of IBS on the live game): in MT code each iteration of a
      self-loop pays the preemption poll (about 6.3% of generated-code ops) and the callback-sentinel compare (about 4.7%, three ops
-     because an Android pc is wider than imm32); `BIFROST_PROF` puts block entry and exit at 11.8% and 11.9% of JIT time
+     because an Android pc is wider than imm32, now two: a compare of the sentinel's low 32 bits, 2026-11-24, one instruction per
+     iteration; the compare itself must stay, as tests and the contract let the sentinel name real code); `BIFROST_PROF` puts block entry and exit at 11.8% and 11.9% of JIT time
      ([details](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)).
    - *Across blocks* (games, 2026-11-23, dispatched uops of the generated code): guest state traffic is about 24% (Zenless Zone
      Zero) and 23% (Umamusume). On Umamusume's direct chained edges the exit sequence (`movabs r11, cell; jmp [r11]`) is 5.8%, the

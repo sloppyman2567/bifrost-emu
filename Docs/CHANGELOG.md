@@ -14,6 +14,7 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
 
 - Android apps run memory-heavy code with fewer instructions: an access through a tagged pointer (Android's allocator tags them) is one
   instruction shorter, about 5% fewer in the Android runtime's start-up code.
+- Hot loops in Android code run one instruction shorter per iteration (the loop's stop check no longer loads the loop's address).
 - A game that clamps with `fmax(x, 0)` or `fmin` no longer drops into the slow interpreter when the result is zero (a loop of them runs
   about 20 times faster here). Checked against QEMU; no game has been timed.
 - The stats overlay is restyled after MangoHud: a half-transparent panel with smooth, outlined text, a coloured label for GPU, CPU,

@@ -44,9 +44,20 @@ untag above) 11.9%, guest state loads 11.7% and stores 11.0%, bound compares `cm
 (`movabs rax,<pc>; cmp rax,[rbx+jit_stop_pc]; je`, three ops because an Android pc does not fit the imm32 form) about 4.7%. A chain exit
 (`movabs r11,<cell>; jmp [r11]`) is 4.4% on the jump alone. `BIFROST_PROF` on the same game: entry 11.8%, body 75.4%, exit 11.9% of JIT
 time; body by operation: state moves 37.8%, memory with guards 26.1%, branches 13.1%, integer ALU 11.1%, FP and SIMD 9.9%. Candidates not
-done: compare only the low 32 bits of `jit_stop_pc` against the target (exact, since a mismatch there is a mismatch of the whole, and a
-false hit only costs an exit), or skip the check for targets the sentinel (`0x1000`, its only value) can never equal; an epoch word
-reachable from a live register instead of a 64-bit constant; chain cells inside the code buffer's reach (`jmp [rip+disp32]`).
+done: an epoch word reachable from a live register instead of a 64-bit constant; chain cells inside the code buffer's reach
+(`jmp [rip+disp32]`).
+
+**Back-edge sentinel compare, same day.** The self-loop back edge of published MT code compares the next pc with
+`cpu.jit_stop_pc` on every iteration. For a pc that fits imm32 that is one `cmp qword [rbx+off], imm32`; an Android pc does not, so it
+loaded the pc with a 10-byte `movabs` first. It now compares the sentinel's low 32 bits with `cmp dword [rbx+off], imm32`: an equal
+sentinel always matches, and a different one sharing those bits only leaves early, where the dispatcher compares the whole pc. A wide
+self-loop (head at 0x7360000000, `add; add; subs; b.ne`, 5000 iterations per run): 15.1 to 14.1 host instructions per iteration; cycles
+did not move measurably (the loop is bound by the poll's load chain). Dropping the compare was considered and rejected: tests set the
+sentinel to a loop's own head (`jit_mt_publication` mode 2 needs exactly one iteration) and this history says a host runner returning to
+real guest code must be able to set it to a real address, so the compare is part of the contract. `jit_mt_publication` now runs its
+self-loop checks at a low and at a wide head; a mutant that compares `target_pc + 1` fails the wide one. `verify_jit.sh` (114 fixtures, 12
+threaded oracle runs) and 122 of 123 JIT, MT and Tier-2 unit tests pass; the one failure is the load-sensitive `test_fork_lock_contention`.
+Not measured in a game.
 
 ## FP equality compare and branch on the raw ucomis flags (2026-11-23)
 
