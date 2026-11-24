@@ -94,32 +94,52 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // any invalidation); both checks only read. The epoch exit rebuilds RAX
     // for the caller's cold exit out of line.
     size_t expired = emit_preempt_poll(CPU_REG, RAX);
-    size_t stop;
-    if (target_pc <= INT32_MAX && !wide_guest_pc(target_pc)) {
-        // cmp qword [rbx+jit_stop_pc],imm32; je cold exit
-        emit_byte(0x48); emit_byte(0x81); emit_byte(0xBB);
-        emit_u32(offsetof(CPU, jit_stop_pc));
-        emit_u32(static_cast<uint32_t>(target_pc));
-    } else {
-        // A wide pc (Android code lives above 2 GiB) has no imm32 form, and loading it costs a 10-byte movabs on
-        // every iteration. Compare the sentinel's low 32 bits instead: an equal sentinel always matches, and a
-        // different one that shares them only leaves early, where the dispatcher compares the whole pc.
-        // cmp dword [rbx+jit_stop_pc],imm32; je cold exit
-        emit_byte(0x81); emit_byte(0xBB);
-        emit_u32(offsetof(CPU, jit_stop_pc));
-        emit_u32(static_cast<uint32_t>(target_pc));
+    size_t stop = 0;
+    if (!selfloop_stop_hoisted_) {
+        // No entry check was emitted for this block (its prologue ran before the MT decision): compare here.
+        stop = emit_selfloop_stop_compare(target_pc, 0x4);
     }
-    stop = emit_jcc_rel32_placeholder(0x4);
     // Reconcile the loop layout only after every exit check: a cold exit
     // below still observes the original branch-point layout.
     vec_writeback_dynamic();
     emit_byte(0xE9);
     emit_u32(static_cast<uint32_t>(static_cast<int32_t>(block_body_start_off_ - (code_buf_used_ + 4))));
-    for (size_t p : {expired, stop})
-        patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+    patch_jcc_rel32(expired, static_cast<int32_t>(code_buf_used_ - (expired + 6)));
+    if (stop) patch_jcc_rel32(stop, static_cast<int32_t>(code_buf_used_ - (stop + 6)));
     emit_mov_imm_to_rax(target_pc);
     // The caller emits the taken cold exit, committing GPRs and vectors.
     return true;
+}
+// Compares cpu.jit_stop_pc with a self-loop's own head and returns the jcc (je = 0x4: leave on a match). A pc that fits
+// imm32 compares exactly; above that (Android code lives above 2 GiB) there is no imm32 form and loading the pc
+// costs a 10-byte movabs, so the sentinel's low 32 bits are compared: an equal sentinel always matches, and a
+// different one that shares them only leaves early, where the dispatcher compares the whole pc.
+size_t FrostJIT::emit_selfloop_stop_compare(uint64_t target_pc, uint8_t condition) {
+    if (target_pc <= INT32_MAX && !wide_guest_pc(target_pc)) {
+        // cmp qword [rbx+jit_stop_pc],imm32
+        emit_byte(0x48); emit_byte(0x81); emit_byte(0xBB);
+    } else {
+        // cmp dword [rbx+jit_stop_pc],imm32
+        emit_byte(0x81); emit_byte(0xBB);
+    }
+    emit_u32(offsetof(CPU, jit_stop_pc));
+    emit_u32(static_cast<uint32_t>(target_pc));
+    return emit_jcc_rel32_placeholder(condition);
+}
+// Once per entry of a published MT self-loop, instead of once per iteration: the sentinel cannot change while the
+// loop runs (only this thread sets it), so a sentinel naming the loop's head only has to be noticed on entry. The
+// first iteration still runs and the first back edge leaves, as the per-iteration compare did: the entry moves this
+// CPU's lease half the epoch range away, so that back edge's poll fails and takes the same exit.
+void FrostJIT::emit_selfloop_stop_entry_check(uint64_t start_pc) {
+    // Not equal (the common case) jumps over the poisoning, so an entry costs a compare and a taken jump.
+    const size_t differs = emit_selfloop_stop_compare(start_pc, 0x5);
+    // RAX is free here, as at every entry: seen = epoch + 2^30 (a tick cannot make them equal within a loop run).
+    emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(&g_jit_preempt_epoch));
+    note_host_reloc(HostReloc::Image);
+    emit_byte(0x8B); emit_byte(0x00);                                  // mov eax,[rax]
+    emit_byte(0x05); emit_u32(0x40000000u);                            // add eax,0x40000000
+    emit_byte(0x89); emit_byte(0x83); emit_u32(offsetof(CPU, jit_epoch_seen));  // mov [rbx+seen],eax
+    patch_jcc_rel32(differs, static_cast<int32_t>(code_buf_used_ - (differs + 6)));
 }
 // The conditional jump of a single-thread self-loop back-edge normally lands on the patchable slot, which then
 // jumps to the body: two taken jumps per iteration. When nothing was emitted between the jump's target and the

@@ -740,6 +740,8 @@ public:
     // Chain-skip BR/BLR/RET exit: jump through the IBL table on a hit.
     void emit_indirect_branch_probe();
     bool emit_selfloop_backedge(uint64_t target_pc);
+    void emit_selfloop_stop_entry_check(uint64_t start_pc);
+    size_t emit_selfloop_stop_compare(uint64_t target_pc, uint8_t condition);
     void emit_selfloop_reconcile_stub();
     void refresh_mt_edges(uint64_t target_pc);
     void retire_mt_source(uint64_t source_pc);
@@ -2292,6 +2294,9 @@ private:
     // to the block body start (block_body_start_off_), creating a tight loop
     // that skips the epilogue/dispatcher/prologue.
     bool    has_selfloop_slot_ = false;
+    // The callback-sentinel compare of a published MT self-loop runs once on entry, not on every iteration
+    // (emit_selfloop_stop_entry_check); the back edge then emits no compare of its own.
+    bool    selfloop_stop_hoisted_ = false;
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
     size_t  selfloop_jcc_off_ = 0;       // the 6-byte jcc whose target is that slot with nothing between (0: none)
     void note_selfloop_jcc(size_t jcc_patch, size_t taken_label);

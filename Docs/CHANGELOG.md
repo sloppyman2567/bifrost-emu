@@ -16,7 +16,7 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   instruction shorter, about 5% fewer in the Android runtime's start-up code.
 - Turning on Tier-2 (`BIFROST_TIER2=1`) no longer makes every thread empty its dispatch caches each time a trial ends, which cost a game
   about 4 points of its CPU in its first minutes. Not yet timed in a game after the change.
-- Hot loops in Android code run one instruction shorter per iteration (the loop's stop check no longer loads the loop's address).
+- Hot loops in Android code run three instructions shorter per iteration (the loop's stop check now runs once when the loop is entered).
 - A game that clamps with `fmax(x, 0)` or `fmin` no longer drops into the slow interpreter when the result is zero (a loop of them runs
   about 20 times faster here). Checked against QEMU; no game has been timed.
 - The stats overlay is restyled after MangoHud: a half-transparent panel with smooth, outlined text, a coloured label for GPU, CPU,

@@ -246,8 +246,12 @@ A new history section can make an older "not measured" or "next section" line wr
   (ordinary frames, Tier-2 chain-outs) RBX is the caller's, so those pass RDI. Reading RBX there compares
   whatever the C++ caller left in it, which only crashes when the compiler happens to leave it null.
 - `cpu.jit_stop_pc` is a callback boundary that may name real guest code (`jit_mt_publication` sets it to a loop's own head and expects one
-  iteration), so a self-loop back edge always compares it. For a pc above imm32 the compare covers the low 32 bits only (a false hit
-  leaves early, never the reverse); do not load the pc into a register for it, and do not drop it for targets that look unreachable.
+  iteration), so a published MT self-loop must honor it. It cannot change while the loop runs (only this thread sets it), so the loop
+  compares it once per entry (`emit_selfloop_stop_entry_check`, before `block_body_start_off_`); if it names the head, the entry moves
+  `cpu.jit_epoch_seen` 2^30 away from the epoch, so the first back edge's poll leaves, after one iteration as before. A block whose
+  prologue ran before the MT decision (`selfloop_stop_hoisted_` false) compares in the back edge instead. For a pc above imm32 the
+  compare covers the low 32 bits only (a false hit leaves early, never the reverse); do not load the pc into a register for it, and
+  do not drop the check for targets that look unreachable.
 - MT code stays bounded through `g_jit_preempt_epoch` (`Runtime/Preemption.hpp`), polled with loads only by
   backward edges and IBL probes; new native entries must call `jit_grant_lease(cpu)`, and before `bind_ibl`: MT
   probes have no generation check, so a lease taken after the table sync could accept a stale entry. Anything that retires or

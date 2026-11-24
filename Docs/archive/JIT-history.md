@@ -69,7 +69,15 @@ last, which this does not touch.
 loaded the pc with a 10-byte `movabs` first. It now compares the sentinel's low 32 bits with `cmp dword [rbx+off], imm32`: an equal
 sentinel always matches, and a different one sharing those bits only leaves early, where the dispatcher compares the whole pc. A wide
 self-loop (head at 0x7360000000, `add; add; subs; b.ne`, 5000 iterations per run): 15.1 to 14.1 host instructions per iteration; cycles
-did not move measurably (the loop is bound by the poll's load chain). Dropping the compare was considered and rejected: tests set the
+did not move measurably (the loop is bound by the poll's load chain). The compare then moved off the iteration altogether: the sentinel cannot change while the loop runs, so it is checked once per entry
+(`emit_selfloop_stop_entry_check`, before the body start the back edge jumps to). If it names the head, the entry sets
+`cpu.jit_epoch_seen` to the epoch plus 2^30, which the first back edge's poll cannot match, so the loop still runs one iteration and
+leaves through the same exit. The same wide loop: 15.2 host instructions per iteration with the `movabs` compare, 14.1 with the low-32
+compare, 12.2 hoisted (-20% against the first). Cycles were not a usable measure: the same code ran from 69 M to 110 M cycles
+across 20 alignments of the loop body (a throwaway pad switch, not committed), and most alignments gave 88-92 M against 87 M for the
+old code at its one alignment. A mutant that adds 0 instead of 2^30 fails `jit_mt_publication` (mode 2 loops all 5000 iterations).
+`verify_jit.sh` and 74 JIT, MT and Tier-2 unit tests pass. Not measured in a game.
+Dropping the compare was considered and rejected: tests set the
 sentinel to a loop's own head (`jit_mt_publication` mode 2 needs exactly one iteration) and this history says a host runner returning to
 real guest code must be able to set it to a real address, so the compare is part of the contract. `jit_mt_publication` now runs its
 self-loop checks at a low and at a wide head; a mutant that compares `target_pc + 1` fails the wide one. `verify_jit.sh` (114 fixtures, 12

@@ -120,6 +120,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     unchainable_end_ = false;
     indirect_exit_ = false;
     has_selfloop_slot_ = false;
+    selfloop_stop_hoisted_ = false;
     selfloop_patch_off_ = 0;
     selfloop_jcc_off_ = 0;
     selfloop_target_off_ = 0;
@@ -923,6 +924,16 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             vreg_dirty_[a] = false;
             vreg_last_use_[a] = ++regalloc_lru_counter_;
             if (a > max_vreg_) max_vreg_ = a;
+        }
+    }
+    // A published MT self-loop checks the callback sentinel once per entry here, past the pin preloads and before
+    // the body start the back edge jumps to, so an iteration pays no compare for it.
+    if (!ir_block.insts.empty() && mt_active() && preempt_by_epoch() && !dbg().no_selfloop && !dbg().no_chain) {
+        const IRInst& last = ir_block.insts.back();
+        if ((last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO || last.op == IROp::BRCOND_BIT) &&
+            last.branch_target() == start_pc) {
+            emit_selfloop_stop_entry_check(start_pc);
+            selfloop_stop_hoisted_ = true;
         }
     }
     // Record the block body start offset (after prologue). Used for
