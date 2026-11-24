@@ -2,6 +2,23 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Carry loop report on a game, and chain-edge carrying (2026-11-24)
+
+`BIFROST_PROF=1 BIFROST_PC_HIST=1 asgard --emu <repo build> start com.tiltingpoint.spongebob`, 100 s of start-up with nobody playing (so loading and
+ad-SDK start-up, not gameplay), one run: JIT 68.8% of samples, dispatch 12.2%, translate 7.0%; body state moves 39.5% of the body (entry 11.0%,
+exit 11.0% of JIT samples). The loop report: **the 200 hottest blocks cover only 27.4% of the JIT samples**; of that, loops of several blocks hold
+1.4%, single-block loops 4.6% and everything else in the top 200 (calls, returns, straight-line code) 21.5%. The other 72.6% is in blocks outside the
+top 200. The three multi-block loops found hold 0.5%, 0.4% and 0.4%. So at start-up the time is spread thinly over a very large number of blocks,
+and a Carry that promotes hot loop regions would reach about 1% of it. Gameplay may look different (Unity update loops, the renderer); it was not
+measured.
+
+What the flat profile does suggest is carrying registers across chain edges everywhere, not only in loops. A simulation on the CoreMark trace used for
+the ceiling above (same method and limits): merge a block into its predecessor when it has exactly one observed predecessor, so the pair is one
+unit that loads each live-in once and stores each written register once. Moves removed: 15% with at most 2 blocks per unit, 26% with 4, 30% with 8,
+31% with 16 (986 of 1,156 blocks have a single observed predecessor; units average 2.2 blocks). That needs no profile, so it works on a flat
+profile, but it is far below the 63-84% an oracle gets by pinning the busiest registers of a loop, and it ignores the stores that side exits still
+need. Both numbers are CoreMark-only upper bounds.
+
 ## Carry loop report: first numbers (2026-11-24)
 
 The report (`Carry/LoopReport.cpp`, printed with `BIFROST_PROF=1 BIFROST_PC_HIST=1`) on CoreMark at 100,000 iterations (one run,

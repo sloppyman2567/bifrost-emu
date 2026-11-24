@@ -1350,6 +1350,11 @@ exit. A simulation on CoreMark puts that at 0.93 moves per guest instruction, an
 window removes 63 to 84% of them ([the measurement and its limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)).
 It is an upper bound on one small workload, not a promise.
 
+A start-up run of SpongeBob found the hottest 200 blocks holding 27% of the JIT samples and loops of several blocks only 1.4%
+([numbers](archive/JIT-history.md#carry-loop-report-on-a-game-and-chain-edge-carrying-2026-11-24)), so loop regions alone would reach little of
+that workload; merging a block into its single predecessor (a unit that loads and stores each register once) removed 26-31% of CoreMark's
+register moves in a simulation and needs no profile. Which of the two comes first is open until a steady-gameplay profile exists.
+
 Rules the design follows (decided 2026-11-24):
 
 - **Cheap hotness.** No counter in block entries (Tier-2's hot and branch counters cost CoreMark 18-29%, and its entry counter was a `lock xadd` in MT). Hot blocks
@@ -1617,6 +1622,7 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
+- [Carry loop report on a game, and chain-edge carrying (2026-11-24)](archive/JIT-history.md#carry-loop-report-on-a-game-and-chain-edge-carrying-2026-11-24)
 - [Carry loop report: first numbers (2026-11-24)](archive/JIT-history.md#carry-loop-report-first-numbers-2026-11-24)
 - [Carry ceiling: guest register moves in CoreMark (2026-11-24)](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)
 - [Tier-2 regions removed (2026-11-24)](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)
