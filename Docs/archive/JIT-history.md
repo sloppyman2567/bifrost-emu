@@ -27,6 +27,14 @@ following only unconditional jumps reaches about 5% of the edges, so a merge has
 Lean's `BlockEntry` has exactly two chain slots (`chain_patch_off`, `taken_chain_patch_off`) and the chaining, unpatching, MT cell, persistent-cache,
 replay and invalidation code all assume at most two static exits per block, so a block with a mid-block side exit means generalizing all of them first.
 
+What a merge that needs no profile would reach: continue a block past a forward conditional branch along its fall-through (contiguous code, so
+`code_words_` stays simple; the taken side becomes a deferred exit). On the same trace the block entries split as: forward branch falling through
+33.1%, backward branch taken 29.3% (loop edges), forward branch taken 13.8%, backward branch falling through 11.2%, unconditional `b` 5.0%, `ret` 3.0%,
+`bl` 2.9%. The policy merges 23% of entries with 2-block units and removes 6.9% of the register moves (9.8% with 4 blocks, 11.2% with 8), about 2-3% of
+host instructions at 3.5 per guest instruction. The profile-guided plan above reaches 25-28% because it also follows loop and taken edges. So the
+side-exit machinery (a new mid-block branch form, deferred exit tails with state capture, stub bookkeeping for the chain slots, and replay disabled for
+such blocks) would buy a few percent on CoreMark; it was not built.
+
 
 ## Carry loop report: first numbers (2026-11-24)
 
