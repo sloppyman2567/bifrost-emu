@@ -19,6 +19,15 @@ unit that loads each live-in once and stores each written register once. Moves r
 profile, but it is far below the 63-84% an oracle gets by pinning the busiest registers of a loop, and it ignores the stores that side exits still
 need. Both numbers are CoreMark-only upper bounds.
 
+Two checks on that simulation, same trace. It built each unit from the path that actually ran, which is perfect branch prediction. With a fixed plan
+instead (follow each block's most frequent successor, only when that successor has no other predecessor; the plan is right 92% of the time and covers
+775 of 1,155 blocks) the numbers hold: -15% (2 blocks), -25% (4), -28% (8). But the plan needs to know the likely successor, and a game's branches may
+be less biased than CoreMark's. And 87% of CoreMark's block entries end in a conditional branch, 5% in an unconditional `b`, 3% in `ret`, 3% in `bl`:
+following only unconditional jumps reaches about 5% of the edges, so a merge has to continue past conditional branches, and those need a side exit.
+Lean's `BlockEntry` has exactly two chain slots (`chain_patch_off`, `taken_chain_patch_off`) and the chaining, unpatching, MT cell, persistent-cache,
+replay and invalidation code all assume at most two static exits per block, so a block with a mid-block side exit means generalizing all of them first.
+
+
 ## Carry loop report: first numbers (2026-11-24)
 
 The report (`Carry/LoopReport.cpp`, printed with `BIFROST_PROF=1 BIFROST_PC_HIST=1`) on CoreMark at 100,000 iterations (one run,
