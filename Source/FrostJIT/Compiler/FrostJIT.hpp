@@ -342,6 +342,7 @@ public:
     static thread_local LastBlockCache tls_last_block_;
     static thread_local const FrostJIT* tls_cache_owner_;
     static thread_local uint64_t tls_cache_generation_;
+    static thread_local uint64_t tls_stale_seq_;  // how much of the stale-pc ring this thread has applied
     static std::atomic<uint64_t> next_cache_generation_;
     std::atomic<uint64_t> cache_generation_{next_cache_generation_.fetch_add(1, std::memory_order_relaxed)};
     void invalidate_dispatch_cache() {
@@ -351,18 +352,58 @@ public:
         // translation at their next back-edge rather than at the next tick.
         g_jit_preempt_epoch.fetch_add(1, std::memory_order_release);
     }
+    // A translation replaced by an equivalent one (a Tier-2 head redirect, a settle or a region's retirement) leaves the
+    // old code valid: only each thread's entries for those pcs must go, not every cache of every thread. Writers hold
+    // the compiler lock exclusively; each thread applies what it has not seen at its next dispatch. A thread more than
+    // one ring behind (or lapped while reading) wipes everything, as a generation change does.
+    static constexpr uint64_t STALE_PC_SLOTS = 1024;
+    std::atomic<uint64_t> stale_seq_{0};
+    std::atomic<uint64_t> stale_pcs_[STALE_PC_SLOTS];
+    void invalidate_dispatch_pcs(const uint64_t* pcs, size_t count) {
+        if (count > STALE_PC_SLOTS) { invalidate_dispatch_cache(); return; }
+        const uint64_t seq = stale_seq_.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < count; ++i) stale_pcs_[(seq + i) % STALE_PC_SLOTS].store(pcs[i], std::memory_order_relaxed);
+        stale_seq_.store(seq + count, std::memory_order_release);
+    }
     void sync_dispatch_cache() {
         const uint64_t generation = cache_generation_.load(std::memory_order_acquire);
-        if (tls_cache_owner_ == this && tls_cache_generation_ == generation) return;
+        if (tls_cache_owner_ == this && tls_cache_generation_ == generation) {
+            const uint64_t seq = stale_seq_.load(std::memory_order_acquire);
+            if (__builtin_expect(seq != tls_stale_seq_, 0)) sync_stale_pcs(seq, generation);
+            return;
+        }
         // Never attribute another JIT owner's pending diagnostic counts here.
         if (tls_cache_owner_ != this) tls_dispatch_stats_ = DispatchStats{};
+        tls_stale_seq_ = stale_seq_.load(std::memory_order_acquire);
+        wipe_local_dispatch_caches(generation);
+        tls_cache_owner_ = this;
+        tls_cache_generation_ = generation;
+        bifrost_prof_init(this);
+    }
+    void wipe_local_dispatch_caches(uint64_t generation) {
         tls_last_block_ = LastBlockCache{};
         ensure_inline_cache();
         clear_inline_cache();
-        tls_cache_owner_ = this;
-        tls_cache_generation_ = generation;
         if (tls_ibl_) reset_ibl(generation);
-        bifrost_prof_init(this);
+    }
+    void sync_stale_pcs(uint64_t seq, uint64_t generation) {
+        const uint64_t from = tls_stale_seq_;
+        if (seq - from > STALE_PC_SLOTS) {
+            wipe_local_dispatch_caches(generation);
+        } else {
+            for (uint64_t s = from; s < seq; ++s) drop_local_pc(stale_pcs_[s % STALE_PC_SLOTS].load(std::memory_order_relaxed));
+            // A writer that lapped the ring while this read it overwrote slots not yet read.
+            if (stale_seq_.load(std::memory_order_acquire) - from > STALE_PC_SLOTS) wipe_local_dispatch_caches(generation);
+        }
+        tls_stale_seq_ = seq;
+    }
+    void drop_local_pc(uint64_t pc) {
+        if (tls_last_block_.pc == pc) tls_last_block_ = LastBlockCache{};
+        inline_cache_erase(pc);
+        if (tls_ibl_) {
+            IblEntry& e = tls_ibl_->entries[(pc >> 2) & tls_ibl_->mask];
+            if (e.pc == pc) e = IblEntry{~0ULL, 0};
+        }
     }
     // ── Indirect-branch target table (IBL) ──────────────────────────
     // Chain-skip BR/BLR/RET exits look their dynamic guest target up here
@@ -648,7 +689,9 @@ public:
     bool tier2_settling_ = false;  // compiler lock; blocks are retired and not yet back
     void tier2_settle_locked(uint64_t pc);
     void tier2_settle_queued(Emulator& emu);
-    void retire_blocks_locked(const std::vector<uint64_t>& victims);
+    // `equivalent`: the victims are replaced by translations of the same code (Tier-2 settle, a region's retirement),
+    // so in MT mode only their pcs are dropped from every thread's caches (invalidate_dispatch_pcs), not all of them.
+    void retire_blocks_locked(const std::vector<uint64_t>& victims, bool equivalent = false);
     struct Tier2RegionMonitor {
         std::atomic<uint32_t> enabled{1};
         uint64_t head = 0, identity = 0;

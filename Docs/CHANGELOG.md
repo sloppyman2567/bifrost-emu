@@ -14,6 +14,8 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
 
 - Android apps run memory-heavy code with fewer instructions: an access through a tagged pointer (Android's allocator tags them) is one
   instruction shorter, about 5% fewer in the Android runtime's start-up code.
+- Turning on Tier-2 (`BIFROST_TIER2=1`) no longer makes every thread empty its dispatch caches each time a trial ends, which cost a game
+  about 4 points of its CPU in its first minutes. Not yet timed in a game after the change.
 - Hot loops in Android code run one instruction shorter per iteration (the loop's stop check no longer loads the loop's address).
 - A game that clamps with `fmax(x, 0)` or `fmin` no longer drops into the slow interpreter when the result is zero (a loop of them runs
   about 20 times faster here). Checked against QEMU; no game has been timed.

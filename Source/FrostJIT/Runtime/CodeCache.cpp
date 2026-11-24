@@ -42,6 +42,7 @@ namespace arm64emu {
 std::atomic<uint64_t> FrostJIT::next_cache_generation_{1};
 thread_local const FrostJIT* FrostJIT::tls_cache_owner_ = nullptr;
 thread_local uint64_t FrostJIT::tls_cache_generation_ = 0;
+thread_local uint64_t FrostJIT::tls_stale_seq_ = 0;
 thread_local std::unique_ptr<FrostJIT::IblTable> FrostJIT::tls_ibl_;
 uint64_t (*FrostJIT::lookup_or_translate(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
     {
@@ -895,10 +896,11 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
     retire_blocks_locked(victims);
 }
 
-void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
+void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims, bool equivalent) {
     // Caller holds the compiler lock and has selected exact victims.
     if (victims.empty()) return;
-    invalidate_dispatch_cache();
+    const bool by_pc = equivalent && mt_active();
+    if (!by_pc) invalidate_dispatch_cache();
     auto unpatch_slot = [&](uint64_t source_pc, size_t off) {
         if (mt_active()) {
             if (MtEdge* edge = mt_slot_edge(source_pc, off)) edge->target.store(0, std::memory_order_release);
@@ -957,6 +959,8 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
         inline_cache_erase(vpc);
     }
     std::atomic_thread_fence(std::memory_order_release);
+    // After the erase: a thread that syncs now finds the table already without the victims (refills take the lock).
+    if (by_pc) invalidate_dispatch_pcs(victims.data(), victims.size());
     if (!mt_active()) make_executable();
 }
 void FrostJIT::invalidate_all() {

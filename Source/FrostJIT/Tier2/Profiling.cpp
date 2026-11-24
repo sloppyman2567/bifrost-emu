@@ -70,7 +70,7 @@ void FrostJIT::tier2_settle_queued(Emulator& emu) {
         }
         tier2_refresh_queue_.clear();
         tier2_settling_ = true;
-        retire_blocks_locked(victims);
+        retire_blocks_locked(victims, true);  // clean translations of the same code replace the instrumented ones
         rebuilt.swap(tier2_rebuild_queue_);
         sources.insert(sources.end(), tier2_rebuild_sources_.begin(), tier2_rebuild_sources_.end());
         tier2_rebuild_sources_.clear();

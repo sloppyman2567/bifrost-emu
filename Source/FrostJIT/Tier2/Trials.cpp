@@ -167,8 +167,12 @@ void FrostJIT::redirect_tier2_head_locked(uint64_t pc) {
     auto target = blocks_.find(pc);
     if (target == blocks_.end()) return;
     refresh_mt_edges(pc);
+    // The old entry stays valid (a finished trial's wrapper forwards to the decision), so MT threads only drop this pc.
+    if (mt_active()) {
+        invalidate_dispatch_pcs(&pc, 1);
+        return;
+    }
     invalidate_dispatch_cache();
-    if (mt_active()) return;
     const auto* fn = reinterpret_cast<const uint8_t*>(chain_skip_enabled() && target->second.chain_entry
         ? target->second.chain_entry : target->second.fn);
     auto refs = back_refs_.find(pc);

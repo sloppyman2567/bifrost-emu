@@ -90,6 +90,6 @@ void FrostJIT::retire_tier2_region_locked(uint64_t pc) {
     }
     tier2_rebuild_queue_.insert(tier2_rebuild_queue_.end(), victims.begin(), victims.end());
     tier2_settle_pending_.store(true, std::memory_order_release);
-    retire_blocks_locked(victims);
+    retire_blocks_locked(victims, true);  // the same code is translated again, so no guest code went stale
 }
 }  // namespace arm64emu

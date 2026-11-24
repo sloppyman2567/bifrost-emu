@@ -47,6 +47,23 @@ time; body by operation: state moves 37.8%, memory with guards 26.1%, branches 1
 done: an epoch word reachable from a live register instead of a 64-bit constant; chain cells inside the code buffer's reach
 (`jmp [rip+disp32]`).
 
+**Tier-2 and the dispatcher (same day).** A controlled run of SpongeBob (same launch, same switches, 60 s from 40 s after launch)
+sampled 12.7% more with Tier-2 than without, while the generated code itself was only 1.5% more: the rest was the C++ dispatcher
+(`run_block` 0.70% to 2.81% of all samples, `bind_ibl` 0.15% to 1.71%, plus `flush_stat_tls` and `tier2_measure`). A throwaway census of
+dispatches (per thread, target pc, and which cache resolved it) showed 35 threads dispatching heavily instead of 5, the slow shared-table
+lookup resolving 39% of dispatches instead of 6.7%, and half of all dispatches landing right after a call. The cause is in the code: every
+decided trial ran `invalidate_dispatch_cache()` twice (the head redirect, then the settle's retirement), and that bumps one global
+generation, so each of the game's threads emptied its last-block cache and inline cache and refilled its whole IBL table at its next
+dispatch (an Android game has about 300 threads and 483 decided trials in 4.5 minutes). The old entries stay valid: a finished trial's
+wrapper forwards to the decision, and a settled block is replaced by a clean translation of the same code. MT Tier-2 head redirects, settles
+and region retirements now queue just the affected pcs in a ring (`invalidate_dispatch_pcs`, 1024 slots) that each thread applies at its next
+dispatch, and a thread more than a ring behind wipes its own caches; real invalidations (guest code or mappings changed) keep the full wipe,
+and so does ST. `jit_mt_publication` checks that a targeted invalidation leaves the generation alone, drops exactly the named pcs from another
+thread's inline cache and IBL, and that a lapped thread wipes; a mutant that skips the drop fails it. The existing Tier-2, MT and chain unit
+tests (27) and `verify_jit.sh` pass. Not measured: the game with the change (the run was cut short when its window closed), so it is not yet
+known how much of the +12.7% this removes. Trials still run the head through a C++ wrapper (`tier2_measure`) with the IBL unbound while they
+last, which this does not touch.
+
 **Back-edge sentinel compare, same day.** The self-loop back edge of published MT code compares the next pc with
 `cpu.jit_stop_pc` on every iteration. For a pc that fits imm32 that is one `cmp qword [rbx+off], imm32`; an Android pc does not, so it
 loaded the pc with a 10-byte `movabs` first. It now compares the sentinel's low 32 bits with `cmp dword [rbx+off], imm32`: an equal

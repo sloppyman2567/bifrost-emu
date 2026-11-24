@@ -251,7 +251,11 @@ A new history section can make an older "not measured" or "next section" line wr
 - MT code stays bounded through `g_jit_preempt_epoch` (`Runtime/Preemption.hpp`), polled with loads only by
   backward edges and IBL probes; new native entries must call `jit_grant_lease(cpu)`, and before `bind_ibl`: MT
   probes have no generation check, so a lease taken after the table sync could accept a stale entry. Anything that retires or
-  replaces code advances the epoch (`invalidate_dispatch_cache`). Forward static edges carry no poll; ST code and timed
+  replaces code advances the epoch (`invalidate_dispatch_cache`), which also makes every thread drop all of its dispatch caches and IBL.
+  The exception is code replaced by an equivalent translation of the same guest code (Tier-2 head redirects, settles and region
+  retirements in MT mode): `invalidate_dispatch_pcs` / `retire_blocks_locked(..., equivalent=true)` queue only those pcs in a ring
+  (`STALE_PC_SLOTS`) that each thread applies at its next dispatch, and a thread that falls a ring behind wipes its own. Never use it when
+  guest code or mappings changed: a stale entry would keep running the old translation. `jit_mt_publication` covers it. Forward static edges carry no poll; ST code and timed
   Tier-2 sampling code keep the 256-edge budget (`preempt_by_epoch()`). MT `BL` calls through a revocable cell.
 - MT Tier-1 compiles run under the shared table lock (`translate_entry`).
   Codegen may read `blocks_` but must not change state that shared-lock

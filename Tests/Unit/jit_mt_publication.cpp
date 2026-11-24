@@ -6,12 +6,97 @@
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <shared_mutex>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <thread>
 #include <vector>
 using namespace arm64emu;
+namespace arm64emu {
+struct Tier2TestAccess {
+    static uint64_t generation(FrostJIT& j) { return j.cache_generation_.load(); }
+    static void invalidate_pcs(FrostJIT& j, const std::vector<uint64_t>& pcs) {
+        std::unique_lock<std::shared_mutex> lock(j.blocks_mutex_);
+        j.invalidate_dispatch_pcs(pcs.data(), pcs.size());
+    }
+    static void sync(FrostJIT& j, CPU& cpu) { j.bind_ibl(cpu); }
+    static uint64_t fake(CPU*, Emulator*) { return 0; }
+    static void remember(FrostJIT& j, uint64_t pc) {
+        j.inline_cache_insert(pc, &fake, 1, &fake);
+        j.ibl_note(pc, &fake);
+    }
+    static bool in_inline_cache(FrostJIT& j, uint64_t pc) {
+        uint64_t (*fn)(CPU*, Emulator*) = nullptr;
+        int count = 0;
+        return j.inline_cache_lookup(pc, &fn, count);
+    }
+    static bool in_ibl(FrostJIT& j, uint64_t pc) {
+        return FrostJIT::tls_ibl_->entries[(pc >> 2) & FrostJIT::tls_ibl_->mask].pc == pc;
+    }
+    static constexpr uint64_t slots() { return FrostJIT::STALE_PC_SLOTS; }
+};
+}  // namespace arm64emu
+// Replacing a translation by an equivalent one (a Tier-2 head redirect or settle) drops that pc from every thread's
+// dispatch caches without advancing the global generation, which would empty all caches of all threads. A thread that
+// fell more than one ring behind empties its own, as a generation change does.
+static bool check_targeted_invalidation() {
+    auto e = std::make_unique<Emulator>();
+    e->enable_jit();
+    auto* j = e->jit();
+    j->enter_multithreaded();
+    using A = Tier2TestAccess;
+    constexpr uint64_t a = 0x10004, b = 0x20008, c = 0x3000c;  // distinct IBL slots: (pc >> 2) & 1023 is 1, 2, 3
+    std::mutex m;
+    std::condition_variable cv;
+    int step = 0;
+    bool ok = true;
+    auto wait_for = [&](int want) {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [&] { return step >= want; });
+    };
+    auto advance = [&](int to) {
+        { std::lock_guard<std::mutex> lock(m); step = to; }
+        cv.notify_all();
+    };
+    auto check = [&](bool condition, const char* what) {
+        if (!condition) { std::fprintf(stderr, "targeted invalidation: %s\n", what); ok = false; }
+    };
+    std::thread worker([&] {
+        CPU cpu;
+        A::sync(*j, cpu);  // a first sync binds this thread's tables
+        for (uint64_t pc : {a, b, c}) A::remember(*j, pc);
+        check(A::in_inline_cache(*j, a) && A::in_ibl(*j, a), "entries were not remembered");
+        advance(1);
+        wait_for(2);
+        A::sync(*j, cpu);
+        check(!A::in_inline_cache(*j, a) && !A::in_ibl(*j, a), "the named pc stayed cached");
+        check(A::in_inline_cache(*j, b) && A::in_ibl(*j, b) && A::in_inline_cache(*j, c), "another pc was dropped");
+        advance(3);
+        wait_for(4);
+        A::sync(*j, cpu);  // more than one ring of pcs went by without a sync
+        check(!A::in_inline_cache(*j, b) && !A::in_ibl(*j, b) && !A::in_inline_cache(*j, c), "a lapped thread kept entries");
+        advance(5);
+    });
+    wait_for(1);
+    const uint64_t generation = A::generation(*j);
+    A::invalidate_pcs(*j, {a});
+    check(A::generation(*j) == generation, "a targeted invalidation advanced the generation");
+    advance(2);
+    wait_for(3);
+    std::vector<uint64_t> many(A::slots() / 2 + 10);
+    for (size_t i = 0; i < many.size(); ++i) many[i] = 0x100000 + 4 * i;
+    A::invalidate_pcs(*j, many);
+    A::invalidate_pcs(*j, many);
+    check(A::generation(*j) == generation, "a lapped ring advanced the generation");
+    advance(4);
+    wait_for(5);
+    worker.join();
+    if (ok) std::puts("jit_mt_publication: targeted dispatch-cache invalidation PASS");
+    return ok;
+}
 static bool check_entry_order_loops(bool mt) {
     constexpr uint64_t head = 0x90000, stop = 0xa0000;
     // Warm the interior entry first, as CoreMark's list walk does. Every
@@ -418,7 +503,7 @@ int main() {
     j->invalidate_all();
     unchanged("after invalidate_all");
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
-    if (!check_signal_return(false) || !check_signal_return(true) || !check_ibl_revocation() || !check_selfloops(0x30000) || !check_selfloops(0x7360000000ULL) ||
+    if (!check_signal_return(false) || !check_signal_return(true) || !check_ibl_revocation() || !check_selfloops(0x30000) || !check_selfloops(0x7360000000ULL) || !check_targeted_invalidation() ||
         !check_entry_order_loops(false) || !check_entry_order_loops(true) || !check_forward_chains()) {
         std::fputs("jit_mt_publication: FAILED after the checks that passed above\n", stderr);
         return 1;
