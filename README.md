@@ -29,7 +29,9 @@ There is no phone, no emulated device and no virtual machine to set up. It trans
 | Bifrost | Runs ARM64 Linux programs: command-line tools, SDL and OpenGL games, Vulkan games. |
 | Asgard | Its Android layer. `bifrost-emu game.apk` installs a game and starts it, and `asgard launcher` opens a library of what you installed. |
 
-It is a beta. Some games play well, others only start, and a few are blocked.
+> [!NOTE]
+> bifrost-emu is a beta. Some games play well, others only start, and a few are blocked.
+> [What has been run](Docs/COMPATIBILITY.md) says which.
 
 ## Quick start
 
@@ -64,7 +66,9 @@ versions, frame rates and known problems, is [What has been run](Docs/COMPATIBIL
 | Android is experimental | Google Play services come from microG, so Google sign-in works only up to Google's own page. Media decoding and many system services are partial or missing. |
 | ARM64 only | An app that ships only 32-bit ARM or x86 code cannot start. |
 | x86_64 Linux only | Other distributions should work, but only Ubuntu 24.04 is tested in CI; see the [support matrix](Docs/SUPPORT.md). |
-| Untrusted programs | Read the [security model](Docs/SECURITY.md) before running anything you do not trust. |
+
+> [!WARNING]
+> Read the [security model](Docs/SECURITY.md) before running a program you do not trust.
 
 ## Learn more
 
