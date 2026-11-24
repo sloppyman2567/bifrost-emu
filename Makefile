@@ -495,6 +495,10 @@ install-check:
 	fi
 
 uninstall:
+	@[ -e "$(DESTDIR)$(PREFIX)/bin/bifrost-emu" ] || { echo "no bifrost-emu in $(DESTDIR)$(PREFIX)/bin"; \
+	  for h in "$$HOME" "$$(getent passwd "$$SUDO_USER" 2>/dev/null | cut -d: -f6)"; do \
+	    [ -n "$$h" ] && [ -e "$$h/.local/bin/bifrost-emu" ] && echo "  there is one in $$h/.local: run make uninstall PREFIX=$$h/.local (as yourself, without sudo)"; \
+	  done; true; }
 	rm -f $(DESTDIR)$(PREFIX)/bin/bifrost-emu
 	rm -f $(DESTDIR)$(PREFIX)/lib/bifrost/libSDL3.so*
 	-rmdir $(DESTDIR)$(PREFIX)/lib/bifrost 2>/dev/null

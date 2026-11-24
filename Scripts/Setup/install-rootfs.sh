@@ -66,11 +66,21 @@ has_loader() {
 if [ "$UNINSTALL" = 1 ]; then
     if [ ! -e "$DEST" ]; then
         echo "nothing to remove at $DEST"
-        # The same rootfs in the other standard place (make uses /usr/local unless PREFIX is set).
+        # The same rootfs in the other standard places. make uses /usr/local unless PREFIX is set, and under sudo
+        # HOME may be root's, so the invoking user's home counts too.
         REL="${DEST#"$BASE"/}"
-        for where in "user:${XDG_DATA_HOME:-${HOME:?HOME is not set}/.local/share}/bifrost" "system:/usr/local/share/bifrost"; do
-            [ "${where#*:}" != "$BASE" ] && [ -e "${where#*:}/$REL" ] &&
-                echo "  there is one at ${where#*:}/$REL: run $0 --uninstall --${where%%:*}${PROFILE:+ --profile $PROFILE}"
+        homes=("${HOME:?HOME is not set}")
+        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+            sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6) && [ -n "$sudo_home" ] && homes+=("$sudo_home")
+        fi
+        seen=" $BASE "
+        for cand in "${XDG_DATA_HOME:-$HOME/.local/share}/bifrost" "${homes[@]/%//.local/share/bifrost}" /usr/local/share/bifrost; do
+            case "$seen" in *" $cand "*) continue ;; esac
+            seen+="$cand "
+            [ -e "$cand/$REL" ] || continue
+            note=""
+            [ "$cand" != /usr/local/share/bifrost ] && [ "$(id -u)" = 0 ] && note=" (as yourself, without sudo)"
+            echo "  there is one at $cand/$REL: run $0 --uninstall --prefix ${cand%/share/bifrost}${PROFILE:+ --profile $PROFILE}$note"
         done
         exit 0
     fi

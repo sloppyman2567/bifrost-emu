@@ -10,8 +10,11 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
-- `make uninstall-rootfs` looks in `/usr/local` unless you pass `PREFIX`, so it found nothing for a `make bootstrap` install. It now says where
-  the rootfs is and which command removes it (`Scripts/Setup/install-rootfs.sh --uninstall --user`), and the docs show how to remove the games profile.
+- `make uninstall`, `make uninstall-asgard` and `make uninstall-rootfs` look in `/usr/local` unless you pass `PREFIX`, so they found nothing
+  for a `make bootstrap` install and said so without a hint. They now say where the install is and which command removes it (also under
+  `sudo`), and the docs show how to remove the games libraries.
+- The app launcher shows Asgard's warning (for example that Asgard and the emulator were installed from different builds) instead of
+  "Couldn't read the app library: Expecting value".
 - Translating code takes about half the time (the JIT no longer runs its SSA pass on every block, stops building a verification
   record nobody reads outside `BIFROST_JIT_VERIFY`, and keeps its per-block tables in flat arrays). Starting the real Android
   runtime went from 1.57 s to 1.02 s. Generated code is about 2% slower on CoreMark; `BIFROST_TIER1_SSA=1` brings the old pass back.
