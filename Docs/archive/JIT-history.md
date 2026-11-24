@@ -2,6 +2,48 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)
+
+Read-only measurements, one unattended run of each (the title, loading or connect screen, not gameplay), HEAD `c5b66667`.
+Method: `perf record -e ibs_op/cnt_ctl=1,swfilt=1/u -c 200003` on the whole launch with `BIFROST_PERF_MAP=1`; the launching script reads
+the game process's JIT code buffer through `/proc/PID/mem` at about 60 s (`ptrace_scope=1` allows it for descendants) and, for edges, the
+chain cells, then every sampled host instruction is classified by pattern. `BIFROST_JIT_DUMP` is useless on a game (printing the dump
+dominates the run). `BIFROST_CLASS_PROF` in the game process names the interpreter's fallback words. Shares are of dispatched uops:
+`cnt_ctl=1` counts uops, so a `jmp [mem]` (two uops) is sampled twice as often as a `mov`.
+
+**Zenless Zone Zero** (5.47 M samples): generated code 53.7% of the game process, the emulator's C++ 37.6%. In the C++ the largest function
+was `Emulator::exec_simd_imm` at 7.0%: the interpreter running `sqrshrun v.8b, v.8h, #7` (about 20 M executions in the sampled windows, the
+pixel conversion of the CRI Mana video decoder), about 11% with the interpreter's other entry points, since fixed
+([native lowering](#saturating-narrowing-shifts-are-native-2026-11-23)); texture transcoding (ASTC to BC7) 6.7%. Of the generated-code uops, guest
+state traffic is 24% (GPR loads and stores 13.9, vector 3.4, other cpu fields 3.8, PC 1.9, NZCV 1.0), guards 10.3, flag packing 7.2, chain
+jumps 6.5, register copies 2.1. By block size most ops are in long blocks: 53% in blocks of 8 or more guest instructions (state 15%), 30% in 4 to 7
+(24%), 17% in 1 to 3 (state 31% plus chaining 17%). A rebuilt runtime took 105 s before the game started; see the
+[changelog](../CHANGELOG.md).
+
+**Umamusume Global** (5.25 M samples): generated code 83%, the emulator's C++ 12% (no interpreter function above 0.3%). Uops: integer ALU and
+other 29.7, guards 10.5, guest memory 8.5, GPR state loads and stores 15.2 (all state traffic about 23), address arithmetic 7.9, chain jumps
+6.3, copies 3.0, flag packing 2.9; FP and SIMD in total about 4%. 35% of the uops are in blocks of 1 to 3 guest instructions (state 29%, chaining
+14%). Threads: `UnityMain` 34.8%, the thread named `games.umamusume` 34.8% (the name of the protector thread found earlier; not re-checked),
+`UnityGfxDeviceW` 10.8%. The game caps itself at 30 FPS.
+
+Umamusume's block boundaries, dynamic (multi-threaded code never patches instructions: an exit is `movabs r11, CELL; jmp [r11]`, the cell
+holds the target's chain entry; an edge's weight is the samples on its `jmp`, halved for the two uops). Direct chained edges are 1.93% of uops
+and their exit pair 5.8%; the stores before those exits are 0.57% and the loads at the targets' entries 4.78%, of which 49% (2.3%) are
+redundant because the value is still in a host register (2.0% with at most four registers per edge); dead stores are about 0. Edges whose
+target has one dominant chained predecessor are 1.58% of uops; merging them would save up to 6.6% (the exit pair and the redundant loads;
+the targets' calls and indirect entries are not measured). Guest-register stores are 8.4% of uops but only 0.57% sit at exits, so about 9% are
+stores inside blocks. The exact MT preemption poll (seven instructions) is 1.5%. Most-moved registers: `x0` to `x3`, `x19` to `x22`, `sp`,
+`x30`, NZCV. An extrapolation from the epoch compare alone gave 16% for the poll; counting the whole sequence gives 1.5%, because the compare
+also occurs in other sequences.
+
+**Game-style kernels** (nine kernels reconstructed in one source, built with gcc `-O3` for AArch64 and for x86-64-v3, so not comparable with the
+earlier clang set; one pinned core): host instructions per guest instruction 3.3 (hash), 4.9 (vm), 6.3 (audio mix), 7.6 (collide), 8.6 (particles),
+9.9 (cull), 10.0 (anim), 10.3 (skinning), 10.5 (4x4 matmul). Wall time against native: 4.8 times on average (1.4 to 14.6), QEMU user mode 14.3
+times (2.6 to 59.5), so the JIT is about 3 times faster than QEMU (1.4 to 6.9). In the four slowest, SIMD/FP moves and zeroing are 28-36% of
+the generated ops, vector state loads and stores 15-21%, NaN checks 11-14%, FP math 5-7%.
+
+Not measured: gameplay, a second run, frame times, the targets' non-chained entries, the cost of the changes proposed here.
+
 ## Saturating narrowing shifts are native (2026-11-23)
 
 Chosen from a profile of Zenless Zone Zero (IBS op sampling of the game process, generated code read from its memory at 62 s

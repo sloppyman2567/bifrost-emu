@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
 Status: in progress. The current pre-release is **2.0.0-beta.2** (November 14, 2026): its scope is
-only partly met. Updated November 14, 2026.
+only partly met. Updated November 23, 2026.
 
 Everything below is a development target, not a compatibility guarantee or a release date. "Done" means the contract is
 implemented and checked as the linked document says, not that every app using it works. Dated checkpoints, measurements
@@ -100,6 +100,9 @@ In order. Each carries into the next pre-release until its acceptance test passe
   Back-key, stats, Window and Controller settings, clear-data/uninstall and the last-session drawer; a library a gamepad can
   drive (gamepad layout, Select for the last session); `make bootstrap` that resumes downloads and finds tools and libraries
   without root. Open: Game Mode on a Steam Deck (a black screen on 2026-11-08; Desktop mode ran Subway Surfers) and a fresh Debian 13.
+- A rebuilt app runtime no longer copies or hashes the app's data: "Preparing Android runtime" for Zenless Zone Zero (38 GB of
+  downloaded resources) went from 105 s to 2 s (2026-11-23; measured on a real launch). The first launch after an update still
+  checks the runtime files.
 - Validate install → play → settings → stop/relaunch on a fresh setup, and broaden the app matrix with longer sessions and
   several apps in one realm on the supported Linux display stacks.
 
@@ -170,6 +173,11 @@ for it is chosen.
   spill costs where measurements justify it.
 - Measure rendering, ART/GC, Binder and input delays alongside JIT cost.
 - Exercise several engines and apps with audio, saves, resize, pause/resume and process exit, keeping Linux games working.
+
+Measured 2026-11-23 (one unattended run of each at its title or connect screen, IBS sampling of the game process; not gameplay):
+Zenless Zone Zero is 54% generated code and 38% the emulator's own C++ (texture transcoding 6.7%; before the `sqrshrun` change
+the interpreter ran about 11%); Umamusume is 83% generated code and 12% C++. Guest state traffic is about 13% (Zenless) and
+19% (Umamusume) of the process. [Details](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23).
 
 Acceptance: repeatable GPU-enabled runs report load time, CPU and compilation cost and median/p95/p99 frame times against a
 baseline, with correctness checks and sustained interaction. A window title's instantaneous FPS is not the measurement.
@@ -318,19 +326,37 @@ game measured): NZCV stored as the `lahf` image, PC stores behind the chain slot
 flags left in the host. CoreMark runs 11.9% fewer host instructions; skinning and animation blending 35-42% fewer cycles.
 A fork child keeps its parent's JIT ([details](JIT.md)).
 
+Also done on 2026-11-23: a pinned register updated by a loop (`add x0, x0, #1`) is updated in place, not through a scratch copy
+(CoreMark about +0.5%, busybox gzip -1.3% cycles; [details](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23));
+the saturating narrowing shifts (`sqrshrun`, `sqshrn`, ...) are native for 16- and 32-bit lanes (a loop of them 47 times faster; the
+interpreter's share of Zenless Zone Zero fell from about 8.5% to 4.9%; [details](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)).
+Measured the same day: Tier-2 regions are +4.7% on CoreMark at 200,000 iterations (+2.1% at 40,000; still opt-in, no game run with
+it), and on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
+
 Open, in priority order:
 
-1. **Per-instruction overhead in scalar FP loops.** The cheap part is done (loads into the cached XMM, one-instruction
+1. **Per-instruction overhead in scalar FP loops.** Measured on the game-style kernels (2026-11-23): XMM moves and zeroing are
+   28-36% of the generated ops, vector state loads and stores 15-21%, NaN checks 11-14% and real FP math 5-7%, at 8-10.5 host
+   instructions per guest instruction. Untried: VEX three-operand scalar ops to drop the operand copies (FMA3 is already required, so
+   AVX is there). The cheap part is done (loads into the cached XMM, one-instruction
    result writes). Sampled FP kernels still spend 2-6% of ops on arithmetic and most of the rest on XMM copies, `v_hi`
    traffic, `pxor` zeroing and NaN checks. Dropping NaN checks exactly fits 3 of 277 checked ops; more would need relaxed
    NaN semantics, which is the maintainer's decision. A plain `v_hi` zero store (cull and collide about 30% slower) and
    `insertps` result writes were slower, so measure each change on a branchy and a predictable kernel, over several code
    placements ([details](archive/JIT-history.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
-2. **Guest-register traffic across blocks.** Guest register loads and stores are 20-27% of executed ops in the integer
-   kernels, mostly block-entry loads and live-out stores that only cross-block allocation removes; a pass that hoists
+2. **Guest-register traffic across blocks.** Measured on games (2026-11-23, dispatched uops of the generated code): guest state
+   traffic is about 24% (Zenless Zone Zero) and 23% (Umamusume). On Umamusume's direct chained edges the exit sequence
+   (`movabs r11, cell; jmp [r11]`) is 5.8%, the loads at block entries 4.8% of which 49% are redundant (2.3%), and about 9% of uops
+   are guest-register stores inside blocks, not at exits. Ideas by size: merge single-predecessor blocks (up to 6.6%, an upper
+   bound), defer the store-through writes (needs the recovery metadata of item 4), rip-relative chain cells (about 1.9%), keep
+   boundary loads in registers (at most 2.3%), a cheaper preemption poll (1.5%)
+   ([details](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)). Guest register loads and stores are
+   20-27% of executed ops in the integer kernels, mostly block-entry loads and live-out stores that only cross-block allocation removes; a pass that hoists
    scratch work above a flag setter is measured but not merged (cycles within placement noise,
    [details](archive/JIT-history.md#guest-register-traffic-and-flag-windows-measured-not-merged-2026-11-10)).
-3. **Paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics.
+3. **Paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics. What a game
+   still runs in the interpreter (Zenless Zone Zero, 2026-11-23, `BIFROST_CLASS_PROF`): the exclusive pairs `ldxp`/`stxp`/`ldaxp`/
+   `stlxp` with their retry loops, and scalar `fmax`/`fmin`; 64-bit-lane saturating narrowing shifts stay interpreted too.
 4. **Model guest state explicitly**, define recovery and helper contracts, then hand values between two regions and choose
    layouts by measured benefit (the five-stage plan in [the snapshot](archive/roadmap-2026-11-03.md#jit-codegen-retain-guest-state-across-hot-regions)).
 5. **Tier-2**: regions now follow calls and returns, every side exit chains, a kept region retires when its exit rate

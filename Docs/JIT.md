@@ -1882,6 +1882,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)
 - [Saturating narrowing shifts are native (2026-11-23)](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)
 - [In-place updates of pinned registers (2026-11-23)](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23)
 - [One jump per loop iteration and one check per repeated access (2026-11-16)](archive/JIT-history.md#one-jump-per-loop-iteration-and-one-check-per-repeated-access-2026-11-16)
