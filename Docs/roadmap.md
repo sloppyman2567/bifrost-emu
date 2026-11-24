@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
-Status: in progress. The current pre-release is **2.0.0-beta.2** (November 14, 2026): its scope is
-only partly met. Updated November 23, 2026.
+Status: in progress. The current pre-release is **2.0.0-beta.3** (November 24, 2026): its scope is
+only partly met. Updated November 24, 2026.
 
 Everything below is a development target, not a compatibility guarantee or a release date. "Done" means the contract is
 implemented and checked as the linked document says, not that every app using it works. Dated checkpoints, measurements
@@ -41,7 +41,8 @@ Not the focus: games behind attestation or anti-cheat, and compatibility sweeps 
 | 2.0.0-alpha.2 (2026-10-21) | Released; goals partly met | Toasts, `NsdManager`, all of `IAppOpsService`, declined Settings intents, scaled fixed-size apps |
 | 2.0.0-alpha.3 (2026-11-01) | Released; WebView, media and ad scope mostly open | `media.extractor`, POSIX timers, installable Asgard and rootfs, `bifrost-emu app.apk`, window stats |
 | 2.0.0-beta.1 (2026-11-03) | Released as a label; scope partly met | Library cards, per-app settings, clear-data/uninstall, run-ended cards; app Keystore, WebView GPU fences, Vulkan for apps through a guest HAL, a faster Tier-1 JIT |
-| 2.0.0-beta.2 (2026-11-14) | Current; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns, NativeActivity games |
+| 2.0.0-beta.2 (2026-11-14) | Released; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns, NativeActivity games |
+| 2.0.0-beta.3 (2026-11-24) | Current; scope partly met | A JIT that translates about twice as fast, cheaper scalar float compares and widening multiplies, native saturating narrowing shifts, in-place pinned registers, `BIFROST_PROF` stall and DNS reports, a shorter README and `INSTALL.md`, an app launcher that keeps a log, and uninstall targets that find a `make bootstrap` install |
 
 **In 2.0.0-beta.2, since the beta.1 label:** the desktop library can be driven with a gamepad (a gamepad layout, menus,
 confirmations and the settings page drawn inside its window); per-app `window_mode` and `controller` settings, with a touch
@@ -141,6 +142,16 @@ app exit leaves the library and the other apps usable.
   checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)).
   Position and fullscreen are deliberately not remembered (a Wayland client cannot place its window). Open: a real
   compositor check, including whether the window visibly resizes once at launch. `--fullscreen` still belongs to the library.
+- Rotation and scaling of the host window (reported 2026-11-24, planned, not started). Umamusume Global sometimes resizes itself past
+  the right edge of a 3440x1440 monitor when it turns to landscape for a race. Read from the code, not yet reproduced live:
+  `set_orientation` gives a fixed-size app a window of the panel's other shape (1230x692 desktop units, 389x692 in portrait, per the
+  [reference](Android/ANDROID_RUNTIME_REFERENCE.md)), a resize keeps the window's top-left corner, and a Wayland client can neither
+  move its window nor read its position, so a window that starts right of about 490 units reaches past the edge of a desktop 1720
+  units wide (3440 px at 2x). Decided with the maintainer: by default a fixed-size app's host window keeps its size on rotation and
+  the panel refits inside it (people mostly play full screen, and the window is the user's, as for any Linux app); a per-app setting
+  next to Resolution reshapes the window as it does today. First a probe window on KWin to confirm the cause, and
+  `make test-android-sdl-backend` (fake SDL3) updated for the new default. The wider aim stays open: content that scales seamlessly
+  and windows that behave like other Linux windows at fractional scales and across monitors, with no other report so far.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested
   with the real emulator, not with media services attached; the retired broker leaves its 750 MB service root until the next
   sweep). Open: every service child (WebView service and renderers, microG) is a whole emulated runtime of 350 to 450 MiB
