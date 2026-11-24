@@ -224,6 +224,7 @@ void FrostJIT::release_resources() {
     clear(mt_source_refs_);
     clear(mt_edges_);
     clear(code_words_);
+    clear(carry_info_);
     clear(flag_dep_table_);
     clear(retired_pcs_);
     clear(compile_invalidations_);

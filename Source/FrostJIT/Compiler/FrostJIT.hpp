@@ -59,6 +59,7 @@ struct CPU;
 class Emulator;
 class Memory;
 class PersistentCache;
+struct ProfReport;
 // Regalloc bloat diagnostics (BIFROST_REGALLOC_STATS=1). Counted at the
 // (codegen-time) spill/reload emit sites; reset per translated block.
 struct regalloc_stats_t {
@@ -585,6 +586,8 @@ public:
     void dump_code_cache_stats();
     // Host heap held by per-block bookkeeping (Runtime/MemoryStats.cpp).
     void dump_memory_stats();
+    // BIFROST_PROF with BIFROST_PC_HIST: the cycles among the hottest blocks (Carry/LoopReport.cpp). Prints; changes no code.
+    void dump_carry_candidates(const ProfReport& report);
     // Interval Tier-1 compile time/stalls and invalidations by reason.
     void dump_compile_stats();
     // ── SMC / mapping invalidation ──────────────────────────────────
@@ -1417,6 +1420,11 @@ private:
     // BIFROST_PROF: registers where the parts of the block just emitted are, for the sample report (SampleProfile.cpp).
     // The body starts at the first IR instruction; everything before it is the entry that loads the register layout.
     bool profile_sections_active_ = false;
+    // The guest registers a block reads before writing and the ones it writes, bit n = xn (31 = sp), recorded only when the loop report
+    // will print (BIFROST_PROF with BIFROST_PC_HIST). Written under the compile lock, read under it by dump_carry_candidates.
+    struct CarryBlockInfo { uint32_t reads = 0, writes = 0; };
+    std::unordered_map<uint64_t, CarryBlockInfo> carry_info_;
+    void note_carry_block(uint64_t pc, const IRBlock& block);
     size_t profile_body_begin_ = SIZE_MAX;
     struct ProfileRange { size_t begin, end; uint8_t op; bool spill; };
     std::vector<ProfileRange> profile_ranges_;  // the IR operations of the block being emitted

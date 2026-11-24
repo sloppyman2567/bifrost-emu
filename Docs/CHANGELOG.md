@@ -16,6 +16,8 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   game was shown to gain. `BIFROST_TIER2`, `BIFROST_TIER2_*`, `BIFROST_T2_REGIONDUMP` and the region-only `BIFROST_NO_*` switches
   (`CALLREGION`, `DESTSRC`, `RDCE`, `LICM`, `KEEPRES`, `EXITCHAIN`) do nothing now, and the `tier2:` and `block-runs` lines are gone
   from the JIT stats. Nothing changes in a default run, and the emulator binary is about 150 KB smaller.
+- `BIFROST_PROF` with `BIFROST_PC_HIST=1` also lists the hot loops of several blocks (`[carry]` lines): how much of the JIT time they take and how many
+  registers each touches. It only reports.
 - Android apps run memory-heavy code with fewer instructions: an access through a tagged pointer (Android's allocator tags them) is one
   instruction shorter, about 5% fewer in the Android runtime's start-up code.
 - Hot loops in Android code run three instructions shorter per iteration (the loop's stop check now runs once when the loop is entered).

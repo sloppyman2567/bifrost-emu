@@ -21,6 +21,11 @@ A new history section can make an older "not measured" or "next section" line wr
   `BlockCompiler.cpp` orchestrates Tier-1 compilation; `VerificationStores.cpp`
   records differential replay footprints. Prediction must track actual fallback
   support, but final fallback counts come from optimized IR.
+- `Carry/` is the planned register-resident second JIT ([design](../../Docs/JIT.md#planned-codegen-retaining-guest-state-across-regions)).
+  Today it holds `LoopReport.cpp` only: `note_carry_block` and `dump_carry_candidates` read sampled hotness, each block's static
+  chain targets and `carry_info_`, print the `[carry]` lines of the `BIFROST_PROF`/`BIFROST_PC_HIST` report and emit no code. `carry_info_` is
+  written under the compile lock, so the reader takes `compile_mutex_` (try-lock, as `dump_memory_stats` does) and then the table lock.
+  `carry_report` covers it.
 - `IR/` owns typed instructions, translation, scalar SSA, optimization and
   validation. Factories/readers are the parameter contract. SSA currently models
   scalar values; do not assume MemorySSA or complete vector/FP state coverage.

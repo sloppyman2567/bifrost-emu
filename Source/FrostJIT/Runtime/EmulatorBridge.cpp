@@ -371,7 +371,12 @@ void Emulator::dump_prof_snapshot() {
     // Where the JIT samples fell: thread, and entry/body/exit/cold of the block. BIFROST_PC_HIST=1 also lists the hottest
     // guest blocks (map a pc to a function with aarch64 objdump). Gated separately so the default run stays short.
     static const bool pc_hist = dbg().pc_hist;
-    prof_print(stderr, prof_collect(pc_hist ? 20 : 0), pc_hist);
+    // The loop report wants more blocks than the listing shows: it joins their hotness with their static successors.
+    ProfReport report = prof_collect(pc_hist ? 200 : 0);
+    ProfReport listing = report;
+    if (listing.hottest.size() > 20) listing.hottest.resize(20);
+    prof_print(stderr, listing, pc_hist);
+    if (pc_hist && jit_) jit_->dump_carry_candidates(report);
 }
 // Periodic real-guest-throughput + block-structure reporter. The old
 // BIFROST_STATS_PERIOD "rolling MIPS" used the run-loop dispatch counter

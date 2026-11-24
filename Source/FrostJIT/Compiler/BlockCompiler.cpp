@@ -541,6 +541,7 @@ if (demote_interp) {
     // Per-op IR parameter contract check (only migrated ops; see IR.hpp).
     // Validates what codegen is about to consume, after the optimizer.
     if (dbg().ir_validate) validate_ir_block(ir_block);
+    if (profile_sections_active_ && dbg().pc_hist) note_carry_block(start_pc, ir_block);
     static bool dump_ir_ = dbg().jit_dump;
     // BIFROST_DUMP_PC=0x... restricts the IR dump to a single block pc
     // (useful when BIFROST_JIT_DUMP would flood with thousands of blocks).

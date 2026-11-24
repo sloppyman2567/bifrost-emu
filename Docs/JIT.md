@@ -1374,7 +1374,8 @@ Rules the design follows (decided 2026-11-24):
 
 Milestones: (1) a clean start-up profile exists ([2026-11-24](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24):
 guest register moves about 37% of samples); a steady-gameplay profile with `BIFROST_PROF=1` alone (the stats counters add instructions to
-every block entry) and the window-free workloads are still wanted; (2) sampled hotness and region discovery that only report; (3) register-resident code for one
+every block entry) is still wanted; (2) done: sampled hotness and region discovery that only report (the `[carry]` loop report above;
+first numbers in [the history](archive/JIT-history.md#carry-loop-report-first-numbers-2026-11-24)); (3) register-resident code for one
 region behind forced promotion, with recovery maps, passing `make verify` and the fault/signal fixtures; (4) MT promotion and exit cells;
 (5) a game check by the maintainer. Expanding the scope requires measurable benefit and the
 [planned correctness/performance gates](archive/TESTS-history.md#planned-codegen-and-coremark-acceptance).
@@ -1421,7 +1422,16 @@ into the parts of a translated block. **Entry** loads the canonical register lay
 **exit** publishes state back, **cold** is recovery and exit code (the same four parts as the `entry`, `tier1-ir`, `exit` and
 `cold` rows of the allocation profile), and **shared stubs** is code outside any registered block: the frame-exit and cold-path
 stubs, and blocks loaded from the persistent cache, which are not registered. Below it come the busiest eight threads, and with
-`BIFROST_PC_HIST=1` the twenty hottest guest blocks (`pc=` values map to functions with `aarch64 objdump`).
+`BIFROST_PC_HIST=1` the twenty hottest guest blocks (`pc=` values map to functions with `aarch64 objdump`) and the loop report.
+
+**Loop report (`[carry]`).** With `BIFROST_PC_HIST=1` each translated block also records the guest registers it reads before writing and
+the ones it writes (`note_carry_block`, `Carry/LoopReport.cpp`). At the report the 200 hottest blocks are joined with their static
+successors (the chain targets), and the cycles among them are printed: one line saying how much of the JIT samples sit in loops of several
+blocks, in single-block loops (Lean already pins their registers) and elsewhere, then the ten hottest multi-block loops with their head pc,
+blocks, guest instructions, share of the JIT samples, distinct guest registers (read, written), the register moves one pass over all
+its blocks costs now, and the static edges that leave it (counted to cold blocks too). A loop through a call or a return has no static
+edge and does not appear; the "elsewhere" share holds it. It reads what the sampler and the block table already hold and changes no code.
+`carry_report` checks it on a hand-written four-block loop.
 
 Under the report a second line splits the **body** samples by what the operation under them does: guest state moves
 (`LOAD_REG`/`STORE_REG`), memory (a load or store with its guest-address guard, and atomics), integer ALU, flag setting, branches,
@@ -1607,6 +1617,7 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
+- [Carry loop report: first numbers (2026-11-24)](archive/JIT-history.md#carry-loop-report-first-numbers-2026-11-24)
 - [Carry ceiling: guest register moves in CoreMark (2026-11-24)](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)
 - [Tier-2 regions removed (2026-11-24)](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)
 - [Hotspots from IBS and the allocation profile: tag untag and scalar FMAX/FMIN zeros (2026-11-24)](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)

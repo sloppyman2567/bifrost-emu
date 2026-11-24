@@ -326,6 +326,7 @@ UNIT_TESTS=(
     "wait_profile|Scripts/Testing/test_wait_profile.sh||60|wait_profile: ALL PASS|HOST_JIT"
     # BIFROST_PROF prints its report at exit without -v, and its guest-instruction count covers chained blocks and self-loops.
     "jit_instruction_count|Scripts/Testing/test_jit_instruction_count.sh||120|jit_instruction_count: ALL PASS|HOST_JIT"
+    "carry_report|Scripts/Testing/test_carry_report.sh||120|carry_report: ALL PASS|HOST_JIT"
     # BIFROST_PROF prints a [stall] line for a second-long call on a busy thread (futex address, caller, time of day), not for idle ones.
     "wait_stall|Scripts/Testing/test_wait_stall.sh||90|wait_stall: ALL PASS|HOST_JIT"
     # The AArch64 syscall name table matches the kernel's header, and BIFROST_SYSCALL_TRACE names the socket calls by their real numbers.

@@ -86,6 +86,13 @@ program that forks 40 times with the profiler started (a smoke check: short-live
 It does not check the timeline. That was checked by hand with Tracy's `capture` and `csvexport` (built from the 0.15.0 release): zone and
 thread names, GL symbol zones, frames, and the fork program with a viewer connected.
 
+### Carry loop report (2026-11-24)
+
+`Tests/Unit/carry_loop.c` and `Scripts/Testing/test_carry_report.sh` (`run_tests.sh` entry `carry_report`) run a hand-written four-block loop over five
+registers with `BIFROST_PROF=1 BIFROST_PC_HIST=1` and check that the first `[carry] loop` line has at least two blocks, at least 50% of the JIT
+samples and five to eight registers, and that nothing prints without `BIFROST_PC_HIST`. It fails on a build without the report. It does not
+check the exit counts, loops through calls or any real program.
+
 ### Guest instruction counts (2026-11-23)
 
 `Tests/Unit/jit_stats_count.c` and `Scripts/Testing/test_jit_instruction_count.sh` (`run_tests.sh` entry

@@ -2,6 +2,20 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Carry loop report: first numbers (2026-11-24)
+
+The report (`Carry/LoopReport.cpp`, printed with `BIFROST_PROF=1 BIFROST_PC_HIST=1`) on CoreMark at 100,000 iterations (one run,
+`Tests/Unit/coremark.elf`): 112 hot blocks cover all the JIT samples; 41.0% of them sit in cycles of several blocks, 16.9% in single-block loops (Lean
+already pins their registers) and 42.2% elsewhere (calls, returns and straight-line code, which have no static cycle). The ten hottest multi-block loops
+are 2 to 5 blocks and 6 to 34 guest instructions; four of them touch 2 to 4 registers, the biggest touch 9 to 13, so a cap of
+eight carried registers does not hold the largest loops whole. The loop of five blocks (head 0x401f84, 9.9% of the samples) moves 36 registers per pass
+now and uses 13 distinct ones.
+
+What this does not say: the "elsewhere" 42% includes loops that run through a call or a return, which the static successors miss; one benchmark, not a
+game; blocks are counted once per pass, not weighted by which arm of a branch runs; the register counts come from the IR after optimization (loads
+and stores of guest registers, not host moves). A game run with the same switches is the next measurement (the maintainer plays it; nothing here
+launches one).
+
 ## SpongeBob profile with the stats counters off (2026-11-24)
 
 `BIFROST_PROF=1 asgard start com.tiltingpoint.spongebob`, the installed build, stopped with `asgard stop` after about 83 s (exit 143); the
