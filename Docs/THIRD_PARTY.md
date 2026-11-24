@@ -24,6 +24,14 @@ other licenses, so this Apache text is not a blanket license for every runtime
 library, header, tool or external game. Retain the upstream notices when
 redistributing any bundle.
 
+## Roboto outlines in the stats overlay
+
+`Include/Generated/OverlayFont.hpp` holds the outlines of 98 glyphs of Roboto Medium 2.138, Copyright 2011 Google Inc., under
+the Apache License 2.0 ([Apache-2.0.txt](../LICENSES/Apache-2.0.txt)). `Tools/CodeGen/overlayfont.py` writes it from
+`Roboto-Medium.ttf` in the `roboto-unhinted.zip` asset of the
+[googlefonts/roboto v2.138 release](https://github.com/googlefonts/roboto/releases/tag/v2.138) (the script records the file's
+SHA-256). The font file itself is not in the repository. The stats panel draws the glyphs with its own rasterizer.
+
 ## Tracy profiler (optional, not distributed)
 
 `make USE_TRACY=1` builds the Tracy profiler's client sources into a separate emulator binary. They are fetched by

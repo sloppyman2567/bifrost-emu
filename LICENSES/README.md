@@ -8,6 +8,8 @@
   It accompanies reused AOSP material licensed under Apache 2.0, including
   the AOSP-derived generated
   [Settings defaults](../Guest/Android/Managed/Framework/FrameworkSettingsDefaults.java).
+  It also covers the glyph outlines of Roboto Medium 2.138 (Copyright 2011 Google Inc.) in the generated
+  [overlay font](../Include/Generated/OverlayFont.hpp) that the stats panel draws with.
 - [NOTICE-Android.txt](NOTICE-Android.txt) retains attribution and pinned source
   provenance for the six AOSP inputs used by that generated Settings profile.
   Existing per-file notices and downloaded runtime NOTICE files remain applicable.

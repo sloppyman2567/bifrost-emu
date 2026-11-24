@@ -43,6 +43,25 @@ int main() {
   assert(c.fps == 0);
   c.present(7000000000ULL);
   assert(c.fps == 1);
+  {
+    // The frame times the overlay's graph shows: each frame's gap, oldest first, kept to the history's size, and
+    // restarted by a frame after an idle gap (which has no gap of its own).
+    Clock g;
+    float times[arm64emu::window_stats::kFrameHistory];
+    g.present(1000000000ULL);
+    assert(g.recent_frames(times, 8) == 0);
+    g.present(1016000000ULL);
+    g.present(1036000000ULL);
+    g.present(1048500000ULL);
+    assert(g.recent_frames(times, 8) == 3 && std::abs(times[0] - 16) < 0.001 && std::abs(times[1] - 20) < 0.001 &&
+           std::abs(times[2] - 12.5) < 0.001);
+    assert(g.recent_frames(times, 2) == 2 && std::abs(times[0] - 20) < 0.001 && std::abs(times[1] - 12.5) < 0.001);
+    for (int i = 0; i < 500; ++i) g.present(2000000000ULL + i * 10000000ULL);
+    assert(g.recent_frames(times, arm64emu::window_stats::kFrameHistory) == arm64emu::window_stats::kFrameHistory);
+    assert(std::abs(times[0] - 10) < 0.001 && std::abs(times[arm64emu::window_stats::kFrameHistory - 1] - 10) < 0.001);
+    g.present(20000000000ULL);  // resumes after more than two seconds
+    assert(g.recent_frames(times, 8) == 0);
+  }
   // Native backends record on a renderer thread, then update on the window
   // thread. A forgotten/recreated window must start a fresh frame count.
   using namespace arm64emu::window_stats;

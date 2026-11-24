@@ -96,30 +96,34 @@ closes that window's stats UI. No font files or SDL_ttf are required.
 
 ## In-window overlay
 
-On an **Android window** the overlay is a small translucent panel in the window's top-left corner, drawn inside
+On an **Android window** the overlay is a small half-transparent panel in the window's top-left corner, drawn inside
 the window on both Wayland and X11. It uses the window backend's popup layer (the one framework dialogs use,
 reserved id `0xFFFF0001`): software-rendered ARGB pixels in a separate layer above every surface that never takes
 host input. Nothing is drawn through the guest's GL or Vulkan state, and nothing is added to its framebuffer.
-It refreshes at most four times a second and scales its 5x7 built-in font with the window height (2x up to
-about 1440p, 3x at 4K). The panel is about 85 percent opaque with a thin outline and anti-aliased rounded corners.
-It shows, from top to bottom:
+It refreshes at most four times a second.
 
-- `BIFROST-EMU` with the version at the right edge, then the app's own title;
-- the frame rate as a double-size figure, then `FPS`, the frame time and, at the right edge, the presentation
-  backend (a large `IDLE` after two seconds without a frame);
-- aligned `CPU`, `GPU`, `VRAM` and `RAM` rows, each with a percentage, a meter and, at the right edge, a detail
-  (a temperature, or used/total memory); meters and numbers turn amber from 80 percent and red from 95,
-  temperatures at 80 and 90 degrees Celsius;
-- a dim footer: `Emulator`, this process's CPU share, session RAM, and the shortened GPU name (`llvmpipe`
-  identifies a software renderer). A guest that presents through Vulkan has no GL renderer string, so the name
-  comes from the host Vulkan loader's device (`AMD Radeon RX 9060 XT (RADV GFX1200)`), not the kernel driver
-  (`amdgpu`), which names no card.
+It is styled after [MangoHud](https://github.com/flightlessmango/MangoHud) and uses the colours of its default
+configuration: a 50 percent black panel with rounded corners, white text with a black outline, a coloured label for each
+metric, and small units beside the figures. The text is Roboto Medium (Apache-2.0) drawn smooth at any size from outlines
+built into the program, so no font files are needed. Its height follows the window: the window height divided by 55,
+from 16 to 40 pixels (25 pixels in a 1384-pixel-tall window). The panel shows, from top to bottom:
 
-Text keeps its case: the font has lower case with descenders. Accented Latin letters print without the accent
-(`Pokémon` as `Pokemon`), dashes and curly quotes as their ASCII forms, and other characters as `?`. A title or
-GPU name longer than 31 characters ends in an ellipsis, and a title with nothing the font can show (all CJK, say)
-is left out. Values that cannot be read show `--` with an empty meter. A window plugin without popup layers logs once and keeps
-the title statistics.
+- the presentation backend (red), the frame rate with `FPS` and the frame time with `ms`; after two seconds without a
+  frame, `idle` in amber;
+- `GPU` (green), `CPU` (blue), `VRAM` (purple) and `RAM` (pink) rows: the load in percent and the temperature, or the used
+  memory and, after a slash, the total. Figures turn amber from 80 percent and red from 95, temperatures at 80 and 90
+  degrees Celsius;
+- `Frametime` with the lowest and highest time in the graph, and a green line graph of the last 120 frames, 0 to 50 ms from
+  bottom to top, the newest frame at the right edge (empty while idle);
+- a dim footer: the app's own title, `Emulator` with this process's CPU share and session RAM, and the shortened GPU name
+  with the emulator version at the right edge (`llvmpipe` identifies a software renderer). A guest that presents through
+  Vulkan has no GL renderer string, so the name comes from the host Vulkan loader's device
+  (`AMD Radeon RX 9060 XT (RADV GFX1200)`), not the kernel driver (`amdgpu`), which names no card.
+
+Text keeps its case. Accented Latin letters print without the accent (`Pokémon` as `Pokemon`), dashes and curly quotes as
+their ASCII forms, and other characters as `?`. A title or GPU name too long for the panel ends in an ellipsis, and a title
+with nothing the font can show (all CJK, say) is left out. The panel keeps one width whatever the readings are. Values that
+cannot be read show `--`. A window plugin without popup layers logs once and keeps the title statistics.
 
 Readings come from generic Linux interfaces, sampled once a second, with no vendor tools or libraries:
 

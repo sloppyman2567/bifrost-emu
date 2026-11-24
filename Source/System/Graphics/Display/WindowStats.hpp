@@ -25,8 +25,13 @@ std::string pick_gpu_device(const std::vector<DrmClient> &clients);
 struct Clock {
   uint64_t frames = 0, sample_frames = 0, sample_ns = 0, last_ns = 0;
   double fps = 0;
+  float history[kFrameHistory] = {};  // milliseconds between recent presentations, a ring
+  size_t history_next = 0, history_count = 0;
   void present(uint64_t now);
   double active_fps(uint64_t now) const;
+  // Up to `capacity` of the latest frame times in milliseconds, oldest first; returns how many. A frame after
+  // an idle gap has no time of its own, so the history starts again there.
+  size_t recent_frames(float *out, size_t capacity) const;
 };
 void sdl_present(void *window, const char *backend);
 // Backend-neutral path: rendering threads only record completed presents.

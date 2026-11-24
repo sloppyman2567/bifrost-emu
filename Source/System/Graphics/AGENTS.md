@@ -193,6 +193,13 @@
   (`StatsOverlay`) is one ARGB image: an Android window backend shows it as a popup layer, and the X11 desktop
   HUD helper draws the same image from the figures in its `Packet` (`overlay_stats` builds both). Never draw
   statistics through guest GL or Vulkan state. Mode/title/overlay defaults live in `DebugFlags.hpp`.
+  The panel follows MangoHud's default look (colours from its `MangoHud.conf`). `overlay_rows` builds rows of
+  cells and `render_overlay` lays them out and rasterizes Roboto Medium from `Include/Generated/OverlayFont.hpp`
+  (outlines, so any size; `Tools/CodeGen/overlayfont.py FONT.ttf OUT` writes it and names the font's version and
+  SHA-256; `make generated-check` does not cover it, having no font to read). Keep the panel's width steady: a cell's
+  `reserve` and `reserve_unit` hold room for the widest figure and unit, and notes are cut to the table's width.
+  The frame-time graph reads `Clock`'s ring of presentation gaps (`kFrameHistory`), sent in the `Packet`. The 5x7
+  bitmap font in `StatsOverlay.cpp` is only for the separate stats window.
 - Run affected real-GPU GL/EGL/SDL/Vulkan/XWayland probes and the headless header
   check. Rendered smoke frames alone do not validate sustained gameplay.
 

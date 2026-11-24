@@ -12,6 +12,10 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagnostics.
 
+- The stats overlay is restyled after MangoHud: a half-transparent panel with smooth, outlined text, a coloured label for GPU, CPU,
+  VRAM and RAM, small units beside the figures (`58 %`, `64 °C`, `1.2 GB`) and a green graph of the last 120 frame times. The
+  pixel font and the load meters are gone; the text size follows the window height. Turn it on as before (`--window-stats-mode overlay`).
+
 - `make uninstall`, `make uninstall-asgard` and `make uninstall-rootfs` look in `/usr/local` unless you pass `PREFIX`, so they found nothing
   for a `make bootstrap` install and said so without a hint. They now say where the install is and which command removes it (also under
   `sudo`), and the docs show how to remove the games libraries.
