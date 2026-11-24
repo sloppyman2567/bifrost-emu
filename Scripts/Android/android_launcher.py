@@ -189,6 +189,16 @@ def short_error(output, fallback="The command failed"):
     return text if len(text) <= 300 else text[:299] + "…"
 
 
+def json_output(output):
+    """The value a command printed as JSON, and the text before it. The launcher reads stdout and stderr together, so a
+    warning Asgard prints first (a build that does not match the emulator) arrives ahead of the JSON."""
+    lines = output.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.lstrip()[:1] in ("[", "{"):
+            return json.loads("".join(lines[i:])), "".join(lines[:i]).strip()
+    raise ValueError(short_error(output, "The command printed nothing"))
+
+
 # Desktops that keep the clock format apart from the locale: (schema, key, value meaning 12-hour).
 DESKTOP_CLOCKS = {"gnome": ("org.gnome.desktop.interface", "clock-format", "'12h'"),
                   "unity": ("org.gnome.desktop.interface", "clock-format", "'12h'"),
@@ -1210,7 +1220,7 @@ def build(state, application, settings=None, pads=None):
             def listed(code, output):
                 try:
                     if code: raise ValueError(short_error(output))
-                    found = [x["name"] for x in json.loads(output)]
+                    found = [x["name"] for x in json_output(output)[0]]
                 except (ValueError, KeyError, TypeError) as error:
                     self.hint.setText("Couldn't read the accounts: " + str(error)[:200]); return
                 selected = {x.text() for x in self.accounts.selectedItems()}
@@ -1221,7 +1231,7 @@ def build(state, application, settings=None, pads=None):
                 self.update_hint(found)
             self.window_.command(["google", "accounts", "--json"], listed)
             def status(code, output):
-                try: state = json.loads(output).get("state") if not code else None
+                try: state = json_output(output)[0].get("state") if not code else None
                 except ValueError: state = None
                 active = state in ACTIVE
                 if active != self.signing_in: self.signing_in = active; self.update_buttons(); self.update_hint(None)
@@ -1265,6 +1275,7 @@ def build(state, application, settings=None, pads=None):
             self.jobs, self.pending, self.cards = set(), {}, {}
             self.refreshing, self.apps, self.columns = False, [], 0
             self.icons_scanned = None
+            self.warned = ""   # the last warning Asgard printed before its output, shown once
             self.selected, self.drawer_package, self.drawer_stamp, self.drawer_scanned = None, None, None, 0
             self.order, self.announce = [], None
             self.settings = settings or QSettings("Asgard", "Library")
@@ -1599,11 +1610,14 @@ def build(state, application, settings=None, pads=None):
                 try:
                     if code: raise ValueError(short_error(output))
                     # System apps (microG's sign-in window) are not games.
-                    listed = json.loads(output)
+                    listed, warning = json_output(output)
                     self.apps = sorted((a for a in listed if not a.get("system")),
                                        key=lambda a: (a["label"].casefold(), a["package"]))
                 except (ValueError, KeyError) as error:
                     self.show_notice("Couldn't read the app library: " + str(error)[:300], error=True); return
+                if warning != self.warned:
+                    self.warned = warning
+                    if warning: self.show_notice(short_error(warning), error=True)
                 self.google_request(listed)
                 active = {a["package"] for a in self.apps if a["session"].get("state") in ACTIVE}
                 if self.big and self.was_active - active and not self.isActiveWindow(): self.present()
@@ -1981,7 +1995,7 @@ def build(state, application, settings=None, pads=None):
         def check_setup(self):
             """Ask `asgard setup --check` what this tree still lacks, and offer to fix it. Unchanged when nothing is missing."""
             def checked(code, output):
-                try: status = json.loads(output)
+                try: status = json_output(output)[0]
                 except ValueError: return          # an older Asgard without the command: say nothing
                 self.setup_status = status if status.get("missing") else None
                 if self.setup_status: self.offer_setup()
