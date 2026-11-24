@@ -2,6 +2,40 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Widening multiply-accumulate is extend, multiply and add (2026-11-23)
+
+Found by reading the generated code of a hot block, not from a profile: the loop body of the `collide` game-style kernel
+(`ldp w2, w1, [x0], #8; umull x2, w2, w6; umull x1, w1, w6; ...`, 9 guest instructions, 572 bytes of x86). Each `umull` was about
+16 host instructions: the old emitter for `SMADDL`/`UMADDL`/`SMSUBL`/`UMSUBL` called `clobber_flags`, flushed and invalidated RAX, RCX
+and RDX (stores to the frame), loaded both operands into RAX and RCX (reloading what it had just stored), extended them in place,
+multiplied, then loaded the accumulator into RDX and added it, which for `umull` (Ra = XZR) is `mov edx, 0; add rax, rdx`.
+
+Now the translator lowers the four instructions like `MADD`: `SEXT`/`ZEXT` 32 of both operands, a 64-bit `MUL`, then `ADD`/`SUB`
+against Xa (XZR reads as a constant 0 and folds). The emitter, the four IR ops and `emit_aux` are gone; `aux` stays, as the SIMD
+element and lane carrier. Mechanism: [the guide](../JIT.md#widening-multiply-accumulate).
+
+Measured (host instructions per frame, the difference of two repetition counts, one pinned core, nine kernels reconstructed in one
+source; every checksum equal to the old build's): `collide` 204,949 to 176,287 (-14.0%), `skinning` 2,388,156 to 2,326,568 (-2.6%);
+the seven others (only these two kernels contain a widening multiply) within 0.2%, in both directions. CoreMark executes 295.435
+billion instructions on both builds (the runs differ by under 0.001%), `crcfinal` 0x4983. Cycles were not compared (a game was running on the machine).
+
+Checked: `jit_maddl` now sweeps 4,000 random operand pairs through ten forms (high halves are junk the W views must ignore),
+register aliasing, a three-instruction dependent chain and a loop-carried accumulator; QEMU, the old build, the new build with
+`BIFROST_JIT_VERIFY=1` and `BIFROST_IR_VALIDATE=1`, and `--no-jit` agree. Mutants (signed read as unsigned and the reverse, `SUB`
+emitted as `ADD`, the second operand left unextended) each fail it. The first version of the sweeps passed a sign-extension mutant:
+GCC compiles a C widening multiply into the instruction under test, so it compared the JIT with itself; the references now use a
+shift-and-add multiply (`ref_mul`). `verify_jit.sh` (112 differential fixtures, 12 threaded oracle runs), 99 name-filtered unit
+tests and the 65 Toybox and real-world programs pass.
+
+Trap: a build tree made by copying another one (`cp -a build/X build/Y`) keeps `.d` files that name the old directory, so a header
+change does not rebuild the copy's objects and the binary mixes enum values; build such A/B trees from scratch (24 s here).
+
+Not measured: gameplay, the Android runtime (ART's `smull` for `long` arithmetic), cycles, Tier-2 beyond the verify fixtures.
+Left in the same block, for the next step: the scalar-FP `fcmp` + `b.mi` pair is 9 host instructions (`ucomiss`, two `set`s with
+their zeroing moves, a `cmovp`, a `cmp`, then the branch); the `ldp` loads are followed by a `mov edx, edx` the loads already make
+redundant; the generic scans of `aux` as a vreg (`BlockCompiler`, `RegionPlanner`, `RegionCompiler`, `RegisterAllocator`, `SSA`) have
+no user left and filter by value range.
+
 ## Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)
 
 Read-only measurements, one unattended run of each (the title, loading or connect screen, not gameplay), HEAD `c5b66667`.

@@ -105,6 +105,10 @@ it under the guide's Recorded changes.
   `compile_simd_structure_` uses XMM0-2 and XMM12-15 only; `vec_inst_effects` declares that clobber set (0xF007) and the
   registers read or written, so change them together. Tier-2 stops at the op. A post-index `Rm` is any of X0-X30 and only 31
   selects the immediate: the interpreter, the helper and the translator agree, and `jit_neon_struct` checks X30.
+- `SMADDL`/`UMADDL`/`SMSUBL`/`UMSUBL` (and `smull`, `umull`, `smnegl`, `umnegl`) are not IR ops: the translator lowers them to `SEXT`/`ZEXT`
+  32, `MUL` and `ADD`/`SUB`, so the allocator sees them. Do not bring back a fixed-register emitter for a multiply form. `IRInst::aux`
+  carries SIMD element and lane numbers; no op keeps a vreg in it. `jit_maddl` compares against a multiply-free reference: a C
+  widening multiply compiles into the instruction under test.
 - `FP_CMP` (not `FCCMP`) leaves SUB-convention host flags (`flags_in_host_`, `flags_from_sub_`) with no pstate store when its
   consumer, found past constants, moves, register loads and adds, is a conditional branch or an integer select; `fcsel`, `mrs`
   and anything else keep the branchy pstate sequence (jumps on the compare's own PF/CF/ZF, never `pushfq`), which measured faster

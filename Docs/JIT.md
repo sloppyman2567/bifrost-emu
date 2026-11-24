@@ -255,6 +255,16 @@ true path is `cmp` (`CCMN`: `mov` + `add` into a scratch register); the false pa
 the host in the op's carry convention and store nothing. AL and NV always compare. `jit_ccmp` covers every condition against
 a C model that also passes under QEMU.
 
+### Widening multiply-accumulate
+
+`SMADDL`, `UMADDL`, `SMSUBL`, `UMSUBL` and their aliases (`smull`, `umull`, `smnegl`, `umnegl`) have no IR op. The translator emits
+`SEXT` (signed) or `ZEXT` (unsigned) of 32 bits for both W operands, a 64-bit `MUL`, then `ADD` or `SUB` against Xa; `load_arm_reg`
+reads XZR as the constant 0, which the optimizer folds. The low 64 bits of the product are the same for the signed and the unsigned
+reading once both operands are extended, so one `MUL` serves all four. The allocator, the immediate forms and the pin updates see
+ordinary ops, and nothing is flushed around them. `jit_maddl` covers every form against a reference that does not multiply with a
+widening instruction (GCC compiles that into the instruction under test)
+([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)).
+
 ## Scalar SSA
 
 `Source/FrostJIT/IR/SSA/SSA.hpp` and `Source/FrostJIT/IR/SSA/SSA.cpp` define a scalar SSA graph with
@@ -1882,6 +1892,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Widening multiply-accumulate is extend, multiply and add (2026-11-23)](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)
 - [Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)
 - [Saturating narrowing shifts are native (2026-11-23)](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)
 - [In-place updates of pinned registers (2026-11-23)](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23)

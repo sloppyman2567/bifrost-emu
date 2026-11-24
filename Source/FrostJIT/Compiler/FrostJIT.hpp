@@ -2020,7 +2020,7 @@ private:
     //   Arithmetic.cpp    — ADD/SUB/MUL/AND/OR/XOR/SHL/SHR/SAR/ROR/
     //                            NOT/NEG/SEXT/ZEXT/CLZ/REV64/CSEL/SBFM/
     //                            UBFM/BFM/EXTR/RBIT/CLS/REV16/REV32/CCMP/
-    //                            UDIV/SDIV/SMADDL/UMADDL/SMSUBL/UMSUBL/
+    //                            UDIV/SDIV/
     //                            MOV/IMM
     //   Memory.cpp    — LOAD_MEM/STORE_MEM/LOAD_REG/STORE_REG
     //   Branch.cpp — BRCOND_ZERO/BRCOND_BIT/BRCOND/
@@ -2068,7 +2068,7 @@ private:
     // dead immediately, so its host mapping can be dropped without a spill.
     // Exact because IR scratch vregs are block-local with unique-per-
     // definition numbers (VregAlloc monotonic) and the scan covers aux
-    // (SMADDL/SMSUBL accumulator) in addition to src1/src2.
+    // in addition to src1/src2.
     std::vector<int> vreg_last_use_op_;
     // vreg_uses_[v] = sorted (ascending) list of IR op indices that READ
     // vreg `v` as a source (src1/src2/aux), built by the same use-scan as

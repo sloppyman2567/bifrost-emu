@@ -27,21 +27,7 @@ void ir_reset_vreg_alloc();
 // NOTE: the old generic emit() (positional width/cond/flags/imm args) and
 // emit_bf() are GONE — every op is constructed through a typed factory
 // (IRInst::make_* in IR.hpp) or the generic IRInst::make() for
-// parameter-less ops. emit_aux() survives: it only touches public
-// dataflow fields (op/dest/src1/src2/aux/arm_pc).
-// Emit with auxiliary vreg (for SMADDL/SMSUBL accumulator).
-inline void emit_aux(IRBlock& b, IROp op, uint16_t dest,
-                     uint16_t src1, uint16_t src2, uint16_t aux_vreg,
-                     uint64_t arm_pc) {
-    IRInst inst{};
-    inst.op = op;
-    inst.dest = dest;
-    inst.src1 = src1;
-    inst.src2 = src2;
-    inst.aux = aux_vreg;
-    inst.arm_pc = arm_pc;
-    b.insts.push_back(inst);
-}
+// parameter-less ops.
 // Typed emit for SIMD_TBL (table lookup). Packs SimdTblParams via the
 // IRInst factory so emit and codegen cannot disagree on the layout.
 inline void emit_tbl(IRBlock& b, uint16_t dest, uint16_t table,

@@ -133,7 +133,7 @@ static bool is_pure(IROp op) {
         case IROp::BRCOND_ZERO:
         case IROp::BRCOND_BIT:
             return false;
-        // Newer ops (UDIV/SDIV/SMADDL/UMADDL/SMULH/UMULH/SMSUBL/UMSUBL,
+        // Newer ops (UDIV/SDIV/SMULH/UMULH,
         // FCVT_S2D/FCVT_D2S/FRINT/FP_CMP/FP_UNOP/FMADD/FMSUB, MRS/MSR)
         // are not pure (side effects on pstate or system regs) — never DCE.
         default:
@@ -925,8 +925,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // Normal op: src1 and src2 are vregs.
                 if (inst.src1) live.insert(inst.src1);
                 if (inst.src2) live.insert(inst.src2);
-                // SMSUBL accumulator). Mark it live so DCE doesn't remove
-                // the instruction that defines it.
+                // aux: no op keeps a vreg there today; if one does, keep its definition live.
                 if (inst.aux) live.insert(inst.aux);
             }
         } else {
@@ -1049,10 +1048,6 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::UDIV: return "UDIV";
                     case IROp::CRC32: return "CRC32";
                     case IROp::SDIV: return "SDIV";
-                    case IROp::SMADDL: return "SMADDL";
-                    case IROp::UMADDL: return "UMADDL";
-                    case IROp::SMSUBL: return "SMSUBL";
-                    case IROp::UMSUBL: return "UMSUBL";
                     case IROp::SMULH: return "SMULH";
                     case IROp::UMULH: return "UMULH";
                     case IROp::FCVT_S2D: return "FCVT_S2D";

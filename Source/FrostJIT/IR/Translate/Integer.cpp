@@ -890,35 +890,32 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::BARRIER:
             block.insts.push_back(IRInst::make(IROp::NOP));
             return false;
-        // ── SMADDL / UMADDL (widening multiply-accumulate) ─────────
-        case InstClass::SMADDL: case InstClass::UMADDL: {
-            uint16_t a = load_arm_reg(block, d.rn);
-            uint16_t b = load_arm_reg(block, d.rm);
-            // it via the `aux` field. The old approach passed the ARM
-            // register index in `cond` and read cpu.regs[] directly in
-            // the JIT, bypassing the vreg cache. If the accumulator
-            // register was modified earlier in the same block, the new
-            // value was still in a dirty vreg and cpu.regs[] held the
-            // stale value, causing divergent results.
+        // ── SMADDL / UMADDL / SMSUBL / UMSUBL (widening multiply-accumulate) ──
+        // Xd = Xa +/- ext32(Wn) * ext32(Wm), the low 64 bits of the product being the same for the signed and the
+        // unsigned reading once both operands are extended. Lowered like MADD (extend, MUL, ADD/SUB) so the
+        // allocator, the immediate forms and the constant folder see them: smull/umull/smnegl/umnegl have Ra = XZR,
+        // and the accumulate then folds away.
+        case InstClass::SMADDL: case InstClass::UMADDL:
+        case InstClass::SMSUBL: case InstClass::UMSUBL: {
+            const bool is_signed = d.cls == InstClass::SMADDL || d.cls == InstClass::SMSUBL;
+            const bool is_sub = d.cls == InstClass::SMSUBL || d.cls == InstClass::UMSUBL;
+            uint16_t ext[2];
+            const uint8_t srcs[2] = {d.rn, d.rm};
+            for (int i = 0; i < 2; ++i) {
+                uint16_t v = load_arm_reg(block, srcs[i]);
+                ext[i] = g_alloc.alloc();
+                if (is_signed) emit_sext(block, ext[i], v, 32, cur_pc);
+                else           emit_zext(block, ext[i], v, 32, cur_pc);
+            }
+            uint16_t prod = g_alloc.alloc();
+            block.insts.push_back(IRInst::make(IROp::MUL, prod, ext[0], ext[1]));
             uint16_t acc = load_arm_reg(block, d.ra);
             uint16_t r = g_alloc.alloc();
-            emit_aux(block, d.cls == InstClass::SMADDL ? IROp::SMADDL : IROp::UMADDL,
-                     r, a, b, acc, cur_pc);
+            block.insts.push_back(IRInst::make(is_sub ? IROp::SUB : IROp::ADD, r, acc, prod));
             store_arm_reg(block, d.rd, r);
             return false;
         }
-        // ── SMSUBL / UMSUBL / SMULH / UMULH ─────────────────────────
-        case InstClass::SMSUBL:
-        case InstClass::UMSUBL: {
-            uint16_t a = load_arm_reg(block, d.rn);
-            uint16_t b = load_arm_reg(block, d.rm);
-            uint16_t acc = load_arm_reg(block, d.ra);
-            uint16_t r = g_alloc.alloc();
-            emit_aux(block, d.cls == InstClass::SMSUBL ? IROp::SMSUBL : IROp::UMSUBL,
-                     r, a, b, acc, cur_pc);
-            store_arm_reg(block, d.rd, r);
-            return false;
-        }
+        // ── SMULH / UMULH ───────────────────────────────────────────
         case InstClass::SMULH: case InstClass::UMULH: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t b = load_arm_reg(block, d.rm);

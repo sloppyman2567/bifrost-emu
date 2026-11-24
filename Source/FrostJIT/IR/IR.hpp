@@ -357,15 +357,9 @@ enum class IROp : uint8_t {
     // Native division (x86 div/idiv)
     UDIV,          // dest = src1 / src2 (unsigned, 64-bit)
     SDIV,          // dest = src1 / src2 (signed, 64-bit)
-    // Native multiply-accumulate long (widening)
-    SMADDL,        // dest = (int64_t)(int32_t)src2 * (int32_t)src1 + src1_hi
-    UMADDL,        // dest = (uint64_t)(uint32_t)src2 * (uint32_t)src1 + src1_hi
     // Native multiply high (128-bit result, high 64 bits)
     SMULH,         // dest = bits[127:64] of (int128)src1 * (int128)src2
     UMULH,         // dest = bits[127:64] of (uint128)src1 * (uint128)src2
-    // Native multiply-subtract long (widening)
-    SMSUBL,        // dest = (int64_t)acc - (int64)(int32)src1 * (int32)src2
-    UMSUBL,        // dest = (uint64_t)acc - (uint64)(uint32)src1 * (uint32)src2
     // Native FP conversions (float <-> double, via x86 cvtss2sd/cvtsd2ss)
     FCVT_S2D,      // v[dest].lo = (double)(float)v[src1].lo
     FCVT_D2S,      // v[dest].lo = (float)(double)v[src1].lo
@@ -450,7 +444,7 @@ struct IRInst {
     uint16_t dest;   // destination vreg (0 if no dest)  [was uint8_t]
     uint16_t src1;   // source vreg 1                     [was uint8_t]
     uint16_t src2;   // source vreg 2                     [was uint8_t]
-    uint16_t aux;    // auxiliary vreg (SMADDL/SMSUBL accumulator)
+    uint16_t aux;    // auxiliary operand (source element index, FMA lane + 1)
     uint64_t arm_pc; // PC of the original ARM instruction (for CALL_INTERP, BRCOND, SVC)
  private:
     // ── Private parameter fields ──────────────────────────────────

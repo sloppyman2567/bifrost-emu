@@ -10,6 +10,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- The widening multiplies (`umull`, `smull`, `umaddl`, `smaddl`, `umsubl`, `smsubl`, `umnegl`, `smnegl`) compile to a multiply and an
+  add through the register allocator, not a fixed-register sequence that saved and reloaded values on the stack. A game-style
+  collision loop runs 14% fewer host instructions; code without them is unchanged. Checked against QEMU and the differential suite.
 - Saturating narrowing shifts (`sqrshrun`, `sqshrn` and the rest of that family, 16- and 32-bit lanes) run as native code instead of
   in the interpreter. Zenless Zone Zero spent about 7% of its CPU there, in its video decoder; a loop of them is about 47 times
   faster here. The results and the QC flag are checked against QEMU.
