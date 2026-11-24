@@ -244,10 +244,10 @@ namespace arm64emu {
 //   one shared Android runtime image, Tier-2 through calls and returns, a JIT disk cache that holds less memory, gamepad
 //   control of the library and a touch cursor, NativeActivity games on the managed path; see CHANGELOG.md. The v2.0
 //   goals in Docs/roadmap.md are still not complete.
-// 2.0.0-beta.3 (2026-11-24): a JIT that translates about twice as fast, cheaper float compares and widening multiplies,
-//   native saturating narrowing shifts, in-place pinned registers, BIFROST_PROF stall and DNS reports, an app launcher that
-//   keeps a log, and uninstall targets that find a `make bootstrap` install; see CHANGELOG.md. The v2.0 goals in
-//   Docs/roadmap.md are still not complete.
+// 2.0.0-beta.3 (2026-11-24), a large release: graphics calls cost a game much less CPU, the JIT translates about twice as
+//   fast and runs cheaper float compares and widening multiplies, large memcpy/memset run on the host, BIFROST_PROF reports
+//   stalls and an optional Tracy timeline, a per-app Resolution setting, an app launcher that keeps a log, and uninstall
+//   targets that find a `make bootstrap` install; see CHANGELOG.md. The v2.0 goals in Docs/roadmap.md are still not complete.
 constexpr const char* VERSION  = "2.0.0-beta.3";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

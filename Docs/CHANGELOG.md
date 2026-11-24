@@ -8,7 +8,9 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [2.0.0-beta.3] — a JIT that translates twice as fast, cheaper float compares and multiplies, profile reports, a launcher log and uninstall hints (2026-11-24)
+## [2.0.0-beta.3] — games spend much less CPU in graphics calls, the JIT translates twice as fast and runs cheaper float and multiply code, profile reports with a Tracy timeline, a Resolution setting, a launcher log and uninstall hints (2026-11-24)
+
+A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagnostics.
 
 - `make uninstall`, `make uninstall-asgard` and `make uninstall-rootfs` look in `/usr/local` unless you pass `PREFIX`, so they found nothing
   for a `make bootstrap` install and said so without a hint. They now say where the install is and which command removes it (also under
@@ -69,45 +71,6 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
   With `-v` or `BIFROST_STATS_PERIOD` the translator emits the counters (about 15 % slower on CoreMark), so the figure is
   exact for Tier-1 code instead of a small fraction of it; `BIFROST_PROF` alone does not emit them. Persistent-cache
   blocks and Tier-2 regions are not counted.
-
-## [2.0.0-beta.2] — installing and updating that rebuild what changed, a fresh-machine test run, Zygote, shared Android and a faster JIT (2026-11-14)
-
-**2.0.0-beta.2** collects the changes made after 2.0.0-beta.1: installing and updating that rebuild what changed (the app
-launcher, the adapters and the framework, with a warning when Asgard and the emulator are different builds), `make check-fresh`
-to run the whole test suite on a fresh machine, instructions that now match a real ARM CPU, and graphics tests that skip
-what a driver cannot do. It also adds game-window visibility, fullscreen and a remembered size, Activity relaunch on a
-resize, setting up from the library, built-in per-app settings, 4 GiB packages, a realm idle timeout, the AAudio write fix,
-NEON `LD2` to `LD4` and `ST2` to `ST4` in the block, the project site, ASTC textures through BC7 on hosts without ASTC (with a
-lowest-priority, cached transcoder), a swapchain acquire that no longer re-uploads the frame, a faster `/proc/self/pagemap`,
-a crash line that names the library, ASTC transcoding about four times faster in a real game, fewer host instructions per JIT
-block, Tier-2 regions through calls and returns, fork children that keep the JIT, a session Zygote for an app's helper
-processes, microG in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and
-SoundPool, one shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every
-process, NativeActivity games on the managed path that get their window and input, input delivered through each window's
-input channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffers and an app's pointer icons. It is
-not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
-
-- The version is 2.0.0-beta.2 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
-  the generated rootfs `os-release` and the C API comment. Measurements recorded on earlier versions keep their label.
-- Oddmar is recorded as playable (2026-11-08): the maintainer reports the first level plays very well with no stutter noticed,
-  and a frame from their screen recording shows level gameplay. Later levels are not confirmed and stutter was not measured.
-- The project site has a sidebar and separate pages: Home, Install (one-command bootstrap, Debian/Ubuntu packages, Bazzite and
-  updating), Games and Screenshots, replacing the home page's install and screenshot sections (`Tools/Site`). The sidebar closes with a
-  button (animated, remembered in the browser, and folded to the brand row on a phone), and reopens from a button at the page's top left.
-- The site's search and sharing metadata is rewritten: keyword-led page titles and descriptions of 130 to 160 characters, a
-  "Common questions" section on the home page (what it is, Android games on Linux without a phone, Waydroid and qemu-user
-  compared, requirements), structured data for the site, the software and each page's breadcrumb, social image size and alt
-  text, descriptive screenshot alt text, and a sitemap date taken from the newest commit instead of the build day. The README
-  games badge now says 17 playable of 20.
-- The README's performance tables are re-measured (2026-11-08): CoreMark 14,874 iterations/s (shipped build) and 14,753
-  (headless) against 12,711 for alpha.2 and 7,992 for QEMU 11.1.1, every CRC valid, and the `bench_*` speedups are 55x to 97x.
-  Method, limits and the near-limit 160,000 iteration count are in [JIT.md](archive/JIT-history.md#coremark-re-measurement-2026-11-08).
-- The benchmark runner's CoreMark count is 200,000 iterations (`crcfinal` 0x4983, the value QEMU 11.1.1 prints): 160,000
-  finished in 9.7 s on 2026-11-10, under CoreMark's ten-second minimum, so every run was reported invalid.
-- The site's Screenshots page showed no images: its relative `images/...` paths resolved below `/screenshots/`, so every request was
-  a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
-  captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
-  table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
 ### Added (`BIFROST_PROF` names the call behind a freeze)
 
@@ -207,6 +170,45 @@ not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
 - With two threads, `munmap` could free an address before the translations of the code there were dropped. A thread that mapped
   the address in that moment, such as a program loading a library, could run the old code. `mmap` now drops the translations of
   the range it returns. A new test, `jit_unmap_reuse_race`, failed on every run before and passes now.
+
+## [2.0.0-beta.2] — installing and updating that rebuild what changed, a fresh-machine test run, Zygote, shared Android and a faster JIT (2026-11-14)
+
+**2.0.0-beta.2** collects the changes made after 2.0.0-beta.1: installing and updating that rebuild what changed (the app
+launcher, the adapters and the framework, with a warning when Asgard and the emulator are different builds), `make check-fresh`
+to run the whole test suite on a fresh machine, instructions that now match a real ARM CPU, and graphics tests that skip
+what a driver cannot do. It also adds game-window visibility, fullscreen and a remembered size, Activity relaunch on a
+resize, setting up from the library, built-in per-app settings, 4 GiB packages, a realm idle timeout, the AAudio write fix,
+NEON `LD2` to `LD4` and `ST2` to `ST4` in the block, the project site, ASTC textures through BC7 on hosts without ASTC (with a
+lowest-priority, cached transcoder), a swapchain acquire that no longer re-uploads the frame, a faster `/proc/self/pagemap`,
+a crash line that names the library, ASTC transcoding about four times faster in a real game, fewer host instructions per JIT
+block, Tier-2 regions through calls and returns, fork children that keep the JIT, a session Zygote for an app's helper
+processes, microG in under a second, faster launch preparation, a parse cache that survives updates, static AudioTracks and
+SoundPool, one shared read-only copy of Android for every game, a JIT disk cache that no longer holds its files in every
+process, NativeActivity games on the managed path that get their window and input, input delivered through each window's
+input channel, a controller cursor that hides the desktop pointer, odd-sized YUV buffers and an app's pointer icons. It is
+not a completed beta scope: the [v2.0 goals](roadmap.md) remain in progress.
+
+- The version is 2.0.0-beta.2 in `Version.hpp`, the Makefile, README, the sample config, the Debian package and manual pages,
+  the generated rootfs `os-release` and the C API comment. Measurements recorded on earlier versions keep their label.
+- Oddmar is recorded as playable (2026-11-08): the maintainer reports the first level plays very well with no stutter noticed,
+  and a frame from their screen recording shows level gameplay. Later levels are not confirmed and stutter was not measured.
+- The project site has a sidebar and separate pages: Home, Install (one-command bootstrap, Debian/Ubuntu packages, Bazzite and
+  updating), Games and Screenshots, replacing the home page's install and screenshot sections (`Tools/Site`). The sidebar closes with a
+  button (animated, remembered in the browser, and folded to the brand row on a phone), and reopens from a button at the page's top left.
+- The site's search and sharing metadata is rewritten: keyword-led page titles and descriptions of 130 to 160 characters, a
+  "Common questions" section on the home page (what it is, Android games on Linux without a phone, Waydroid and qemu-user
+  compared, requirements), structured data for the site, the software and each page's breadcrumb, social image size and alt
+  text, descriptive screenshot alt text, and a sitemap date taken from the newest commit instead of the build day. The README
+  games badge now says 17 playable of 20.
+- The README's performance tables are re-measured (2026-11-08): CoreMark 14,874 iterations/s (shipped build) and 14,753
+  (headless) against 12,711 for alpha.2 and 7,992 for QEMU 11.1.1, every CRC valid, and the `bench_*` speedups are 55x to 97x.
+  Method, limits and the near-limit 160,000 iteration count are in [JIT.md](archive/JIT-history.md#coremark-re-measurement-2026-11-08).
+- The benchmark runner's CoreMark count is 200,000 iterations (`crcfinal` 0x4983, the value QEMU 11.1.1 prints): 160,000
+  finished in 9.7 s on 2026-11-10, under CoreMark's ten-second minimum, so every run was reported invalid.
+- The site's Screenshots page showed no images: its relative `images/...` paths resolved below `/screenshots/`, so every request was
+  a 404. They are absolute now, a check over HTTP in a real browser finds all of them loading, and the gallery grew from 6 to 15
+  captures (Oddmar, Arknights, Umamusume, Azur Lane, SpongeBob, Doom 3, Minecraft Weekend and Neverball were added to the README's
+  table, which the site is built from). The home page says a gamepad can act as a touch cursor too.
 
 ### Fixed (graphics tests skip what the driver cannot do)
 
