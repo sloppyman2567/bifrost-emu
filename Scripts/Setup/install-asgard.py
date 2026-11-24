@@ -498,6 +498,19 @@ def uninstall(prefix):
         print(f"removed {tree}")
     else:
         print(f"nothing to remove at {tree}")
+        # make uses /usr/local unless PREFIX is set, and under sudo HOME may be root's: look in the usual places.
+        homes = [Path.home()]
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user and sudo_user != "root":
+            try: homes.append(Path(pwd.getpwnam(sudo_user).pw_dir))
+            except KeyError: pass
+        seen = {prefix}
+        for other in [home / ".local" for home in homes] + [Path("/usr/local")]:
+            if other in seen: continue
+            seen.add(other)
+            if (other / "share/bifrost/asgard").is_dir():
+                note = " (as yourself, without sudo)" if os.geteuid() == 0 and other != Path("/usr/local") else ""
+                print(f"  there is one under {other}: run {sys.argv[0]} --uninstall --prefix {other}{note}")
     if wrapper.is_file() and WRAPPER_TAG in wrapper.read_text():
         wrapper.unlink()
         print(f"removed {wrapper}")

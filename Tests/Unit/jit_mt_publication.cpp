@@ -389,7 +389,14 @@ int main() {
     std::vector<std::thread> threads;
     for (unsigned k = 0; k < 8; ++k) threads.emplace_back(run);
     for (auto& t : threads) t.join();
-    if (!j->tier2_regions.load()) { std::fputs("no Tier-2 region was published by the workers\n", stderr); ++failures; }
+    if (!j->tier2_regions.load()) {
+        // Which stage lost it: no loop got hot, no trace was taken, the trace was declined or sent back to profile again.
+        std::fprintf(stderr, "no Tier-2 region was published by the workers (hot heads %llu, traces %llu, declined %llu, "
+                     "profile retries %llu)\n", (unsigned long long)j->tier2_hot_heads.load(),
+                     (unsigned long long)j->tier2_traces.load(), (unsigned long long)j->tier2_profit_rejections.load(),
+                     (unsigned long long)j->tier2_profile_retries.load());
+        ++failures;
+    }
     unchanged("after the workers");
     j->invalidate_range(body, 24); // must revoke a region whose head is on another page
     unchanged("after invalidate_range");

@@ -64,7 +64,26 @@ has_loader() {
 }
 
 if [ "$UNINSTALL" = 1 ]; then
-    if [ ! -e "$DEST" ]; then echo "nothing to remove at $DEST"; exit 0; fi
+    if [ ! -e "$DEST" ]; then
+        echo "nothing to remove at $DEST"
+        # The same rootfs in the other standard places. make uses /usr/local unless PREFIX is set, and under sudo
+        # HOME may be root's, so the invoking user's home counts too.
+        REL="${DEST#"$BASE"/}"
+        homes=("${HOME:?HOME is not set}")
+        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+            sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6) && [ -n "$sudo_home" ] && homes+=("$sudo_home")
+        fi
+        seen=" $BASE "
+        for cand in "${XDG_DATA_HOME:-$HOME/.local/share}/bifrost" "${homes[@]/%//.local/share/bifrost}" /usr/local/share/bifrost; do
+            case "$seen" in *" $cand "*) continue ;; esac
+            seen+="$cand "
+            [ -e "$cand/$REL" ] || continue
+            note=""
+            [ "$cand" != /usr/local/share/bifrost ] && [ "$(id -u)" = 0 ] && note=" (as yourself, without sudo)"
+            echo "  there is one at $cand/$REL: run $0 --uninstall --prefix ${cand%/share/bifrost}${PROFILE:+ --profile $PROFILE}$note"
+        done
+        exit 0
+    fi
     # Only delete something that looks like a rootfs, never an arbitrary directory.
     has_loader "$DEST" || { echo "refusing to remove $DEST: no AArch64 loader inside" >&2; exit 1; }
     rm -rf -- "$DEST"

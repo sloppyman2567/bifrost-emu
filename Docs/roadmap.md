@@ -1,7 +1,7 @@
 # bifrost-emu v2.0 roadmap
 
-Status: in progress. The current pre-release is **2.0.0-beta.2** (November 14, 2026): its scope is
-only partly met. Updated November 23, 2026.
+Status: in progress. The current pre-release is **2.0.0-beta.3** (November 24, 2026): its scope is
+only partly met. Updated November 24, 2026.
 
 Everything below is a development target, not a compatibility guarantee or a release date. "Done" means the contract is
 implemented and checked as the linked document says, not that every app using it works. Dated checkpoints, measurements
@@ -41,7 +41,8 @@ Not the focus: games behind attestation or anti-cheat, and compatibility sweeps 
 | 2.0.0-alpha.2 (2026-10-21) | Released; goals partly met | Toasts, `NsdManager`, all of `IAppOpsService`, declined Settings intents, scaled fixed-size apps |
 | 2.0.0-alpha.3 (2026-11-01) | Released; WebView, media and ad scope mostly open | `media.extractor`, POSIX timers, installable Asgard and rootfs, `bifrost-emu app.apk`, window stats |
 | 2.0.0-beta.1 (2026-11-03) | Released as a label; scope partly met | Library cards, per-app settings, clear-data/uninstall, run-ended cards; app Keystore, WebView GPU fences, Vulkan for apps through a guest HAL, a faster Tier-1 JIT |
-| 2.0.0-beta.2 (2026-11-14) | Current; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns, NativeActivity games |
+| 2.0.0-beta.2 (2026-11-14) | Released; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns, NativeActivity games |
+| 2.0.0-beta.3 (2026-11-24) | Current; a large release, scope partly met | Graphics calls cost a game much less CPU, the JIT translates about twice as fast and runs cheaper scalar float compares and widening multiplies, large memcpy and memset run on the host, `BIFROST_PROF` stall reports and a Tracy timeline, a per-app Resolution setting, an app launcher that keeps a log, and uninstall targets that find a `make bootstrap` install |
 
 **In 2.0.0-beta.2, since the beta.1 label:** the desktop library can be driven with a gamepad (a gamepad layout, menus,
 confirmations and the settings page drawn inside its window); per-app `window_mode` and `controller` settings, with a touch
@@ -141,6 +142,16 @@ app exit leaves the library and the other apps usable.
   checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)).
   Position and fullscreen are deliberately not remembered (a Wayland client cannot place its window). Open: a real
   compositor check, including whether the window visibly resizes once at launch. `--fullscreen` still belongs to the library.
+- Rotation and scaling of the host window (reported 2026-11-24, planned, not started). Umamusume Global sometimes resizes itself past
+  the right edge of a 3440x1440 monitor when it turns to landscape for a race. Read from the code, not yet reproduced live:
+  `set_orientation` gives a fixed-size app a window of the panel's other shape (1230x692 desktop units, 389x692 in portrait, per the
+  [reference](Android/ANDROID_RUNTIME_REFERENCE.md)), a resize keeps the window's top-left corner, and a Wayland client can neither
+  move its window nor read its position, so a window that starts right of about 490 units reaches past the edge of a desktop 1720
+  units wide (3440 px at 2x). Decided with the maintainer: by default a fixed-size app's host window keeps its size on rotation and
+  the panel refits inside it (people mostly play full screen, and the window is the user's, as for any Linux app); a per-app setting
+  next to Resolution reshapes the window as it does today. First a probe window on KWin to confirm the cause, and
+  `make test-android-sdl-backend` (fake SDL3) updated for the new default. The wider aim stays open: content that scales seamlessly
+  and windows that behave like other Linux windows at fractional scales and across monitors, with no other report so far.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested
   with the real emulator, not with media services attached; the retired broker leaves its 750 MB service root until the next
   sweep). Open: every service child (WebView service and renderers, microG) is a whole emulated runtime of 350 to 450 MiB
@@ -330,24 +341,21 @@ Also done on 2026-11-23: a pinned register updated by a loop (`add x0, x0, #1`) 
 (CoreMark about +0.5%, busybox gzip -1.3% cycles; [details](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23));
 the saturating narrowing shifts (`sqrshrun`, `sqshrn`, ...) are native for 16- and 32-bit lanes (a loop of them 47 times faster; the
 interpreter's share of Zenless Zone Zero fell from about 8.5% to 4.9%; [details](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)).
-The widening multiplies (`umull`, `smull`, `umaddl` and the rest) are `SEXT`/`ZEXT`, `MUL` and `ADD` instead of a fixed-register emitter that
-spilled and reloaded: the `collide` kernel runs 14.0% fewer host instructions per frame, `skinning` 2.6%, CoreMark no change
-([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)). A scalar `fcmp` followed by a
-conditional branch is one `ucomis` and one `jcc` (two for equal and not-equal; 9 instructions before), and the NZCV store is dropped when only scalar FP
-arithmetic precedes the next rewrite: `cull` 11.7% fewer host instructions per frame, `collide` 6.5%, `particles` 4.5%
-([details](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)). No game was run with either.
+The widening multiplies go through the register allocator ([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)),
+and a scalar `fcmp` followed by a branch is one compare and one or two jumps
+([details](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23),
+[equal and not-equal](archive/JIT-history.md#fp-equality-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)): up to 14% (multiply)
+and 12% (compare) fewer host instructions per frame in the kernels that use them. No game was run with either.
 Measured the same day: Tier-2 regions are +4.7% on CoreMark at 200,000 iterations (+2.1% at 40,000; still opt-in, no game run with
 it), and on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
 
 Open, in priority order (the maintainer put translation speed ahead of the cross-block work on 2026-11-23, so item 1 comes first):
 
-1. **Translation cost.** Translating the ART bootstrap's 93 thousand blocks took 1,056 ms; dropping the Tier-1 SSA adapter, the per-block
-   verification footprints and the hash maps of `optimize_ir` made it about 500 ms (5.4 us per block; the startup 1.57 s to 1.02 s,
-   [details](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
-   Left in the profile: `translate_block` itself (7.6%), `optimize_ir` (6.8%, spread over its passes), the guard bookkeeping
-   (`compile_guarded_mem`, `swap_guard_state`, 2.7%: every deferred guard copies a ~460-byte `GuardState`), the vector and FP cache scans
-   and `remember_code_granules` (about 2% each). Not measured: a game, or several threads compiling at once. Open: whether Tier-1 should run SSA on
-   hot blocks only (about 2% of CoreMark's cycles).
+1. **Translation cost.** Translating the ART bootstrap now takes about half the time (1,056 to about 500 ms; the startup 1.57 s to
+   1.02 s, [details](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
+   Left in the profile: `translate_block` itself (7.6%), `optimize_ir` (6.8%), the guard bookkeeping (2.7%: every deferred guard
+   copies a ~460-byte `GuardState`), the vector and FP cache scans and `remember_code_granules` (about 2% each). Not measured: a game,
+   or several threads compiling at once. Open: whether Tier-1 should run SSA on hot blocks only (about 2% of CoreMark's cycles).
 2. **State moves and copies around the arithmetic.** Real FP math is 2-7% of the generated ops in games and in the game-style
    kernels; the rest is moving guest state, copying vector registers and checking results. One track, in three parts:
    - *Inside a block* (game-style kernels, 2026-11-23): XMM moves and zeroing are 28-36% of the generated ops, vector state
