@@ -1536,7 +1536,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         make_executable();
         return fn;
     }
-    record_verification_stores(ir_block, start_pc, entry);
+    // Store footprints serve differential replay alone (Dispatch.cpp, gated by the same flag); building them cost two
+    // 4096-entry tables (36 KB cleared) per translated block.
+    if (dbg().jit_verify) record_verification_stores(ir_block, start_pc, entry);
     attach_code_words(entry, !has_inlined_leaf);
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;

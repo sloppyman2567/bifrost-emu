@@ -10,6 +10,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- Translating code is about 40% cheaper (the JIT no longer runs its SSA pass on every block, and stops building a verification
+  record nobody reads outside `BIFROST_JIT_VERIFY`). Starting the real Android runtime went from 1.58 s to 1.15 s. Generated code is
+  about 2% slower on CoreMark; `BIFROST_TIER1_SSA=1` brings the old pass back.
 - A float compare followed by a branch (`fcmp` then `b.lt`, `b.mi`, `b.gt` and the rest, except equal and not-equal) is one compare
   and one jump instead of nine instructions, and the condition flags are no longer saved when the next instructions only do float
   arithmetic before another compare. A culling loop runs 12% fewer host instructions, a collision loop 6.5% and a particle loop

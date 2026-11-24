@@ -240,9 +240,10 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     const auto& fwd_ranges = dbg().fwd_ranges;
     if (!fwd_ranges.empty() && !bifrost::DebugFlags::in_ranges(fwd_ranges, block.start_pc))
         fwd_requested = false;
-    // Tier-2 still concatenates legacy blocks with globally allocated vregs;
-    // its region needs one SSA graph rather than independently lowered blocks.
-    block.ssa_optimized = !force_fwd && fwd_requested && !dbg().no_ssa &&
+    // Tier-1 blocks keep the legacy scalar pipeline unless BIFROST_TIER1_SSA=1: the SSA adapter was a third of translation time
+    // for under 1% fewer instructions (Docs/JIT.md). Tier-2 still concatenates legacy blocks with globally allocated vregs;
+    // its region needs one SSA graph (RegionPlanner) rather than independently lowered blocks.
+    block.ssa_optimized = !force_fwd && fwd_requested && dbg().tier1_ssa && !dbg().no_ssa &&
         optimize_ir_ssa(block, dbg().ir_validate);
     bool block_has_atomics = false;
     if (fwd_requested) {

@@ -296,10 +296,11 @@ system-register operations, barriers, and guest-state stores retain order;
 loads from guest memory are never commoned or speculated by SSA. Flag consumers
 remain ordered effects because NZCV is not yet an SSA value.
 
-Tier-1 runs this pipeline for supported scalar blocks before the existing
-constant folding passes. `BIFROST_NO_SSA=1` selects the legacy path;
-`BIFROST_NO_FWD=1` and FWD range restrictions also bypass Tier-1 SSA forwarding.
-The legacy forwarding cache does not run again on an SSA-lowered block.
+Tier-2 region planning runs this pipeline (`BIFROST_NO_SSA=1` turns that off). Tier-1 does not by default: the adapter was a third of
+translation time for 0.6% fewer instructions and about 2% fewer cycles on CoreMark
+([measured](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-2026-11-23)).
+`BIFROST_TIER1_SSA=1` runs it on supported scalar blocks before the existing constant folding passes (`BIFROST_NO_FWD=1` and FWD
+range restrictions bypass its forwarding); the legacy forwarding cache does not run again on an SSA-lowered block.
 `BRCOND_SKIP`, direct FP/SIMD operations, calls/helpers, and atomics retain their
 existing pipeline until their operand and state effects are modeled explicitly.
 This is scalar value SSA, not MemorySSA or a complete FP/vector conversion.
@@ -1887,6 +1888,10 @@ by method rather than by fixed address ranges.
   onto the dumped blocks and each instruction classified by operand pattern; `instructions:u` skids too far to attribute
   single instructions. The dump holds pre-patch bytes, so chain slots show as `nopl` although they execute as jumps.
   `BIFROST_PROF` (above) gives the coarser split without perf.
+- **Translation time.** The `[JIT] compile:` line of `bifrost-emu -v` gives blocks, milliseconds and microseconds per block. The ART
+  bootstrap (`Scripts/Android/test_android_jni.py`, which prints its command) translates about 93 thousand blocks in 1.6 s, so it
+  shows translation cost without a window; `perf record` without call graphs groups by function, and per-call-site costs of `memset`
+  and `malloc` need a throwaway `LD_PRELOAD` shim because `perf_event_paranoid` may forbid call graphs.
 - **Split a ratio to native** into guest instructions over native instructions (the guest compiler's share, which the JIT
   cannot change) and host instructions per guest instruction (the JIT's share).
 - **CoreMark.** `Scripts/Bench/run_benchmarks.py` runs 200,000 iterations (`crcfinal` 0x4983, the value QEMU 11.1.1
@@ -1901,6 +1906,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Translation cost: no Tier-1 SSA, no store footprints outside verify (2026-11-23)](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-2026-11-23)
 - [FP compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)
 - [Widening multiply-accumulate is extend, multiply and add (2026-11-23)](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)
 - [Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)

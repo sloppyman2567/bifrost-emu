@@ -2,6 +2,40 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Translation cost: no Tier-1 SSA, no store footprints outside verify (2026-11-23)
+
+Chosen by the maintainer over cross-block register allocation: make translation itself cheaper first. Workload: the headless ART
+bootstrap (`Scripts/Android/test_android_jni.py`'s command in a fixed copy of its root), real ART creating its VM: 92.7 thousand blocks
+translated in a 1.6 s run, of which the JIT's own `[JIT] compile:` line says about 1,050 ms were translation (11.3 us per block).
+`perf record` call graphs are not permitted here (`perf_event_paranoid` 2), so the flat profile was grouped by function: the scalar SSA
+stages (build, optimize, lower, validate) were 11.3% of all samples, `optimize_ir` 6.9%, `translate_block` 5.6%, codegen and register
+allocation 11.6%, `malloc` and `free` 18.7%, hash-table inserts and rehashing 7.1%.
+
+Two changes, both removing work:
+- Tier-1 no longer runs the scalar SSA adapter (`optimize_ir_ssa`) on every block. It stays for Tier-2 planning and behind
+  `BIFROST_TIER1_SSA=1`. Translation: 1,051 to 695 ms (-34%), 11.3 to 7.5 us per block.
+- `record_verification_stores` cleared two 4096-entry tables (36 KB) for every translated block and built a footprint nothing reads
+  except differential replay (`BIFROST_JIT_VERIFY`, `Dispatch.cpp`). It now runs only then. Translation: 705 to 618 ms (-12%). Found
+  by a throwaway `LD_PRELOAD` shim that recorded the caller and size of every `memset` of 256 bytes or more (two sites ran once per
+  block, 32.8 KB and 4.1 KB); a 4096-entry refill of `vreg_last_use_op_` per block was the third, worth about 1% (697 to 681 ms in one pair of
+  runs, 697 to 695 in the other) and not kept.
+
+Together: translation 1,051 to 635 ms (-40%, 6.8 us per block); the whole ART startup 1.575 s to 1.154 s elapsed (-27%), 6.41 to 4.59 G
+cycles (-28%), 10.80 to 8.11 G instructions (-25%), over six runs each.
+
+What SSA bought, which is what is given up: CoreMark at 200,000 iterations executes 190.03 G instructions with it and 191.24 G without
+(+0.64%), same CRC; over 16 code placements at 20,000 iterations the mean cycles were 5.390 G with it and 5.500 G without (+2.0%, the
+ranges overlap: 5.20-5.62 and 5.41-5.66 G); the ART code is 8.18 MB with it and 8.21 MB without (+0.4%); the nine game-style kernels
+move by under 0.1% either way. Not measured: a game.
+
+Checked: `verify_jit.sh` (113 differential fixtures, 12 threaded oracle runs), 100 name-filtered unit tests, 65 Toybox and real-world
+programs, and `make test-ir-ssa` (21,839 checks, which exercise the adapter directly) pass. `jit_mt_publication` timed out once in the
+unit run: it builds the host library first, my header change made that a full rebuild inside its 120 s budget; alone it passes (twice).
+
+Left in the profile after this (share of all samples): `translate_block` 6.8%, `optimize_ir` 8.7% with its `unordered_map`s of vregs (about 3%
+more in hash-table code), `malloc`/`free` about 4%, `compile_guarded_mem` with `swap_guard_state` 2.4%, `vec_cache_may_enable` and
+`fp_cache_may_enable` 1.5%, `remember_code_granules` with its map 1.6%.
+
 ## FP compare and branch on the raw ucomis flags (2026-11-23)
 
 Next in the block that exposed the widening multiply: `fcmpe s31, s30; b.mi` was `ucomiss`, then `seta`, `setb`, `cmovp` and a `cmp`

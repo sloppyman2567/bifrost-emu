@@ -110,7 +110,8 @@ struct DebugFlags {
     bool tier2_hits_fixed = false;  // BIFROST_TIER2_HITS=N: Tier-2 candidates need N entries and skip the rate gate
     uint32_t tier2_hits = 1000;
     int fp_native_gate = -1;  // BIFROST_FP_NATIVE_GATE=mask: FP op classes the translator handles natively (-1 = all)
-    bool no_ssa = false; // BIFROST_NO_SSA — compare with the legacy scalar IR pipeline
+    bool no_ssa = false; // BIFROST_NO_SSA — Tier-2 regions use the legacy scalar IR pipeline too
+    bool tier1_ssa = false; // BIFROST_TIER1_SSA=1 — run the scalar SSA adapter on Tier-1 blocks (slower to translate, see Docs/JIT.md)
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;  // [lo, hi) guest pcs
     Ranges fwd_ranges;   // BIFROST_FWD_RANGES=lo-hi,...  — FWD only for blocks starting here
@@ -285,6 +286,7 @@ struct DebugFlags {
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.no_ssa = env("BIFROST_NO_SSA");
+        f.tier1_ssa = env("BIFROST_TIER1_SSA");
         f.ir_validate = all || env("BIFROST_IR_VALIDATE");
         f.fwd_ranges = parse_ranges(std::getenv("BIFROST_FWD_RANGES"));
         f.block_trace = parse_ranges(std::getenv("BIFROST_BLOCK_TRACE"));
