@@ -105,6 +105,17 @@ it under the guide's Recorded changes.
   `compile_simd_structure_` uses XMM0-2 and XMM12-15 only; `vec_inst_effects` declares that clobber set (0xF007) and the
   registers read or written, so change them together. Tier-2 stops at the op. A post-index `Rm` is any of X0-X30 and only 31
   selects the immediate: the interpreter, the helper and the translator agree, and `jit_neon_struct` checks X30.
+- `SMADDL`/`UMADDL`/`SMSUBL`/`UMSUBL` (and `smull`, `umull`, `smnegl`, `umnegl`) are not IR ops: the translator lowers them to `SEXT`/`ZEXT`
+  32, `MUL` and `ADD`/`SUB`, so the allocator sees them. Do not bring back a fixed-register emitter for a multiply form. `IRInst::aux`
+  carries SIMD element and lane numbers; no op keeps a vreg in it. `jit_maddl` compares against a multiply-free reference: a C
+  widening multiply compiles into the instruction under test.
+- An `FP_CMP` directly followed by a `BRCOND` (Tier-1 only, any condition but AL/NV) leaves raw `ucomis` flags: the host
+  flags are in no convention then, only `fp_raw_flags_live()` (the op index of that BRCOND) says so, and the branch picks one jcc
+  and swaps the compare's operands where `fp_raw_flags_cc` says. EQ/NE add a `jp` (unordered sets ZF): EQ hops over its `je`, NE
+  takes the branch; `note_selfloop_jcc` records only the ZF jump, the `jp` keeps landing on the patchable slot. Nothing but
+  that BRCOND may read them: every exit that needs NZCV converts them with `materialize_fp_raw_flags_to_pstate` before its pack,
+  on both paths. A new consumer or an op between the two must not see `fp_raw_flags_live()`; `jit_fcmp_branch` covers every
+  condition and exit shape.
 - `FP_CMP` (not `FCCMP`) leaves SUB-convention host flags (`flags_in_host_`, `flags_from_sub_`) with no pstate store when its
   consumer, found past constants, moves, register loads and adds, is a conditional branch or an integer select; `fcsel`, `mrs`
   and anything else keep the branchy pstate sequence (jumps on the compare's own PF/CF/ZF, never `pushfq`), which measured faster
@@ -140,6 +151,12 @@ it under the guide's Recorded changes.
 - Native saturating integer SIMD must set FPSR.QC like the interpreter
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.
+- Translation cost counts: a pass that costs more translation time than the code it saves is not worth running on every block
+  (`[JIT] compile:` in `-v`; the Tier-1 SSA adapter was dropped for that, `BIFROST_TIER1_SSA=1` brings it back). Per-block state
+  that only a debug mode reads is built only in that mode: `record_verification_stores` runs under `BIFROST_JIT_VERIFY` alone, so
+  anything new that replay needs from a block must be recorded there too. Clearing a 4096-entry table per block is a cost, and so is a hash
+  node per vreg: `optimize_ir` keeps its per-block state in thread-local `EpochTable`s (O(1) clear, no allocation), so a new per-block map
+  keyed by vreg or ARM register belongs there, not in an `unordered_map`.
 - Run `make verify` and relevant guest regressions after behavior changes. A
   file split also needs a complete link/library build: missing definitions and
   old archive members can evade per-file compilation checks.
@@ -154,7 +171,8 @@ it under the guide's Recorded changes.
 - An exit may omit its NZCV store only through `exit_flags_dead` (public Tier-1
   compiles): the successor's first words must overwrite all four flags
   (`ADDS`/`SUBS`/`ANDS`/`FCMP`) after nothing but flag-neutral, fault-free, non-branching
-  integer instructions. A successor that merely does not read the flags proves nothing.
+  integer or scalar FP data-processing instructions (`fcsel` and `fccmp` read the flags and end the scan as live;
+  FP loads and stores are other classes and also end it). A successor that merely does not read the flags proves nothing.
   Extend `nzcv_dead_in`'s neutral list only with instructions that cannot fault, trap,
   branch or read NZCV. The words become a block dependency (`flag_dep_table_`, checked
   by `invalidate_range`, `remember_code_granules`, `staged_entry_invalidated` and

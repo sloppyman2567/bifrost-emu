@@ -314,9 +314,7 @@ bool FrostJIT::plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* mo
             case IROp::REV16: case IROp::REV32: case IROp::REV64:
             case IROp::UBFM: case IROp::SBFM: case IROp::EXTR: case IROp::BFM:
             case IROp::UDIV: case IROp::SDIV:
-            case IROp::SMADDL: case IROp::UMADDL:
             case IROp::SMULH: case IROp::UMULH:
-            case IROp::SMSUBL: case IROp::UMSUBL:
                 return true;
             default:
                 return false;

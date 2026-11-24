@@ -105,8 +105,10 @@ V = bit 0; the other bits are don't-care.
 - C++ goes through `nzcv()`/`set_nzcv()` (the architectural view) and the flag accessors; only save-and-restore code copies
   the raw value. Signal frames, ptrace, the GDB stub, the C API and differential verification see the architectural view.
 - `nzcv_dead_in` drops an exit's pack only when the successor rewrites all four flags before anything can fault, because a
-  guest signal frame must show the flags of the faulting instruction
-  ([Dead NZCV stores at block exits](archive/JIT-history.md#dead-nzcv-stores-at-block-exits-2026-10-20)).
+  guest signal frame must show the flags of the faulting instruction. Integer data processing and scalar FP data processing
+  (everything in the FP class except `fcsel` and `fccmp`, which read the flags) are skipped on the way to the rewrite
+  ([Dead NZCV stores at block exits](archive/JIT-history.md#dead-nzcv-stores-at-block-exits-2026-10-20),
+  [FP compare and branch](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)).
 
 `jit_flags_exit_dead` (section K faults on a successor's first load and checks the frame's NZCV), `jit_msr_nzcv`,
 `jit_fcmp_flags`, `jit_ccmp` and `jit_branch_flags` cover the conversions and the memory tests.
@@ -255,6 +257,16 @@ true path is `cmp` (`CCMN`: `mov` + `add` into a scratch register); the false pa
 the host in the op's carry convention and store nothing. AL and NV always compare. `jit_ccmp` covers every condition against
 a C model that also passes under QEMU.
 
+### Widening multiply-accumulate
+
+`SMADDL`, `UMADDL`, `SMSUBL`, `UMSUBL` and their aliases (`smull`, `umull`, `smnegl`, `umnegl`) have no IR op. The translator emits
+`SEXT` (signed) or `ZEXT` (unsigned) of 32 bits for both W operands, a 64-bit `MUL`, then `ADD` or `SUB` against Xa; `load_arm_reg`
+reads XZR as the constant 0, which the optimizer folds. The low 64 bits of the product are the same for the signed and the unsigned
+reading once both operands are extended, so one `MUL` serves all four. The allocator, the immediate forms and the pin updates see
+ordinary ops, and nothing is flushed around them. `jit_maddl` covers every form against a reference that does not multiply with a
+widening instruction (GCC compiles that into the instruction under test)
+([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)).
+
 ## Scalar SSA
 
 `Source/FrostJIT/IR/SSA/SSA.hpp` and `Source/FrostJIT/IR/SSA/SSA.cpp` define a scalar SSA graph with
@@ -284,10 +296,11 @@ system-register operations, barriers, and guest-state stores retain order;
 loads from guest memory are never commoned or speculated by SSA. Flag consumers
 remain ordered effects because NZCV is not yet an SSA value.
 
-Tier-1 runs this pipeline for supported scalar blocks before the existing
-constant folding passes. `BIFROST_NO_SSA=1` selects the legacy path;
-`BIFROST_NO_FWD=1` and FWD range restrictions also bypass Tier-1 SSA forwarding.
-The legacy forwarding cache does not run again on an SSA-lowered block.
+Tier-2 region planning runs this pipeline (`BIFROST_NO_SSA=1` turns that off). Tier-1 does not by default: the adapter was a third of
+translation time for 0.6% fewer instructions and about 2% fewer cycles on CoreMark
+([measured](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
+`BIFROST_TIER1_SSA=1` runs it on supported scalar blocks before the existing constant folding passes (`BIFROST_NO_FWD=1` and FWD
+range restrictions bypass its forwarding); the legacy forwarding cache does not run again on an SSA-lowered block.
 `BRCOND_SKIP`, direct FP/SIMD operations, calls/helpers, and atomics retain their
 existing pipeline until their operand and state effects are modeled explicitly.
 This is scalar value SSA, not MemorySSA or a complete FP/vector conversion.
@@ -432,11 +445,19 @@ References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsi
   [hi], 0` for the upper-half zero and `insertps` for the result write, both slower on a culling kernel.
 - **NaN checks stay exact.** Dropping one needs a result that cannot be NaN or whose payload nothing can observe; in the
   measured FP kernels 3 of 277 checked ops qualify. Relaxing NaN semantics is the maintainer's decision.
-- **Compares.** When `fcmp` feeds a conditional branch or an integer select, `FP_CMP` leaves its result in the host flags as
+- **Compares.** A scalar `fcmp` whose next op is a `BRCOND` on any condition but AL/NV leaves the raw `ucomis` flags in the host
+  (`fp_raw_flags_live()`, valid only for that next op) and the branch is one `jcc`: GE `jae`, LT `jb`, GT `ja`, LE `jbe`, VS `jp`,
+  VC `jnp` after `ucomis a, b`, and HI `jb`, LS `jae`, MI `ja`, PL `jbe`, CS `jbe`, CC `ja` after the swapped `ucomis b, a`
+  (`fp_raw_flags_cc`; unordered sets CF, ZF and PF, which each of those reads as ARM does). EQ and NE are `je`/`jne` behind a
+  `jp`, since unordered sets ZF too: EQ is `jp over; je taken`, NE is `jp taken; jne taken`. An exit whose successor reads
+  NZCV converts the raw flags itself (`materialize_fp_raw_flags_to_pstate`: the sequence below, then the pack), so a live exit
+  costs what the old sequence did and a dead one nothing. Tier-2 uses the sequence below.
+  When `fcmp` feeds an integer select or a branch that does not qualify, `FP_CMP` leaves its result in the host flags as
   `SUBS` does: `seta`, `setb` and a `cmovp` pick two small integers, and one `cmp` of them leaves the flags a subtraction
   would (greater 1-0, equal 0-0, less 0-1, unordered 0x80000000-1). A compare feeding `fcsel`, `mrs` or anything else keeps
   the branchy sequence, which jumps on PF, CF and ZF directly; lazy flags there were slower on a clamp loop. `FCCMP` is
-  unchanged. `jit_fcmp_flags` checks every pair of special values, both precisions, all forms and consumers.
+  unchanged. `jit_fcmp_flags` checks every pair of special values, both precisions, all forms and consumers, and `jit_fcmp_branch` every
+  condition against every outcome with live, dead, `fcsel`-reading and `fccmp`-reading exits and loop back-edges.
 - **By element.** Scalar FMUL, FMULX, FMLA and FMLS by element are `FP_BINOP`, `FMADD` and `FMSUB` with a `lane` (IR
   `cond` = element + 1; `fp_decode::scalar_fp_by_element`). `fp_load_lane` moves the element into scratch (`pshufd` from a
   pinned XMM, or a load from memory); the low-half FP cache reads an upper-half element from memory. Vd is written after the
@@ -1868,6 +1889,10 @@ by method rather than by fixed address ranges.
   onto the dumped blocks and each instruction classified by operand pattern; `instructions:u` skids too far to attribute
   single instructions. The dump holds pre-patch bytes, so chain slots show as `nopl` although they execute as jumps.
   `BIFROST_PROF` (above) gives the coarser split without perf.
+- **Translation time.** The `[JIT] compile:` line of `bifrost-emu -v` gives blocks, milliseconds and microseconds per block. The ART
+  bootstrap (`Scripts/Android/test_android_jni.py`, which prints its command) translates about 93 thousand blocks in 1.6 s, so it
+  shows translation cost without a window; `perf record` without call graphs groups by function, and per-call-site costs of `memset`
+  and `malloc` need a throwaway `LD_PRELOAD` shim because `perf_event_paranoid` may forbid call graphs.
 - **Split a ratio to native** into guest instructions over native instructions (the guest compiler's share, which the JIT
   cannot change) and host instructions per guest instruction (the JIT's share).
 - **CoreMark.** `Scripts/Bench/run_benchmarks.py` runs 200,000 iterations (`crcfinal` 0x4983, the value QEMU 11.1.1
@@ -1882,6 +1907,10 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [FP equality compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-equality-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)
+- [Translation cost: no Tier-1 SSA, no store footprints outside verify, flat vreg tables (2026-11-23)](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)
+- [FP compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)
+- [Widening multiply-accumulate is extend, multiply and add (2026-11-23)](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)
 - [Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)
 - [Saturating narrowing shifts are native (2026-11-23)](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)
 - [In-place updates of pinned registers (2026-11-23)](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23)

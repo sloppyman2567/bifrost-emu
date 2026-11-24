@@ -2,6 +2,134 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## FP equality compare and branch on the raw ucomis flags (2026-11-23)
+
+The scalar `fcmp` + `BRCOND` fusion (the section two down) left EQ and NE on the old sequence: `ucomis` sets ZF for an unordered compare as
+well as an equal one, so EQ is ZF without PF and NE is the reverse, which one `jcc` cannot say. They now use the raw flags too, with a
+`jp` ahead of the ZF jump: EQ is `jp over; je taken` (unordered falls through), NE is `jp taken; jne taken`. The operand order does not
+matter for an equality, so there is no swapped form. The exits convert the raw flags exactly as for the other conditions. A self-loop
+back edge retargets only the ZF jump past the patchable slot (`note_selfloop_jcc`); the `jp` of an NE keeps landing on the slot,
+which is patched to the body, and replay finds the unpatched slot where it always did.
+
+Measured on one throwaway kernel (two compares per iteration, `if (l2 != 0) inv = 1 / l2` and `if (w == 1) ...`, 20% zeros and 50%
+ones in the data; both exits live, as the successor starts with an FP load): 587,437 to 566,962 host instructions per repetition
+(-3.5%), checksum equal to QEMU and to the old build. The nine game kernels are unchanged within 0.05% (none compares floats for
+equality), checksums equal. A dead exit should gain more; that case was not measured. Cycles were not compared.
+
+Checked: `jit_fcmp_branch` already covered EQ and NE against every outcome (it passed before this change on the old sequence and passes
+now, also under `BIFROST_JIT_VERIFY=1`); a mutant that drops the `jp` fails it. `verify_jit.sh` (113 differential fixtures, 12 threaded
+oracle runs), 100 name-filtered unit tests and 65 Toybox and real-world programs pass. Not tested: gameplay, Tier-2 (it keeps the old
+sequence), multi-threaded self-loops with an NE back edge beyond what `jit_fcmp_branch` and the threaded oracle runs contain.
+
+## Translation cost: no Tier-1 SSA, no store footprints outside verify, flat vreg tables (2026-11-23)
+
+Chosen by the maintainer over cross-block register allocation: make translation itself cheaper first. Workload: the headless ART
+bootstrap (`Scripts/Android/test_android_jni.py`'s command in a fixed copy of its root), real ART creating its VM: 92.7 thousand blocks
+translated in a 1.6 s run, of which the JIT's own `[JIT] compile:` line says about 1,050 ms were translation (11.3 us per block).
+`perf record` call graphs are not permitted here (`perf_event_paranoid` 2), so the flat profile was grouped by function: the scalar SSA
+stages (build, optimize, lower, validate) were 11.3% of all samples, `optimize_ir` 6.9%, `translate_block` 5.6%, codegen and register
+allocation 11.6%, `malloc` and `free` 18.7%, hash-table inserts and rehashing 7.1%.
+
+Three changes, all removing work:
+- Tier-1 no longer runs the scalar SSA adapter (`optimize_ir_ssa`) on every block. It stays for Tier-2 planning and behind
+  `BIFROST_TIER1_SSA=1`. Translation: 1,051 to 695 ms (-34%), 11.3 to 7.5 us per block.
+- `record_verification_stores` cleared two 4096-entry tables (36 KB) for every translated block and built a footprint nothing reads
+  except differential replay (`BIFROST_JIT_VERIFY`, `Dispatch.cpp`). It now runs only then. Translation: 705 to 618 ms (-12%). Found
+  by a throwaway `LD_PRELOAD` shim that recorded the caller and size of every `memset` of 256 bytes or more (two sites ran once per
+  block, 32.8 KB and 4.1 KB); a 4096-entry refill of `vreg_last_use_op_` per block was the third, worth about 1% (697 to 681 ms in one pair of
+  runs, 697 to 695 in the other) and not kept.
+- `optimize_ir` kept its per-block state in `unordered_map`s and an `unordered_set` of vregs (constants, copies, the register-forwarding
+  cache, the live set, the dead-store table) and wrote a `last_def` map nothing read. They are now `EpochTable`s, thread-local arrays
+  whose slots carry the epoch they were written in, so a block clears them in O(1) and allocates no node (calloc'ed, so untouched pages
+  cost nothing). Translation: 634 to 491 ms (-22%). The optimizer's IR dump is byte-identical to the previous build's on 11 programs
+  (about 190,000 lines: CoreMark, six game-style kernels, two busybox applets and three fixtures). Per-source reference counts to skip
+  the scans in `clear_source` and the forwarding cache's invalidation measured no gain (473 to 477 ms against 475 to 488) and were
+  not kept.
+
+Together: translation 1,056 to about 500 ms (-52%, 11.4 to 5.4 us per block); the whole ART startup 1.572 s to 1.020 s elapsed (-35%),
+6.40 to 4.00 G cycles (-37%), 10.80 to 6.96 G instructions (-36%), over eight runs each.
+
+What SSA bought, which is what is given up: CoreMark at 200,000 iterations executes 190.03 G instructions with it and 191.24 G without
+(+0.64%), same CRC; over 16 code placements at 20,000 iterations the mean cycles were 5.390 G with it and 5.500 G without (+2.0%, the
+ranges overlap: 5.20-5.62 and 5.41-5.66 G); the ART code is 8.18 MB with it and 8.21 MB without (+0.4%); the nine game-style kernels
+move by under 0.1% either way. Not measured: a game.
+
+Checked (on the final build): `verify_jit.sh` (113 differential fixtures, 12 threaded oracle runs), 100 name-filtered unit tests, 65 Toybox
+and real-world programs, and `make test-ir-ssa` (21,839 checks, which exercise the adapter directly) pass. `jit_mt_publication` timed out once in the
+unit run: it builds the host library first, my header change made that a full rebuild inside its 120 s budget; alone it passes (twice).
+
+Left in the profile after this (share of all samples, final build): `translate_block` 7.6%, `optimize_ir` 6.8% (spread across its passes; no
+single loop stands out), `malloc`/`free` about 2.6%, `swap_guard_state` with `compile_guarded_mem` 2.7% (each deferred guard copies a ~460-byte
+`GuardState`), `vec_cache_may_enable` and `fp_cache_may_enable` 1.8%, `remember_code_granules` with its map 1.9%, `decode` and `translate_to_ir`
+2.2%. perf call graphs are not permitted here, so inclusive times per phase are not known.
+
+## FP compare and branch on the raw ucomis flags (2026-11-23)
+
+Next in the block that exposed the widening multiply: `fcmpe s31, s30; b.mi` was `ucomiss`, then `seta`, `setb`, `cmovp` and a `cmp`
+between zeroing and constant moves (nine instructions) to build the flags a subtraction would leave, which one `jcc` then read. The flags
+were built for any later consumer, and every exit stored them whenever its successor was not proved to overwrite them.
+
+Now a scalar `fcmp` whose next op is a `BRCOND` (any condition but EQ and NE) leaves the raw `ucomis` flags and the branch is one jump.
+Unordered sets CF, ZF and PF, so GE, LT, GT, LE, VS and VC read them directly (`jae`, `jb`, `ja`, `jbe`, `jp`, `jnp`) and HI, LS, MI,
+PL, CS and CC do after swapping the compare's operands (`jb`, `jae`, `ja`, `jbe`, `jbe`, `ja`); EQ and NE need ZF without PF, two jumps,
+so they keep the old sequence. An exit that must store NZCV converts the raw flags first (the old sequence, one `mov`/`cmovp` more in the
+swapped order, then the pack), so a live exit costs about what it did and a dead one nothing. Mechanism:
+[the guide](../JIT.md#scalar-fp-in-the-xmm-caches).
+
+The first version regressed `cull` by 2.4% and `particles` by 0.9%: their exits are all live, because the dead-NZCV scan stopped at any
+scalar FP instruction other than `fcmp` and these blocks begin with `fmul`/`fmadd`, and the swapped conversion costs two more
+instructions. The scan now skips scalar FP data processing (everything in that class except `fcsel` and `fccmp`, which read the flags;
+`fccmp` only writes them, so excluding it is conservative, not needed).
+
+Measured (host instructions per frame on the nine-kernel set, against the build after the multiply change; checksums equal):
+`cull` 845,817 to 747,001 (-11.7%), `collide` 176,320 to 164,939 (-6.5%), `particles` 446,826 to 426,759 (-4.5%); the six others within
+0.1%. The two changes together took `collide` from 204,949 to 164,939 (-19.5%). FP benchmark outputs match; cycles were not compared.
+
+Checked: `jit_fcmp_branch` runs every ARM condition against every outcome (greater, equal, less, unordered, signed zeros, infinities,
+subnormals; 16 values squared) in both precisions with live exits (`mrs` on both), dead exits, an `fcsel` after scalar FP arithmetic, an
+`fccmp` after it, and loops whose back edge is the compare and branch; the expected outcome comes from an integer model of the bit
+patterns (a C comparison would compile to the instruction under test). QEMU, the old build and the new one agree, also under
+`BIFROST_JIT_VERIFY=1`. Mutants that fail it: HI on the wrong jump, the swapped conversion without its unordered fix, `fcsel` taken as
+flag-neutral. `verify_jit.sh` (113 differential fixtures, 12 threaded oracle runs), 100 name-filtered unit tests and 65 Toybox and
+real-world programs pass.
+
+Not measured: gameplay, cycles, Tier-2 (it keeps the old sequence), EQ and NE branches (done later the same day, the top section), the vector compares (`fcmeq`, `fcmgt`), and
+a successor that starts with an FP load or store (the scan still stops there, as a load can fault).
+
+## Widening multiply-accumulate is extend, multiply and add (2026-11-23)
+
+Found by reading the generated code of a hot block, not from a profile: the loop body of the `collide` game-style kernel
+(`ldp w2, w1, [x0], #8; umull x2, w2, w6; umull x1, w1, w6; ...`, 9 guest instructions, 572 bytes of x86). Each `umull` was about
+16 host instructions: the old emitter for `SMADDL`/`UMADDL`/`SMSUBL`/`UMSUBL` called `clobber_flags`, flushed and invalidated RAX, RCX
+and RDX (stores to the frame), loaded both operands into RAX and RCX (reloading what it had just stored), extended them in place,
+multiplied, then loaded the accumulator into RDX and added it, which for `umull` (Ra = XZR) is `mov edx, 0; add rax, rdx`.
+
+Now the translator lowers the four instructions like `MADD`: `SEXT`/`ZEXT` 32 of both operands, a 64-bit `MUL`, then `ADD`/`SUB`
+against Xa (XZR reads as a constant 0 and folds). The emitter, the four IR ops and `emit_aux` are gone; `aux` stays, as the SIMD
+element and lane carrier. Mechanism: [the guide](../JIT.md#widening-multiply-accumulate).
+
+Measured (host instructions per frame, the difference of two repetition counts, one pinned core, nine kernels reconstructed in one
+source; every checksum equal to the old build's): `collide` 204,949 to 176,287 (-14.0%), `skinning` 2,388,156 to 2,326,568 (-2.6%);
+the seven others (only these two kernels contain a widening multiply) within 0.2%, in both directions. CoreMark executes 295.435
+billion instructions on both builds (the runs differ by under 0.001%), `crcfinal` 0x4983. Cycles were not compared (a game was running on the machine).
+
+Checked: `jit_maddl` now sweeps 4,000 random operand pairs through ten forms (high halves are junk the W views must ignore),
+register aliasing, a three-instruction dependent chain and a loop-carried accumulator; QEMU, the old build, the new build with
+`BIFROST_JIT_VERIFY=1` and `BIFROST_IR_VALIDATE=1`, and `--no-jit` agree. Mutants (signed read as unsigned and the reverse, `SUB`
+emitted as `ADD`, the second operand left unextended) each fail it. The first version of the sweeps passed a sign-extension mutant:
+GCC compiles a C widening multiply into the instruction under test, so it compared the JIT with itself; the references now use a
+shift-and-add multiply (`ref_mul`). `verify_jit.sh` (112 differential fixtures, 12 threaded oracle runs), 99 name-filtered unit
+tests and the 65 Toybox and real-world programs pass.
+
+Trap: a build tree made by copying another one (`cp -a build/X build/Y`) keeps `.d` files that name the old directory, so a header
+change does not rebuild the copy's objects and the binary mixes enum values; build such A/B trees from scratch (24 s here).
+
+Not measured: gameplay, the Android runtime (ART's `smull` for `long` arithmetic), cycles, Tier-2 beyond the verify fixtures.
+Left in the same block, for the next step: the scalar-FP `fcmp` + `b.mi` pair is 9 host instructions (`ucomiss`, two `set`s with
+their zeroing moves, a `cmovp`, a `cmp`, then the branch); the `ldp` loads are followed by a `mov edx, edx` the loads already make
+redundant; the generic scans of `aux` as a vreg (`BlockCompiler`, `RegionPlanner`, `RegionCompiler`, `RegisterAllocator`, `SSA`) have
+no user left and filter by value range.
+
 ## Game profiles: Zenless Zone Zero and Umamusume (2026-11-23)
 
 Read-only measurements, one unattended run of each (the title, loading or connect screen, not gameplay), HEAD `c5b66667`.

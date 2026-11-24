@@ -330,12 +330,25 @@ Also done on 2026-11-23: a pinned register updated by a loop (`add x0, x0, #1`) 
 (CoreMark about +0.5%, busybox gzip -1.3% cycles; [details](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23));
 the saturating narrowing shifts (`sqrshrun`, `sqshrn`, ...) are native for 16- and 32-bit lanes (a loop of them 47 times faster; the
 interpreter's share of Zenless Zone Zero fell from about 8.5% to 4.9%; [details](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)).
+The widening multiplies (`umull`, `smull`, `umaddl` and the rest) are `SEXT`/`ZEXT`, `MUL` and `ADD` instead of a fixed-register emitter that
+spilled and reloaded: the `collide` kernel runs 14.0% fewer host instructions per frame, `skinning` 2.6%, CoreMark no change
+([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)). A scalar `fcmp` followed by a
+conditional branch is one `ucomis` and one `jcc` (two for equal and not-equal; 9 instructions before), and the NZCV store is dropped when only scalar FP
+arithmetic precedes the next rewrite: `cull` 11.7% fewer host instructions per frame, `collide` 6.5%, `particles` 4.5%
+([details](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)). No game was run with either.
 Measured the same day: Tier-2 regions are +4.7% on CoreMark at 200,000 iterations (+2.1% at 40,000; still opt-in, no game run with
 it), and on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
 
-Open, in priority order:
+Open, in priority order (the maintainer put translation speed ahead of the cross-block work on 2026-11-23, so item 1 comes first):
 
-1. **State moves and copies around the arithmetic.** Real FP math is 2-7% of the generated ops in games and in the game-style
+1. **Translation cost.** Translating the ART bootstrap's 93 thousand blocks took 1,056 ms; dropping the Tier-1 SSA adapter, the per-block
+   verification footprints and the hash maps of `optimize_ir` made it about 500 ms (5.4 us per block; the startup 1.57 s to 1.02 s,
+   [details](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
+   Left in the profile: `translate_block` itself (7.6%), `optimize_ir` (6.8%, spread over its passes), the guard bookkeeping
+   (`compile_guarded_mem`, `swap_guard_state`, 2.7%: every deferred guard copies a ~460-byte `GuardState`), the vector and FP cache scans
+   and `remember_code_granules` (about 2% each). Not measured: a game, or several threads compiling at once. Open: whether Tier-1 should run SSA on
+   hot blocks only (about 2% of CoreMark's cycles).
+2. **State moves and copies around the arithmetic.** Real FP math is 2-7% of the generated ops in games and in the game-style
    kernels; the rest is moving guest state, copying vector registers and checking results. One track, in three parts:
    - *Inside a block* (game-style kernels, 2026-11-23): XMM moves and zeroing are 28-36% of the generated ops, vector state
      loads and stores 15-21%, NaN checks 11-14% and FP math 5-7%, at 8-10.5 host instructions per guest instruction. The cheap
@@ -344,6 +357,8 @@ Open, in priority order:
      need relaxed NaN semantics, which is the maintainer's decision. A plain `v_hi` zero store (cull and collide about 30%
      slower) and `insertps` result writes were slower, so measure each change on a branchy and a predictable kernel, over
      several code placements ([details](archive/JIT-history.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
+     Reading a hot block's generated code found the widening-multiply emitter and the scalar `fcmp` + branch pair (both done, above);
+     the other fixed-register emitters have not been audited, and the dead-flags scan stops at FP loads and stores and at vector instructions.
    - *Across blocks* (games, 2026-11-23, dispatched uops of the generated code): guest state traffic is about 24% (Zenless Zone
      Zero) and 23% (Umamusume). On Umamusume's direct chained edges the exit sequence (`movabs r11, cell; jmp [r11]`) is 5.8%, the
      loads at block entries 4.8% of which 49% are redundant (2.3%), and about 9% of uops are guest-register stores inside
@@ -358,20 +373,20 @@ Open, in priority order:
      and choose layouts by measured benefit (the five-stage plan in
      [the snapshot](archive/roadmap-2026-11-03.md#jit-codegen-retain-guest-state-across-hot-regions)). The cheap ideas above add
      up to roughly 10-12% at best; a larger gain is expected to need this.
-2. **Memory guards and interpreter fallbacks.** Compact scalar memory guards are done, but the 2026-11-23 game profiles do not
+3. **Memory guards and interpreter fallbacks.** Compact scalar memory guards are done, but the 2026-11-23 game profiles do not
    break out memory-access guards, so their share in a game is unmeasured. First step: a per-category breakdown (guest state
    traffic, copies, memory guards, math) of the generated code on a game, so the next fix is chosen from numbers. Then
    **paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics. What a game
    still runs in the interpreter (Zenless Zone Zero, 2026-11-23, `BIFROST_CLASS_PROF`): the exclusive pairs `ldxp`/`stxp`/`ldaxp`/
    `stlxp` with their retry loops, and scalar `fmax`/`fmin`; 64-bit-lane saturating narrowing shifts stay interpreted too.
-3. **Tier-2**: regions now follow calls and returns, every side exit chains, a kept region retires when its exit rate
+4. **Tier-2**: regions now follow calls and returns, every side exit chains, a kept region retires when its exit rate
    outgrows its trial, and enabling it no longer slows Tier-1 code (2026-11-11). CoreMark runs 1.2% fewer host instructions
    than Tier-1 (run time within placement noise) and a particle loop 7.7% fewer cycles. It does not take single-block loops,
    which Tier-1 already keeps in registers. Loops whose iterations take different arms (culling), loops with an inner loop
    (skinning) and dispatch loops (a bytecode VM) are declined, because promotion judges a linear trace; raising the 8-block
    cap alone admits none of them. Next: regions with internal joins, then real Android titles. It stays opt-in until then
    ([details](archive/JIT-history.md#tier-2-exits-that-chain-exit-rate-feedback-and-profiler-costs-2026-11-11)).
-4. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
+5. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the
 5800X3D on November 7, native CoreMark v1.01 built with gcc 16.2.1 `-O2` ran 37,950 iterations/s on one core and the JIT 14,785,

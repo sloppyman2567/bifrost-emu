@@ -413,9 +413,12 @@ Observed: `test_managed_google_activity_window` starts `AuthSignInActivity`
 explicitly and by action, and `AskPermissionActivity` with an authenticator
 response, from a fixture app; each opens the system app's window and returns
 (`RESULT_OK` with `errorCode=10` for a request without a configuration;
-`RESULT_CANCELED` and a cancelled response for the permission screen). Not
-observed: a real sign-in, `LoginActivity`'s own result and response relay, or
-a Google Sign-In button in a real game.
+`RESULT_CANCELED` and a cancelled response for the permission screen).
+Reported by the maintainer (2026-11-03 for Arknights, 2026-11-23 for the other
+two; no capture or log kept): Google sign-in through microG works in Arknights,
+Azur Lane and Zenless Zone Zero. Not observed here: `LoginActivity`'s own result
+and response relay, and a game's own Play Games sign-in (Hungry Shark World's
+still fails, see below).
 
 Not modelled: other users, shared and restricted accounts, device-policy
 limits, `startAddAccountSession` and its relatives, the credential-grant and

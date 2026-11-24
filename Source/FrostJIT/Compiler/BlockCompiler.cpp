@@ -115,6 +115,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     flags_in_host_ = false;
     flags_match_pstate_ = false;
     flags_from_sub_ = false;
+    fp_raw_flags_op_ = kNoFpRawFlags;
     chain_target_pc_ = 0;
     unchainable_end_ = false;
     indirect_exit_ = false;
@@ -569,13 +570,10 @@ if (demote_interp) {
         if (inst.dest > max_vreg) max_vreg = inst.dest;
         if (inst.src1 > max_vreg) max_vreg = inst.src1;
         if (inst.src2 > max_vreg) max_vreg = inst.src2;
-        // aux is the SMADDL/SMSUBL accumulator vreg. Today it is always
-        // allocated BEFORE inst.dest (load_arm_reg(ra) then g_alloc.alloc()),
-        // so aux < dest for the same op — but copy-substitution in
-        // optimize_ir can rewrite aux, and any vreg the pre-scan misses gets
-        // a LAZY slot (-8 * num_stack_slots_++) past the pre-allocated frame
-        // (vreg_stack_slot in RegisterAllocator.cpp). Under chain-skip's fixed
-        // 32 KB frame that writes past the frame. Defensive: cover it.
+        // No op keeps a vreg in aux today (SIMD ops store element and lane numbers there), but a vreg the
+        // pre-scan misses gets a LAZY slot (-8 * num_stack_slots_++) past the pre-allocated frame
+        // (vreg_stack_slot in RegisterAllocator.cpp), and under chain-skip's fixed 32 KB frame that writes past
+        // the frame. Defensive: cover it, so an op that does put a vreg in aux needs no new scan.
         if (inst.aux > max_vreg) max_vreg = inst.aux;
     }
     // Bounds-check: vreg arrays are fixed-size (4096). A pathological block
@@ -974,8 +972,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                     if (inst.src2 > highest_used) highest_used = inst.src2;
                 }
             }
-            // aux is a vreg for SMADDL/UMADDL/SMSUBL/UMSUBL (accumulator);
-            // SIMD_INS stores a small element index (< 33, filtered out).
+            // No op keeps a vreg in aux today; SIMD ops store a small element index (< 33, filtered out).
             if (inst.aux > 31 && inst.aux < 4096) {
                 vreg_last_use_op_[inst.aux] = static_cast<int>(i);
                 note_vreg_use(inst.aux, static_cast<uint16_t>(i));
@@ -1539,7 +1536,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         make_executable();
         return fn;
     }
-    record_verification_stores(ir_block, start_pc, entry);
+    // Store footprints serve differential replay alone (Dispatch.cpp, gated by the same flag); building them cost two
+    // 4096-entry tables (36 KB cleared) per translated block.
+    if (dbg().jit_verify) record_verification_stores(ir_block, start_pc, entry);
     attach_code_words(entry, !has_inlined_leaf);
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;

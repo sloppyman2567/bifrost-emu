@@ -10,6 +10,16 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- Translating code takes about half the time (the JIT no longer runs its SSA pass on every block, stops building a verification
+  record nobody reads outside `BIFROST_JIT_VERIFY`, and keeps its per-block tables in flat arrays). Starting the real Android
+  runtime went from 1.57 s to 1.02 s. Generated code is about 2% slower on CoreMark; `BIFROST_TIER1_SSA=1` brings the old pass back.
+- A float compare followed by a branch (`fcmp` then `b.lt`, `b.mi`, `b.gt` and the rest) is one compare and one jump (two for equal
+  and not-equal) instead of nine instructions, and the condition flags are no longer saved when the next instructions only do float
+  arithmetic before another compare. A culling loop runs 12% fewer host instructions, a collision loop 6.5% and a particle loop
+  4.5%. Checked against QEMU for every condition, outcome and precision.
+- The widening multiplies (`umull`, `smull`, `umaddl`, `smaddl`, `umsubl`, `smsubl`, `umnegl`, `smnegl`) compile to a multiply and an
+  add through the register allocator, not a fixed-register sequence that saved and reloaded values on the stack. A game-style
+  collision loop runs 14% fewer host instructions; code without them is unchanged. Checked against QEMU and the differential suite.
 - Saturating narrowing shifts (`sqrshrun`, `sqshrn` and the rest of that family, 16- and 32-bit lanes) run as native code instead of
   in the interpreter. Zenless Zone Zero spent about 7% of its CPU there, in its video decoder; a loop of them is about 47 times
   faster here. The results and the QC flag are checked against QEMU.

@@ -64,6 +64,60 @@ void FrostJIT::materialize_flags_to_pstate(bool preserve_flags, bool dead) {
     invalidate_host_regs(FLAGS3);
 }
 
+// ucomiss/ucomisd a, b leave: greater CF=0 ZF=0, less CF=1 ZF=0, equal ZF=1, unordered CF=ZF=PF=1 (SF=OF=0 always). Read
+// as the ARM outcome of fcmp a, b (greater N=0 Z=0 C=1 V=0, less N=1, equal Z=1 C=1, unordered C=1 V=1), every condition
+// but EQ/NE is one jcc on those flags, with the operands swapped (ucomis b, a) where the plain order would need two:
+//   a, b order:   GE jae, LT jb, GT ja, LE jbe, VS jp, VC jnp
+//   b, a order:   HI jb, LS jae, MI ja, PL jbe, CS jbe, CC ja
+// EQ is ZF and not PF, NE is not ZF or PF (unordered sets ZF too): the cc is the ZF half, je/jne, and the branch
+// adds a jp (BRCOND: `jp over; je` for EQ, `jp taken; jne taken` for NE). The operand order does not matter there.
+bool FrostJIT::fp_raw_flags_cc(uint8_t arm_cond, bool& swapped, uint8_t& cc) {
+    swapped = false;
+    switch (arm_cond & 0xF) {
+        case 0x0: cc = 0x4; return true;                  // EQ (with the parity jump)
+        case 0x1: cc = 0x5; return true;                  // NE (with the parity jump)
+        case 0xA: cc = 0x3; return true;                  // GE
+        case 0xB: cc = 0x2; return true;                  // LT
+        case 0xC: cc = 0x7; return true;                  // GT
+        case 0xD: cc = 0x6; return true;                  // LE
+        case 0x6: cc = 0xA; return true;                  // VS
+        case 0x7: cc = 0xB; return true;                  // VC
+        case 0x8: swapped = true; cc = 0x2; return true;  // HI
+        case 0x9: swapped = true; cc = 0x3; return true;  // LS
+        case 0x4: swapped = true; cc = 0x7; return true;  // MI
+        case 0x5: swapped = true; cc = 0x6; return true;  // PL
+        case 0x2: swapped = true; cc = 0x6; return true;  // CS
+        case 0x3: swapped = true; cc = 0x7; return true;  // CC
+        default: return false;
+    }
+}
+// Two small integers whose `cmp` leaves the flags a subtraction would give for each ARM outcome (SF=N, ZF=Z, CF=!C,
+// OF=V): greater 1-0, equal 0-0, less 0-1, unordered 0x80000000-1 (signed overflow). mov and cmov keep the ucomis flags.
+// In the swapped order (ucomis b, a) "greater" is CF=1 and "less" is CF=0 and ZF=0.
+void FrostJIT::emit_fp_raw_flags_to_sub(bool swapped) {
+    emit_mov_imm32_zext(RAX, 0);
+    emit_byte(0x0F); emit_byte(swapped ? 0x92 : 0x97); emit_byte(0xC0);   // setb al (swapped) / seta al
+    emit_mov_imm32_zext(RCX, 0);
+    emit_byte(0x0F); emit_byte(swapped ? 0x97 : 0x92); emit_byte(0xC1);   // seta cl (swapped) / setb cl
+    if (swapped) {
+        emit_mov_imm32_zext(RDX, 1);
+        emit_byte(0x0F); emit_byte(0x4A); emit_byte(0xCA);                // cmovp ecx, edx: unordered b = 1
+    }
+    emit_mov_imm32_zext(RDX, 0x80000000);
+    emit_byte(0x0F); emit_byte(0x4A); emit_byte(0xC2);                    // cmovp eax, edx: unordered a = INT_MIN
+    emit_byte(0x39); emit_byte(0xC8);                                     // cmp eax, ecx
+}
+void FrostJIT::materialize_fp_raw_flags_to_pstate(bool dead) {
+    constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
+    flush_dirty_host_regs(FLAGS3);
+    flush_scratch_host_regs(FLAGS3);
+    if (!dead) {
+        emit_fp_raw_flags_to_sub(fp_raw_swapped_);
+        emit_materialize_flags(true, false);
+    }
+    invalidate_host_regs(FLAGS3);
+}
+
 bool FrostJIT::exit_flags_dead(uint64_t pc) {
     if (!flag_scan_active_ || !window_base_ || !guest_memory_) return false;
     for (const auto& dep : flag_deps_scratch_)

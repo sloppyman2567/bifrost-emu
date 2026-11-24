@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>  // getenv (BIFROST_NO_SELFLOOP)
+#include <stdexcept>
 namespace arm64emu {
 // Keep the current frame and cached loop state. ST patches the slot; MT code
 // stays immutable and leaves through the preemption epoch (any invalidation
@@ -415,6 +416,9 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // The stored C bit is x86 CF, the inverse of ARM C.
             uint32_t direct_mask = 0;
             bool direct_taken_if_set = false;
+            // Raw ucomis flags from the FP_CMP just before (fp_raw_flags_live): one jcc on them, and each exit that
+            // needs NZCV converts them itself.
+            const bool fp_raw = fp_raw_flags_live();
             if (!flags_in_host_) {
                 switch (bp.cond & 0xF) {
                     case 0: direct_mask = kHostZ; direct_taken_if_set = true;  break;  // EQ
@@ -444,8 +448,15 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // With flags_from_sub_=true (SUB convention, whether originally
             // from SUB or normalized), the default mapping is used.
             bool need_cmc_for_hi_ls = false;
-            uint8_t cc = direct_mask ? (direct_taken_if_set ? 5 /*JNE: bit set*/ : 4 /*JE: bit clear*/)
-                       : resolve_arm_cond_with_carry(bp.cond, need_cmc_for_hi_ls);
+            uint8_t cc;
+            if (fp_raw) {
+                bool swapped_unused = false;
+                if (!fp_raw_flags_cc(bp.cond, swapped_unused, cc))
+                    throw std::logic_error("raw FP flags reached a BRCOND they cannot serve");
+            } else {
+                cc = direct_mask ? (direct_taken_if_set ? 5 /*JNE: bit set*/ : 4 /*JE: bit clear*/)
+                           : resolve_arm_cond_with_carry(bp.cond, need_cmc_for_hi_ls);
+            }
             // Emit the JCC first — it consumes host RFLAGS directly, so no
             // flag materialization is needed before it. Flags are materialized
             // to pstate on each path separately (the next block may read pstate).
@@ -462,7 +473,14 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             } else if (need_cmc_for_hi_ls) {
                 emit_byte(0xF5);  // cmc — invert CF for HI/LS after ADD/TST
             }
+            // Raw FP flags set ZF for an unordered compare too: EQ must not take it, NE must. The parity jump decides
+            // that before the ZF jump (EQ hops over it, NE takes the branch).
+            const bool fp_zf_cond = fp_raw && (bp.cond & 0xE) == 0;
+            size_t parity_patch = 0;
+            if (fp_zf_cond) parity_patch = emit_jcc_rel32_placeholder(0xA);  // JP
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
+            if (fp_zf_cond && (bp.cond & 0xF) == 0)
+                patch_jcc_rel32(parity_patch, 6);  // EQ, unordered: past the 6-byte jcc, into the fall-through path
             // ── Fall-through (not-taken) path: materialize flags, set RAX = fall-through PC ──
             // If CMC was emitted (for HI/LS after ADD/TST), re-invert CF so
             // materialize_flags_to_pstate sees the original carry flag.
@@ -478,7 +496,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             if (need_cmc_for_hi_ls && !fall_dead) emit_byte(0xF5);
             // JCC has consumed the host flags. Only architectural NZCV must
             // survive the exit; restoring RFLAGS here is dead work.
-            materialize_flags_to_pstate(false, fall_dead);
+            if (fp_raw) materialize_fp_raw_flags_to_pstate(fall_dead);
+            else        materialize_flags_to_pstate(false, fall_dead);
             if (defer_pc_store()) late_fall_pc_ = inst.arm_pc + 4;
             else emit_mov_imm_to_rax(inst.arm_pc + 4);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
@@ -487,6 +506,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             const size_t taken_label = code_buf_used_;
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
+            if (fp_zf_cond && (bp.cond & 0xF) == 1)
+                patch_jcc_rel32(parity_patch, static_cast<int32_t>(code_buf_used_ - (parity_patch + 6)));  // NE, unordered
             static bool no_selfloop_ = dbg().no_selfloop;
             bool is_selfloop = (bp.target == current_start_pc_) &&
                 (!mt_active() || !dbg().no_chain);
@@ -514,7 +535,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                     emit_byte(0xF5);  // cmc — restore CF to original
                 }
                 // Materialize flags to pstate (the taken-target block may read them).
-                materialize_flags_to_pstate(false);
+                if (fp_raw) materialize_fp_raw_flags_to_pstate(false);
+                else        materialize_flags_to_pstate(false);
 
             }
             // ── Self-loop chaining ──
@@ -531,6 +553,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             if (has_selfloop_slot_) emit_mov_imm_to_rax(bp.target);  // else emit_taken_path_epilogue
             rax_holds_next_pc_ = true;
             flags_in_host_ = false;
+            fp_raw_flags_op_ = kNoFpRawFlags;
             //
             // OLD: unchainable_end_ = true (both paths return to dispatcher)
             // NEW: The fall-through (not-taken) path chains to the block at

@@ -51,8 +51,7 @@ static bool vec_cache_compatible_op(IROp op) {
         case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
         case IROp::BRCOND_SKIP:
         case IROp::UDIV: case IROp::SDIV:
-        case IROp::SMADDL: case IROp::UMADDL: case IROp::SMULH: case IROp::UMULH:
-        case IROp::SMSUBL: case IROp::UMSUBL:
+        case IROp::SMULH: case IROp::UMULH:
         case IROp::MRS: case IROp::MSR:
             return true;
         default:
@@ -535,8 +534,7 @@ static bool fp_cache_compatible_op(IROp op) {
         case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
         case IROp::BRCOND_SKIP:
         case IROp::UDIV: case IROp::SDIV:
-        case IROp::SMADDL: case IROp::UMADDL: case IROp::SMULH: case IROp::UMULH:
-        case IROp::SMSUBL: case IROp::UMSUBL:
+        case IROp::SMULH: case IROp::UMULH:
         case IROp::MRS: case IROp::MSR:
             return true;
         default:

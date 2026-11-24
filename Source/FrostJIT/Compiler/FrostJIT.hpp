@@ -2020,7 +2020,7 @@ private:
     //   Arithmetic.cpp    — ADD/SUB/MUL/AND/OR/XOR/SHL/SHR/SAR/ROR/
     //                            NOT/NEG/SEXT/ZEXT/CLZ/REV64/CSEL/SBFM/
     //                            UBFM/BFM/EXTR/RBIT/CLS/REV16/REV32/CCMP/
-    //                            UDIV/SDIV/SMADDL/UMADDL/SMSUBL/UMSUBL/
+    //                            UDIV/SDIV/
     //                            MOV/IMM
     //   Memory.cpp    — LOAD_MEM/STORE_MEM/LOAD_REG/STORE_REG
     //   Branch.cpp — BRCOND_ZERO/BRCOND_BIT/BRCOND/
@@ -2037,6 +2037,20 @@ private:
     bool rax_holds_next_pc_ = false;
     bool flags_in_host_ = false;
     bool flags_from_sub_ = false;
+    // A scalar FP_CMP followed directly by a BRCOND leaves its raw ucomis flags in the host (no SUB-convention
+    // build-up). fp_raw_flags_op_ is the IR index of that BRCOND; the flags are raw only while the op being
+    // compiled has that index (fp_raw_flags_live()), so a stale value can never match a later op.
+    // fp_raw_swapped_: the compare was emitted as ucomis b, a. fp_raw_flags_cc() maps the condition to its jcc.
+    static constexpr size_t kNoFpRawFlags = SIZE_MAX;
+    size_t fp_raw_flags_op_ = kNoFpRawFlags;
+    bool fp_raw_swapped_ = false;
+    bool fp_raw_flags_live() const { return flags_in_host_ && fp_raw_flags_op_ == cur_op_index_; }
+    // Maps an ARM condition to the x86 jcc on raw ucomis flags (EQ/NE: the ZF jump, which BRCOND precedes with a jp); false for AL/NV.
+    static bool fp_raw_flags_cc(uint8_t arm_cond, bool& swapped, uint8_t& cc);
+    // Builds SUB-convention host flags (SF=N, ZF=Z, CF=!C, OF=V) from raw ucomis flags; clobbers RAX, RCX, RDX.
+    void emit_fp_raw_flags_to_sub(bool swapped);
+    // A BRCOND exit's NZCV store from raw ucomis flags (the counterpart of materialize_flags_to_pstate).
+    void materialize_fp_raw_flags_to_pstate(bool dead);
     // True if the block reads guest NZCV before a flag-setting op runs
     // (computed by translate_block's pre-scan). A self-loop block with
     // this false can skip the taken-path pstate materialization on its
@@ -2068,7 +2082,7 @@ private:
     // dead immediately, so its host mapping can be dropped without a spill.
     // Exact because IR scratch vregs are block-local with unique-per-
     // definition numbers (VregAlloc monotonic) and the scan covers aux
-    // (SMADDL/SMSUBL accumulator) in addition to src1/src2.
+    // in addition to src1/src2.
     std::vector<int> vreg_last_use_op_;
     // vreg_uses_[v] = sorted (ascending) list of IR op indices that READ
     // vreg `v` as a source (src1/src2/aux), built by the same use-scan as

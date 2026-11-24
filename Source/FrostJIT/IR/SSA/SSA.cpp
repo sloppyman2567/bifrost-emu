@@ -29,9 +29,6 @@ bool shape(const IRInst& i, Shape& s) {
             // CSEL reads implicit NZCV and therefore cannot be CSE'd/DCE'd
             // as ordinary arithmetic by this pass.
             s = {3, true, i.op == IROp::CSEL}; break;
-        case IROp::SMADDL: case IROp::UMADDL:
-        case IROp::SMSUBL: case IROp::UMSUBL:
-            s = {7, true, false}; break;
         case IROp::ADDS: case IROp::SUBS: case IROp::ADCS: case IROp::SBCS:
             s = {3, i.dest != 0, true}; break;
         case IROp::TST: case IROp::CCMP: s = {3, false, true}; break;
@@ -173,7 +170,6 @@ bool cse_parameter(const IRInst& i, uint64_t& parameter) {
         case IROp::MOV: case IROp::ADD: case IROp::SUB: case IROp::MUL:
         case IROp::AND: case IROp::OR: case IROp::XOR:
         case IROp::NOT: case IROp::NEG: case IROp::SMULH: case IROp::UMULH:
-        case IROp::SMADDL: case IROp::UMADDL: case IROp::SMSUBL: case IROp::UMSUBL:
             return true;
         case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
             parameter = i.gpr_shift_params().width; return true;

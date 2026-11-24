@@ -277,6 +277,8 @@ UNIT_TESTS=(
     "int_fp_conv|Tests/Unit/jit_int_fp_conv.elf||5|ALL TESTS PASSED"
     "ldp_stp|Tests/Unit/jit_ldp_stp.elf||5|PASS"
     "madd|Tests/Unit/jit_madd.elf||5|PASS"
+    "maddl|Tests/Unit/jit_maddl.elf||10|maddl: PASS"
+    "fcmp_branch|Tests/Unit/jit_fcmp_branch.elf||20|fcmp_branch: PASS"
     "neon|Tests/Unit/jit_neon.elf||5|PASS"
     "neon_advanced|Tests/Unit/jit_neon_advanced.elf||5|PASS"
     "neon_cmp|Tests/Unit/jit_neon_cmp.elf||5|checks passed"

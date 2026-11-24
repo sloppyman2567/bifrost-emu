@@ -20,8 +20,7 @@
 //   IMM, MOV, ADD, SUB, AND, OR, XOR, MUL, SHL, SHR, SAR, ROR,
 //   NOT, NEG, SEXT, ZEXT, CLZ, REV64, CSEL,
 //   SBFM, UBFM, BFM, EXTR, RBIT, CLS, REV16, REV32,
-//   CCMP, UDIV, SDIV,
-//   SMADDL, UMADDL, SMSUBL, UMSUBL
+//   CCMP, UDIV, SDIV
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "System/Core/Emulator.hpp"
 #include "FrostJIT/IR/IR.hpp"
@@ -1157,77 +1156,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int d = alloc_reg_for(inst.dest, RAX);
             if (d != RAX) emit_mov_reg(d, RAX);
             set_vreg_reg(inst.dest, d);  // cache the result
-            return 0;
-        }
-        // ── SMADDL / UMADDL — widening multiply-accumulate ──────────
-        case IROp::SMADDL:
-        case IROp::UMADDL: {
-            // SMADDL: dest = acc + (int64)(int32)src1 * (int64)(int32)src2
-            // UMADDL: dest = acc + (uint64)(uint32)src1 * (uint64)(uint32)src2
-            // x86: imul rax, rcx (64-bit multiply); add rax, acc
-            clobber_flags();
-            // use bitmask helpers instead of open-coded loop.
-            flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
-            // Load src1 (32-bit, sign/zero-extended) into RAX
-            load_vreg_to_reg(RAX, inst.src1);
-            if (inst.op == IROp::SMADDL) {
-                // cdqe (sign-extend EAX into RAX)
-                emit_byte(0x48); emit_byte(0x98);
-            } else {
-                // mov eax, eax (zero-extend)
-                emit_byte(0x89); emit_byte(0xC0);
-            }
-            // Load src2 (32-bit, extended) into RCX
-            load_vreg_to_reg(RCX, inst.src2);
-            if (inst.op == IROp::SMADDL) {
-                // Sign-extend ECX into RCX (cdqe on RCX isn't directly
-                // available; use movsxd rcx, ecx instead).
-                // 48 63 c9 = movsxd rcx, ecx
-                emit_byte(0x48); emit_byte(0x63); emit_byte(0xC9);
-            } else {
-                // mov ecx, ecx (zext)
-                emit_byte(0x89); emit_byte(0xC9);
-            }
-            // imul rax, rcx (64-bit multiply — result in RAX, no RDX needed)
-            emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);
-            // The accumulator is read through the vreg cache (inst.aux), not directly from cpu.regs[]: reading
-            // cpu.regs[inst.cond] would bypass the cache and see stale values if the accumulator was modified earlier in the
-            // same block.
-            load_vreg_to_reg(RDX, inst.aux);
-            // add rax, rdx
-            emit_byte(0x48); emit_byte(0x01); emit_byte(0xD0);
-            int d = alloc_reg_for(inst.dest, RAX);
-            if (d != RAX) emit_mov_reg(d, RAX);
-            set_vreg_reg(inst.dest, d);  // cache the result (like UDIV)
-            return 0;
-        }
-        // ── SMSUBL / UMSUBL — widening multiply-subtract ────────────
-        case IROp::SMSUBL:
-        case IROp::UMSUBL: {
-            // SMSUBL: dest = acc - (int64)(int32)src1 * (int32)src2
-            // UMSUBL: dest = acc - (uint64)(uint32)src1 * (uint32)src2
-            clobber_flags();
-            // use bitmask helpers instead of open-coded loop.
-            flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
-            load_vreg_to_reg(RAX, inst.src1);
-            if (inst.op == IROp::SMSUBL) {
-                emit_byte(0x48); emit_byte(0x98);  // cdqe
-            } else {
-                emit_byte(0x89); emit_byte(0xC0);  // mov eax, eax
-            }
-            load_vreg_to_reg(RCX, inst.src2);
-            if (inst.op == IROp::SMSUBL) {
-                emit_byte(0x48); emit_byte(0x63); emit_byte(0xC9);  // movsxd rcx, ecx
-            } else {
-                emit_byte(0x89); emit_byte(0xC9);  // mov ecx, ecx
-            }
-            emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);  // imul rax, rcx
-            load_vreg_to_reg(RDX, inst.aux);
-            // sub rdx, rax (dest = acc - product)
-            emit_byte(0x48); emit_byte(0x29); emit_byte(0xC2);  // sub rdx, rax
-            int d = alloc_reg_for(inst.dest, RDX);
-            if (d != RDX) emit_mov_reg(d, RDX);
-            set_vreg_reg(inst.dest, d);
             return 0;
         }
         default:
