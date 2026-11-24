@@ -142,8 +142,8 @@ int FrostJIT::compile_cond_side_exit(const IRInst& inst) {
     return 0;
 }
 
-// The exits, after the block. Each one runs on the layout captured at its branch: every mapped guest register is stored (a pin is
-// ahead of memory and statically clean, as in emit_memory_fault_exit), the pinned vectors are written back, and the chain slot of
+// The exits, after the block. Each one runs on the layout captured at its branch: every dirty or pinned guest register is stored (a pin is
+// ahead of memory and statically clean, unlike emit_memory_fault_exit, which stores everything mapped), the pinned vectors are written back, and the chain slot of
 // emit_taken_path_epilogue takes the target. The compile-time state is swapped back afterwards.
 void FrostJIT::flush_deferred_side_exits() {
     const bool had_slot = has_taken_chain_slot_;
@@ -154,8 +154,9 @@ void FrostJIT::flush_deferred_side_exits() {
         GuardState state = exit.state;
         swap_guard_state(state);
         if (exit.need_cmc) emit_byte(0xF5);  // CF back to ARM's meaning, as the host flags still hold the inverted one
+        // A mapped register that is clean already matches cpu.regs[]; only a loop pin is clean in the allocator's books and ahead of memory.
         for (int v = 0; v < 32; ++v)
-            if (vreg_home_[v] >= 0) emit_store_arm(v, vreg_home_[v]);
+            if (vreg_home_[v] >= 0 && (vreg_dirty_[v] || arch_pin_[v] >= 0)) emit_store_arm(v, vreg_home_[v]);
         vec_cache_writeback_all_pinned(false);
         // NZCV: the stores above leave RFLAGS alone. When the host flags are the only copy, pack them (this clobbers RAX).
         const bool saved_in_host = flags_in_host_, saved_from_sub = flags_from_sub_, saved_match = flags_match_pstate_;

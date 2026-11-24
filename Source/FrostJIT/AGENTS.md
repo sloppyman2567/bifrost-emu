@@ -31,6 +31,10 @@ A new history section can make an older "not measured" or "next section" line wr
   branch barriers must stay (dead-store elimination clears at a branch). Its chain slot lives in a stub `BlockEntry` under `side_exit_key`; anything
   that enumerates `blocks_` must tolerate those entries (no guest pc, `fn` null), anything that retires a block must retire its `side_stubs_`, and
   a new place that creates MT edges for a tail sets `edge_source_override_`. Such a block is `has_call` and unrecordable; `jit_side_exit` covers it.
+- `fold_ahead_kind_` 4 (a constant stored by the next eager `STORE_REG`) is decided by the pre-scan under the same guards the `STORE_REG` case re-checks
+  (not `keep_store_dest_`, GPR/SP destination, imm32 fit): a skipped `mov` whose consumer then stores a register leaves the vreg unmapped. Do not
+  defer stores into RAX/RCX/RDX/R8 for a block that is not a loop to save the eager store: it was tried and added instructions (a spill at each clobber).
+  Carry formation (`BIFROST_CARRY`) stays off while the persistent cache records, as its blocks are unrecordable.
 - `IR/` owns typed instructions, translation, scalar SSA, optimization and
   validation. Factories/readers are the parameter contract. SSA currently models
   scalar values; do not assume MemorySSA or complete vector/FP state coverage.

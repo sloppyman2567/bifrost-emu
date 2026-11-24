@@ -623,6 +623,12 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     kill_vreg(inst.dest);
                     return 0;
                 }
+                if (cur_op_index_ > 0 && cur_op_index_ - 1 < fold_ahead_kind_.size() && fold_ahead_kind_[cur_op_index_ - 1] == 4) {
+                    // The constant was never put in a register (fold_ahead_kind_ 4): store it as an immediate.
+                    emit_store_arm_imm32(inst.dest, static_cast<int32_t>(jit_consts_.at(inst.src1)));
+                    if (inst.dest <= 31) kill_vreg(inst.dest);
+                    return 0;
+                }
                 int s = ensure_vreg(inst.src1);
                 if (inst.is_fp_store() && inst.dest <= 30) {
                     // FP register: store to cpu.v[dest].lo (or, when the fp

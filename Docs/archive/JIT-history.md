@@ -2,6 +2,32 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Carry formation behind BIFROST_CARRY, and what did not help (2026-11-24)
+
+With every conditional kind a mid-block exit, `translate_block` can go on past a forward conditional branch (design in `Docs/JIT.md`, "Carry
+formation"). CoreMark, 40,000 iterations, one pinned core, five alternating runs of the same binary with and without `BIFROST_CARRY=1`, loops with exits
+already on: host instructions 36.555 G to 35.828 G (-2.0%); cycles best-of-five 9.841 G to 9.402 G (-4.5%); iterations per second best-of-five 18,265
+to 19,130 (+4.7%). The validated 200,000-iteration run keeps all CRCs. With `-v` it forms 320 blocks with exits on CoreMark (28 without).
+
+SpongeBob, 100 s from launch through loading into the lobby, one run each with `BIFROST_PROF=1 BIFROST_STATS_PERIOD=40`: no crash either way; total
+process CPU 103.3 s with Carry and 115.3 s without; JIT samples 66.1% against 70.5%; 294,000 of 1.23 million blocks formed with exits; code cache
+339 MB against 345 MB; guest instructions per block 8.7 against 5.3. One pair, loading work differs between runs, and the cold share of JIT samples
+rose from 0.3% to 2.9%, which is the exit tails running: the fall-through is often not the hot side. Not repeated; the maintainer judged more
+pairs not worth it.
+
+Changes while tuning it: an exit tail now stores only registers that are dirty or pinned (a clean mapped register already matches `cpu.regs[]`; a loop
+pin is clean in the allocator and ahead of memory); the formation is off while the persistent cache records (a Carry block is unrecordable and
+`jit_disk_cache` failed with Carry on until then). A constant stored by the next `STORE_REG` is a `mov qword [slot], imm32` (`fold_ahead_kind_` 4):
+-0.93% host instructions without Carry (36.555 G to 36.215 G) and -0.95% with it (35.829 G to 35.489 G), deterministic.
+
+Tried and dropped: deferring the register writes of a non-loop block with exits (`keep_store_dest_`) changed nothing at first, because the deferral only
+targets registers other than RAX, RCX, RDX and R8 and most values land there; allowing those registers made it worse (35.907 G against 35.829 G
+instructions, best cycles 9.50 G against 9.36 G), since each clobber then spills the deferred value. Reverted.
+
+The generated code of a Carry block still shows, on CoreMark's state machine (`core_state_transition`): a store of each guest register at every
+definition (the dead-store pass clears at each branch and memory op), the flag pack at both exits, one `lea` per guarded access with an offset, and a
+`jmp` hop on the fall-through exit of the block's own final branch.
+
 ## Loops with CBZ/CBNZ exits become one block (2026-11-24)
 
 First piece of the Carry plan that changes code: the primitive every merge needs, a conditional exit out of the middle of a block (design in

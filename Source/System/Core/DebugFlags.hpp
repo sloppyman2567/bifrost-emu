@@ -60,6 +60,7 @@ struct DebugFlags {
     bool verify_untracked = false;  // BIFROST_VERIFY_UNTRACKED: also verify blocks with unresolved stores
     bool verify_trace = false;  // BIFROST_VERIFY_TRACE: print each verified block's entry state
     // ── JIT toggles and diagnostics (presence of the variable turns each on) ──
+    bool carry = false;  // BIFROST_CARRY=1: a block continues past a forward conditional branch along its fall-through (the taken side is a mid-block exit)
     bool no_side_exit = false;  // BIFROST_NO_SIDE_EXIT: a loop whose only inner branches are CBZ/CBNZ exits stays split into blocks
     bool no_selfloop = false;  // BIFROST_NO_SELFLOOP: keep self-loop blocks as ordinary blocks (no pinned loop body)
     bool no_native_libc = false;  // BIFROST_NO_NATIVE_LIBC: run the guest's own memcpy/memmove/memset (no host-native path)
@@ -290,6 +291,7 @@ struct DebugFlags {
         if (const char* end = std::getenv("BIFROST_MEMFULL_END")) f.jit_memfull_end = std::strtoull(end, nullptr, 0);
         f.verify_untracked = env("BIFROST_VERIFY_UNTRACKED");
         f.verify_trace = env("BIFROST_VERIFY_TRACE");
+        f.carry = env("BIFROST_CARRY");
         f.no_side_exit = env("BIFROST_NO_SIDE_EXIT");
         f.no_selfloop = env("BIFROST_NO_SELFLOOP");
         f.no_native_libc = env("BIFROST_NO_NATIVE_LIBC");

@@ -128,6 +128,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // and the consumer's ensure_vreg would reload garbage.
                 if (cur_op_index_ < fold_ahead_kind_.size() && !wide) {
                     uint8_t fa = fold_ahead_kind_[cur_op_index_];
+                    if (fa == 4) return 0;  // the STORE_REG after this stores the immediate itself
                     if (fa == 1) {
                         int64_t c = static_cast<int64_t>(inst.imm_value());
                         if (static_cast<int64_t>(static_cast<int32_t>(c)) == c)

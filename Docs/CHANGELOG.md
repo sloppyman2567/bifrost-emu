@@ -18,6 +18,9 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   from the JIT stats. Nothing changes in a default run, and the emulator binary is about 150 KB smaller.
 - Loops that test a register or a condition and leave (walking a list until a null pointer, scanning until a zero byte, searching for a match)
   now run as one block that keeps the loop's registers in host registers (CoreMark: 1.8% fewer host instructions, from the `cbz` loops alone). `BIFROST_NO_SIDE_EXIT=1` turns it off.
+- Storing a constant into a guest register (`mov w0, #0`) is one instruction instead of two (CoreMark: 0.9% fewer host instructions).
+- `BIFROST_CARRY=1` (experimental, off by default) lets a block continue past a forward conditional branch, keeping registers in host registers
+  across it: CoreMark 2.0% fewer host instructions and about 4.7% more iterations per second; no game has been timed carefully.
 - Code that reads and writes memory runs a little faster: the window address is loaded once per call chain instead of at every block
   (CoreMark: 2.8% fewer host instructions and about 2.4% fewer cycles, five alternating runs; no game has been timed).
 - `BIFROST_PROF` with `BIFROST_PC_HIST=1` also lists the hot loops of several blocks (`[carry]` lines): how much of the JIT time they take and how many

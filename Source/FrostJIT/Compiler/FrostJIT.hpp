@@ -1353,6 +1353,7 @@ private:
     // ARM64 reg access.
     void emit_load_arm(int xr, int ar);
     void emit_store_arm(int ar, int xr);
+    void emit_store_arm_imm32(int ar, int32_t imm);  // mov qword [cpu.regs[ar]], imm32 (sign-extended)
     // Flag materialization.
     void emit_materialize_flags(bool from_sub = false, bool keep_rax = true);
     void emit_load_flags_from_pstate();

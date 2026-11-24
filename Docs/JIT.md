@@ -242,6 +242,17 @@ and is never formed under `BIFROST_JIT_VERIFY`. `BIFROST_NO_SIDE_EXIT=1` turns t
 six loop shapes against C, a fault inside a loop (the signal frame shows the finished iterations) and five threads; `[JIT] side-exit blocks`
 in `-v` shows how many blocks were formed. On CoreMark it removes 1.8% of host instructions.
 
+### Carry formation (`BIFROST_CARRY=1`)
+
+The mid-block exits above also let a block go on past an ordinary forward conditional branch. With `BIFROST_CARRY=1`, `translate_block` treats every
+forward `cbz`, `cbnz`, `tbz`, `tbnz` or `b.cond` (taken target above the branch) as an exit when the block has room (at most six such exits, and two
+instructions of the cap left): the not-taken side is the next instruction in memory, so the block stays contiguous and its code words stay one run,
+and the registers the code between the two blocks used to store and reload stay in host registers. The direction is the static fall-through, not a
+profile. Backward branches still end a block. It is not used while the persistent cache records (or checks a recording), because a block with a
+mid-block exit is not recordable. It is off by default: on CoreMark it removes 2.0% of host instructions and 4.5% of cycles (the best of five
+alternating runs), and a 100 s SpongeBob start-up showed no crash and about 10% less process CPU, but that pair was not repeated and the exits are
+taken often enough in game code (the cold share of JIT samples went from 0.3% to 2.9%) that a direction chosen from samples is the next step.
+
 ### Peepholes
 
 Tier-1 decides each with a pre-scan and the emitter re-checks it:
@@ -251,6 +262,10 @@ Tier-1 decides each with a pre-scan and the emitter re-checks it:
 - A 64-bit `lsl #1..3` read only by the next `ADD` becomes that `lea`'s index scale (`scaled_add_`; one `LOAD_REG` may sit
   between them, as the translator emits for `[xN, xM, lsl #s]`).
 - A register read only as the second operand of the next `CMP` is `cmp r, [cpu.regs]` (`lazy_load_`).
+- A constant read only by the `STORE_REG` right after it (`mov w0, #0`) is stored as `mov qword [slot], imm32` and never put in a register
+  (`fold_ahead_kind_` 4). The pre-scan marks it only for an eager store (a block that defers its stores keeps the register form), a GPR or SP
+  destination, and a constant that survives a sign-extended imm32; the `STORE_REG` case re-reads the marker. About 0.9% of CoreMark's host
+  instructions.
 
 The last two leave a value unmaterialized for one op; `materialize_scaled` and `materialize_lazy_load` emit the original
 instruction for any consumer that does not fold it, and the Tier-1 loop calls them before every other op. W-form fusion and
@@ -1644,6 +1659,7 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
+- [Carry formation behind BIFROST_CARRY, and what did not help (2026-11-24)](archive/JIT-history.md#carry-formation-behind-bifrost_carry-and-what-did-not-help-2026-11-24)
 - [Loops with CBZ/CBNZ exits become one block (2026-11-24)](archive/JIT-history.md#loops-with-cbzcbnz-exits-become-one-block-2026-11-24)
 - [Window register loaded once per chain (2026-11-24)](archive/JIT-history.md#window-register-loaded-once-per-chain-2026-11-24)
 - [SpongeBob host profile with perf: dispatch and translation after loading (2026-11-24)](archive/JIT-history.md#spongebob-host-profile-with-perf-dispatch-and-translation-after-loading-2026-11-24)

@@ -218,10 +218,17 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     bool has_brcond_skip = false;   // blocks with BRCOND_SKIP skip optimize_ir (op-count stability)
     uint64_t loop_tail_end = 0;
     // A loop whose only inner branches are CBZ/CBNZ exits stays one block: the exits become mid-block exits (SideExit.cpp).
+    // Not while the persistent cache records (or checks a recording): a block with a mid-block exit is not recordable, so the cache would
+    // lose it, and the recording compile and its shifted proof compile must form blocks the same way.
     const bool side_exits_allowed = !dbg().no_side_exit && !dbg().no_selfloop && !dbg().jit_verify && !leaf_inline_enabled_ &&
-                                    !(mt_active() && dbg().no_chain);
+                                    !(mt_active() && dbg().no_chain) && !recording_ && !record_oracle_;
     bool side_exit_scanned = false;
     std::vector<uint64_t> side_exit_pcs;
+    // Carry formation (BIFROST_CARRY=1): past any forward conditional branch the block goes on along its fall-through, the taken side
+    // becomes a mid-block exit, and the guest registers stay in host registers across what used to be a block edge.
+    const bool carry_formation = dbg().carry && side_exits_allowed;
+    constexpr int kCarryMaxExits = 6;
+    int carry_exits = 0;
     // A loop body up to twice the cap stays one block (selfloop_extent).
     int block_cap = max_block_insts;
     bool loop_probed = false;
@@ -378,6 +385,10 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                 }
             }
             side_exit_here = std::find(side_exit_pcs.begin(), side_exit_pcs.end(), cur_pc) != side_exit_pcs.end();
+            if (!side_exit_here && carry_formation && d.imm > 0 && carry_exits < kCarryMaxExits && instr_count + 2 < max_block_insts) {
+                side_exit_here = true;
+                ++carry_exits;
+            }
         }
         bool ends = translate_to_ir(ir_block, d, cur_pc);
         // A B.cond right after an FP_CMP reads raw ucomis flags with exits of its own: it stays a block end.
@@ -959,6 +970,23 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             if (block_const(cs.src1, j, c1) && block_const(cs.src2, j, c2) &&
                 c1 <= 1 && c2 <= 1 && c1 != c2)
                 fold_ahead_kind_[i] = 3;
+        }
+    }
+    // A constant that only the next op reads, and that op is an eager STORE_REG of a guest register (every block but a loop that defers its
+    // stores): the store takes the immediate (`mov qword [reg slot], imm32`) and the constant is never put in a register. The guards mirror
+    // the STORE_REG case (Memory.cpp): not a deferred store, not an FP store, and the constant fits a sign-extended imm32.
+    if (!keep_store_dest_) {
+        const size_t count = ir_block.insts.size();
+        for (size_t i = 0; i + 1 < count && i < fold_ahead_kind_.size(); i++) {
+            const IRInst& im = ir_block.insts[i];
+            if (im.op != IROp::IMM || fold_ahead_kind_[i]) continue;
+            if (!(im.dest > 32 && im.dest < 4096) || wide_guest_pc(im.imm_value())) continue;
+            if (vreg_last_use_op_[im.dest] != static_cast<int>(i + 1)) continue;
+            const IRInst& nx = ir_block.insts[i + 1];
+            if (nx.op != IROp::STORE_REG || nx.is_fp_store() || nx.dest > 31 || nx.src1 != im.dest) continue;
+            const int64_t c = static_cast<int64_t>(im.imm_value());
+            if (static_cast<int64_t>(static_cast<int32_t>(c)) != c) continue;
+            fold_ahead_kind_[i] = 4;
         }
     }
     scan_w32_and_sext_loads(ir_block.insts);

@@ -475,6 +475,15 @@ void FrostJIT::emit_store_arm(int ar, int xr) {
     else if (ar == 31)       emit_store(CPU_REG, SP_OFF, xr);
     // XZR — discard
 }
+void FrostJIT::emit_store_arm_imm32(int ar, int32_t imm) {
+    int32_t off;
+    if (ar >= 0 && ar <= 30) off = REGS_OFF + 8 * ar;
+    else if (ar == 31)       off = SP_OFF;
+    else                     return;  // XZR — discard
+    emit_byte(rex(true, false, false, CPU_REG >= 8));
+    emit_byte(0xC7); emit_modrm_disp(0, CPU_REG, off);
+    emit_u32(static_cast<uint32_t>(imm));
+}
 // ── NZCV materialization to cpu.nzcv_host ─────────────────────────────
 // Scratch: clobbers RAX unless keep_rax saves it (epilogues with
 // rax_holds_next_pc_ commit flags after RAX already holds the next PC).
