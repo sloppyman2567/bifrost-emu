@@ -21,7 +21,7 @@
 # Directory layout (see Docs/ARCHITECTURE.md):
 #
 #   Source/FrostJIT/     — JIT: IR, Compiler, CodeGen, RegisterAlloc,
-#                          Backend, Runtime, Tier2
+#                          Backend, Runtime
 #   Source/Interpreter/  — Decoder, Core (integer/branch), FloatSIMD
 #   Source/System/       — Core, Memory, Loader, Syscalls, VFS, Android,
 #                          Graphics, Audio, API

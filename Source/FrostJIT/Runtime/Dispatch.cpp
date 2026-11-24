@@ -52,7 +52,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             FrostJIT* current = emu.jit();
             if (current && current != this) return current->run_block(cpu, emu);
         }
-        if (__builtin_expect(tier2_settle_pending_.load(std::memory_order_acquire), 0)) tier2_settle_queued(emu);
     }
     bool debug_step = emu.debugger_poll(cpu);
     if (!cpu.running || (cpu.jit_call_depth && cpu.jit_dispatch_requested)) return cpu.pc;
@@ -61,7 +60,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // A block that reached a (non-thunk) SVC left it unrun: run it here, with no generated frame
     // on this thread's stack (see emit_call_native_svc).
     if (__builtin_expect(cpu.jit_svc_pc != 0, 0) && run_pending_svc(cpu, emu)) return cpu.pc;
-    cpu.jit_tier2_trial = nullptr; // clear an interrupted native timing window
     jit_grant_lease(cpu);
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled
     // by default (measured ~8-10% SLOWER on the minecraft game). getenv() on
@@ -209,9 +207,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
-        // Tier-2 hotness is counted at generated entries, including chained
-        // entries. Publication has one exclusive-lock path in tier2_fire_region;
-        // this shared table lookup must not mutate counters or publish code.
         // Per-PC hotness tracking (thread-local, no lock needed for the
         // counter, but promoting to interp_only needs exclusive lock).
         // Runtime promotion to interp_only is DISABLED by default: the
@@ -415,10 +410,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // store blocks; their ref re-run can double-apply stores, so only
     // trust divergences that reproduce and make sense (register splits).
     static const bool verify_untracked_ = dbg().verify_untracked;
-    // Regions have internal loops and no Tier-1 chain/self-loop slots.
-    // Replaying them with a fixed block count (or unpatching offset zero)
-    // is invalid; use their independent result oracles instead.
-    if (verify_ && !mt_active_.load(std::memory_order_acquire) && !entry.is_region &&
+    if (verify_ && !mt_active_.load(std::memory_order_acquire) &&
         entry.verify_count < verify_every_ &&
         !entry.has_svc && !entry.has_call &&
         (!entry.has_unresolved_store || verify_untracked_)) {

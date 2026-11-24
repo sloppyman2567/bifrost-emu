@@ -433,31 +433,6 @@ public:
     // later one, as MFENCE does for write-back memory, and costs much less.
     // Its value means nothing; only this thread touches it.
     uint64_t jit_fence_word = 0;
-    // Host-only Tier-2 observations. Generated hot completions deposit one
-    // credit using a flag-neutral store; cold exits consume it in C++.
-    // Slots are CPU-local. Collisions can only delay retirement, not create
-    // pressure for an unrelated region. Architectural copies exclude these.
-    struct Tier2FeedbackSlot {
-        uint64_t owner = 0;
-        // Side exits and completed iterations of the owning region in the current feedback window (and of
-        // its sampling copy during a trial); see FrostJIT::kTier2FeedbackWindowExits.
-        uint32_t pressure = 0, credit = 0;
-        uint64_t baseline_ns = 0;
-        uint32_t baseline_work = 0, sample_quota = 256;
-        // Time and guest instructions pooled for the arm running now: visits
-        // to a head are short and uneven, so no one window can decide.
-        uint64_t window_ns = 0;
-        uint32_t window_work = 0;
-        uint32_t strikes = 0;  // feedback windows in a row that exited too often
-    };
-    static constexpr unsigned TIER2_FEEDBACK_SLOTS = 16;
-    Tier2FeedbackSlot jit_tier2_feedback[TIER2_FEEDBACK_SLOTS]{};
-    // CPU-local, host-only state for bounded real-execution A/B trials.
-    void* jit_tier2_trial = nullptr;
-    uint64_t (*jit_tier2_trial_fn)(CPU*, Emulator*) = nullptr;
-    uint64_t (*jit_tier2_trial_chain_fn)(CPU*, Emulator*) = nullptr;
-    uint32_t jit_tier2_trial_remaining = 0;
-    uint32_t jit_tier2_trial_work = 0;
 
     // ── NZCV accessors ───────────────────────────────────────────────
     void set_flag_n(bool v) { if (v) nzcv_host |= kHostN; else nzcv_host &= ~kHostN; }

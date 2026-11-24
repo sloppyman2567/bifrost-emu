@@ -37,8 +37,7 @@
 #include <mutex>
 #include <unistd.h>
 namespace arm64emu {
-void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin,
-                                       bool region) {
+void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin) {
     if (!allocation_profile_active_ || code_buf_overflow_) return;
     static std::mutex output_mutex;
     static FILE* output = nullptr;
@@ -87,7 +86,7 @@ void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t col
             (unsigned long long)evictions, reason, counted ? "ir-delta" : "range-only");
     };
     for (const auto& e : allocation_events_)
-        emit(e.pc, e.begin, e.end, region ? "region-ir" : "tier1-ir", e.op, e.scalar,
+        emit(e.pc, e.begin, e.end, "tier1-ir", e.op, e.scalar,
              e.vector_spills, e.vector_reloads, e.vector_evictions,
              e.boundary ? "synchronize" : "allocate");
     const size_t body = allocation_events_.empty() ? hot_end : allocation_events_.front().begin;
@@ -409,8 +408,8 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
         evict_vreg(reg_vreg_[best_r]);
         return best_r;
     }
-    // Every non-pinned alloc reg is excl1/excl2 (extreme pressure: e.g. a
-    // region preheader compiled with FLAGS3 + arch pins excluded leaves a
+    // Every non-pinned alloc reg is excl1/excl2 (extreme pressure: e.g.
+    // FLAGS3 + arch pins excluded leaves a
     // 2-reg pool, and a 2-operand op excludes both). Falling back to
     // `return alloc_reg()` would silently ignore the exclusions: alloc_reg
     // could hand back excl2's register, and the caller's canonical sequence

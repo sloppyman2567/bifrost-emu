@@ -18,11 +18,9 @@ clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -ffreestanding -fP
 for aslr in fixed random; do
     settings=()
     [[ "$aslr" != fixed ]] || settings=(BIFROST_NO_ASLR=1)
-    for mode in jit interp tier2; do
+    for mode in jit interp; do
         args=()
         [[ "$mode" != interp ]] || args=(--no-jit)
-        tier=0
-        [[ "$mode" != tier2 ]] || tier=1
         for services in off on; do
             service_args=()
             service_env=(BIFROST_GUEST_ENV=BIFROST_ANDROID_DEVICE_TEST=1)
@@ -31,8 +29,8 @@ for aslr in fixed random; do
                 service_env=('BIFROST_GUEST_ENV=BIFROST_ANDROID_DEVICE_TEST=1;BIFROST_ANDROID_SERVICES_TEST=1')
             fi
             log="$task_tmp/$aslr-$mode-$services.log"
-            env -u BIFROST_ROOT -u BIFROST_NO_ASLR -u BIFROST_ANDROID_SERVICES_TEST BIFROST_TIER2="$tier" \
-                BIFROST_ANDROID_DEVICE_TEST=1 BIFROST_TIER2_HITS=32 "${settings[@]}" "${service_env[@]}" timeout -s KILL 30 \
+            env -u BIFROST_ROOT -u BIFROST_NO_ASLR -u BIFROST_ANDROID_SERVICES_TEST \
+                BIFROST_ANDROID_DEVICE_TEST=1 "${settings[@]}" "${service_env[@]}" timeout -s KILL 30 \
                 "$emu" "${args[@]}" "${service_args[@]}" --android-runtime --rootfs "$runtime" \
                 /data/local/tmp/bootstrap > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
             grep -qE '^android_bionic_bootstrap: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
@@ -55,13 +53,11 @@ clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -fPIE -pie -O2 \
     "$runtime/apex/com.android.runtime/lib64/bionic/libc.so" \
     "$runtime/apex/com.android.runtime/lib64/bionic/libdl.so" \
     -o "$runtime/data/local/tmp/aaudio_thread"
-for mode in jit interp tier2; do
+for mode in jit interp; do
     args=()
     [[ "$mode" != interp ]] || args=(--no-jit)
-    tier=0
-    [[ "$mode" != tier2 ]] || tier=1
     log="$task_tmp/aaudio-$mode.log"
-    env -u BIFROST_ROOT SDL_AUDIODRIVER=dummy BIFROST_TIER2="$tier" BIFROST_TIER2_HITS=32 \
+    env -u BIFROST_ROOT SDL_AUDIODRIVER=dummy \
         timeout -s KILL 60 "$emu" "${args[@]}" --android-runtime --rootfs "$runtime" \
         /data/local/tmp/aaudio_thread > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
     grep -qE '^android_aaudio_thread: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }
@@ -86,13 +82,11 @@ clang --target=aarch64-linux-android35 -fuse-ld=lld -nostdlib -fPIE -pie -O2 -Wa
     "$runtime/apex/com.android.runtime/lib64/bionic/libm.so" \
     "$runtime/apex/com.android.runtime/lib64/bionic/libdl.so" \
     -o "$runtime/data/local/tmp/opensles_player"
-for mode in jit interp tier2; do
+for mode in jit interp; do
     args=()
     [[ "$mode" != interp ]] || args=(--no-jit)
-    tier=0
-    [[ "$mode" != tier2 ]] || tier=1
     log="$task_tmp/opensles-$mode.log"
-    env -u BIFROST_ROOT SDL_AUDIODRIVER=dummy BIFROST_TIER2="$tier" BIFROST_TIER2_HITS=32 \
+    env -u BIFROST_ROOT SDL_AUDIODRIVER=dummy \
         timeout -s KILL 60 "$emu" "${args[@]}" --android-runtime --rootfs "$runtime" \
         /data/local/tmp/opensles_player > "$log" 2>&1 || { cat "$log" >&2; exit 1; }
     grep -qE '^android_opensles_player: ALL PASS$' "$log" || { cat "$log" >&2; exit 1; }

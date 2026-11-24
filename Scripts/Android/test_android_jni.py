@@ -54,7 +54,6 @@ def run(emu, runtime, fixture, mode, output, timeout):
             arguments += ["--android-runtime", "--rootfs", str(root), "/data/local/tmp/bifrost-art", "Bootstrap"]
         environment = dict(os.environ)
         environment.pop("BIFROST_ROOT", None)
-        environment["BIFROST_TIER2"] = "0"
         log_path = output / (mode + ".log")
         started = time.monotonic()
         timed_out = False

@@ -858,7 +858,7 @@ make test-android-package
 The APK gate requires a native Wayland desktop and GPU and provisions the
 pinned real-media bundle above. It builds and signs a
 base/split NativeActivity fixture with actual AAPT2/API-35 manifest resources
-and apksigner. All six JIT/interpreter/Tier-2 and built-in/plugin combinations
+and apksigner. All four JIT/interpreter and built-in/plugin combinations
 pass lifecycle, pthread/TLS, split-asset, save persistence, EGL pixel readback
 and service-handle invocation checks. The signed fixture also verifies sibling
 dependency loading, mixed integer/FP/string/stack variadic logs, a known CRC,

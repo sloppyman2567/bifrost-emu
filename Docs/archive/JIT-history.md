@@ -2,6 +2,40 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Tier-2 regions removed (2026-11-24)
+
+The maintainer decided to remove Tier-2: it was written before the JIT had MT chaining, it was not designed for MT, and it was not cheap
+to profile. The guide's Tier-2 sections (loop discovery, trials, phase feedback, region publication, calls and returns) are in git
+history before this change; the dated write-ups below ("Tier-2 exits that chain", "Tier-2 through calls and returns", "Tier-2 without
+a Tier-1 tax") stay as the record of what it did.
+
+What the numbers said at the end (all from earlier sections, not re-measured): CoreMark +4.7% at 200,000 iterations and +2.1% at 40,000
+over Tier-1 (2026-11-24 roadmap), a particle loop 7.7% fewer cycles, no game run with it on, and its instrumentation had cost CoreMark
+18-29% before a decided block was retranslated clean (about 3.4% after). In MT mode every candidate head carried a `lock xadd` counter.
+A 60 s SpongeBob loading run on 2026-11-24 had Tier-2 off (`tier2: hot_heads=0 regions=0`), so it is not in that profile.
+
+Removed: `Source/FrostJIT/Tier2/` (trace collector, planner, region compiler, promotion, trials, feedback, profiling), the hot-head counter
+at block entry, branch-profile counters, the work probe, `BlockEntry`'s Tier-2 fields and `is_region`, the CPU's trial and feedback
+slots, the stale-pc ring (`invalidate_dispatch_pcs`) that only Tier-2 redirects used, the `private_entry` and `force_fwd` parameters, the
+timed-sampling branch of the MT self-loop back edge, and the switches `BIFROST_TIER2`, `_HITS`, `_TRACE`, `_TRACE_VERBOSE`, `_GRAPH`,
+`BIFROST_T2_REGIONDUMP`, `BIFROST_JIT_SUPERBLOCK_LIMIT` and `BIFROST_NO_CALLREGION/DESTSRC/RDCE/LICM/KEEPRES/EXITCHAIN`. The `tier2:`,
+`tier2 lifetime`, `block-runs` and `Tier-2 measured payoff` stats lines and the `regions=` count of `MT publication` are gone. Tests
+removed: `jit_tier2_discovery`, `_feedback`, `_measure`, `_rate`, `_mutex`, `tier2_smov`, `tier2_calls`; the Android bionic and package
+tests lost their `tier2` mode. `jit_mt_tier2` became `jit_mt_loops` (no Tier-2 modes); `jit_mt_publication` lost its promotion and
+targeted-invalidation checks.
+
+Coverage that went with it: loop-carried SMOV through a region (`tier2_smov`), region calls and returns, and the region result oracles.
+Tier-1 self-loop pinning keeps `jit_selfloop_pins` and `jit_pin_inplace`. The multi-block SSA graph in `IR/SSA/` has no user now; it stays
+under `make test-ir-ssa`. Some inline-guard paths (`defer_guards_` false) were Tier-2's and may now be unreachable; they were not removed.
+
+Checked: full build with no warnings (root binary 5.88 to 5.73 MB), `make verify` (112 differential fixtures, 12 threaded oracle runs),
+`test_jit_mt.sh` (default, no-chain, no-chain-skip), `test_jit_mt_publication.sh` and the suite's JIT, fork, memory and SIMD tests (all passed
+except `test_fork_lock_contention`). That test also fails on the installed pre-removal build: 6 of 7 runs on the new build and 5 of 6 on the old
+one, each with `fork N: child did not exit within 8 s`, most after `[fork] could not quiesce all locks within 3 s; forking without them`
+(`Threads.cpp`). The fork loop try-locks every lock and gives up after 3 s against seven hammering threads, and the child then inherits locked
+state; it is independent of Tier-2 (no trial locks exist with Tier-2 off) and not fixed here. Not run: games, the window tests, the interpreter
+(`--no-jit`) category of the suite.
+
 ## Hotspots from IBS and the allocation profile: tag untag and scalar FMAX/FMIN zeros (2026-11-24)
 
 Method: one run of the headless ART bootstrap (the translation yardstick's root, `BIFROST_NO_ASLR=1`, pinned to one core) under

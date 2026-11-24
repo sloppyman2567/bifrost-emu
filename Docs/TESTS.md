@@ -43,7 +43,7 @@ SQRSHRN, UQRSHRN, SQSHRUN and SQRSHRUN at every shift for 16-, 32- and 64-bit so
 `Vd == Vn`, runs each on lanes at the rounding, saturation and sign boundaries plus pseudo-random ones, and compares the
 result and FPSR.QC with an exact `__int128` model (32,257 checks); a last loop keeps the source in a vector register. The
 model and the encodings pass under QEMU, the interpreter and both JITs, and the fixture fails on a JIT without the QC update
-or without the rounding add. It does not run Tier-2 regions or a host without SSE4.1.
+or without the rounding add. It does not run a host without SSE4.1.
 
 ### In-place pin updates (2026-11-23)
 
@@ -52,7 +52,7 @@ shapes the optimisation takes: a counter in `x0` with a later reader of the new 
 add/sub/eor/mul, the old value read before the update, a `madd`, each checked against plain C for several trip counts, and a
 faulting load on either side of the update (the registers in the signal frame must show the update done or not). It passes
 under the interpreter and the JIT, with and without `BIFROST_NO_PIN_INPLACE`, and it fails (7 `madd_shape` checks) with the
-`ADD` guard in `Arithmetic.cpp` removed. It does not run Tier-2 regions, threads or a game.
+`ADD` guard in `Arithmetic.cpp` removed. It does not run threads or a game.
 
 ### Stall lines (2026-11-19)
 
@@ -94,7 +94,7 @@ and with `--no-jit`, the JIT sample report with the JIT), that nothing prints wi
 guest-instruction count for a self-loop-and-call workload matches the interpreter's count for the same program (it is
 exactly equal on this build; the check allows 2 %). It fails on the build before the fix (a report only under `-v`, and a
 count around a thousandth of the interpreter's). It does not check that `BIFROST_PROF` alone leaves the counters out
-(that is timing, not output), and it does not cover blocks served from the persistent JIT cache or Tier-2 regions, which
+(that is timing, not output), and it does not cover blocks served from the persistent JIT cache, which
 are not counted.
 
 ### Waiting report (2026-11-19)
@@ -167,12 +167,8 @@ every result is checked. The default layout must release each retired generation
 expects renewals at a 1 MiB budget.
 
 Run on the final build: the 333 unit, integration, toybox and real-world runs (`--quick`) passed at the default
-budget. With `BIFROST_JIT_CACHE_MB=1`, 332 of those 333 passed, and the 22 dynamic-linking runs selected with
-`--filter 'test_dyn|hello_dyn|dlopen|dladdr'` passed. The one failure, `jit_tier2_discovery`, passes at the
-default budget. It fails at 1 or 2 MiB with no renewal at all (a gdb breakpoint on `Emulator::renew_jit` never
-fires): the test drives `lookup_or_translate` and `compile_tier2_region` directly, which do not go through
-`translate_entry`, so it meets the plain budget limit as it did before; that the budget is simply too small for
-its compiles is likely but was not checked. The generations fixture also passed 20 of 20 repeated runs
+budget. With `BIFROST_JIT_CACHE_MB=1`, 332 of those 333 passed (the one failure was a Tier-2 test, removed since), and the 22 dynamic-linking runs selected with
+`--filter 'test_dyn|hello_dyn|dlopen|dladdr'` passed. The generations fixture also passed 20 of 20 repeated runs
 pinned to different CPU sets, three at a time. `make verify` reported two failures, both present before this
 change: `jit_bfm_extract` times out (exit 124; the 95 s against the 30 s limit recorded on 2026-10-23, not
 re-measured on the old tree), and `jit_dispatch_cache_growth` is a threaded fixture that `verify_jit.sh` runs

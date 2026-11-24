@@ -59,36 +59,6 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // its old mapping before the guard and writing the next PC on cold exit.
     clobber_host_reg(RAX);
     selfloop_patch_off_ = code_buf_used_;
-    if (!preempt_by_epoch()) {
-        // Timed Tier-2 trials keep the bounded edge budget: a window counts
-        // dispatcher resumptions, so its loops must expire on a short count.
-        MtEdge* edge = create_chain_edge(target_pc, false, selfloop_patch_off_);
-        edge->internal_loop = true;
-        edge->target.store(reinterpret_cast<uint64_t>(code_buf_ + block_body_start_off_),
-                           std::memory_order_relaxed);
-        mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
-        emit_mov_imm_to_rax(target_pc);
-        // cmp rax,[rbx+jit_stop_pc]; je cold exit
-        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
-        emit_u32(offsetof(CPU, jit_stop_pc));
-        size_t stop = emit_jcc_rel32_placeholder(0x4);
-        // Same 256-edge lease as ordinary ST chains (zero also expires).
-        emit_byte(0x83); emit_byte(0xAB);
-        emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
-        size_t budget = emit_jcc_rel32_placeholder(0x6);
-        emit_mov_imm_to_rax(reinterpret_cast<uint64_t>(&edge->target));
-        emit_load(RAX, RAX, 0);
-        emit_test_reg(RAX, RAX);
-        size_t empty = emit_jcc_rel32_placeholder(0x4);
-        // Only reconcile the loop layout after every revocation/lease check.
-        // A cold exit below still observes the original branch-point layout.
-        vec_writeback_dynamic();
-        emit_byte(0xFF); emit_byte(0xE0); // jmp rax (body entry, same frame)
-        for (size_t p : {stop, budget, empty})
-            patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
-        // The caller emits the taken cold exit, committing GPRs and vectors.
-        return true;
-    }
     // Published MT code is immutable, so the body is a direct jump. It leaves
     // on the callback sentinel or when the preemption epoch moves (a tick or
     // any invalidation); both checks only read. The epoch exit rebuilds RAX
@@ -251,7 +221,6 @@ void FrostJIT::emit_taken_path_epilogue() {
     // stack slot.
     flush_arch_vregs_keep();
     if (!pc_after_slot) emit_store(CPU_REG, PC_OFF, RAX);
-    emit_tier2_edge_profile(true);
     // RDI/RSI only for the ordinary layout's fn targets (see the block epilogue).
     if (!chain_skip_enabled()) {
         emit_mov_reg(RDI, CPU_REG);
@@ -623,8 +592,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
         }
         case IROp::BRCOND_FALLTHRU: {
             const BrCondFallthruParams bp = inst.fallthru_params();
-            // Ends a Tier-1 block (regions lay their direct edges out
-            // themselves): scratch values are dead at the exit.
+            // Ends the block: scratch values are dead at the exit.
             flush_all_vregs_exit();
             emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;

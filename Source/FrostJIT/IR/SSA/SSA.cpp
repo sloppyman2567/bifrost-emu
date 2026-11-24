@@ -476,7 +476,7 @@ bool lower_ssa(const SSAFunction& f, std::vector<SSASourceBlock>& result,
             if (node.input_mask & 4) i.aux = home(node.inputs[2]);
             out[b].ir.insts.push_back(i);
         }
-        if (b == 0) // empty entry (Tier-2 preheader): every input loads here
+        if (b == 0) // empty entry: every input loads here
             out[0].ir.insts.insert(out[0].ir.insts.end(),
                                    input_loads[entry.size()].begin(), input_loads[entry.size()].end());
     }

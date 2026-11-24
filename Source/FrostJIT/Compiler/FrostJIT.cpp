@@ -72,32 +72,6 @@ bool FrostJIT::direct_call_enabled() {
     static const bool on = !dbg().no_direct_call;
     return on;
 }
-// Tier-1 JIT is the default. Tier-2 region promotion remains experimental:
-// opt in with BIFROST_TIER2=1; BIFROST_TIER2=0 explicitly keeps it off.
-// Chaining is independent of this gate, including in multithreaded mode.
-bool FrostJIT::tier2_enabled() {
-    // Fixed-instruction differential replay temporarily patches Tier-1 exits
-    // and restores guest memory. Region promotion can redirect those exits
-    // into whole loops during replay; validate regions with result oracles.
-    if (dbg().tier2 && dbg().jit_verify) {
-        static const bool reported = [] {
-            std::fprintf(stderr, "[tier2] promotion disabled during differential replay; use region result oracles\n");
-            return true;
-        }();
-        (void)reported;
-    }
-    return dbg().tier2 && !dbg().jit_verify;
-}
-uint32_t FrostJIT::tier2_hits_threshold() {
-    // Default 1000 (set in DebugFlags): hot blocks neutralize their in-code
-    // counters 10x sooner, and with loop-regions-only the extra regions the
-    // lower bar admits are genuine loops. CoreMark A/B: 3614 vs 3590 iters/s
-    // (3 reps each) — small but reproducible.
-    return dbg().tier2_hits;
-}
-bool FrostJIT::tier2_trace_enabled() {
-    return dbg().tier2_trace;
-}
 // ── Compile-time layout checks ─────────────────────────────────────────
 // The JIT hardcodes offsets into the CPU struct (REGS_OFF, SP_OFF, etc.)
 // for direct memory access in generated x86 code. If the CPU struct layout
@@ -707,8 +681,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             int s1, s2;
             ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             // CMP normally has an unused temporary destination in the IR.
-            // Restrict this test to body liveness: Tier-2 preheader indices
-            // sit after the body in the allocator's synthetic use ordering.
+            // Restrict this test to body liveness.
             const bool discard_result = inst.dest == 0 ||
                 (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
                  cur_op_index_ < kills_per_op_.size() &&
@@ -788,7 +761,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
         }
         case IROp::BR: {
             int s = ensure_vreg(inst.src1, RAX);
-            // BR always ends the block (regions never admit it): commit the
+            // BR always ends the block: commit the
             // architectural registers; scratch values, the target included, die
             // here and need no stack store. The target stays in s for the mov.
             flush_all_vregs_exit();
@@ -1148,9 +1121,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             // overwrite it with a pop.
             // MT code keeps the callee in a revocable data cell (an empty cell
             // reads as this site's slow path), so no stale address is embedded.
-            // Timed sampling code stays on the helper: its cells are private.
-            const bool mt_cell_call = mt_active() && !tier2_sampling_compile_;
-            if (direct_call_enabled() && (!mt_active() || mt_cell_call)) {
+            if (direct_call_enabled()) {
                 // ── Direct BL call ─────────────────────────────────
                 // Emit a patchable `call rel32` slot instead of routing
                 // through jit_call_helper → lookup_call_target. Once the
@@ -1171,7 +1142,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 emit_sub_rsp_imm8(16);
                 size_t call_slot = code_buf_used_;
                 MtEdge* call_edge = nullptr;
-                if (mt_cell_call) {
+                if (mt_active()) {
                     call_edge = create_chain_edge(bp.target, true, call_slot);
                     emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(&call_edge->target));
                     note_host_reloc(HostReloc::Edge, static_cast<uint32_t>(mt_edges_.size() - 1 - record_edge_mark_));

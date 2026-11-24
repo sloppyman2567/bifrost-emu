@@ -46,5 +46,5 @@
 - Managed `isMusicActive` reflects real started host output streams. Keep audio
   service answers tied to supported state rather than unconditional success.
 - Validate host callback stress/frame counters and the managed Bionic AAudio
-  thread and OpenSL ES player tests in JIT/interpreter/Tier-2. Host tests alone
+  thread and OpenSL ES player tests in JIT/interpreter. Host tests alone
   do not validate Android TLS.

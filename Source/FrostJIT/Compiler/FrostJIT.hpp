@@ -59,54 +59,6 @@ struct CPU;
 class Emulator;
 class Memory;
 class PersistentCache;
-// ── Tier-2 trace (ROADMAP #14, Phase 1 step 2) ──────────────────────────
-// A candidate tier-2 trace: a linear run of guest blocks whose IR will be
-// compiled as ONE region with ONE register allocation. Pure
-// data collection — collect_tier2_trace() emits no code, touches no block
-// cache, and compiles nothing.
-struct Tier2Trace {
-    struct Block {
-        uint64_t pc;            // block start PC
-        IRBlock  ir;            // translated IR for this block
-        bool follows_taken = false; // conditional hot successor, terminator inverted
-        uint64_t hot_successor = 0; // original target, checked before compilation
-
-        // Terminal edge (target_pc, ir_op_index): conditional taken exit,
-        // direct jump or synthetic cap continuation. The compiler identifies
-        // inline direct edges and the final back-edge to head_pc.
-        std::vector<std::pair<uint64_t, int>> side_exits;
-        // kDynamicExit side exit: leave to the address in this guest register (a RET).
-        int dynamic_exit_reg = -1;
-    };
-    // Side-exit target of a RET: a final BR, or the guard a matched RET becomes.
-    static constexpr uint64_t kDynamicExit = ~0ull;
-    std::vector<Block> blocks;
-    uint64_t head_pc = 0;
-    uint64_t total_insts = 0;   // sum of block instruction counts
-    double path_probability = 1.0; // measured probability of completing the path
-    bool fully_profiled = true;
-    bool ok = false;            // complete path/prefix is safe to compile
-    const char* stop_reason = nullptr;  // why collection stopped (debug)
-};
-// Output of plan_tier2_region(): the trace's IR concatenated, SSA-optimized
-// and transformed (DCE, LICM, dest-sourcing), ready for region codegen.
-struct Tier2RegionPlan {
-    struct Block {
-        size_t   start;      // first op index in region_ir
-        size_t   term;       // terminating branch op index
-        uint64_t side_pc;    // taken (side-exit / back-edge) target
-        uint64_t pc;         // block start PC (for exit_pc)
-        size_t   inst_count; // ARM instructions in this block
-        int dynamic_exit_reg = -1;  // side_pc == Tier2Trace::kDynamicExit: target register
-    };
-    std::vector<Block> blocks;
-    std::vector<IRInst> region_ir;  // loop body
-    std::vector<IRInst> preheader;  // SSA entry + LICM-hoisted ops
-    int region_max_vreg = 32;
-    bool last_is_backedge = false;
-    bool ssa_region = false;
-    bool has_call = false;
-};
 // Regalloc bloat diagnostics (BIFROST_REGALLOC_STATS=1). Counted at the
 // (codegen-time) spill/reload emit sites; reset per translated block.
 struct regalloc_stats_t {
@@ -135,17 +87,9 @@ extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
 extern "C" uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_excl_lock_slow(std::atomic<uint64_t>* word);
-// Tier-2 in-code fire stub: called from generated block prologues (the
-// per-block hot-head counter, BIFROST_TIER2=1). A plain free function so the
-// prologue can take its address at codegen time; forwards to
-// emu->jit()->tier2_fire_region(). Implemented in Tier2/Promotion.cpp.
-void tier2_fire_stub(Emulator* emu, uint64_t pc, size_t site);
 void bifrost_prof_init(class FrostJIT* jit);
 class FrostJIT {
-    struct Tier2Trial;
     struct BlockEntry;
-    bool tier2_sampling_compile_ = false;
-    friend struct Tier2TestAccess;
 public:
     FrostJIT();
     ~FrostJIT();
@@ -254,22 +198,6 @@ public:
     std::atomic<uint64_t> cache_misses{0};
     std::atomic<uint64_t> interpreter_fallbacks{0};
     std::atomic<uint64_t> block_chains_patched{0};
-    // Tier-2 hot-head counter (ROADMAP #14, Phase 1): blocks that crossed
-    // tier2_hits_threshold() slow-path executions while BIFROST_TIER2=1.
-    // Printed by dump_periodic_stats alongside the block-end reasons.
-    std::atomic<uint64_t> tier2_hot_heads{0};
-    // Tier-2 trace counter (ROADMAP #14, Phase 1 step 2): traces that reached
-    // ok=true (>= 2 blocks) during collection. Not yet wired into periodic
-    // stats — that belongs to the compilation task.
-    std::atomic<uint64_t> tier2_traces{0};
-    // Tier-2 region counter (ROADMAP #14, Phase 1 step 3): traces successfully
-    // compiled as a whole-region function (blocks_[head_pc] replaced by the
-    // region fn). Printed by dump_periodic_stats alongside hot_heads/traces.
-    // Inert (0) unless BIFROST_TIER2=1 and a hot head fires.
-    std::atomic<uint64_t> tier2_regions{0};
-    std::atomic<uint64_t> tier2_profit_rejections{0}, tier2_profile_retries{0};
-    std::atomic<uint64_t> tier2_measured_pairs{0}, tier2_measured_keeps{0}, tier2_measured_rejections{0};
-    std::atomic<uint64_t> tier2_phase_retirements{0}, tier2_compile_ns{0}, tier2_code_bytes{0};
     // Tier-1 compile cost and churn (BIFROST_STATS_PERIOD). The max is an
     // interval value that the periodic reporter resets. Lock waits count
     // only contended table/compiler lock acquisitions on dispatch paths.
@@ -342,7 +270,6 @@ public:
     static thread_local LastBlockCache tls_last_block_;
     static thread_local const FrostJIT* tls_cache_owner_;
     static thread_local uint64_t tls_cache_generation_;
-    static thread_local uint64_t tls_stale_seq_;  // how much of the stale-pc ring this thread has applied
     static std::atomic<uint64_t> next_cache_generation_;
     std::atomic<uint64_t> cache_generation_{next_cache_generation_.fetch_add(1, std::memory_order_relaxed)};
     void invalidate_dispatch_cache() {
@@ -352,29 +279,11 @@ public:
         // translation at their next back-edge rather than at the next tick.
         g_jit_preempt_epoch.fetch_add(1, std::memory_order_release);
     }
-    // A translation replaced by an equivalent one (a Tier-2 head redirect, a settle or a region's retirement) leaves the
-    // old code valid: only each thread's entries for those pcs must go, not every cache of every thread. Writers hold
-    // the compiler lock exclusively; each thread applies what it has not seen at its next dispatch. A thread more than
-    // one ring behind (or lapped while reading) wipes everything, as a generation change does.
-    static constexpr uint64_t STALE_PC_SLOTS = 1024;
-    std::atomic<uint64_t> stale_seq_{0};
-    std::atomic<uint64_t> stale_pcs_[STALE_PC_SLOTS];
-    void invalidate_dispatch_pcs(const uint64_t* pcs, size_t count) {
-        if (count > STALE_PC_SLOTS) { invalidate_dispatch_cache(); return; }
-        const uint64_t seq = stale_seq_.load(std::memory_order_relaxed);
-        for (size_t i = 0; i < count; ++i) stale_pcs_[(seq + i) % STALE_PC_SLOTS].store(pcs[i], std::memory_order_relaxed);
-        stale_seq_.store(seq + count, std::memory_order_release);
-    }
     void sync_dispatch_cache() {
         const uint64_t generation = cache_generation_.load(std::memory_order_acquire);
-        if (tls_cache_owner_ == this && tls_cache_generation_ == generation) {
-            const uint64_t seq = stale_seq_.load(std::memory_order_acquire);
-            if (__builtin_expect(seq != tls_stale_seq_, 0)) sync_stale_pcs(seq, generation);
-            return;
-        }
+        if (tls_cache_owner_ == this && tls_cache_generation_ == generation) return;
         // Never attribute another JIT owner's pending diagnostic counts here.
         if (tls_cache_owner_ != this) tls_dispatch_stats_ = DispatchStats{};
-        tls_stale_seq_ = stale_seq_.load(std::memory_order_acquire);
         wipe_local_dispatch_caches(generation);
         tls_cache_owner_ = this;
         tls_cache_generation_ = generation;
@@ -386,33 +295,14 @@ public:
         clear_inline_cache();
         if (tls_ibl_) reset_ibl(generation);
     }
-    void sync_stale_pcs(uint64_t seq, uint64_t generation) {
-        const uint64_t from = tls_stale_seq_;
-        if (seq - from > STALE_PC_SLOTS) {
-            wipe_local_dispatch_caches(generation);
-        } else {
-            for (uint64_t s = from; s < seq; ++s) drop_local_pc(stale_pcs_[s % STALE_PC_SLOTS].load(std::memory_order_relaxed));
-            // A writer that lapped the ring while this read it overwrote slots not yet read.
-            if (stale_seq_.load(std::memory_order_acquire) - from > STALE_PC_SLOTS) wipe_local_dispatch_caches(generation);
-        }
-        tls_stale_seq_ = seq;
-    }
-    void drop_local_pc(uint64_t pc) {
-        if (tls_last_block_.pc == pc) tls_last_block_ = LastBlockCache{};
-        inline_cache_erase(pc);
-        if (tls_ibl_) {
-            IblEntry& e = tls_ibl_->entries[(pc >> 2) & tls_ibl_->mask];
-            if (e.pc == pc) e = IblEntry{~0ULL, 0};
-        }
-    }
     // ── Indirect-branch target table (IBL) ──────────────────────────
     // Chain-skip BR/BLR/RET exits look their dynamic guest target up here
     // and jump straight to its chain-skip entry instead of returning to the
     // dispatcher (every guest return used to cost a full dispatcher round
     // trip). One table per host thread: generated code reads it without
     // locks, so cpu.jit_ibl_table is rebound at every native entry
-    // (run_block, jit_call_helper); Tier-2 trials and differential replay
-    // unbind it to preserve their execution boundaries. Its generation is this
+    // (run_block, jit_call_helper); differential replay
+    // unbinds it to preserve its execution boundaries. Its generation is this
     // JIT's dispatch generation, so every invalidation revokes all entries;
     // the probe also honors jit_stop_pc, nested helper calls and the shared
     // 256-edge chain budget. See emit_indirect_branch_probe.
@@ -656,77 +546,14 @@ public:
         uint32_t slot = 0;  // code offset the edge was emitted for (fits the padding)
         bool live = true; // compiler lock only
         bool cold_entry = false;
-        bool sampling_private = false;
         bool internal_loop = false; // body entry retains this block's register state
     };
-    // Outcome counts of one Tier-1 conditional exit: generated code only does
-    // `inc qword [profile+offset]` (no checks, no saturation), and the trace
-    // collector reads the ratio once per decision.
-    struct Tier2BranchProfile {
-        std::atomic<uint64_t> taken{0}, fallthrough{0};
-    };
-    static_assert(sizeof(std::atomic<uint64_t>) == 8);
-    static_assert(offsetof(Tier2BranchProfile, taken) < 128 &&
-                  offsetof(Tier2BranchProfile, fallthrough) < 128);
-    std::vector<std::unique_ptr<Tier2BranchProfile>> tier2_branch_profiles_;
-    std::map<uint64_t, Tier2BranchProfile*> tier2_profiles_by_pc_;  // ordered: retirement erases a range
-    Tier2BranchProfile* tier2_branch_profile_ = nullptr; // current Tier-1 codegen
-    void emit_tier2_edge_profile(bool taken);
-    void invalidate_tier2_profiles(uint64_t lo, uint64_t hi);
-    void clear_tier2_profiles();
-    // Instrumentation has no way out of a block: its hot counter and branch counters cost CoreMark 22-29% of its
-    // cycles for life. Once promotion has decided about a block it is retranslated without them. The compiler
-    // lock guards the set and queue; the swap waits for the dispatcher, because the decision is made inside
-    // the running block. A code change forgets the decision, as it does the profile.
-    std::set<uint64_t> tier2_settled_;
-    std::vector<uint64_t> tier2_settle_queue_;
-    // Blocks to retranslate at the current block boundaries without settling them: a head whose
-    // trial could not start because a constituent no longer translates to its traced length.
-    std::vector<uint64_t> tier2_refresh_queue_;
-    // Retired region blocks and the predecessors retirement forgot, to rebuild at a dispatch boundary.
-    std::vector<uint64_t> tier2_rebuild_queue_, tier2_rebuild_sources_;
-    std::atomic<bool> tier2_settle_pending_{false};
-    bool tier2_settling_ = false;  // compiler lock; blocks are retired and not yet back
-    void tier2_settle_locked(uint64_t pc);
-    void tier2_settle_queued(Emulator& emu);
-    // `equivalent`: the victims are replaced by translations of the same code (Tier-2 settle, a region's retirement),
-    // so in MT mode only their pcs are dropped from every thread's caches (invalidate_dispatch_pcs), not all of them.
-    void retire_blocks_locked(const std::vector<uint64_t>& victims, bool equivalent = false);
-    struct Tier2RegionMonitor {
-        std::atomic<uint32_t> enabled{1};
-        uint64_t head = 0, identity = 0;
-        unsigned slot = 0;
-        Tier2Trial* trial = nullptr;
-        // A feedback window (kTier2FeedbackWindowExits side exits) that completed fewer iterations than this
-        // exited too often for the trial's verdict; the exit stub reads it, a kept trial sets it.
-        uint32_t min_window_iterations = kTier2FeedbackWindowExits * kTier2ExitRateFloor;
-    };
-    std::vector<std::unique_ptr<Tier2RegionMonitor>> tier2_region_monitors_;
-    Tier2RegionMonitor* tier2_current_monitor_ = nullptr;
-    std::unordered_map<uint64_t, unsigned> tier2_retrains_; // compiler lock; lifetime budget
-    // A measured loss retries a strictly smaller prefix, at most 8 -> 4 -> 2.
-    // Kept until code invalidation or a selected region changes phase.
-    std::unordered_map<uint64_t, unsigned> tier2_block_limits_; // compiler lock
-    // Entry counts live outside the code buffer. A store to the cache line
-    // being executed is self-modifying code to the CPU: 62 cycles of pipeline
-    // resync per block entry when the counters sat in front of each block.
-    struct HotCounter {
-        std::atomic<uint32_t> enabled{1}, hits{0};
-        bool patchable = false;  // single-thread prologue: disabled by a jump over it
-        // Guest-work rate gate: when the current window began, and how many came up short.
-        uint64_t window_start_ns = 0;
-        unsigned slow_windows = 0;
-    };
-    static_assert(std::atomic<uint64_t>::is_always_lock_free);
-    static_assert(std::atomic<uint32_t>::is_always_lock_free);
-    static_assert(offsetof(HotCounter, hits) == 4);
+    void retire_blocks_locked(const std::vector<uint64_t>& victims);
     std::vector<std::unique_ptr<MtEdge>> mt_edges_;
     std::unordered_map<uint64_t, std::vector<MtEdge*>> mt_edge_refs_, mt_source_refs_;
     // The edge source_pc emitted at code offset `slot`; its 1-3 edges are scanned.
     MtEdge* mt_slot_edge(uint64_t source_pc, size_t slot);
-    std::vector<std::unique_ptr<HotCounter>> hot_counters_;
-    std::unordered_map<size_t, HotCounter*> hot_counter_sites_;
-    std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
+    std::atomic<uint64_t> mt_edges_published_{0};
     MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
     // cpu_reg holds the CPU at the slot: RDI after an exit that restored the
     // caller's callee-saved registers, where RBX is no longer ours.
@@ -734,9 +561,6 @@ public:
     // MT preemption poll (loads only); returns the jne-to-cold patch offset.
     size_t emit_preempt_poll(int cpu_reg, int scratch);
     void emit_preempt_compare(int cpu_reg, int scratch);  // leaves the flags for a JNE on expiry
-    // Published MT code polls the epoch; ST code and timed Tier-2 sampling code
-    // (whose windows count dispatcher resumptions) keep the 256-edge budget.
-    bool preempt_by_epoch() const { return mt_active() && !tier2_sampling_compile_; }
     // Chain-skip BR/BLR/RET exit: jump through the IBL table on a hit.
     void emit_indirect_branch_probe();
     bool emit_selfloop_backedge(uint64_t target_pc);
@@ -893,83 +717,6 @@ public:
     // through jit_call_helper → lookup_call_target. Disable with
     // BIFROST_NO_DIRECT_CALL=1 (bisection / debugging).
     static bool direct_call_enabled();
-    // Tier-2 (trace/region JIT) env gates (ROADMAP #14). Read once
-    // at first use. Experimental and opt-in with BIFROST_TIER2=1.
-    // BIFROST_TIER2_HITS = the "hot head" threshold (default 1000);
-    // BIFROST_TIER2_TRACE=1 logs compiled candidates and timing decisions;
-    // BIFROST_TIER2_TRACE_VERBOSE=1 adds discovery and codegen details.
-    static bool     tier2_enabled();
-    static uint32_t tier2_hits_threshold();
-    static bool     tier2_trace_enabled();
-    // Tier-2 trace collection (ROADMAP #14, Phase 1 step 2). Walks guest
-    // code from a hot head, translating each instruction to IR, and returns
-    // a candidate trace (blocks + side exits) for a later task to compile as
-    // one region. PURE COLLECTION: emits no code, never touches blocks_ beyond
-    // read-only membership checks, and resets g_alloc per block so it never
-    // consumes the global regalloc. Call with the block table quiescent (the
-    // hot-head fire site holds the exclusive lock). Implemented in
-    // Tier2/TraceCollector.cpp.
-    Tier2Trace collect_tier2_trace(Emulator& emu, uint64_t head_pc);
-    // The natural loop around a hot head, both sides of its branches, for graph regions.
-    struct Tier2Loop { std::vector<uint64_t> blocks; unsigned insts = 0, backedges = 0; double coverage = 0; bool capped = false; };
-    Tier2Loop find_tier2_loop(Emulator& emu, uint64_t head_pc);
-    // Tier-2 region compilation (ROADMAP #14, Phase 1 step 3 / M1). Compiles
-    // a collected trace as ONE x86 function with ONE region-wide register
-    // allocation: the blocks' IR is vreg-remapped to a single space and
-    // concatenated, the terminating branch of each block is handled by the
-    // region compiler (internal fall-through edges stay inline, side exits /
-    // the loop back-edge jump to the shared epilogue or the region body).
-    // Region-internal edges carry flags in host RFLAGS (no per-edge pstate
-    // materialize); only the back-edge and side exits materialize. No
-    // cross-block optimization (M1 scope), no vec-cache/fp-cache (blocks use
-    // the memory paths). Call with the blocks_mutex_ held EXCLUSIVE (the
-    // region fn is written into code_buf_ alongside translate_block's).
-    // Returns nullptr if the trace shape isn't region-qualified. The CALLER
-    // replaces blocks_[head_pc].fn with the returned fn; publication is
-    // centralized in tier2_fire_region in Tier2/Promotion.cpp.
-    // chain_out (optional): receives the region's CHAIN-SKIP entry point
-    // (code_buf_ + the post-frame-setup label, mirroring BlockEntry.
-    // chain_entry for standalone blocks) when chain-skip is enabled. Chain
-    // edges are bare jmps carrying the ROOT's rbp/rsp, so they must enter
-    // past the region's frame allocation; cold dispatches use fn (which
-    // allocates the unified kChainSkipFrameBytes frame under chain-skip).
-    // nullptr when chain-skip is off (fn handles both entries there).
-    // Region-qualification checks and IR transforms (RegionPlanner.cpp).
-    // Also selects loop-carried pins (arch_pin_/pinned_host_regs_) and the
-    // phase-feedback monitor. False when the trace does not qualify.
-    bool plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* monitor_override,
-                           Tier2RegionPlan& plan);
-    uint64_t (*compile_tier2_region(Emulator& emu, const Tier2Trace& trace,
-                                    uint64_t (**chain_out)(CPU*, Emulator*) = nullptr,
-                                    Tier2RegionMonitor* monitor_override = nullptr))(CPU*, Emulator*);
-    // Tier-2 in-code fire path (ROADMAP #14, Phase 1 step 4). Called from the
-    // per-block hot-head counter emitted in block prologues (BIFROST_TIER2=1):
-    // counts CHAINED execution (which never reaches run_block's slow path),
-    // and once a block crosses tier2_hits_threshold() mid-run this collects +
-    // compiles a region for it and re-patches the loop back-edge chain slot(s)
-    // so the next iteration jumps into the region. Executes from INSIDE a
-    // running block: must not throw (wrapped in try/catch), must not touch the
-    // W^X machinery (bails when wex_enabled_ — disabling a counter patches the
-    // code page, which only exists in non-W^X shared-JIT mode), and takes the
-    // exclusive lock only around the map mutations. Implemented in
-    // Tier2/Promotion.cpp.
-    void tier2_fire_region(Emulator& emu, uint64_t pc, size_t site = 0);
-    void tier2_region_feedback(CPU& cpu, void* monitor);
-    uint64_t tier2_measure(CPU& cpu, Emulator& emu, void* trial);
-private:
-    void emit_tier2_work_probe(unsigned count);
-    void finish_tier2_trial(Tier2Trial& trial, bool keep);
-    void retire_tier2_region_locked(uint64_t pc);
-    void redirect_tier2_head_locked(uint64_t pc);
-    void revoke_tier2_samples_locked(Tier2Trial& trial);
-public:
-    // Neutralize a block's tier-2 counter after it fires: overwrites the start
-    // of a single-thread prologue with `jmp rel32` past the whole
-    // counter+fire sequence so the block stops paying ~6 cycles/entry. No-op
-    // when no counter was emitted (off==0). Writes the code page directly —
-    // callers hold the exclusive blocks_mutex_ (and tier-2 only runs in
-    // non-W^X mode, so the buffer is RWX). Implemented in Tier2/Promotion.cpp.
-    void tier2_counter_disable(size_t counter_off, size_t counter_len, bool legacy_transition = false);
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. One
     // constant, so a future change (e.g. adding XMM regs to the allocator)
@@ -1007,7 +754,7 @@ private:
     // tests inline. The software page checks and the recoverable fault exit
     // are emitted after the block (flush_deferred_guards) from the GPR/vector
     // cache state captured where the access diverts, so the fast path takes
-    // no branch. Tier-2 regions use it too.
+    // no branch.
     struct GuardState {
         int reg_vreg[16];
         uint16_t dirty_mask;
@@ -1134,8 +881,7 @@ private:
         uint64_t (*chain_entry)(CPU*, Emulator*) = nullptr;
         uint64_t chain_target_pc = 0;  // statically-known next PC, or 0
         uint64_t taken_chain_target_pc = 0;  // taken-path target, or 0
-        uint64_t verify_count = 0; // independent of Tier-2 entry hotness
-        Tier2RegionMonitor* tier2_monitor = nullptr;
+        uint64_t verify_count = 0;
         // Verify-mode memory save/restore: list of (arm_reg, offset, width)
         // for every STORE_MEM in this block whose address can be statically
         // resolved to (saved_arm_reg + offset). At verify time, we snapshot
@@ -1172,28 +918,13 @@ private:
         uint32_t taken_chain_patch_off = 0;   // offset of the taken-path slot
         uint32_t selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
         uint16_t selfloop_jcc_back = 0;   // ST: slot offset minus the retargeted jcc's offset (0: none)
-        uint32_t emitted_bytes = 0;    // actual host code size for region admission
-        // Offset of the tier-2 hot-head counter sequence in the prologue (the
-        // count is a HotCounter, found through hot_counter_sites_). 0 = no
-        // counter emitted (block ineligible, or tier-2 off). Single-thread
-        // firing overwrites the sequence's start with a `jmp rel32` over the
-        // whole counter+fire sequence once the block fires, so a hot block
-        // stops paying the per-entry counter cost for the rest of the run.
-        uint32_t tier2_counter_off = 0;
-        // Total length of the tier-2 counter+fire sequence at
-        // tier2_counter_off (mov+inc+cmp+jne+fire path). tier2_counter_disable
-        // overwrites its first five bytes with `jmp rel32` of
-        // (tier2_counter_len - 5) to skip the whole sequence. 0 = none.
-        uint32_t tier2_counter_len = 0;
+        uint32_t emitted_bytes = 0;    // actual host code size
         int     instr_count = 0;      // number of ARM64 instructions in this block
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
         int     call_interp_count = 0; // post-optimization IR CALL_INTERP count
-        // Generated entry counters own Tier-2 hotness. Each translation
-        // bounds promotion attempts; differential replay has a separate budget.
-        unsigned tier2_attempts = 0; // bounded retries while branch samples warm up
         // The instruction words this translation fetched, as a span of
         // code_words_. Recorded only for contiguous Tier-1 blocks (no
-        // inlined leaf, no region). Cache maintenance and mprotect keep a
+        // inlined leaf). Cache maintenance and mprotect keep a
         // block whose words still match and remain executable; a zero
         // count always retires it.
         uint32_t code_words_off = 0;
@@ -1212,15 +943,6 @@ private:
         bool    chained = false;       // true once the slot has been patched to a jmp
         bool    taken_chained = false;       // true once patched to a jmp
         bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
-        bool     tier2_hot_logged = false;
-        // True if this BlockEntry is a tier-2 region fn (registered by
-        // tier2_fire_region). Region entries have NO chain slots (their
-        // chained/taken_chained are set true and the slots are 0), so any
-        // repatch logic must never treat them as standalone blocks — and a
-        // region fire must not repatch the stale standalone slots of a block
-        // that has since become a DIFFERENT region's head (overlapping
-        // traces share blocks; hijacking those slots cross-wires regions).
-        bool     is_region = false;
         // True if the block contains an SVC (syscall / thunk) instruction.
         // The verify re-run must NOT re-execute such blocks (the syscall has
         // host side effects), so the full-memory verifier (MEMFULL) skips them.
@@ -1271,51 +993,10 @@ private:
         bool skips_dead_flag_store = false;
     };
     static_assert(CODE_BUF_SIZE <= UINT32_MAX, "BlockEntry code offsets are 32-bit");
-    // Measured trials: a timing pool closes after kTier2TrialWindowNs and the baseline's work (shorter
-    // pools were dominated by the switch between the arms' code); kTier2TrialPairs pairs decide, keeping
-    // the candidate when their median is under 0.97 and three quarters of them are.
-    static constexpr uint64_t kTier2TrialWindowNs = 100000;
-    static constexpr size_t kTier2TrialPairs = 12;
-    // Phase feedback: a kept region's side exits are judged in windows of kTier2FeedbackWindowExits. A window
-    // is bad when its exit rate (exits per completed iteration) is above kTier2ExitRateSlack times the rate its
-    // trial measured, or above 1/kTier2ExitRateFloor when that is higher; kTier2FeedbackStrikes bad windows in
-    // a row retire the region, and a new trial judges the new phase. The exit stub and tier2_region_feedback
-    // implement one rule.
-    static constexpr uint32_t kTier2FeedbackWindowExits = 32;
-    static constexpr uint32_t kTier2FeedbackStrikes = 4;
-    static constexpr uint32_t kTier2ExitRateSlack = 4;
-    static constexpr uint32_t kTier2ExitRateFloor = 16;
-    struct Tier2Trial {
-        Tier2RegionMonitor* monitor = nullptr;
-        BlockEntry baseline, candidate_entry;
-        uint64_t (*candidate)(CPU*, Emulator*) = nullptr;
-        uint64_t (*candidate_chain)(CPU*, Emulator*) = nullptr;
-        // Private instrumented entries; only plain entries can be selected.
-        // Timing tests may override these without publishing non-JIT rel32s.
-        uint64_t (*baseline_sample)(CPU*, Emulator*) = nullptr;
-        uint64_t (*candidate_sample)(CPU*, Emulator*) = nullptr;
-        uint64_t (*baseline_chain_sample)(CPU*, Emulator*) = nullptr;
-        uint64_t (*candidate_chain_sample)(CPU*, Emulator*) = nullptr;
-        uint64_t lo = 0, hi = 0;
-        bool linear = false;
-        std::vector<std::pair<uint64_t, uint64_t (*)(CPU*, Emulator*)>> baseline_blocks;
-        std::vector<MtEdge*> baseline_edges, candidate_edges, sampling_edges;
-        std::vector<std::pair<uint64_t, BlockEntry>> sampling_blocks;
-        std::mutex mutex;
-        std::vector<double> ratios;
-        bool sampling_revoked = false; // compiler lock only
-        bool sampling_cells = false;  // copies compiled in MT: data cells, no instruction slots
-        unsigned attempts = 0;
-        unsigned entries = 0;
-        // What the candidate's sampling copy did in its visits: completed iterations and side exits.
-        uint64_t candidate_iterations = 0, candidate_exits = 0;
-        std::atomic<unsigned> decision{0}; // 0 trial, 1 keep, 2 reject
-    };
-    std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;
     std::unordered_map<uint64_t, BlockEntry> blocks_;
     // Conservative 256-byte guest granule -> block PC index, protected by
     // blocks_mutex_. A block is listed on every granule of its own and
-    // inlined/Tier-2 ranges. Lists may hold retired or non-overlapping PCs;
+    // inlined ranges. Lists may hold retired or non-overlapping PCs;
     // range invalidation checks each candidate exactly and prunes absent ones
     // from the granules it visits. A granule smaller than a page keeps a
     // cache-line publish from scanning every live block on its page. Whole-
@@ -1688,7 +1369,7 @@ private:
     // traffic in SIMD-heavy blocks that fall back to the interpreter
     // frequently.
     static constexpr int NUM_ALLOC_REGS = 10;
-    // Translation complexity budgets, shared with the region collector.
+    // Translation complexity budgets.
     // These bound scratch/frame growth, not the precise peak live set.
     // Retain the original 32-instruction allowance for dense instructions.
     static bool block_translation_budget_reached(const IRBlock& ir, int count,
@@ -1704,7 +1385,7 @@ private:
     // vregs); kept as a strict allocator capacity increase for
     // pressure-heavy blocks that DO exceed 9 live vregs.
     static constexpr int ALLOC_REGS[10] = {RAX, RCX, RDX, R8, R9, R11, R12, R13, R15, R14};
-    // Phase 2 (tier-2 whole-region regalloc): loop-carried arch GPR vregs are
+    // Phase 2 (self-loop pinning): loop-carried arch GPR vregs are
     // PINNED to fixed callee-saved host regs for the whole loop. The pin pool
     // is a subset of ALLOC_REGS (R12/R13/R14/R15): callee-saved (survives
     // memory-op C calls), OUTSIDE the flag-prep clobber set (RAX/RCX/RDX/R8)
@@ -1732,8 +1413,7 @@ private:
     };
     std::vector<AllocationEvent> allocation_events_;
     bool allocation_profile_active_ = false;
-    void write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin,
-                                  bool region);
+    void write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin);
     // BIFROST_PROF: registers where the parts of the block just emitted are, for the sample report (SampleProfile.cpp).
     // The body starts at the first IR instruction; everything before it is the entry that loads the register layout.
     bool profile_sections_active_ = false;
@@ -1772,7 +1452,7 @@ private:
     int32_t vreg_slot_[4096];
     // Number of stack slots used.
     int num_stack_slots_ = 0;
-    // Phase 2 loop-carried pinning (per-compile, reset at block/region start):
+    // Phase 2 loop-carried pinning (per-compile, reset at block start):
     //   arch_pin_[a]   — host reg pinned to arch GPR vreg a (1-31), -1 if not
     //                    pinned. The pinned vreg's value lives in that reg for
     //                    the WHOLE loop; STORE_REG refreshes it, the back-edge
@@ -1784,7 +1464,7 @@ private:
     //                    store (transferring the stored scratch's reg, or
     //                    refreshing the pin) so later reads of `dest` reuse the
     //                    cached value instead of reloading cpu.regs[dest].
-    //                    Enabled for self-loop blocks and tier-2 regions only.
+    //                    Enabled for self-loop blocks only.
     int8_t   arch_pin_[32];
     uint16_t pinned_host_regs_ = 0;
     bool     keep_store_dest_ = false;
@@ -1794,7 +1474,7 @@ private:
     // LOAD_MEM/ATOMIC results would land in a scratch register the next
     // iteration clobbers. Explicit list, NOT a dest<=30 catch-all: branch
     // ops carry a dummy dest=0 and FP ops use dest for FP register numbers.
-    // Shared by the self-loop and Tier-2 selectors (Tier-1 once lacked
+    // Used by the self-loop pin selector (Tier-1 once lacked
     // SIMD_SMOV and lost loop-carried SMOV results).
     static bool writes_arch_gpr_directly(const IRInst& inst) {
         switch (inst.op) {
@@ -2023,7 +1703,7 @@ private:
     bool compile_simd_widening_(const IRInst& inst);
     // Inline SSE/AVX2 bodies for SIMD_NATIVE_EXTRA kinds (CodeGen/Native/
     // NativeSIMDInline.cpp). The predicate is exact: the emitter succeeds
-    // for every word it accepts, so Tier-2 need not treat those as calls.
+    // for every word it accepts.
     bool native_simd_inlinable(uint32_t w) const;
     bool native_simd_cache_compatible(uint32_t w) const;
     bool emit_native_simd_inline(const IRInst& inst);
@@ -2170,7 +1850,7 @@ private:
     // zext32_fused_[i] = 1: op i (ADD/SUB/AND/OR/XOR/MUL, CSEL, SEXT 8/16) defines a
     // scratch vreg read only by op i+1, a ZEXT 32 of it. Op i is emitted in
     // its 32-bit x86 form (bits 63:32 cleared) and the ZEXT emits nothing
-    // when it keeps the same host register. Tier-1 blocks and Tier-2 regions
+    // when it keeps the same host register. Tier-1 blocks
     // (scan_w32_and_sext_loads); empty elsewhere.
     std::vector<uint8_t> zext32_fused_;
     // Fills zext32_fused_ and sext_load_ for one compile unit; needs vreg_last_use_op_.
@@ -2179,7 +1859,7 @@ private:
     // its own width at i + 1 (LDRSB/LDRSH/LDRSW), so the guarded load may
     // sign-extend itself. A request only: the SEXT skips its own extension
     // when sext_load_done_ names the op before it, which the load sets after
-    // emitting that form (the other load paths zero-extend). Tier-1 and regions.
+    // emitting that form (the other load paths zero-extend).
     std::vector<uint8_t> sext_load_;
     size_t sext_load_done_ = SIZE_MAX;
     // guard_cover_[i] = j: op i is a LOAD_MEM/STORE_MEM at the same base value and offset as the earlier access j,
@@ -2273,7 +1953,7 @@ private:
     // two-operand ops (STORE_MEM) so the first kept reg isn't flushed.
     uint16_t load_vreg_to_reg_fast(int dst, int v, int dest_vreg,
                                    uint16_t clobber_mask);
-    // Predicate form of the Tier-2 fast path: true if scratch vreg `v` is
+    // Predicate form of the fast path: true if scratch vreg `v` is
     // already cached in host reg `reg`, its last use is the current op, and
     // it is not the op's dest. Used by two-operand ops (STORE_MEM) that must
     // decide BOTH operands' fast paths before flushing anything.
@@ -2303,12 +1983,6 @@ private:
     size_t  selfloop_target_off_ = 0;    // where the patched slot jumps: the body, or the reconcile stub
     bool    selfloop_reconcile_after_ = false;  // an ST back-edge still owes its reconcile stub
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
-    // Tier-2 in-code hot-head counter (BIFROST_TIER2=1): offset of the
-    // prologue counter+fire sequence (0 = none emitted). Carried into
-    // BlockEntry.tier2_counter_off so tier2_counter_disable can neutralize it
-    // after the block fires.
-    size_t  tier2_counter_off_ = 0;
-    size_t  tier2_counter_len_ = 0;  // length of that sequence (see above)
     // Chain-skip entry (BIFROST_CHAIN_SKIP=1): offset right after the
     // window/vec-cache prologue setup but PAST the push/frame/reg-setup,
     // i.e. the earliest point a chain successor may jump to. Chain slots
@@ -2350,7 +2024,7 @@ private:
     // ── XMM vector register cache ───────────────────
     // Tier-1 assigns a fixed hot loop core and, under pressure, a
     // demand-allocated tail in XMM3-15. Unsupported instructions synchronize
-    // locally. Tier-2 uses the same allocator over the complete region.
+    // locally.
     // XMM0-2 remain instruction scratch. Deferred fault guards snapshot the
     // live vector mapping; exits commit all architectural dirty values.
     static constexpr int VEC_XMM_START = 3;
@@ -2395,7 +2069,7 @@ private:
                    ? vec_cache_[vreg] : -1;
     }
     // Shared vector operand/effect scan admits synchronization boundaries
-    // and pressure in both Tier-1 blocks and Tier-2 regions.
+    // and pressure for Tier-1 blocks.
     // Both paths retain the existing FMA3/AVX host feature requirement.
     bool vec_cache_may_enable(const IRBlock& block);
     bool vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& writes) const;
@@ -2503,7 +2177,7 @@ private:
     // Does NOT clear flags_in_host_ — the caller manages that.
     void materialize_flags_to_pstate(bool preserve_flags = true, bool dead = false);
     // Translation entry point.
-    uint64_t (*translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry = nullptr))(CPU*, Emulator*);
+    uint64_t (*translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*);
 private:
     void record_verification_stores(const IRBlock& ir_block, uint64_t start_pc, BlockEntry& entry);
 };

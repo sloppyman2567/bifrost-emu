@@ -23,7 +23,7 @@ AArch64 word
   → translate_to_ir() / typed IR
   → optimize_ir() and validate_ir_block()
   → compile_ir_inst() / x86_64 code
-  → block chaining and optional Tier-2 region compilation
+  → block chaining
 ```
 
 | Responsibility | Main files |
@@ -36,18 +36,11 @@ AArch64 word
 | Analyze and compile Tier-1 blocks | `Source/FrostJIT/Compiler/BlockAnalysis.cpp`, `BlockCompiler.cpp`; replay footprints in `VerificationStores.cpp` |
 | Emit x86_64 for IR operations and exits | `Source/FrostJIT/Compiler/FrostJIT.cpp`, `Source/FrostJIT/CodeGen/Integer/`, `CodeGen/FloatSIMD/` |
 | Allocate host registers and spill vregs | `Source/FrostJIT/RegisterAlloc/RegisterAllocator.cpp` |
-| Dispatch blocks and promote hot regions | `Source/FrostJIT/Runtime/Dispatch.cpp`, `Source/FrostJIT/Tier2/` |
+| Dispatch, cache and chain blocks | `Source/FrostJIT/Runtime/Dispatch.cpp`, `CodeCache.cpp` |
 | Define reference instruction semantics | `Source/Interpreter/Core/`, `Source/Interpreter/FloatSIMD/` including `SIMD/` |
 
-Tier-2 compiles region IR through the normal IR code generator, with its own
-region liveness, loop, and exit handling. An IR operation that works in a
-single Tier-1 block can still need region-specific handling when it affects a
-region boundary or control-flow exit.
-
 Tier-1 compiles one block at a time (32 instructions by default, a loop body up to twice that) and chains blocks through
-patched slots in single-threaded (ST) code or atomic target cells in multithreaded (MT) code. Tier-2 (`BIFROST_TIER2=1`,
-experimental and off by default) fuses a hot path of two to eight Tier-1 blocks into a region, keeps it only when a timed
-trial beats Tier-1, and retires it when its exit rate outgrows the trial's ([Tier-2](#tier-2-loop-discovery-and-publication)).
+patched slots in single-threaded (ST) code or atomic target cells in multithreaded (MT) code.
 The interpreter is the reference semantics and the fallback for every instruction the JIT does not emit natively.
 
 ## Adding or changing an instruction
@@ -71,7 +64,7 @@ The interpreter is the reference semantics and the fallback for every instructio
    fallback behavior. It is a pre-translation heuristic. The final
    interp-only decision and `BlockEntry::call_interp_count` use the
    post-optimization IR `CALL_INTERP` count.
-7. Consider both Tier-1 and Tier-2 control flow, then add a focused guest
+7. Consider chained, self-loop and MT control flow, then add a focused guest
    regression under `Tests/Unit/` or `Tests/Apps/` and register it in
    `Scripts/Testing/run_tests.sh`.
 
@@ -119,7 +112,7 @@ V = bit 0; the other bits are don't-care.
 read it; inside chained code it is stale.
 
 - A static chain-skip exit is `slot; mov eax, pc; mov [cpu.pc], rax; frame return` (`defer_pc_store()`, which is
-  chain-skip alone, with or without Tier-2). A patched slot jumps past the store; every other way out of the slot (still
+  chain-skip alone). A patched slot jumps past the store; every other way out of the slot (still
   unpatched, an empty or revoked MT cell, the backward-edge checks) falls into it. An MT backward edge keeps `mov eax, pc`
   before its slot, which compares RAX with the stop sentinel. Indirect (`ret`/`br`/`blr`) and unchainable exits, and the
   ordinary layout (`BIFROST_NO_CHAIN_SKIP=1`), store before the slot.
@@ -127,8 +120,6 @@ read it; inside chained code it is stale.
   its own start PC first: inline before the plain entry when a call is expected, in a stub after the block (store, then a
   jump to the plain entry) when one was emitted without being expected. Guarded accesses reach helpers only through exits
   that set the PC themselves, so integer blocks carry no entry store.
-- A Tier-2 trial wrapper's three tails store their head's PC. A region's chain entry stores the head PC once per entry and
-  the back-edge jumps past it; region exits store the PC once.
 
 ## Block exits and chaining
 
@@ -144,10 +135,10 @@ read it; inside chained code it is stale.
   The stubs serve widths up to 8; a 16-byte access keeps its own page checks.
 - **Indirect branches.** Each thread's IBL table (`FrostJIT::IblTable`) starts at `IBL_MIN_ENTRIES` (1,024) and quadruples
   up to `IBL_MAX_ENTRIES` (65,536) once it has replaced one target per entry since its last resize. Only `entries` moves, so
-  a table pointer saved across a nested run (`IblGuard`, Tier-2 trials) stays valid; the probe reads the pre-scaled mask
+  a table pointer saved across a nested run (`IblGuard`) stays valid; the probe reads the pre-scaled mask
   (`byte_mask`) and the entry array from the header, and its miss jumps are `jcc rel8`. MT probes
   compare the preemption epoch instead of the generation: every generation change advances the epoch, and a native entry
-  takes its lease before it syncs the table. ST and timed-sampling code keep the generation check. Keep the probe inline at
+  takes its lease before it syncs the table. ST code keeps the generation check. Keep the probe inline at
   each site: a shared lookup stub made `bench_dispatch` 44% slower (2026-11-03). `jit_dispatch_cache_growth` replaces code
   at an address only a grown table reaches.
 - **CSET.** A `CSEL` whose operands are XZR or block constants 0 and 1 emits `setcc` and `movzx` (fold-lookahead kind 3
@@ -183,7 +174,7 @@ paths, not a measurement of executed spill traffic. See
 for the independent value/flag checks and timing bounds.
 
 The default block instruction limit remains 32. `BIFROST_JIT_BLOCK_LIMIT=8..128`
-allows bounded comparisons; both Tier-1 and the Tier-2 collector stop growth
+allows bounded comparisons; Tier-1 stops growth
 at the instruction cap or the shared IR/vreg complexity budget. A Tier-1 loop
 body may reach twice the cap: at the cap `selfloop_extent` looks for a branch
 back to the block start, and an already compiled loop tail is absorbed under the
@@ -191,13 +182,11 @@ same limit ([details](archive/JIT-history.md#vector-fmla-by-element-ld1r-loop-bo
 are no longer automatically demoted solely for exceeding 32 instructions;
 actual interpreter-fallback density still controls demotion. Larger limits
 are diagnostic options, not a verified performance default for every game.
-The Tier-2 discovery, feedback and measure scripts unset the variable: their
-expected region shapes assume the default cap.
 `jit_bitfield_regalloc` covers immediate multiplier signs/widths, aliases and
 a long body with fifteen live GPRs.
 
 Belady eviction reads per-vreg use lists (`vreg_uses_`, 4,096 entries).
-Each Tier-1 and Tier-2 use-scan starts with `reset_vreg_uses()`, which
+Each Tier-1 use-scan starts with `reset_vreg_uses()`, which
 empties only the lists that the previous scan filled (`note_vreg_use`
 records them) and keeps their storage. Outside a compile every list is
 empty, so `next_use_after` returns -1 as before. Rebuilding all 4,096
@@ -245,8 +234,8 @@ Tier-1 decides each with a pre-scan and the emitter re-checks it:
 
 The last two leave a value unmaterialized for one op; `materialize_scaled` and `materialize_lazy_load` emit the original
 instruction for any consumer that does not fold it, and the Tier-1 loop calls them before every other op. W-form fusion and
-`sext_load_` also run in Tier-2 regions (`scan_w32_and_sext_loads`); `fp_load_`, `lazy_load_` and `scaled_add_` are Tier-1
-only, because they need its per-op materializers. The kill-list scan stops at the highest vreg the block uses.
+`sext_load_` come from `scan_w32_and_sext_loads`; `fp_load_`, `lazy_load_` and `scaled_add_` need the per-op materializers
+of the Tier-1 compile loop. The kill-list scan stops at the highest vreg the block uses.
 
 ### Conditional compares
 
@@ -296,7 +285,7 @@ system-register operations, barriers, and guest-state stores retain order;
 loads from guest memory are never commoned or speculated by SSA. Flag consumers
 remain ordered effects because NZCV is not yet an SSA value.
 
-Tier-2 region planning runs this pipeline (`BIFROST_NO_SSA=1` turns that off). Tier-1 does not by default: the adapter was a third of
+Tier-1 does not run this pipeline by default (`BIFROST_NO_SSA=1` keeps it off even with `BIFROST_TIER1_SSA=1`): the adapter was a third of
 translation time for 0.6% fewer instructions and about 2% fewer cycles on CoreMark
 ([measured](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
 `BIFROST_TIER1_SSA=1` runs it on supported scalar blocks before the existing constant folding passes (`BIFROST_NO_FWD=1` and FWD
@@ -305,27 +294,12 @@ range restrictions bypass its forwarding); the legacy forwarding cache does not 
 existing pipeline until their operand and state effects are modeled explicitly.
 This is scalar value SSA, not MemorySSA or a complete FP/vector conversion.
 
-Experimental Tier-2 superblocks build one scalar SSA graph across all their
-blocks, with a separate entry and distinct conditional side exits. Retained
-single-thread loops include the actual backedge; linear and MT paths use an
-acyclic graph. Cross-block value numbering runs on this graph before
-lowering. Architectural phis lower to guest-state reads at the join: retained
-STORE_REG operations commit incoming values, pinned registers carry their
-current value, and non-pinned deferred stores commit on the backedge. This
-keeps the backend's existing precise side-exit and memory-fault state contract.
-It also avoids assuming that temporary homes survive its loop boundary.
-Regions with temporary phis or unsupported effects retain the existing path.
-Multithreaded regions retain their existing bounded, single-iteration path.
-Tier-2 remains opt-in; SSA does not change its promotion or timing policy.
-
 The general SSA destructor also supports parallel edge copies and splits
 critical edges. `make test-ir-ssa` executes independent non-SSA IR oracles for
 diamonds, cyclic loop-carried swaps, critical edges, architectural-state phi
 lowering, width-sensitive value numbering, and GPR/FP namespace separation;
 malformed graphs must fail validation. `make verify` runs this host test before
-the differential/threaded gate. The Tier-2 discovery oracle additionally runs
-generated loops with twelve carried GPRs, beyond the available host pins.
-These tests cover the scalar contracts above, not arbitrary FPCR/FPSR,
+the differential/threaded gate. These tests cover the scalar contracts above, not arbitrary FPCR/FPSR,
 concurrent memory reordering, or whole-program optimization.
 
 Construction follows [Braun et al., Simple and Efficient Construction of SSA](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf).
@@ -353,7 +327,7 @@ between them (`ldr x3,[x19]; str x4,[x19]`), and no `BRCOND_SKIP` in the block. 
 with its fault exit; only the compare, its scratch register and the software page checks are gone. The earlier access
 (`guard_checked_`) must itself have emitted a gate compare or been covered. The gate is raised without a handshake, so an
 access past its check can already run after the gate closes; the second access joins that window for the few ops between
-the two. An acquire load keeps its alignment check. Tier-2 keeps inline guards.
+the two. An acquire load keeps its alignment check.
 `jit_guard_stubs` runs the shapes that are covered and those that must not be (a wider or displaced second access
 crossing into a missing page).
 
@@ -453,7 +427,7 @@ References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsi
   (`fp_raw_flags_cc`; unordered sets CF, ZF and PF, which each of those reads as ARM does). EQ and NE are `je`/`jne` behind a
   `jp`, since unordered sets ZF too: EQ is `jp over; je taken`, NE is `jp taken; jne taken`. An exit whose successor reads
   NZCV converts the raw flags itself (`materialize_fp_raw_flags_to_pstate`: the sequence below, then the pack), so a live exit
-  costs what the old sequence did and a dead one nothing. Tier-2 uses the sequence below.
+  costs what the old sequence did and a dead one nothing.
   When `fcmp` feeds an integer select or a branch that does not qualify, `FP_CMP` leaves its result in the host flags as
   `SUBS` does: `seta`, `setb` and a `cmovp` pick two small integers, and one `cmp` of them leaves the flags a subtraction
   would (greater 1-0, equal 0-0, less 0-1, unordered 0x80000000-1). A compare feeding `fcsel`, `mrs` or anything else keeps
@@ -476,7 +450,7 @@ References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsi
   read. The emitter (`CodeGen/FloatSIMD/SIMD/Structure.cpp`) shuffles in registers: `LD2`/`ST2` one unpack or `shufps` (plus
   a `pshufb` mask for 8- and 16-bit elements), `LD4`/`ST4` a 4x4 transpose, 64-bit arrangements two unpacks, and `LD3`/`ST3`
   with any other combination a generic `pshufb` gather or scatter (correct, not tuned). It uses XMM0-2 and XMM12-15 only and
-  tells the vector allocator so (`vec_inst_effects`, clobber set 0xF007). Tier-2 stops at the op. Single-lane forms,
+  tells the vector allocator so (`vec_inst_effects`, clobber set 0xF007). Single-lane forms,
   replicate forms other than `LD1R {Vt.T}`, `.1D` and wrapping lists use the `native_structure` helper. Only `Rm` = 31
   selects the immediate post-index; X30 is a register. `jit_neon_struct` builds every combination at run time against an
   independent model that passes under QEMU.
@@ -486,7 +460,7 @@ References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsi
 - **Q loads and stores** (`SIMD_LD16`/`SIMD_ST16`, one register) take the scalar guarded path at width 16
   (`compile_guarded_vec16`): the allocator's registers, one window-table compare, a deferred tail and one MOVUPD into the
   pinned XMM or through XMM0. A 16-byte access can cross a page in bytes 8-15, so its tail keeps its own page checks. Pairs
-  and Tier-2 keep the older path. `jit_guard_stubs`.
+  keep the older path. `jit_guard_stubs`.
 
 ## Android interpreter and generated-code contracts
 
@@ -918,7 +892,7 @@ compiler callers that already own it. TLS caches track their JIT owner and
 a globally unique invalidation generation, including negative entries.
 Mapping invalidation and the transition to multithreaded execution invalidate
 TLS entries across CPUs at their next dispatch. Multithreaded mode disables
-rewrites of published instructions; its chaining and Tier-2 publication use
+rewrites of published instructions; its chaining uses
 atomic data cells. Code is not recycled while another CPU can execute it.
 
 `BIFROST_STATS_PERIOD` reports cache usage, capacity, budget, growth and
@@ -930,7 +904,7 @@ overflow counts. The cached settings `BIFROST_JIT_CACHE_MB`
 no repeated translation of cached fallback targets).
 
 Range invalidation queries an ordered, conservative index from 256-byte guest
-granules to the PCs of published blocks whose own or inlined/Tier-2 dependency
+granules to the PCs of published blocks whose own or inlined dependency
 ranges touch that granule. Data-only ranges with no indexed granule return
 under the shared lock, without blocking table readers; code hits take the
 exclusive lock and check only the listed blocks, instead of the whole block
@@ -951,7 +925,7 @@ page, including hot translations next to newly published methods.
 
 A Tier-1 translation depends only on the instruction words it fetched.
 `translate_block` records them in an append-only `code_words_` array (four
-bytes per guest instruction; leaf-inlined blocks and Tier-2 regions record
+bytes per guest instruction; leaf-inlined blocks record
 none). Cache maintenance and `mprotect`/`pkey_mprotect` keep a block whose
 pages are still mapped executable, not userfaultfd-missing, and whose words
 compare equal; anything else retires it. Unmap, `MAP_FIXED` replacement,
@@ -987,14 +961,6 @@ recompiles of previously retired PCs, total/average/maximum compile time,
 shared compiles, retries and contended table/compiler lock wait) and
 `[JIT] invalidate (calls/retired/kept):` per reason. Recompiles include the
 one-time purge when a second CPU starts.
-
-With `BIFROST_TIER2=1`, `[JIT] block-runs (counted blocks=N) 0:.. 1:.. 2:..
-3-4:.. 5-9:.. 10-99:.. 100+:..` buckets the entries of every block that carries a
-hot counter (conditional-branch or size-limited heads without a call, SVC
-or BR). It shows how many compiled blocks run once or twice, for judging a compile
-threshold. A counter stops at `BIFROST_TIER2_HITS` (default 1000), restarts from 0 on a
-profile retry, and outlives its invalidated block until the cache is replaced; the line
-is absent otherwise, and skipped while a compile holds the compiler lock.
 
 `jit_cache_invalidation.elf churn` warms 32,768 executable functions, times
 4,096 data-page protection changes, then rewrites one function 4,096 times with
@@ -1033,8 +999,8 @@ last is current. Only the shared instance is renewable; per-thread instances (`B
   object (generated code embeds the address of members such as `cache_generation_`) and calls `malloc_trim`.
 - **Bound.** At most one retired instance may be unreleased (`kMaxUnreleased`); while it is pinned, the current one falls
   back to the interpreter once full, so the worst case is twice the budget. A nested `jit_call_helper` loop follows the
-  current instance once its own is retired (`retarget_scope`); helpers called from generated code (Tier-2 fire, trials,
-  feedback) use `FrostJIT::running`. Under `BIFROST_NO_CHAIN_SKIP=1` the program runs inside nested frames, so only the
+  current instance once its own is retired (`retarget_scope`); helpers called from generated code
+  use `FrostJIT::running`. Under `BIFROST_NO_CHAIN_SKIP=1` the program runs inside nested frames, so only the
   first generation is ever replaced. A renewal discards every block, so the working set recompiles.
 - **Syscalls leave generated code first.** A block that reaches a non-thunk SVC stores its address in `cpu.jit_svc_pc` and
   returns; `run_block` (and the nested `jit_call_helper` loop) runs it from C++ (`FrostJIT::run_pending_svc`) with `cpu.pc`
@@ -1069,7 +1035,7 @@ stores.
   outside the guest window) is an undeclared address and leaves the block unrecorded. Anything unexplained costs a cache
   entry, never a wrong translation. Emit host addresses as imm64 with `note_host_reloc`: 32-bit immediates and
   RIP-relative operands outside the block are not covered by these checks.
-- **Off when** Tier-2, `BIFROST_JIT_VERIFY`, leaf inlining, `BIFROST_MALLOC_INTERP` or block tracing is on. Blocks with
+- **Off when** `BIFROST_JIT_VERIFY`, leaf inlining, `BIFROST_MALLOC_INTERP` or block tracing is on. Blocks with
   direct BL call sites, inlined leaves or interpreter-only bodies are not recorded. Recording compiles keep full cold tails
   ([Block exits](#block-exits-and-chaining)), so a recording session's code is slightly larger.
 - **Fingerprint.** One directory per application (`BIFROST_JIT_CACHE_APP`, set to the package by the managed launcher; else
@@ -1094,15 +1060,15 @@ stores.
 
 Not validated: play past Umamusume's title and other Android games from the cache (ART JIT code is memfd-backed and never
 cached; native libraries are), a game session that renews its code cache, and network filesystems. Tests:
-`Scripts/Testing/test_jit_disk_cache.sh` (`run_tests.sh` entry `jit_disk_cache`, which fails under Tier-2 by design).
+`Scripts/Testing/test_jit_disk_cache.sh` (`run_tests.sh` entry `jit_disk_cache`).
 
 ## Fork children keep the JIT
 
 A fork child keeps its parent's JIT and translations, so a Zygote child, which never execs, runs warm code.
 
 - `fork_guest` adds every live instance's locks to the set it takes all or none before the host `fork()`
-  (`FrostJIT::try_lock_for_fork`: the block table's read/write lock, the compile and compile-invalidation locks, and each
-  Tier-2 trial's lock). Holding them, no other thread is translating, publishing or invalidating, so the child's copy of
+  (`FrostJIT::try_lock_for_fork`: the block table's read/write lock, and the compile and compile-invalidation locks).
+  Holding them, no other thread is translating, publishing or invalidating, so the child's copy of
   the tables is consistent.
 - The child re-creates those locks (a read/write lock copies its count of waiting writers, which no thread there clears, as
   `Memory::reset_mutex_in_fork_child` handles for guest memory) and restarts the preemption ticker when the JIT is MT:
@@ -1216,7 +1182,6 @@ They are typed, validated IR operations and optimizer barriers. Flush GPR
 state before helpers that read `cpu.regs`, disable incompatible pinning, and
 preserve `WIN_REG` across every SysV call: it is caller-saved R10, so an
 otherwise correct C++ helper can corrupt all later direct-window accesses.
-Tier-2 treats SIMD helper calls as calls for GPR pinning and LICM purposes.
 The translator checks `classify_native_simd` before the interpreter
 fallback, so a classified encoding must be one its `run<K>` implements.
 The classifier, the kind enum and the dispatch list are generated from
@@ -1243,7 +1208,7 @@ All 1,480 remaining encodings match QEMU in both engines. A
 generated-versus-hand-written check over all 2^32 words showed no
 classification change before the spec was corrected.
 
-## Multithreaded chaining and Tier-2
+## Multithreaded chaining
 
 ### Bounded MT self-loops
 
@@ -1251,8 +1216,8 @@ Tier-1 conditional branches to their own block now retain the current frame,
 eligible GPR pins and cached vectors in MT mode. The back-edge uses an immutable
 guard and an atomic cell pointing to this translation's body, bypassing prologue
 reloads. It checks the callback stop PC and the preemption epoch; expiry or revocation commits carried state and returns to dispatch.
-Range/full invalidation clears the cell. Target refresh and Tier-2 publication
-never redirect a body cell into a different translation's frame or register
+Range/full invalidation clears the cell. Target refresh
+never redirects a body cell into a different translation's frame or register
 layout. Cells and retired code retain the existing lifetime policy.
 
 BRCOND commits NZCV before the MT guard because its checks overwrite host
@@ -1261,8 +1226,7 @@ all four flags first (see [Dead NZCV stores at block exits](archive/JIT-history.
 loop-carry shortcut remains ST-only. CBZ/CBNZ and TBZ/TBNZ preserve their pre-branch NZCV contract.
 `BIFROST_NO_SELFLOOP=1` restores ordinary loop edges; `BIFROST_NO_PIN=1`
 disables GPR pinning, and `BIFROST_NO_CHAIN=1` also disables MT body edges.
-Both frame layouts support this path. Tier-2 multi-block regions retain their
-whole-iteration entry policy described below.
+Both frame layouts support this path.
 
 ### Self-loop back-edge writeback
 
@@ -1280,13 +1244,12 @@ MT code bounds chained execution with an epoch poll that only loads, not a share
 
 - **Epoch poll.** `g_jit_preempt_epoch` (`Runtime/Preemption.hpp`) is advanced by a detached ticker thread every
   1 ms once `enter_multithreaded()` runs, and by every `invalidate_dispatch_cache()`. Each dispatcher entry
-  (`run_block`, `jit_call_helper`, Tier-2 trials) calls `jit_grant_lease(cpu)`, which records the epoch in
+  (`run_block`, `jit_call_helper`) calls `jit_grant_lease(cpu)`, which records the epoch in
   `CPU::jit_epoch_seen` before native code starts. MT back-edges and IBL probes only load both values
   (`emit_preempt_poll`: 2 loads and a `jne`, no store); a mismatch takes the existing cold exit to the dispatcher.
   A bumped epoch also revokes in-flight loops of retired code, as the cell clear did. The thread loops, the SDL
   thread loop and the main loop drain host and cross-thread signals on every tick, since native loops now return
-  once per tick rather than every few thousand edges. The edge budget stays for ST code and for timed Tier-2
-  sampling code, whose trial windows count dispatcher resumptions (`preempt_by_epoch()`).
+  once per tick rather than every few thousand edges. The edge budget stays for ST code.
 - **Forward edges.** A static edge to a higher block start cannot close a cycle, so it emits only the cell jump
   (`mov r11, cell; jmp [r11]`). Only edges with `target_pc <= current_start_pc_` carry the sentinel compare and the
   poll. An empty cell now holds its own cold-exit address (`MtCell::cold`), so no emptiness test is needed.
@@ -1306,301 +1269,34 @@ and the ticker is forgotten in a fork child (`pthread_atfork`) so an exec'd mult
 `BIFROST_NO_CHAIN` and `BIFROST_NO_DIRECT_CALL` keep their meanings. Not changed: code blocks that never reach a backward edge, IBL probe or cell call (long straight-line
 chains) are bounded by their length, as before for ST.
 
-### Region publication and execution
-
-Tier-1 and block chaining are the default. Tier-2 promotion is experimental
-and disabled by default in both single-threaded and MT execution. Opt in with
-`BIFROST_TIER2=1`; `BIFROST_TIER2=0` explicitly disables it. The current MT
-whole-iteration regions can regress application performance. Tight ST self-loop iteration hotness remains future work. Execution payoff
-is measured by bounded live-work A/B trials; admission and feedback follow.
+### MT publication
 
 Before the second guest CPU starts, the JIT retires legacy single-thread
 instruction patches and purges the table. New MT blocks use immutable
 load/test/jump instructions and naturally aligned, lock-free atomic target
 cells. Release publication changes a cell, not an instruction displacement;
-x86-64 loads provide acquire ordering. Fall-through, taken and region-exit
-edges share the mechanism. Direct BL targets use the same cells (see the preemption section above),
-so invalidation cannot leave an embedded stale callee address.
+x86-64 loads provide acquire ordering. Fall-through and taken edges share the
+mechanism. Direct BL targets use the same cells (see the preemption section
+above), so invalidation cannot leave an embedded stale callee address.
 
-Eligible MT heads count entries using an atomic XADD in separate writable
-metadata. Exactly one entry reaches the promotion threshold; disabling the
-counter updates an atomic flag instead of patching its prologue. The fire
-notification includes the original code site, so a retired block cannot
-promote a replacement translation. Collection, compilation and publication
-hold the exclusive compiler lock with RAII release on failure.
+Invalidation clears incoming cells and permanently retires outgoing cells.
+Executable code and its metadata remain allocated for the JIT lifetime;
+reclamation, persistent translations and unsynchronized guest code writes
+remain outside this mechanism. A pointer already acquired by another CPU may
+finish its current iteration; guests must still synchronize code changes and
+instruction-cache maintenance.
 
-MT regions fuse complete loop iterations. Their back-edges enter through
-revocable data cells and rerun the region prologue; loop-carried pinning and
-LICM across these iteration boundaries remain disabled. This differs from
-the single-thread region's internal loop: it gives concurrent invalidation a
-boundary without patching or reclaiming live code. Backward edges poll the
-preemption epoch to return chained execution to dispatch (timed sampling code keeps
-a per-CPU 256-edge budget), and callback stop sentinels also end chains. Both ordinary and chain-skip frame layouts are covered.
-
-Publication advances every CPU's dispatch generation and redirects incoming
-cells to the new head. Region metadata retains all constituent guest ranges,
-including non-head pages. Invalidation clears incoming cells, permanently
-retires outgoing cells and disables old hot counters. Executable code and its
-metadata remain allocated for the JIT lifetime; reclamation, persistent
-translations and unsynchronized guest code writes remain outside this change.
-A pointer already acquired by another CPU may finish its current iteration;
-guests must still synchronize code changes and instruction-cache maintenance.
-
-`Tests/Unit/jit_mt_tier2.c` checks eight concurrent CPUs against a closed-form
-arithmetic oracle, invalidates unchanged live code, rewrites only a region's
-non-head page between synchronized runs, replaces that page with MAP_FIXED,
-and churns data mappings. `Scripts/Testing/test_jit_mt.sh` additionally requires MT
-edge/region publication, verifies both opt-outs and checks chain-skip mode.
-`Scripts/Testing/test_jit_mt_publication.sh` snapshots published MT code bytes before
-eight host CPUs trigger promotion, then checks that promotion, range/full
-invalidation and retranslation preserve the snapshot. It also checks epoch exits. The verification gate runs the guest concurrency fixture as an independent oracle,
+`Tests/Unit/jit_mt_loops.c` checks eight concurrent CPUs against a closed-form
+arithmetic oracle, invalidates unchanged live code, rewrites a loop's non-head
+page between synchronized runs, replaces that page with MAP_FIXED, and churns
+data mappings. `Scripts/Testing/test_jit_mt.sh` additionally requires MT edge
+publication and checks the no-chain and ordinary-frame modes.
+`Scripts/Testing/test_jit_mt_publication.sh` snapshots published MT code bytes
+before eight host CPUs run a loop, then checks that range/full invalidation and
+retranslation preserve the snapshot. It also checks epoch exits. The
+verification gate runs the guest concurrency fixture as an independent oracle,
 not shared-memory differential replay. These checks do not establish a Doom 3
 FPS improvement; measure representative gameplay separately.
-
-## Tier-2 loop discovery and publication
-
-The collector follows direct `B` targets as well as conditional fall-through
-edges. Internal direct edges become inline boundaries, retaining register and
-flag state without a host jump. A body exceeding the 32-instruction block cap
-gets an explicit IR continuation with no additional guest instruction count.
-The eight-block/256-instruction bounds apply to loops and linear superblocks.
-Non-head cycles are excluded, and unsupported terminators remain outside the
-collected prefix. Collection stops at another published region head to avoid
-compiling rotated copies of an already optimized loop.
-
-Eligible native conditional, direct-branch and capped straight-line blocks
-use generated entry counters for promotion, including chained entries. The
-counter makes at most three attempts per translation while samples warm up. All automatic publication now goes through
-`tier2_fire_region`, retaining each constituent code range and redirecting
-incoming chains. The former dispatch/call-lookup promotion paths did not
-retain those ranges and have been removed. Self-loop iterations that bypass
-the generated entry still do not contribute hotness. Conditional exits count
-taken/fall-through outcomes with one `inc qword [profile+off]` (64-bit, no check)
-behind a `mov r11, imm64`. It is not `lock`ed in MT: the counts only feed the bias heuristic, so an update lost to a race does no harm.
-
-Instrumentation lasts until a block is decided. Once promotion declines a head, or a trial ends either way, its blocks **settle**:
-the dispatcher retires them and retranslates them without the hot counter or branch counters, then relinks their predecessors, which
-retirement unlinks and forgets. The swap waits for the dispatcher because the decision is made inside the running block. Profiles
-stay, for regions that pass through a settled block, and a code change forgets the decision. Before this, instrumentation cost CoreMark
-22-29% of its cycles with no Tier-2 code running; the penalty is now about 3.4%, and Tier-2 still keeps no region there. Most of what is
-left is 16.5 million dispatches against 0.9 million with Tier-2 off; which edge stays unlinked is not known.
-A head that fires during the swap counts another window instead: the blocks it needs are briefly gone, and it would be rejected for good.
-
-Regions defer guarded-access cold paths and use the shared stubs, as Tier-1 does: a six-instruction region went from 745 to 477 bytes.
-
-Entry counts are `HotCounter`s outside the code buffer, in both modes. They used to sit in the 8 bytes before each
-single-thread block, and an `inc` on the line being executed is self-modifying code to the CPU: `bench_memcpy` with counters
-that never fire took 17.3 billion cycles and 272 M pipeline resyncs (`bp_redirects.resync`), against 0.76 billion and 18 thousand
-now. At the default threshold the move changed little, because a counter stops at 1000 hits.
-With at least 16 samples, a taken successor with 75% bias is linearized by
-inverting the typed branch and retaining the original fall-through as a cold
-exit. Head back-edges remain loop terminators. Promotion requires all branches
-to be sampled and a product of continuation frequencies of at least 75%.
-This is a profitability heuristic, not a measured speedup; multiplying
-marginal frequencies can underestimate correlated paths. MT single-block loops are declined
-because they fuse no boundaries and cannot retain loop state across entries.
-A profile whose block was promoted or invalidated is dropped from the lookup
-table and its counters go unread; storage outlives published code. A monitored region counts its completed
-iterations in a CPU-local slot (`credit`: one `add dword [rbx+disp32],1` on each back-edge and on exits that complete
-the path; the host flags are dead at all of them, and MT performs no shared atomic increment). A side exit calls a
-stub shared by the region after flushing guest state; it counts the exit (`pressure`), and every
-`kTier2FeedbackWindowExits` (32) exits it closes a window: a window that completed fewer iterations than the monitor's
-`min_window_iterations` is a strike, a good one clears the strikes, and `kTier2FeedbackStrikes` (4) strikes in a row
-retire the region. The minimum comes from the trial: its sampling copy counts the same iterations and exits, and a kept
-region may exit up to `kTier2ExitRateSlack` (4) times as often as its candidate did, and at least once in
-`kTier2ExitRateFloor` (16) iterations. A trial that saw no exits gets that floor (512 iterations per window). Then the
-exit chains to its target like any other. Only a slot owned by another region, or the retiring strike, tears down the
-frame and tail-calls `tier2_region_feedback` in C++. The stub and that function implement one rule and change
-together: going through C++ and the dispatcher on every side exit cost a short loop more than the region saved.
-A retirement is a request for a new trial at the current exit rate, not a measured loss: the old rule (64 exits with no
-completed iteration in between) never retired a loop that exits on a steady fraction of its iterations. Sixteen
-CPU-local slots bound metadata; colliding regions can delay detection by adding iterations or changing the slot's
-owner, but cannot add exits to another region.
-
-Retiring a region also forgets its blocks' predecessors, which nothing
-retranslates. `retire_tier2_region_locked` records both, and the next dispatch
-boundary rebuilds the blocks with fresh counters, relinks the predecessors and
-returns them to `back_refs_` (`tier2_settle_queued`). Without the relink,
-CoreMark's dispatches rose 69 times; without the index entry, a later retirement
-could not unpatch the slot.
-
-`BIFROST_TIER2_GRAPH` reports, for each hot head, the natural loop around it:
-blocks that can return to the head along profiled edges, and the share of entries
-that do. It emits nothing, and is the survey for regions with internal branches.
-
-Retirement holds one compiler-lock critical section for version validation,
-exact victim selection and revocation. Victims come from `code_index_` and profiles from an ordered map, so a
-retirement costs the size of its ranges. Each used to walk every block and every profile: with Arknights' thousands of rejected
-trials that was 43% of its user-mode CPU. It retires the head and overlapping
-Tier-1 constituents and resets their profiles, preserving unrelated regions
-on the same page. Mapping changes still use page-granular invalidation. At
-most two phase retirements or terminal trial rejections per head are allowed
-in a full code-cache epoch; exhausted heads stay in Tier-1. Full invalidation
-resets that budget.
-Published MT instructions remain immutable throughout retraining. Both ST and
-MT region exits use tracked, revocable target cells, so a rewritten target on
-the next page cannot leave the region executing stale guest instructions. ST
-exit cells share a frame-teardown tail with stop-sentinel and execution-lease
-checks. Promotion redirects their targets; precise/range/full invalidation and
-the MT transition revoke them. Code and cells remain allocated for in-flight
-CPUs. Empty cells return to dispatch until a replacement target is compiled.
-
-Admission requires at least two cached native Tier-1 blocks with exactly the
-trace's block boundaries, without calls or retained self-loop frames; the walker
-ends each trace block where the published Tier-1 block at its start ends. Branch
-profiles choose candidate paths; code size no longer predicts execution payoff.
-A head that reaches its entry count is timed over a second window, and goes on
-only if it runs at least 10 million guest instructions per second through its
-block, about 1% of one host core. A head that misses three windows settles. Lifetime
-entries alone let thousands of a game's blocks through: in Arknights 7,664 heads
-filled the 32 MiB budget with 93% of trials rejected; with the gate it used 3.7 MB.
-A rate shows activity, not whether a region will win, and a head that settles
-stays out if it turns hot later. A fixed `BIFROST_TIER2_HITS` skips the gate, which
-is why `test_jit_tier2_rate.sh` runs without it.
-
-Each candidate enters a bounded A/B trial before permanent selection. The
-retained Tier-1 graph and candidate run alternate windows on one vCPU's live
-workload, without replaying memory writes or restoring architectural state.
-
-Both arms execute private instrumented copies with identical work probes at
-matching guest block boundaries. Normal Tier-1 blocks and selected regions
-contain no work probes or inactive probe guards. The selected ST region also
-omits sampling quota checks on its internal backedges. CPU-local counters
-record guest instruction count; probes preserve scratch registers and leave
-the host flags alone without saving them (`lea`, `jrcxz`). A `popfq` per block
-costs more than the loops being timed: with one in every probe, a region that
-was 1.58x faster in wall-clock time measured 1.2x slower.
-
-Private Tier-1 chains bind only to other blocks in their sampling graph and
-the trial's head gate. Private region exits use the same restricted bindings.
-Cold targets remain unbound and return before executing unrelated guest work,
-including targets inside gaps in the trace's address envelope. Private copies
-never replace public cache entries or join the public ST back-reference graph.
-MT sample edges are private data cells, excluded from public target refresh,
-and revoked on selection or invalidation. ST sample chain slots are separately
-retained and revoked, including before the second CPU starts. Published MT
-instructions remain immutable. Trials suppress constituent hot-counter
-compilation and phase feedback inside the timed interval. A data-cell lease
-expiration at the head also counts as a completed iteration, so dispatcher
-resumptions cannot inflate the work.
-
-A window runs up to 256 iterations, or one traversal of a linear path, and ends
-early wherever the workload leaves. Real loops leave after a few dozen
-iterations, so no window has to complete: each one adds its time and guest
-instructions to its arm's CPU-local pool. A window that spends its whole quota
-in under 10 us raises the quota, up to 4096, to amortize timing overhead. The
-clock is CLOCK_MONOTONIC, read through the vDSO in tens of nanoseconds; the
-thread CPU clock used before is a system call costing about as much as a short
-loop visit, which both arms paid per visit and which pulled every ratio towards
-1. A window that loses the CPU becomes an outlier pair. A baseline pool closes
-at 100 us (`kTier2TrialWindowNs`) and 128 instructions; a candidate pool at
-100 us and at least the baseline's instructions: 10 us pools were dominated by
-the switch between the arms' code. A pair compares time per guest instruction.
-Twelve pairs (`kTier2TrialPairs`) must show a median candidate/baseline ratio
-below 0.97, with at least nine pairs below 0.97, to select the region. The arms
-run different live work, so a stretch of unusually cheap iterations can skew one
-pair: the median and the nine-pair rule limit that, they do not rule it out. Windows also
-leave out what happens after an exit, so a candidate that leaves badly can pass
-here and still lose over the whole program; every region exit has a revocable cell, so a published exit chains to its
-target once that is translated instead of returning to the dispatcher. Slower or noisy
-candidates restore Tier-1. A measured loss (all twelve pairs, not a path or work mismatch or a timeout) retries the head as
-a shorter trace after fresh profiling: five or more blocks retry at four, three or four at two, and two blocks settle
-(`tier2_block_limits_`, at most twice per head through `tier2_retrains_` and within the code and compile-time limits
-below; a phase retirement clears the cap, since a new phase may favour a longer path). A trial
-with insufficient evidence after 128 pools or 131072 visits also restores Tier-1. Version
-checks and normal revocation protect
-in-flight references across mapping changes and ST-to-MT transition.
-
-The decision measures instrumented execution gain, not lifetime amortization
-of compilation or a guarantee of whole-application speedup. Sampling adds
-short-lived execution cost and retained private code; validate application
-benchmarks as well as local trial decisions. Codegen/retirement oracles select candidates
-deterministically through a test friend; the separate timing oracle uses real
-controlled CPU work to verify both acceptance and rejection, without fake
-clock values. CoreMark comparisons use a fixed 200,000 iterations
-(`Scripts/Bench/run_benchmarks.py`, crcfinal 0x4983, checked against QEMU 11.1.1) and
-labelled CRC/validation checks; the earlier 160,000 (9.7 s on 2026-11-10), 110,000 and 60,000
-iterations now finish below CoreMark's ten-second minimum. Auto-calibrated iteration counts cannot be compared by
-wall time. Counters expose measured pairs, keeps and rejections.
-
-Automatic compilation stops after 32 MiB of emitted region, private sampling
-and trial-wrapper code or two seconds of measured compilation time per JIT lifetime. Rejected
-unpublished candidates revoke their data cells and preserve baseline metadata.
-These limits bound speculation. Actual timing selects winners, and the
-existing phase-pressure monitor can retire a winner when its path changes.
-Tier-2 stays
-experimental and opt-in. Differential replay disables promotion explicitly:
-its temporary Tier-1 exit patches and guest-memory restoration cannot safely
-cover internal region loops. `BIFROST_JIT_VERIFY` therefore checks Tier-1 while
-the region tests check independent result oracles. Replay counts have their
-own per-block budget, separate from promotion hotness.
-
-Single-thread chain-skip invalidation restores the entire five-byte chain slot
-to NOPs; restoring only its opcode would execute the old displacement bytes.
-MT invalidation continues to revoke atomic target cells.
-
-`bash Scripts/Testing/test_jit_tier2_discovery.sh` exercises a non-contiguous loop
-containing a 40-instruction body, early exits with loop-carried state,
-non-head page rewriting, full invalidation, non-head cycles and duplicate-region
-avoidance in ST/MT and ordinary/chain-skip modes. The host fixture has an optional
-`benchmark` argument (and `mt` for MT execution); it times two million iterations
-against a closed-form result oracle. This is a synthetic workload, not a
-representative application performance measurement.
-
-Region compilation clears the complete vreg mapping table. Clearing only the
-new region's maximum left homes from a larger preceding Tier-1 block, then
-published a smaller maximum that hid those stale entries from the next reset.
-This corrupted musl pthread startup's loaded function pointer under frequent
-promotion. `Scripts/Testing/test_jit_tier2_mutex.sh` repeats the mutex result oracle
-with a threshold of 32. Nested call interpreter fallback also uses the existing
-fault trampoline so guest memory exceptions cannot escape generated frames.
-
-ST publication redirects only incoming edges whose recorded Tier-1 target is
-the region head. A collected block may span multiple Tier-1 blocks; guessing
-a back-edge slot from its terminator could bypass a partial block and skip
-guest instructions. The rounding oracle covers this with Tier-2 enabled at
-a low threshold. The discovery harness additionally checks biased branches
-from all three conditional IR families, cold exits after promotion, stale
-profile invalidation, weak-path rejection, sustained phase changes in all three
-conditional families, and nested-call fault delivery.
-
-`bash Scripts/Testing/test_jit_tier2_measure.sh` verifies measured faster/slower decisions,
-a verdict from visits that never reach the quota, and that an outside predecessor
-is chained and tracked again after retirement, in ST/MT with ordinary/skip chaining.
-It also checks that MT publication changes no existing instruction bytes.
-
-`bash Scripts/Testing/test_jit_tier2_feedback.sh` checks two regions sharing one page:
-retiring one preserves the other's exact cached function pointer. Isolated
-cold exits followed by recoveries do not cause retirement. Eight host CPUs
-execute a sustained phase change while the neighboring region remains hot,
-checking fixed arithmetic results, retraining and immutable published MT code
-in ordinary and chain-skip modes. The same harness places a region exit target
-on the next page, rewrites that target, and verifies the new result while the
-region itself stays cached.
-
-### Calls, returns and exits
-
-- **A RET can end a region.** Its block keeps the `BR`; the side exit is `Tier2Trace::kDynamicExit` with the register in
-  `dynamic_exit_reg`. The fall-through exit commits every vreg, pin and flag, loads the register's committed value into RAX,
-  stores `cpu.pc` and tries Tier-1's indirect-branch probe (`emit_indirect_branch_probe`) before the shared exit tail. The
-  planner does not count that final `BR` as a call, so such a region keeps pins and chain-skip.
-- **The walker follows a BL into its callee** like a direct jump, pushing the return address (at most four deep). A RET that
-  matches the top becomes `IMM ret; XOR t = xN ^ ret; BRCOND_ZERO t != 0`: a flag-neutral guard whose taken edge is a
-  dynamic exit through xN, while the trace continues at the return address. A callee already in the trace, or deeper
-  nesting, ends the trace with a static exit into it. `BIFROST_NO_CALLREGION=1` turns this off, as it does native call
-  regions. `jit_tier2_calls` (suite entry `tier2_calls`).
-- **Every region exit has a cell.** An ST exit whose target had no translation when the region compiled gets an empty cell,
-  filled when the target is translated (`chain_back_references`); MT regions always had cells.
-- **Settling and refresh.** A region whose trial does not start settles every constituent, not only its head. A head whose
-  traced block no longer translates to the same length (Tier-1 split it at a newer block start) is retranslated at the
-  current boundaries without being settled (`tier2_refresh_queue_`, at most twice per head through `tier2_retrains_`).
-- **Region code** uses W-form fusion and one-instruction sign-extending loads, and `CBZ`/`CBNZ`/`TBZ`/`TBNZ` terminals test
-  their operand where it is held.
-- **Not admitted:** single-block loops (Tier-1 keeps them in registers, and a trial needs two blocks), loops whose iterations
-  take different arms, loops with an inner loop and dispatch loops. Admitting them needs regions with internal joins: each
-  join a commit point on both incoming edges, a barrier there for the planner's forwarding and LICM, and trial baselines
-  for off-path blocks. Raising the eight-block cap alone admits none of the measured kernels. Tier-2 spends about 20 M
-  cycles per run on compiles and trials before it pays (2026-11-11).
 
 ## Host-native memcpy, memmove and memset
 
@@ -1624,7 +1320,7 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
   `cpu.pc` changed (the helper left it at x30) take the dynamic exit `CALL_INTERP` uses for a changed pc, which returns to the
   dispatcher with RAX = the return address. A call below the threshold, or one the helper declines, falls into the block's
   own code, which is the guest routine. It is not emitted under `BIFROST_JIT_VERIFY` (replay would re-run the guest routine
-  for one block and diverge), slow stores or store tracing, a Tier-2 sampling copy or a shifted proof compile (the registry
+  for one block and diverge), slow stores or store tracing, or a shifted proof compile (the registry
   lookup misses there, so the block differs and the disk cache never reuses it), or `BIFROST_NO_NATIVE_LIBC=1`.
 - **The helper** (`NativeLibcRoutines::run`) declines unless `n >= kNativeLibcMinBytes` and every byte of every range is
   accessible with the right permission (`Memory::guest_to_host_ptr`: mapping, protection, userfaultfd state, window bound,
@@ -1644,9 +1340,9 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
 
 This is the proposed v2 compiler direction, with milestones and performance
 targets in [the roadmap](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions).
-Current region caching retains compatible XMM layouts internally; region
-entries still preload their layout. Scalar SSA does not yet model complete
-vector/FP architectural state. The proposal extends those foundations in
+Tier-2 regions, the only code that fused blocks, were removed on 2026-11-24
+([why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)); a cross-block layout starts again from Tier-1 blocks.
+Scalar SSA does not yet model complete vector/FP architectural state. The proposal extends those foundations in
 stages rather than assuming cross-region state is already supported.
 
 - **Explicit guest values.** Track GPR widths, vector lanes and scalar FP
@@ -1703,7 +1399,7 @@ BIFROST_JIT_VERIFY=1 ./bifrost-emu Tests/Unit/some_regression.elf
 ./bifrost-emu Tests/Unit/coremark.elf
 ```
 
-`BIFROST_IR_VALIDATE=1` checks per-op IR contracts, including Tier-2 regions.
+`BIFROST_IR_VALIDATE=1` checks per-op IR contracts.
 `BIFROST_JIT_VERIFY=1` compares JIT execution with the interpreter; syscalls,
 in-block calls, and memory side effects have documented verification limits,
 so pair it with a focused result check when relevant. Replay is suspended
@@ -1757,7 +1453,7 @@ two-instruction counter in every block entry (after the chain-skip entry, so cha
 self-loop back edge, and the dispatcher folds it into the JIT's totals; without either nothing is emitted and nothing is
 paid, so `BIFROST_PROF`'s sampler keeps its profile free of the counters. The counting code runs in the measured run: on
 CoreMark it costs about 15 %, so the rate it gives is a floor. The figure is exact for Tier-1 code; blocks served from
-the persistent cache (recorded before the counters existed) and Tier-2 regions are not counted.
+the persistent cache (recorded before the counters existed) are not counted.
 
 **Where threads wait.** The sampler counts CPU time, so a thread that waits shows nothing. With `BIFROST_PROF` set, the report
 also prints, for each guest thread, how long it spent inside guest syscalls by kind, next to its lifetime and CPU time
@@ -1834,8 +1530,7 @@ also matched cut to 15 characters, as Android names a process after its package)
 never uses its parent's profiler: for an app use a target, because the Zygote forks.
 
 You get one row per guest thread, named after the guest thread; a zone per guest syscall, coloured by kind (futex, poll, sleep, io,
-ioctl, other); a zone per GL, EGL or SDL thunk call, named after the function; a zone for each block the JIT translates and each
-Tier-2 region; a frame at each `eglSwapBuffers` or `SDL_GL_SwapWindow`; and a message when a full code cache is replaced. Vulkan
+ioctl, other); a zone per GL, EGL or SDL thunk call, named after the function; a zone for each block the JIT translates; a frame at each `eglSwapBuffers` or `SDL_GL_SwapWindow`; and a message when a full code cache is replaced. Vulkan
 presents are not marked as frames. Tracy's own system sampling and context-switch tracing are not used. The profiler window is a
 separate program built from the same release.
 
@@ -1880,7 +1575,7 @@ BIFROST_FWD_RANGES=0x400000-0x480000,0x500000-0x500100 ./bifrost-emu app.elf
   flag change between two consecutive entries points at the first block.
   Self-loop iterations re-enter past the prologue and are not logged.
 - `BIFROST_FWD_RANGES=lo-hi[,...]` restricts FWD to blocks starting in those
-  ranges, including Tier-2 regions that otherwise force it on.
+  ranges.
 
 Ranges are guest pcs, `[lo, hi)`. They are only stable when the code's load
 address is: Android's ART relocates its boot image on every run, even with
@@ -1914,6 +1609,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Tier-2 regions removed (2026-11-24)](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)
 - [Hotspots from IBS and the allocation profile: tag untag and scalar FMAX/FMIN zeros (2026-11-24)](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)
 - [FP equality compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-equality-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)
 - [Translation cost: no Tier-1 SSA, no store footprints outside verify, flat vreg tables (2026-11-23)](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)

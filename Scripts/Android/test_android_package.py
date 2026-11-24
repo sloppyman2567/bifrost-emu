@@ -4438,7 +4438,7 @@ class PackageTests(unittest.TestCase):
                 package.launch("org.bifrost.fixture", state, Path("/must/not/execute"))
         finally:
             configuration.write_text(original)
-        for mode in ("jit", "interp", "tier2"):
+        for mode in ("jit", "interp"):
             for backend in ("builtin", "plugin"):
                 cmd = [
                     "python3",
@@ -4460,8 +4460,6 @@ class PackageTests(unittest.TestCase):
                     **os.environ,
                     "SDL_VIDEODRIVER": "wayland",
                     "SDL_VIDEO_DRIVER": "wayland",
-                    "BIFROST_TIER2": "1" if mode == "tier2" else "0",
-                    "BIFROST_TIER2_HITS": "32",
                 }
                 result = subprocess.run(
                     cmd, env=env, capture_output=True, text=True, timeout=45

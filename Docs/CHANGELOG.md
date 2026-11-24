@@ -12,10 +12,12 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagnostics.
 
+- Tier-2 regions are removed. They were opt-in (`BIFROST_TIER2=1`) and never beat Tier-1 by more than a few percent on CoreMark, and no
+  game was shown to gain. `BIFROST_TIER2`, `BIFROST_TIER2_*`, `BIFROST_T2_REGIONDUMP` and the region-only `BIFROST_NO_*` switches
+  (`CALLREGION`, `DESTSRC`, `RDCE`, `LICM`, `KEEPRES`, `EXITCHAIN`) do nothing now, and the `tier2:` and `block-runs` lines are gone
+  from the JIT stats. Nothing changes in a default run, and the emulator binary is about 150 KB smaller.
 - Android apps run memory-heavy code with fewer instructions: an access through a tagged pointer (Android's allocator tags them) is one
   instruction shorter, about 5% fewer in the Android runtime's start-up code.
-- Turning on Tier-2 (`BIFROST_TIER2=1`) no longer makes every thread empty its dispatch caches each time a trial ends, which cost a game
-  about 4 points of its CPU in its first minutes. Not yet timed in a game after the change.
 - Hot loops in Android code run three instructions shorter per iteration (the loop's stop check now runs once when the loop is entered).
 - A game that clamps with `fmax(x, 0)` or `fmin` no longer drops into the slow interpreter when the result is zero (a loop of them runs
   about 20 times faster here). Checked against QEMU; no game has been timed.
@@ -81,7 +83,7 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   self-loop iterations; the last two used the run loop's dispatch count, which a chained guest reaches once per chain.
   With `-v` or `BIFROST_STATS_PERIOD` the translator emits the counters (about 15 % slower on CoreMark), so the figure is
   exact for Tier-1 code instead of a small fraction of it; `BIFROST_PROF` alone does not emit them. Persistent-cache
-  blocks and Tier-2 regions are not counted.
+  blocks are not counted.
 
 ### Added (`BIFROST_PROF` names the call behind a freeze)
 

@@ -13,7 +13,7 @@
 
 namespace arm64emu {
 
-// Absolute host addresses of one translated block (a Tier-1 block or a Tier-2 region).
+// Absolute host addresses of one translated block (a Tier-1 block).
 struct ProfBlock {
     uint64_t begin, body, exit, cold, end;
     uint64_t guest_pc;

@@ -18,28 +18,16 @@ bool FrostJIT::try_lock_for_fork() {
         blocks_mutex_.unlock();
         return false;
     }
-    // A trial's lock is taken by a vCPU that times one of its windows; holding the table lock keeps the set of
-    // trials fixed, and a trial lock is held only for a few statements.
-    size_t held = 0;
-    for (; held < tier2_trials_.size(); ++held)
-        if (!tier2_trials_[held]->mutex.try_lock()) break;
-    if (held == tier2_trials_.size()) return true;
-    while (held) tier2_trials_[--held]->mutex.unlock();
-    compile_invalidations_mu_.unlock();
-    compile_mutex_.unlock();
-    blocks_mutex_.unlock();
-    return false;
+    return true;
 }
 
 void FrostJIT::unlock_after_fork() {
-    for (auto& trial : tier2_trials_) trial->mutex.unlock();
     compile_invalidations_mu_.unlock();
     compile_mutex_.unlock();
     blocks_mutex_.unlock();
 }
 
 void FrostJIT::reset_after_fork_child() {
-    for (auto& trial : tier2_trials_) new (&trial->mutex) std::mutex();
     new (&compile_invalidations_mu_) std::mutex();
     new (&compile_mutex_) std::mutex();
     new (&blocks_mutex_) std::shared_mutex();

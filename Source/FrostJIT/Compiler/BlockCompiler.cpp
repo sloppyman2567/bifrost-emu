@@ -43,11 +43,9 @@ struct ProfTranslateGuard {
 extern thread_local bool bl_call_disabled_;
 extern thread_local bool blr_call_disabled_;
 // ── translate_block ───────────────────────────────────────────────
-uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry))(CPU*, Emulator*) {
+uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
     BIFROST_ZONE("translate block");
-    // Public Tier-1 compile time; private Tier-2 sampling copies count as
-    // Tier-2 compilation instead.
     struct CompileTimer {
         FrostJIT* jit;
         std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -60,7 +58,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
             while (ns > max && !jit->tier1_compile_max_ns.compare_exchange_weak(
                        max, ns, std::memory_order_relaxed)) {}
         }
-    } compile_timer{private_entry ? nullptr : this};
+    } compile_timer{this};
     block_words_.clear();
     if (!code_buf_) return nullptr;
     if (code_budget_exhausted_) {
@@ -69,7 +67,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
         fallback.interp_only = true;
         fallback.interp_only_count = fallback.instr_count = 1;
         fallback.verified_once = true;
-        if (!private_entry) publish_or_stage(start_pc, fallback);
+        publish_or_stage(start_pc, fallback);
         code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
@@ -95,7 +93,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // caller's recording state, which every exit restores.
     struct RecordingScope { bool& flag; bool saved; ~RecordingScope() { flag = saved; } }
         recording_scope{recording_, recording_};
-    if (!private_entry && !record_oracle_ && disk_cache_ready(emu)) {
+    if (!record_oracle_ && disk_cache_ready(emu)) {
         if (auto cached = install_cached(emu, start_pc)) return cached;
         begin_recording(start_pc);
     }
@@ -125,20 +123,15 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     selfloop_jcc_off_ = 0;
     selfloop_target_off_ = 0;
     selfloop_reconcile_after_ = false;
-    tier2_counter_off_ = 0;
-    tier2_counter_len_ = 0;
-    tier2_branch_profile_ = nullptr;
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
     inlined_ranges_.clear();
-    // Dead-NZCV exit predictions record guest words as dependencies; private
-    // Tier-2 sampling copies are not tracked by those, so they never predict.
     struct FlagScanScope {
         bool& active;
         ~FlagScanScope() { active = false; }
     } flag_scan_scope{flag_scan_active_};
-    flag_scan_active_ = private_entry == nullptr;
+    flag_scan_active_ = true;
     flag_deps_scratch_.clear();
     flag_store_skipped_ = false;
     chain_entry_off_ = 0;
@@ -415,7 +408,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
                 entry.instr_count = instr_count;
                 entry.verified_once = true;  // interp-only: no verify
                 attach_code_words(entry, !has_inlined_leaf);
-                if (!private_entry) publish_or_stage(start_pc, entry);
+                publish_or_stage(start_pc, entry);
                 blocks_translated++;
                 block_profile.interp_only++;
                 make_executable();  // W^X: balance the make_writable() at entry
@@ -503,10 +496,8 @@ if (demote_interp) {
         entry.chained = false;
         entry.instr_count = instr_count;
         entry.verified_once = true;  // skip verify for interp-only
-        if (!private_entry) {
-            attach_code_words(entry, !has_inlined_leaf);
-            publish_or_stage(start_pc, entry);
-        }
+        attach_code_words(entry, !has_inlined_leaf);
+        publish_or_stage(start_pc, entry);
         blocks_translated++;
         block_profile.interp_only++;
         make_executable();  // W^X: balance the make_writable() at entry
@@ -684,13 +675,10 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     chain_entry_off_ = code_buf_used_;
     current_block_instr_count_ = ir_block.count;
     // -v / BIFROST_STATS_PERIOD: count this entry's guest instructions, after chain_entry_off_ so chain-skip
-    // edges count too. Private entries are not blocks a guest runs (a leaf is inlined into its caller, a region trial
-    // runs its own copies), so they must not count.
-    if (!private_entry && !tier2_sampling_compile_) emit_guest_stat(static_cast<uint32_t>(ir_block.count));
-    // BIFROST_BLOCK_TRACE: log every cold and chained entry. Like the Tier-2
-    // counter below, it runs before anything is cached, so the caller-saved
-    // registers are free. Self-loop iterations re-enter past the prologue
-    // and are not logged.
+    // edges count too.
+    emit_guest_stat(static_cast<uint32_t>(ir_block.count));
+    // BIFROST_BLOCK_TRACE: log every cold and chained entry. It runs before anything is cached, so the
+    // caller-saved registers are free. Self-loop iterations re-enter past the prologue and are not logged.
     if (bifrost::DebugFlags::in_ranges(dbg().block_trace, start_pc)) {
         emit_mov_reg(RDI, CPU_REG);
         emit_mov_imm64(RSI, start_pc);
@@ -701,108 +689,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Not under differential replay (the replay would re-run the guest routine for one block and diverge), store
     // tracing, or a shifted proof compile (its pc is not the registered one, so the block is not cached).
     if (!dbg().no_native_libc && !dbg().jit_verify && !dbg().jit_slow_stores && !dbg().need_store_pc() &&
-        fault_sites_ && !private_entry && !record_oracle_ && !tier2_sampling_compile_) {
+        fault_sites_ && !record_oracle_) {
         const NativeLibcKind libc_kind = emu.native_libc().find(start_pc);
         if (libc_kind != NativeLibcKind::None) emit_native_libc_entry(start_pc, static_cast<uint32_t>(libc_kind));
-    }
-    // ── Tier-2 hot-head counter (opt-in; BIFROST_TIER2=1 enables) ──
-    // Emitted here (after chain_entry_off_, before the R10 window load and
-    // vec prologue loads) so BOTH cold entries (falling through the prologue)
-    // and chain-skip entries (jumping to chain_entry_off_) hit it — every
-    // execution of the block is counted. At this point RBX=cpu/RBP=frame are
-    // set and RDI/RSI are still the entry args (already stashed), so the fire
-    // path can clobber the caller-saved regs freely (the window load and vec
-    // loads that follow use no GPR scratch). The count itself is a HotCounter,
-    // outside the code buffer.
-    //
-    // Native conditional/direct-branch and capped straight-line heads can
-    // participate in a bounded loop region. Calls and fault boundaries are
-    // excluded from entry instrumentation; the collector validates the body.
-    bool tier2_head_eligible = false;
-    // Chain-skip composes with tier-2: the counter sits AFTER
-    // chain_entry_off_, so chain edges (bare jmps to chain_entry) count too.
-    // Regions entered via a chain edge use the region's own chain-skip entry
-    // (compile_tier2_region's chain_out); the unified 32 KB frame makes the
-    // vreg-slot layouts compatible.
-    if (tier2_enabled() && !wex_enabled_ && !private_entry && !tier2_settled_.count(start_pc)) {
-        if (!ir_block.insts.empty()) {
-            IROp last_op = ir_block.insts.back().op;
-            if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||
-                last_op == IROp::BRCOND_BIT || last_op == IROp::BRCOND_FALLTHRU ||
-                (!block_ended && size_limited)) {
-                tier2_head_eligible = true;
-                for (const auto& inst : ir_block.insts) {
-                    if (inst.op == IROp::SVC || inst.op == IROp::BR ||
-                        inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
-                        inst.op == IROp::CALL_INTERP || inst.op == IROp::SIMD_NATIVE_STRUCT ||
-                        inst.op == IROp::SIMD_STRUCT_MEM) {
-                        tier2_head_eligible = false;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if (tier2_head_eligible) {
-        const IRInst& terminal = ir_block.insts.back();
-        if (terminal.op == IROp::BRCOND || terminal.op == IROp::BRCOND_ZERO ||
-            terminal.op == IROp::BRCOND_BIT) {
-            auto profile = std::make_unique<Tier2BranchProfile>();
-            tier2_branch_profile_ = profile.get();
-            tier2_profiles_by_pc_[terminal.arm_pc] = profile.get();
-            tier2_branch_profiles_.push_back(std::move(profile));
-        }
-        size_t mt_counter_disabled_patch = 0;
-        tier2_counter_off_ = code_buf_used_;
-        // The prologue counts EVERY entry into the block (cold dispatch and
-        // chain edges both run it), so chained hot loops fire, which dispatch-
-        // side counters never see. Self-loops jump past it to
-        // block_body_start_off_, so only cold entries count. Disabling a
-        // single-thread counter patches this code, hence !wex_enabled_ above.
-        auto counter = std::make_unique<HotCounter>();
-        HotCounter* state = counter.get();
-        hot_counters_.push_back(std::move(counter));
-        hot_counter_sites_[tier2_counter_off_] = state;
-        emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(state));
-        if (mt_active()) {
-            // cmp dword [rax],0; je past counter/fire (patched below)
-            emit_byte(0x83); emit_byte(0x38); emit_byte(0);
-            size_t disabled = emit_jcc_rel32_placeholder(0x4);
-            emit_mov_imm64(RCX, 1);
-            // lock xadd dword [rax+4],ecx: each entry obtains a unique hit.
-            emit_byte(0xF0); emit_byte(0x0F); emit_byte(0xC1);
-            emit_byte(0x48); emit_byte(4);
-            emit_byte(0x81); emit_byte(0xF9);
-            emit_u32(std::max(uint32_t{1}, tier2_hits_threshold()) - 1);
-            // The disabled branch lands at the same skip as the JNE below.
-            // Keep the disabled-counter fixup local to this prologue.
-            mt_counter_disabled_patch = disabled;
-        } else {
-            state->patchable = true;
-            // One vCPU: no lock. inc dword [rax+4]; cmp dword [rax+4], imm32
-            emit_byte(0xFF); emit_byte(0x40); emit_byte(4);
-            emit_byte(0x81); emit_byte(0x78); emit_byte(4);
-            emit_u32(tier2_hits_threshold());
-        }
-        // jne short skip                (75 rel8 — patched after the call)
-        size_t jne_off = code_buf_used_;
-        emit_byte(0x75); emit_byte(0x00);
-        // Fire path: rdi = emu (frame slot), rsi = head pc, call the stub.
-        // emit_call_aligned(…, 0) wraps emit_call_abs (movabs+call, so the
-        // target is reachable regardless of the code_buf_ ↔ binary text
-        // distance) in pushfq/popfq, preserving RFLAGS AND restoring the
-        // ABI stack alignment for the stub (JIT body RSP%16==8 at this
-        // point; pushfq makes it 16-aligned for the `call`).
-        emit_load_emu(RDI);
-        emit_mov_imm64(RSI, start_pc);
-        emit_mov_imm64(RDX, tier2_counter_off_);
-        emit_call_aligned(reinterpret_cast<void*>(&tier2_fire_stub), 0);
-        // Patch the jne to skip the fire path (land right after the call).
-        const int8_t rel = static_cast<int8_t>(code_buf_used_ - (jne_off + 2));
-        patch_jcc_rel8(jne_off, rel);
-        if (mt_counter_disabled_patch)
-            patch_jcc_rel32(mt_counter_disabled_patch, static_cast<int32_t>(code_buf_used_ - (mt_counter_disabled_patch + 6)));
-        tier2_counter_len_ = code_buf_used_ - tier2_counter_off_;
     }
     // load the reservation base into R10 ONLY if the
     // block actually touches guest memory inline.
@@ -928,7 +817,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
     // A published MT self-loop checks the callback sentinel once per entry here, past the pin preloads and before
     // the body start the back edge jumps to, so an iteration pays no compare for it.
-    if (!ir_block.insts.empty() && mt_active() && preempt_by_epoch() && !dbg().no_selfloop && !dbg().no_chain) {
+    if (!ir_block.insts.empty() && mt_active() && !dbg().no_selfloop && !dbg().no_chain) {
         const IRInst& last = ir_block.insts.back();
         if ((last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO || last.op == IROp::BRCOND_BIT) &&
             last.branch_target() == start_pc) {
@@ -939,7 +828,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Record the block body start offset (after prologue). Used for
     // self-loop chaining: the selfloop slot is patched to jmp here.
     block_body_start_off_ = code_buf_used_;
-    emit_tier2_work_probe(ir_block.count);
     // ── Compute liveness: for each vreg, find the last op that uses it ──
     // This lets us free host regs of dead vregs immediately after their
     // last use, instead of keeping them cached until eviction. Without
@@ -1305,7 +1193,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                                 !(mt && chain_target_pc_ <= current_start_pc_);
     if (late_fall_pc_ && !imm_after_slot) emit_mov_imm_to_rax(late_fall_pc_);
     if (!pc_after_slot) emit_store(CPU_REG, PC_OFF, RAX);
-    emit_tier2_edge_profile(false);
     // ── Chain-capable epilogue ────────────────────────────────────
     // For block chaining we jump directly from one block's epilogue to
     // the next block's prologue. The next prologue reloads RBX from
@@ -1316,7 +1203,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // When the block returns (unchained `ret`), clobbering RDI/RSI is
     // fine — they're caller-saved and the dispatcher doesn't read them
     // after the call. Under chain-skip nothing reads them: every chain
-    // target (block, region, trial wrapper, IBL hit) enters past its
+    // target (block, IBL hit) enters past its
     // prologue's `mov rbx, rdi` and the emulator store, and the MT slot and
     // IBL probe address the CPU through RBX. Only the ordinary layout's
     // slots jump to fn, whose prologue reads RDI=cpu / RSI=emu.
@@ -1426,7 +1313,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
 
     defer_guards_ = false;
-    write_allocation_profile(block_start, epilogue_off, recovery_start, false);
+    write_allocation_profile(block_start, epilogue_off, recovery_start);
     note_profile_sections(block_start, epilogue_off, recovery_start);
     if (code_buf_overflow_) {
         rewind_codegen(block_start);
@@ -1437,7 +1324,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         fallback.interp_only_count = 1;
         fallback.instr_count = 1;
         fallback.verified_once = true;
-        if (!private_entry) publish_or_stage(start_pc, fallback);
+        publish_or_stage(start_pc, fallback);
         code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
         code_budget_exhausted_ = true;
         renewal_wanted_.store(true, std::memory_order_relaxed);
@@ -1479,8 +1366,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     entry.taken_chain_patch_off = taken_chain_patch_off_;
     entry.taken_chain_target_pc = taken_chain_target_pc_;
     entry.taken_chained = false;
-    entry.tier2_counter_off = tier2_counter_off_;
-    entry.tier2_counter_len = tier2_counter_len_;
     entry.instr_count = instr_count;
     // Runtime hot-interp promotion uses the same post-optimization IR count
     // as the translate-time interp_only decision. The pre-translation
@@ -1541,12 +1426,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         make_executable();
         return nullptr;
     }
-    if (private_entry) {
-        *private_entry = std::move(entry);
-        prev_max_vreg_ = max_vreg_;
-        make_executable();
-        return fn;
-    }
     // Store footprints serve differential replay alone (Dispatch.cpp, gated by the same flag); building them cost two
     // 4096-entry tables (36 KB cleared) per translated block.
     if (dbg().jit_verify) record_verification_stores(ir_block, start_pc, entry);
@@ -1600,7 +1479,7 @@ void FrostJIT::publish_or_stage(uint64_t pc, const BlockEntry& entry) {
     staged_ = true;
     staged_linked_ = false;
 }
-// W-form fusion and sign-extending loads, for Tier-1 blocks and Tier-2 regions
+// W-form fusion and sign-extending loads, for Tier-1 blocks
 // alike: both are decided from op i and its only reader at i + 1, through the
 // last-use table of the unit being compiled, and need no materializer.
 void FrostJIT::scan_w32_and_sext_loads(const std::vector<IRInst>& insts) {

@@ -11,6 +11,6 @@ build_host_library "$task_tmp/build.log"
 for layout in default ordinary; do
     args=()
     [[ "$layout" == ordinary ]] && args+=(BIFROST_NO_CHAIN_SKIP=1)
-    env -u BIFROST_ROOT -u BIFROST_TIER2 -u BIFROST_NO_CHAIN -u BIFROST_CHAIN_SKIP -u BIFROST_NO_CHAIN_SKIP \
-        BIFROST_TIER2=1 BIFROST_TIER2_HITS=1000 "${args[@]}" timeout -s KILL 30 "$task_tmp/test"
+    env -u BIFROST_ROOT -u BIFROST_NO_CHAIN -u BIFROST_CHAIN_SKIP -u BIFROST_NO_CHAIN_SKIP \
+        "${args[@]}" timeout -s KILL 30 "$task_tmp/test"
 done

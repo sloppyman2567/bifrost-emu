@@ -64,19 +64,15 @@ void FrostJIT::dump_memory_stats() {
     const size_t edges = vector_bytes(mt_edges_) + mt_edges_.size() * chunk(sizeof(MtEdge));
     const size_t edge_maps = hash_bytes(mt_edge_refs_) + vector_values_bytes(mt_edge_refs_) +
                              hash_bytes(mt_source_refs_) + vector_values_bytes(mt_source_refs_);
-    const size_t tier2 = vector_bytes(hot_counters_) + hot_counters_.size() * chunk(sizeof(HotCounter)) +
-                         hash_bytes(hot_counter_sites_) + vector_bytes(tier2_branch_profiles_) +
-                         tier2_branch_profiles_.size() * chunk(sizeof(Tier2BranchProfile)) +
-                         tree_bytes(tier2_profiles_by_pc_);
     const size_t words = vector_bytes(code_words_) + vector_bytes(flag_dep_table_);
     const size_t retired = hash_bytes(retired_pcs_);
-    const size_t total = blocks + index + back_refs + calls + edges + edge_maps + tier2 + words + retired;
+    const size_t total = blocks + index + back_refs + calls + edges + edge_maps + words + retired;
     fprintf(stderr, "[JIT] metadata MiB: total=%.1f per_block=%zuB blocks=%.1f(%zu) code_index=%.1f(%zu granules) "
-                    "back_refs=%.1f(%zu) calls=%.1f mt_edges=%.1f(%zu) mt_edge_maps=%.1f tier2=%.1f "
+                    "back_refs=%.1f(%zu) calls=%.1f mt_edges=%.1f(%zu) mt_edge_maps=%.1f "
                     "code_words=%.1f retired=%.1f(%zu) thread_inline_caches=%.1f\n",
             mib(total), blocks_.empty() ? size_t{0} : total / blocks_.size(), mib(blocks), blocks_.size(),
             mib(index), code_index_.size(), mib(back_refs), back_refs_.size(), mib(calls), mib(edges),
-            mt_edges_.size(), mib(edge_maps), mib(tier2), mib(words), mib(retired), retired_pcs_.size(),
+            mt_edges_.size(), mib(edge_maps), mib(words), mib(retired), retired_pcs_.size(),
             mib(inline_cache_bytes_.load(std::memory_order_relaxed)));
     if (disk_cache_) disk_cache_->dump_stats();
 }

@@ -169,7 +169,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         }
         return true;
     }
-    // Inline (Tier-2): the open gate or a clear flag jumps over the checks.
+    // Inline checks (no deferred tail): the open gate or a clear flag jumps over them.
     const size_t bypass_pages = emit_jmp_rel32_placeholder();
     patch_jcc_rel32(checked, static_cast<int32_t>(code_buf_used_ - (checked + 6)));
     std::vector<GuardJump> passed = emit_guard_page_checks(effective, temp, page, mp.width,
@@ -198,7 +198,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
 // memory untouched, so the fault exit interprets the whole instruction. A
 // 16-byte access may cross a page in bytes 8-15, so its page checks stay in
 // its own tail rather than the shared stubs (built for widths up to 8). Pairs
-// and Tier-2 keep emit_memory_guard and compile_simd_memory_.
+// keep emit_memory_guard and compile_simd_memory_.
 bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
     const bool load = inst.op == IROp::SIMD_LD16;
     if (!defer_guards_ || !fault_sites_ || !guest_memory_ || !window_base_ || !inst.arm_pc) return false;
@@ -534,22 +534,21 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
         case IROp::STORE_REG:
             // arm64_reg[dest] = src1. Write to cpu.regs[dest] (or v_lo if is_fp).
             //
-            // Phase 2 (self-loop / tier-2 region): KEEP dest cached after the
+            // Phase 2 (self-loop pins): KEEP dest cached after the
             // store and DEFER the cpu.regs[] write. The value stays in a
             // register (a pinned loop-carried vreg in R12-R15, or the
             // transferred reg of a dead src1) marked DIRTY; the block's own
             // later LOAD_REG reads reuse the cached register, and the loop
-            // exit (self-loop fall-through / region exit, both of which run
+            // exit (the self-loop fall-through, which runs
             // flush_all_vregs before returning OR chaining) writes it back to
             // cpu.regs[dest] ONCE. Per loop iteration this replaces a store→
             // cpu.regs→load round trip with pure register traffic.
             //
             // Deferral is safe ONLY because keep_store_dest_ is enabled
-            // exclusively for self-loop blocks and back-edge regions whose
+            // exclusively for self-loop blocks, whose
             // exits always flush: a self-loop's taken edge is the loop-back
             // (taken target == start_pc, so the exit is the fall-through →
-            // shared epilogue with flush_all_vregs), and regions flush at
-            // every cold/side exit. Call-like ops (interpreter, BL/BLR, SVC)
+            // shared epilogue with flush_all_vregs). Call-like ops (interpreter, BL/BLR, SVC)
             // are excluded from pinning — they read cpu.regs[] directly and
             // would see the stale (deferred) value.
             //

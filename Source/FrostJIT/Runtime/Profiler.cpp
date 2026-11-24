@@ -160,8 +160,7 @@ void FrostJIT::make_executable() {
     }
 }
 // -v / BIFROST_STATS_PERIOD: add one execution of the block to the CPU's counters. RBX holds the CPU at both
-// call sites and no GPR is needed, so only RFLAGS is clobbered: block entry has not loaded guest flags yet (the Tier-2
-// counter below clobbers them at the same point), and a self-loop back edge either carries no flags or has committed them.
+// call sites and no GPR is needed, so only RFLAGS is clobbered: block entry has not loaded guest flags yet, and a self-loop back edge either carries no flags or has committed them.
 void FrostJIT::emit_guest_stat(uint32_t instructions) {
     if (!block_stats_ || instructions == 0) return;
     const size_t slot = (current_start_pc_ >> 2) & (CPU::JIT_STAT_SLOTS - 1);
@@ -250,7 +249,6 @@ void FrostJIT::flush_cache() {
     // the next translation: W^X violated during execution).
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     blocks_.clear();
-    tier2_block_limits_.clear();
     code_index_.clear();
     back_refs_.clear();
     invalidate_dispatch_cache();

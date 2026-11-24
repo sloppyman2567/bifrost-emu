@@ -55,7 +55,6 @@ Settings come from a TOML file, environment variables and flags:
 ./bifrost-emu --print-config                     # show effective settings
 
 BIFROST_ROOT=/path/to/rootfs    # guest root filesystem
-BIFROST_TIER2=1                 # experimental Tier-2 region compilation
 BIFROST_JIT_VERIFY=1            # JIT vs interpreter divergence check
 BIFROST_SYSCALL_TRACE=1         # trace syscalls
 BIFROST_DYNLINK_TRACE=1         # trace the dynamic linker

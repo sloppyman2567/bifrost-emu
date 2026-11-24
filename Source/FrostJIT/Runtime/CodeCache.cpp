@@ -42,7 +42,6 @@ namespace arm64emu {
 std::atomic<uint64_t> FrostJIT::next_cache_generation_{1};
 thread_local const FrostJIT* FrostJIT::tls_cache_owner_ = nullptr;
 thread_local uint64_t FrostJIT::tls_cache_generation_ = 0;
-thread_local uint64_t FrostJIT::tls_stale_seq_ = 0;
 thread_local std::unique_ptr<FrostJIT::IblTable> FrostJIT::tls_ibl_;
 uint64_t (*FrostJIT::lookup_or_translate(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
     {
@@ -200,9 +199,6 @@ uint64_t (*FrostJIT::lookup_call_target_slow(Emulator& emu, uint64_t pc,
     BlockEntry entry;
     auto fn = translate_entry(emu, pc, entry) ? entry.fn : nullptr;
     int cnt = fn ? entry.instr_count : 1;
-    // The generated entry counter owns hotness for eligible heads. Keep
-    // publication in tier2_fire_region so all entries retain constituent
-    // ranges, revoke dispatch caches and redirect incoming chains together.
     tls_last_block_ = LastBlockCache{pc, fn, cnt};
     inline_cache_insert(pc, fn, cnt);
     instr_count = cnt;
@@ -277,24 +273,6 @@ void FrostJIT::dump_code_cache_stats() {
                 blocks_.size(), (unsigned long long)instrs, (unsigned long long)bytes,
                 instrs ? double(bytes) / double(instrs) : 0.0, blocks_.empty() ? 0.0 : double(instrs) / double(blocks_.size()),
                 (unsigned long long)interp_only, (unsigned long long)selfloop, (unsigned long long)taken_slots);
-        // Entries per block that carries a Tier-2 hot counter (BIFROST_TIER2=1; heads ending in a conditional branch or cut by the size limit, without a call,
-        // SVC or BR), to judge how many compiled blocks are one-shot or rarely run. A counter stops at
-        // BIFROST_TIER2_HITS (1000) and restarts from 0 on a profile retry; counters of invalidated
-        // blocks stay until the cache is replaced, so the total can exceed the live blocks.
-        // try_lock: the compiler takes this mutex before the blocks lock held here, so waiting would deadlock.
-        std::unique_lock<std::mutex> compile_guard(compile_mutex_, std::try_to_lock);
-        if (compile_guard.owns_lock() && !hot_counters_.empty()) {
-            uint64_t bucket[8] = {};  // 0, 1, 2, 3-4, 5-9, 10-99, 100+, total
-            for (const auto& counter : hot_counters_) {
-                const uint32_t hits = counter->hits.load(std::memory_order_relaxed);
-                const int b = hits == 0 ? 0 : hits == 1 ? 1 : hits == 2 ? 2 : hits <= 4 ? 3 : hits <= 9 ? 4 : hits <= 99 ? 5 : 6;
-                bucket[b]++; bucket[7]++;
-            }
-            fprintf(stderr, "[JIT] block-runs (counted blocks=%llu) 0:%llu 1:%llu 2:%llu 3-4:%llu 5-9:%llu 10-99:%llu 100+:%llu\n",
-                    (unsigned long long)bucket[7], (unsigned long long)bucket[0], (unsigned long long)bucket[1],
-                    (unsigned long long)bucket[2], (unsigned long long)bucket[3], (unsigned long long)bucket[4],
-                    (unsigned long long)bucket[5], (unsigned long long)bucket[6]);
-        }
         std::string by_size;
         for (int i = 1; i <= 8; ++i) {
             char field[64];
@@ -304,11 +282,7 @@ void FrostJIT::dump_code_cache_stats() {
         }
         fprintf(stderr, "[JIT] code-shape by instrs (blocks@avg bytes):%s\n", by_size.c_str());
     }
-    fprintf(stderr, "[JIT] Tier-2 measured payoff: pairs=%llu keeps=%llu rejects=%llu\n",
-        (unsigned long long)tier2_measured_pairs.load(), (unsigned long long)tier2_measured_keeps.load(),
-        (unsigned long long)tier2_measured_rejections.load());
-    fprintf(stderr, "[JIT] MT publication: edges=%llu regions=%llu\n",
-        (unsigned long long)mt_edges_published_.load(), (unsigned long long)mt_regions_published_.load());
+    fprintf(stderr, "[JIT] MT publication: edges=%llu\n", (unsigned long long)mt_edges_published_.load());
     if (dispatch_stats_enabled_) {
         fprintf(stderr, "[JIT] dispatch-cache: last=%llu way0=%llu way1=%llu table=%llu evictions=%llu sets=%d ways=2\n",
                 (unsigned long long)dispatch_last_hits_.load(std::memory_order_relaxed),
@@ -341,7 +315,6 @@ void FrostJIT::emit_preempt_compare(int cpu_reg, int scratch) {
 FrostJIT::MtEdge* FrostJIT::create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off) {
     auto cell = std::make_unique<MtEdge>();
     cell->source_pc = current_start_pc_;
-    cell->sampling_private = tier2_sampling_compile_;
     cell->cold_entry = cold_entry;
     cell->target_pc = target_pc;
     cell->slot = static_cast<uint32_t>(off);
@@ -373,7 +346,7 @@ size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry, int cpu
         emit_byte(0x48); emit_byte(0x3B); emit_byte(modrm(2, RAX, cpu_reg));
         emit_u32(offsetof(CPU, jit_stop_pc));
         cold.push_back(emit_jcc_rel32_placeholder(0x4));
-        if (preempt_by_epoch()) {
+        if (mt_active()) {
             // Epoch moved since the dispatcher's grant: return for signals and exits.
             cold.push_back(emit_preempt_poll(cpu_reg, R11));
         } else {
@@ -411,14 +384,14 @@ void FrostJIT::emit_indirect_branch_probe() {
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xBB);          // cmp qword [rbx+depth],0
     emit_u32(offsetof(CPU, jit_call_depth)); emit_byte(0);
     miss(0x5);                                                   // jne
-    // RCX = this thread's table; none bound (trial, foreign entry) → cold.
+    // RCX = this thread's table; none bound (foreign entry) → cold.
     emit_load(RCX, CPU_REG, offsetof(CPU, jit_ibl_table));
     emit_test_reg(RCX, RCX);
     miss(0x4);                                                   // jz
     // Every generation change advances the epoch, and every native entry takes
     // its lease before it syncs the table, so a stale table fails the epoch
     // compare below. Only code without that compare checks the generation.
-    if (preempt_by_epoch()) {
+    if (mt_active()) {
         emit_byte(0x4C); emit_byte(0x8B); emit_byte(0x59);      // mov r11,[rcx+epoch]
         emit_byte(offsetof(IblTable, epoch));
     } else {
@@ -444,7 +417,7 @@ void FrostJIT::emit_indirect_branch_probe() {
     miss(0x4);                                                   // je
     // Return to dispatch (signals, exit) regularly: the shared 256-edge budget
     // in ST, the read-only preemption epoch once MT code is published.
-    if (preempt_by_epoch()) {
+    if (mt_active()) {
         emit_byte(0x45); emit_byte(0x8B); emit_byte(0x1B);      // mov r11d,[r11]
         emit_byte(0x44); emit_byte(0x3B); emit_byte(0x9B);      // cmp r11d,[rbx+seen]
         emit_u32(offsetof(CPU, jit_epoch_seen));
@@ -473,8 +446,8 @@ void FrostJIT::refresh_mt_edges(uint64_t pc) {
             ? block->second.chain_entry : block->second.fn);
     for (MtEdge* edge : refs->second) {
         // A body entry carries this translation's pins and frame. It must
-        // never jump into another translation, including a promoted region.
-        if (!edge->live || edge->sampling_private || edge->internal_loop) continue;
+        // never jump into another translation.
+        if (!edge->live || edge->internal_loop) continue;
         uint64_t target = edge->cold_entry && block != blocks_.end()
             ? reinterpret_cast<uint64_t>(block->second.fn) : fn;
         if (edge->target.exchange(target, std::memory_order_release) != target && target && mt_active())
@@ -605,7 +578,7 @@ void FrostJIT::try_chain_block(uint64_t pc, BlockEntry& entry) {
     }
 }
 void FrostJIT::chain_back_references(uint64_t target_pc) {
-    refresh_mt_edges(target_pc); // includes tracked ST region exits
+    refresh_mt_edges(target_pc);
     if (mt_active()) return;
     // Legacy instruction-patching path below is single-thread only.
     // Patch any cached block whose chain_target_pc == target_pc.
@@ -725,7 +698,7 @@ void FrostJIT::write_perf_map(uint64_t pc, const BlockEntry& entry) {
 void FrostJIT::publish_block(uint64_t pc, const BlockEntry& entry) {
     remember_code_granules(pc, entry);
     if (dbg().jit_perf_map) write_perf_map(pc, entry);
-    if (!entry.is_region && retired_pcs_.erase(pc))
+    if (retired_pcs_.erase(pc))
         tier1_recompiles.fetch_add(1, std::memory_order_relaxed);
     blocks_[pc] = entry;
 }
@@ -757,7 +730,7 @@ void FrostJIT::attach_code_words(BlockEntry& entry, bool contiguous) {
 // unregistered userfaultfd-missing flag, which invalidation must not do.
 bool FrostJIT::block_code_unchanged(const BlockEntry& entry, uint64_t pc) const {
     const uint64_t bytes = static_cast<uint64_t>(entry.code_words_count) * 4;
-    if (!bytes || !guest_memory_ || !window_base_ || entry.is_region ||
+    if (!bytes || !guest_memory_ || !window_base_ ||
         !entry.inlined_ranges_.empty() ||
         entry.code_words_count != static_cast<uint32_t>(entry.instr_count) ||
         pc > guest_memory_->window_size() || bytes > guest_memory_->window_size() - pc)
@@ -830,7 +803,7 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
     }
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     // 1. Collect victims: blocks whose [pc, pc+instr_count*4) or an inlined
-    // BL-leaf/Tier-2 dependency range overlaps [first, last). Granules only
+    // BL-leaf dependency range overlaps [first, last). Granules only
     // locate candidates: a 64-byte cache-line publish must neither drop nor
     // scan unrelated translations elsewhere on its page.
     std::vector<uint64_t> victims;
@@ -886,21 +859,14 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
         victims.resize(kept);
     }
     stats.retired.fetch_add(victims.size(), std::memory_order_relaxed);
-    for (auto it = tier2_block_limits_.begin(); it != tier2_block_limits_.end();) {
-        if (it->first >= lo && it->first < hi) it = tier2_block_limits_.erase(it);
-        else ++it;
-    }
-    for (uint64_t pc : victims) tier2_block_limits_.erase(pc);
     if (victims.empty()) return;
-    invalidate_tier2_profiles(lo, hi);
     retire_blocks_locked(victims);
 }
 
-void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims, bool equivalent) {
+void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims) {
     // Caller holds the compiler lock and has selected exact victims.
     if (victims.empty()) return;
-    const bool by_pc = equivalent && mt_active();
-    if (!by_pc) invalidate_dispatch_cache();
+    invalidate_dispatch_cache();
     auto unpatch_slot = [&](uint64_t source_pc, size_t off) {
         if (mt_active()) {
             if (MtEdge* edge = mt_slot_edge(source_pc, off)) edge->target.store(0, std::memory_order_release);
@@ -915,27 +881,17 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims, bool e
     if (!mt_active()) make_writable();
     for (uint64_t vpc : victims) {
         auto victim_entry = blocks_.find(vpc);
-        if (victim_entry != blocks_.end() && victim_entry->second.tier2_monitor)
-            victim_entry->second.tier2_monitor->enabled.store(0, std::memory_order_release);
-        for (auto& trial : tier2_trials_)
-            if (!trial->monitor->enabled.load(std::memory_order_acquire))
-                revoke_tier2_samples_locked(*trial);
         retire_mt_source(vpc);
         auto refs = mt_edge_refs_.find(vpc);
         if (refs != mt_edge_refs_.end())
             for (MtEdge* edge : refs->second) edge->target.store(0, std::memory_order_release);
-        if (mt_active() && victim_entry != blocks_.end())
-            tier2_counter_disable(victim_entry->second.tier2_counter_off, victim_entry->second.tier2_counter_len);
         // 2. Unpatch predecessors chained to this victim.
         auto bref = back_refs_.find(vpc);
         if (bref != back_refs_.end()) {
             for (uint64_t src_pc : bref->second) {
                 auto sit = blocks_.find(src_pc);
                 if (sit == blocks_.end()) continue;
-                BlockEntry& published = sit->second;
-                BlockEntry& se = published.is_region && published.tier2_monitor &&
-                    published.tier2_monitor->trial && published.tier2_monitor->trial->decision.load() == 0
-                    ? published.tier2_monitor->trial->baseline : published;
+                BlockEntry& se = sit->second;
                 if (se.chained && se.chain_target_pc == vpc) {
                     unpatch_slot(src_pc, se.chain_patch_off);
                     se.chained = false;
@@ -952,15 +908,13 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& victims, bool e
         // Direct calls into it return to their slow path and are queued in
         // pending_call_sites_, so a retranslation re-patches them.
         if (!mt_active()) unpatch_direct_calls(vpc);
-        if (victim_entry != blocks_.end() && !victim_entry->second.is_region) retired_pcs_.insert(vpc);
+        if (victim_entry != blocks_.end()) retired_pcs_.insert(vpc);
         blocks_.erase(vpc);
         // 4. Drop this thread's fast-path entries for the victim.
         if (tls_last_block_.pc == vpc) tls_last_block_ = LastBlockCache{};
         inline_cache_erase(vpc);
     }
     std::atomic_thread_fence(std::memory_order_release);
-    // After the erase: a thread that syncs now finds the table already without the victims (refills take the lock).
-    if (by_pc) invalidate_dispatch_pcs(victims.data(), victims.size());
     if (!mt_active()) make_executable();
 }
 void FrostJIT::invalidate_all() {
@@ -968,22 +922,14 @@ void FrostJIT::invalidate_all() {
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     invalidate_dispatch_cache();
     code_index_.clear();
-    clear_tier2_profiles();
-    tier2_retrains_.clear(); // a full code epoch can reuse addresses for different loops
-    tier2_block_limits_.clear();
-    for (auto& monitor : tier2_region_monitors_)
-        monitor->enabled.store(0, std::memory_order_release);
     for (auto& edge : mt_edges_) {
         edge->live = false;
         edge->target.store(0, std::memory_order_release);
     }
     mt_source_refs_.clear();
-    for (auto& trial : tier2_trials_) revoke_tier2_samples_locked(*trial);
     if (blocks_.empty()) return;
-    for (const auto& kv : blocks_)
-        if (!kv.second.is_region) retired_pcs_.insert(kv.first);
+    for (const auto& kv : blocks_) retired_pcs_.insert(kv.first);
     if (mt_active()) {
-        for (auto& counter : hot_counters_) counter->enabled.store(0, std::memory_order_release);
         blocks_.clear(); back_refs_.clear();
         tls_last_block_ = LastBlockCache{};
         clear_inline_cache();
@@ -1025,11 +971,6 @@ void FrostJIT::enter_multithreaded() {
     // including frames retained by a guest call that created the thread.
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     make_writable();
-    clear_tier2_profiles();
-    for (auto& trial : tier2_trials_) revoke_tier2_samples_locked(*trial);
-    for (auto& monitor : tier2_region_monitors_)
-        if (monitor->trial && monitor->trial->decision.load(std::memory_order_acquire) == 0)
-            monitor->enabled.store(0, std::memory_order_release);
     for (auto& edge : mt_edges_) {
         edge->live = false;
         edge->target.store(0, std::memory_order_release);
@@ -1041,7 +982,6 @@ void FrostJIT::enter_multithreaded() {
             if (off && off + 5 <= CODE_BUF_SIZE && code_buf_[off] == 0xE9) {
                 write_unpatched_slot(off);
             }
-        tier2_counter_disable(entry.tier2_counter_off, entry.tier2_counter_len, true);
     }
     make_executable();
     // MT publication appends code while other host threads execute from
@@ -1058,8 +998,7 @@ void FrostJIT::enter_multithreaded() {
         }
     }
     invalidate_dispatch_cache();
-    for (const auto& kv : blocks_)
-        if (!kv.second.is_region) retired_pcs_.insert(kv.first);
+    for (const auto& kv : blocks_) retired_pcs_.insert(kv.first);
     blocks_.clear(); back_refs_.clear();
     code_index_.clear();
 }

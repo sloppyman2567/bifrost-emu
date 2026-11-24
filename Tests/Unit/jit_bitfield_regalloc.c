@@ -1,5 +1,5 @@
 // Bitfield results must survive register pressure, memory helpers, and
-// tier-2 side exits without an eager write to their scratch stack slots.
+// side exits without an eager write to their scratch stack slots.
 #include <stdint.h>
 #include <stdio.h>
 
@@ -107,7 +107,7 @@ static uint64_t run(unsigned iterations) {
     register uint64_t *dst asm("x12") = output;
     __asm__ volatile(
         "1:\n"
-        "cbz x0, 2f\n" // side exit plus unconditional back-edge: tier-2 region
+        "cbz x0, 2f\n" // side exit plus unconditional back-edge
         "and x14, x0, #255\n"
         "add x3, x1, x14, lsl #3\n"
         "ldr x4, [x3]\n"

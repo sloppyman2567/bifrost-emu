@@ -68,7 +68,7 @@ optional fixtures and remaining limitations: a passing build or smoke launch doe
 
 ## Child DOX Index
 
-- `Source/FrostJIT/AGENTS.md` — compiler, IR/SSA, code generation, register allocation, caching and Tier-2.
+- `Source/FrostJIT/AGENTS.md` — compiler, IR/SSA, code generation, register allocation, and caching.
 - `Source/Interpreter/AGENTS.md` — shared decoder and reference instruction semantics.
 - `Source/System/AGENTS.md` — memory, loader, syscalls, VFS, Android and host integration; narrower guides live
   beside those subsystems.

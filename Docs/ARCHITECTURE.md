@@ -30,7 +30,7 @@ flowchart LR
 | Decode and reference execution | `Source/Interpreter/Decoder/`, `Core/`, `FloatSIMD/` |
 | Host-native `memcpy`/`memmove`/`memset` | `Source/System/Core/NativeLibc.*` (registry and host routines), `Source/System/Loader/DynamicLinker/Symbols.cpp` (symbols), `Source/FrostJIT/Compiler/CallHelpers.cpp` (`emit_native_libc_entry`); see the [JIT guide](JIT.md#host-native-memcpy-memmove-and-memset) |
 | LL/SC exclusive monitor | `Source/System/Core/ExclusiveMonitor.hpp` (shared by the interpreter, the JIT helpers and `Source/FrostJIT/CodeGen/Integer/Atomics.cpp`) |
-| JIT pipeline | `Source/FrostJIT/`: `IR/`, `Compiler/`, `CodeGen/`, `RegisterAlloc/`, `Backend/`, `Runtime/`, `Tier2/` |
+| JIT pipeline | `Source/FrostJIT/`: `IR/`, `Compiler/`, `CodeGen/`, `RegisterAlloc/`, `Backend/`, `Runtime/` |
 | Guest address space and mappings | `Source/System/Memory/`: `Memory.cpp` (mapping index, access, file backing), `Allocation.cpp`, `Discard.cpp` (madvise, userfaultfd) |
 | ELF and dynamic linking | `Source/System/Loader/ElfLoader.cpp`, `DynamicLinker/` |
 | Linux syscall dispatch | `Source/System/Syscalls/Syscalls.cpp`; families in `Files/`, `Process/`, `Memory.cpp`, `Time.cpp`, `Compatibility.cpp`; Bifrost-private calls in `HostCalls/` |
@@ -69,9 +69,7 @@ compile, install) with `Runtime/PersistentCache.*` (on-disk store) form the
 experimental cross-launch translation cache. `Runtime/SampleProfile.*` is the `BIFROST_PROF` sampler's report:
 per-thread sample rings and a registry of each block's entry, body, exit and cold code. `System/Core/WaitProfile.*` is its
 other half: per-thread time inside guest syscalls by kind. `System/Core/TracyProfile.*` is the optional Tracy timeline
-(`make USE_TRACY=1`): zone macros that expand to nothing in a normal build, and the rule for when Tracy starts. Tier-2 separates trace collection, region planning,
-region compilation, promotion, feedback, profiling and trial measurement.
-`Tier2Internal.hpp` shares implementation helpers; it is not a public interface.
+(`make USE_TRACY=1`): zone macros that expand to nothing in a normal build, and the rule for when Tracy starts.
 
 ## Host adapters and the dynamic linker
 

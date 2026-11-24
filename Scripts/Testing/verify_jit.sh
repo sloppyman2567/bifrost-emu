@@ -17,13 +17,11 @@ run_check() {
     local name=$1 mode=$2 limit=$3 rc=0
     shift 3
     local log="$logs/$name-$mode.log"
-    local -a feature_env=()
-    [[ "$name" == jit_tier2_smov ]] && feature_env+=(BIFROST_TIER2=1)
     echo "--- $name ($mode) ---"
     if [[ "$mode" == verify ]]; then
-        env "${feature_env[@]}" BIFROST_JIT_VERIFY=1 BIFROST_NO_DIRECT_CALL=1 timeout -k 5 "$limit" "$emu" "$@" </dev/null >"$log" 2>&1 || rc=$?
+        env BIFROST_JIT_VERIFY=1 BIFROST_NO_DIRECT_CALL=1 timeout -k 5 "$limit" "$emu" "$@" </dev/null >"$log" 2>&1 || rc=$?
     else
-        env -u BIFROST_JIT_VERIFY "${feature_env[@]}" timeout -k 5 "$limit" "$emu" "$@" </dev/null >"$log" 2>&1 || rc=$?
+        env -u BIFROST_JIT_VERIFY timeout -k 5 "$limit" "$emu" "$@" </dev/null >"$log" 2>&1 || rc=$?
     fi
     if ((rc != 0)) || grep -Eq '\[(VERIFY[^]]*|MEMFULL)\].*(DIVERGENCE|suspended)' "$log"; then
         echo "FAIL: $name ($mode), exit=$rc"
@@ -37,7 +35,7 @@ for source in "${sources[@]}"; do
     if [[ ! -f "$fixture" || "$source" -nt "$fixture" ]]; then
         echo "FAIL: missing/stale $fixture; run make setup-tests"; failed=1; continue
     fi
-    if [[ "$name" == jit_mt_tier2 || "$name" == jit_host_fault || "$name" == jit_llsc_native || "$name" == jit_cache_generations ||
+    if [[ "$name" == jit_mt_loops || "$name" == jit_host_fault || "$name" == jit_llsc_native || "$name" == jit_cache_generations ||
        "$name" == jit_dispatch_cache_growth || "$name" == jit_unmap_reuse_race ]]; then
         # These fixtures exercise concurrent publication/invalidation or faults.
         # Shared-memory differential replay is deliberately unsafe here.

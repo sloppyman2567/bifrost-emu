@@ -8,8 +8,7 @@
 // miscompiling silently. Unmigrated ops are skipped.
 //
 // Wire-in: BlockCompiler.cpp runs this after optimize_ir() when
-// BIFROST_IR_VALIDATE=1 (see DebugFlags.hpp). Tier-2 region blocks go
-// through the same optimize_ir() but are not validated yet — follow-up.
+// BIFROST_IR_VALIDATE=1 (see DebugFlags.hpp).
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/CodeGen/Native/NativeSIMD.hpp"
 

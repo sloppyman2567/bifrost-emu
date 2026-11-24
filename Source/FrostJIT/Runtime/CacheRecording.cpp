@@ -164,7 +164,7 @@ bool FrostJIT::disk_cache_ready(Emulator& emu) {
     // Translations these switches shape carry state no record describes.
     static const bool leaf_inline = dbg().enable_leaf_inline;
     static const bool malloc_interp = dbg().malloc_interp;
-    const char* why = tier2_enabled() ? "Tier-2 is enabled" : dbg().jit_verify ? "BIFROST_JIT_VERIFY is set"
+    const char* why = dbg().jit_verify ? "BIFROST_JIT_VERIFY is set"
         : leaf_inline ? "leaf inlining is enabled" : malloc_interp ? "BIFROST_MALLOC_INTERP is set"
         : !dbg().block_trace.empty() ? "BIFROST_BLOCK_TRACE is set" : !guest_memory_ || !window_base_
         ? "no guest window" : own_image().hi == 0 ? "the JIT's own image is unknown" : nullptr;
@@ -222,7 +222,7 @@ bool FrostJIT::begin_recording(uint64_t start_pc) {
 void FrostJIT::capture_compile(CompileCapture& c, uint64_t start_pc, size_t block_start,
                                const BlockEntry& entry, bool inlined_leaf) {
     c.ok = !record_unrecordable_ && !inlined_leaf && !code_buf_overflow_ && call_site_end_ == record_call_end_ &&
-           entry.fn && !entry.interp_only && entry.inlined_ranges_.empty() && entry.tier2_counter_len == 0;
+           entry.fn && !entry.interp_only && entry.inlined_ranges_.empty();
     c.start_pc = start_pc;
     c.block_start = block_start;
     c.code.assign(code_buf_ + block_start, code_buf_ + code_buf_used_);
@@ -242,7 +242,7 @@ void FrostJIT::capture_compile(CompileCapture& c, uint64_t start_pc, size_t bloc
         const uint64_t base = reinterpret_cast<uint64_t>(code_buf_) + block_start;
         // Only the block's own chain slots: self-loop and call cells keep
         // state (a body address, a callee) that a record does not carry.
-        if (e.internal_loop || e.sampling_private || (e.slot != entry.chain_patch_off &&
+        if (e.internal_loop || (e.slot != entry.chain_patch_off &&
             !(entry.has_taken_chain_slot && e.slot == entry.taken_chain_patch_off)) ||
             cold < base || cold - base > c.code.size())
             c.ok = false;

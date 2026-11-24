@@ -247,7 +247,7 @@ Completed checks:
 - Focused Android/SDL/EGL/Wayland regressions: 21/21 JIT and 21/21 interpreter
   with desktop/GPU access, after rebuilding the changed ARM64 surface fixture.
 - Final signed APK suite: six unittest cases in 67.182 seconds. Real Bionic and
-  Media NDK plus built-in/plugin × JIT/interpreter/Tier-2 native Wayland graphics
+  Media NDK plus built-in/plugin × JIT/interpreter native Wayland graphics
   pass with SDL3's `SDL_VIDEO_DRIVER=wayland` set explicitly.
 
 The initial sandbox run blocked the cross compiler and reported the stale surface

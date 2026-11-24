@@ -339,11 +339,6 @@ UNIT_TESTS=(
     "sdl_surface_format|Scripts/Testing/test_sdl_surface_format.sh||60|ALL PASS: copied SDL surface formats and palettes|HOST_JIT"
     "window_stats|Scripts/Testing/test_window_stats.sh||150|window_stats regression: ALL PASS|HOST_JIT"
     "jit_emitter_slow_paths|Scripts/Testing/test_jit_emitter_slow_paths.sh||90|jit_emitter_slow_paths: ALL PASS|HOST_JIT"
-    "jit_tier2_mutex|Scripts/Testing/test_jit_tier2_mutex.sh||180|jit_tier2_mutex: 20 promotion-stress runs PASS|HOST_JIT"
-    "jit_tier2_discovery|Scripts/Testing/test_jit_tier2_discovery.sh||180|jit_tier2_discovery: direct edges, capped bodies, exits and invalidation PASS|HOST_JIT"
-    "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries, exit rates and concurrent phases PASS|HOST_JIT"
-    "jit_tier2_measure|Scripts/Testing/test_jit_tier2_measure.sh||180|jit_tier2_measure: real timing keeps faster code, rejects slower code, decides uneven visits PASS|HOST_JIT"
-    "jit_tier2_rate|Scripts/Testing/test_jit_tier2_rate.sh||90|jit_tier2_rate: a slow head settles, a fast one reaches a trial PASS|HOST_JIT"
     "jit_cache_invalidation|Tests/Unit/jit_cache_invalidation.elf||15|jit_cache_invalidation: ALL PASS"
     "jit_dispatch_cache_growth|Tests/Unit/jit_dispatch_cache_growth.elf||15|jit_dispatch_cache_growth: ALL PASS"
     "jit_unmap_reuse_race|Tests/Unit/jit_unmap_reuse_race.elf||30|jit_unmap_reuse_race: ALL PASS"
@@ -353,7 +348,7 @@ UNIT_TESTS=(
     "jit_dispatch_cache|Tests/Unit/jit_dispatch_cache.elf||15|jit_dispatch_cache: ALL PASS"
     "jit_call_helpers|Tests/Unit/jit_call_helpers.elf||15|jit_call_helpers: ALL PASS"
     "jit_call_depth|Tests/Unit/jit_call_helpers.elf 20000 deep||15|jit_call_helpers: ALL PASS deep calls"
-    "jit_mt_tier2|Tests/Unit/jit_mt_tier2.elf||30|jit_mt_tier2: ALL PASS"
+    "jit_mt_loops|Tests/Unit/jit_mt_loops.elf||30|jit_mt_loops: ALL PASS"
     "shift_register|Tests/Unit/jit_shift_register.elf||5|checks passed"
     "neon_permute|Tests/Unit/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|Tests/Unit/jit_neon_fixups.elf||5|checks passed"
@@ -398,8 +393,6 @@ UNIT_TESTS=(
     "test_jit_native|Tests/Unit/test_jit_native.elf||10|ALL PASS"
     "test_malloc|Tests/Unit/test_malloc.elf||5|malloc test done"
     "test_simd_arith|Tests/Unit/test_simd_arith.elf||10|ALL PASS"
-    "tier2_smov|Tests/Unit/jit_tier2_smov.elf||10|ALL PASS|JIT"
-    "tier2_calls|Tests/Unit/jit_tier2_calls.elf||60|jit_tier2_calls: ALL PASS|JIT"
     "memory_guard_address|Tests/Unit/jit_memory_guard_address.elf||15|ALL PASS"
     "guard_stubs|Tests/Unit/jit_guard_stubs.elf||20|ALL PASS"
     # Host-native memcpy/memmove/memset: results against byte loops, overlaps, mapping edges and denied access (which the
@@ -1201,8 +1194,6 @@ run_test() {
     local tmpout tmpin=""
     local -a test_runner=("$EMU" "${EMU_FLAGS[@]}" "${test_command[@]}")
     local -a test_env=("${RUN_ENV[@]}")
-    # These fixtures specifically check region codegen, which is opt-in.
-    [[ "$name" == tier2_smov || "$name" == tier2_calls ]] && test_env+=(BIFROST_TIER2=1)
     [[ "$name" == android_service_manager ]] && test_runner=("$EMU" "${EMU_FLAGS[@]}" --android-services "${test_command[@]}")
     # INTERP rows check interpreter semantics the JIT does not have yet
     # (see the row comment); they run under --no-jit in every mode.

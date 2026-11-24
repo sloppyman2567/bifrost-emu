@@ -41,7 +41,7 @@ Not the focus: games behind attestation or anti-cheat, and compatibility sweeps 
 | 2.0.0-alpha.2 (2026-10-21) | Released; goals partly met | Toasts, `NsdManager`, all of `IAppOpsService`, declined Settings intents, scaled fixed-size apps |
 | 2.0.0-alpha.3 (2026-11-01) | Released; WebView, media and ad scope mostly open | `media.extractor`, POSIX timers, installable Asgard and rootfs, `bifrost-emu app.apk`, window stats |
 | 2.0.0-beta.1 (2026-11-03) | Released as a label; scope partly met | Library cards, per-app settings, clear-data/uninstall, run-ended cards; app Keystore, WebView GPU fences, Vulkan for apps through a guest HAL, a faster Tier-1 JIT |
-| 2.0.0-beta.2 (2026-11-14) | Released; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns, NativeActivity games |
+| 2.0.0-beta.2 (2026-11-14) | Released; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns (since removed), NativeActivity games |
 | 2.0.0-beta.3 (2026-11-24) | Current; a large release, scope partly met | Graphics calls cost a game much less CPU, the JIT translates about twice as fast and runs cheaper scalar float compares and widening multiplies, large memcpy and memset run on the host, `BIFROST_PROF` stall reports and a Tracy timeline, a per-app Resolution setting, an app launcher that keeps a log, and uninstall targets that find a `make bootstrap` install |
 
 **In 2.0.0-beta.2, since the beta.1 label:** the desktop library can be driven with a gamepad (a gamepad layout, menus,
@@ -57,7 +57,7 @@ across a long game session.
 On November 10 and 11: an app's helper processes fork from a session Zygote, microG maps a compiled vdex, games link one shared
 read-only copy of Android, launch preparation reuses file hashes and compiles after the session, the package parse cache
 survives updates, static AudioTracks and SoundPool play, the JIT disk cache reads its records instead of mapping them, and
-Tier-1 and Tier-2 got the changes listed under [the JIT workstream](#jit-codegen-retain-guest-state-across-hot-regions).
+Tier-1 got the changes listed under [the JIT workstream](#jit-codegen-retain-guest-state-across-hot-regions).
 Measured on Battle Cats and Subway Surfers launches and kernels; the shared copy has not run from an installed Asgard and no
 game was timed for the JIT changes.
 
@@ -316,7 +316,7 @@ exit; then the Azur Lane interaction is checked in a real window and its frame d
 Goal: keep guest registers, vectors and NZCV in host registers across hot paths, reconstructing state only at observable
 boundaries ([design](JIT.md#planned-codegen-retaining-guest-state-across-regions)).
 
-Done: experimental Tier-2 regions (opt-in); a cheaper Tier-1 (CoreMark 13,156 iterations/s on October 27, 14,874 on November 8 and 16,880 on November 23 (pinned, 200,000 iterations), over the 10,000
+Done: a cheaper Tier-1 (CoreMark 13,156 iterations/s on October 27, 14,874 on November 8 and 16,880 on November 23 (pinned, 200,000 iterations), over the 10,000
 target; [method](archive/JIT-history.md#coremark-re-measurement-2026-11-08)); compact scalar memory guards; shared cold stubs; native scalar and vector FP by element and LD1R; loop bodies up
 to twice the block cap; lighter Q-register accesses. On a set of engine-shaped kernels the JIT went from 5.8× to 4.2× the
 time of a native AVX2 build ([details](JIT.md)).
@@ -351,8 +351,7 @@ tag untag is one `and` against a mask word in the window's header page (`LOAD_ME
 generated-code ops in that workload), and scalar `fmax`/`fmin` no longer step the interpreter when the result is zero (a clamp loop went
 from 864 to 44 host instructions per iteration; checked against QEMU, no game run;
 [details](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)).
-Measured the same day: Tier-2 regions are +4.7% on CoreMark at 200,000 iterations (+2.1% at 40,000; still opt-in, no game run with
-it), and on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
+Measured the same day, on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
 
 Open, in priority order (the maintainer put translation speed ahead of the cross-block work on 2026-11-23, so item 1 comes first):
 
@@ -398,13 +397,9 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    still runs in the interpreter (Zenless Zone Zero, 2026-11-23, `BIFROST_CLASS_PROF`): the exclusive pairs `ldxp`/`stxp`/`ldaxp`/
    `stlxp` with their retry loops; 64-bit-lane saturating narrowing shifts stay interpreted too (scalar `fmax`/`fmin` stepped
    the interpreter for every zero result until 2026-11-24; now only a NaN input does).
-4. **Tier-2**: regions now follow calls and returns, every side exit chains, a kept region retires when its exit rate
-   outgrows its trial, and enabling it no longer slows Tier-1 code (2026-11-11). CoreMark runs 1.2% fewer host instructions
-   than Tier-1 (run time within placement noise) and a particle loop 7.7% fewer cycles. It does not take single-block loops,
-   which Tier-1 already keeps in registers. Loops whose iterations take different arms (culling), loops with an inner loop
-   (skinning) and dispatch loops (a bytecode VM) are declined, because promotion judges a linear trace; raising the 8-block
-   cap alone admits none of them. Next: regions with internal joins, then real Android titles. It stays opt-in until then
-   ([details](archive/JIT-history.md#tier-2-exits-that-chain-exit-rate-feedback-and-profiler-costs-2026-11-11)).
+4. **Tier-2 was removed on 2026-11-24** (it never beat Tier-1 by more than a few percent and no game was shown to gain). Any
+   cross-block work starts again from Tier-1 blocks and sampled, MT-aware promotion
+   ([why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)).
 5. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the

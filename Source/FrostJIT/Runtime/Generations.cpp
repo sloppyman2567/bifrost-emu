@@ -193,7 +193,7 @@ void FrostJIT::retire() {
 
 // The reaper found every thread past this instance. Frees what only its own generated code
 // referenced: the code mapping, the fault table and the per-block metadata (including the
-// heap objects the code addressed directly: MT edge cells, counters, Tier-2 monitors). The
+// heap objects the code addressed directly: MT edge cells). The
 // object itself stays, because generated code embeds the address of members such as
 // cache_generation_ and a parked thread may still return through run_block on it.
 void FrostJIT::release_resources() {
@@ -214,7 +214,7 @@ void FrostJIT::release_resources() {
         code_capacity_ = 0;
     }
     auto clear = [](auto& container) { std::remove_reference_t<decltype(container)>().swap(container); };
-    // Blocks first: their entries point at the monitors and edges below.
+    // Blocks first: their entries point at the edges below.
     clear(blocks_);
     clear(code_index_);
     clear(back_refs_);
@@ -223,17 +223,6 @@ void FrostJIT::release_resources() {
     clear(mt_edge_refs_);
     clear(mt_source_refs_);
     clear(mt_edges_);
-    clear(hot_counter_sites_);
-    clear(hot_counters_);
-    clear(tier2_trials_);
-    clear(tier2_region_monitors_);
-    clear(tier2_profiles_by_pc_);
-    clear(tier2_settled_);
-    clear(tier2_settle_queue_);
-    clear(tier2_refresh_queue_);
-    clear(tier2_branch_profiles_);
-    clear(tier2_retrains_);
-    clear(tier2_block_limits_);
     clear(code_words_);
     clear(flag_dep_table_);
     clear(retired_pcs_);

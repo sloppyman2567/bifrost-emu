@@ -465,7 +465,7 @@ struct IRInst {
     // rewrites generically). Everything else goes through factories.
     friend bool validate_ir_block(const IRBlock& block, FILE* out);
     friend void dump_ir(const IRBlock& block, FILE* out);
-    friend void optimize_ir(IRBlock& block, bool force_fwd);
+    friend void optimize_ir(IRBlock& block);
  public:
 
     // ── Typed per-op factories/readers ──────────────────────────────
@@ -751,7 +751,7 @@ void ir_reset_vreg_alloc();
 //   - Dead code elimination (unused stores/scratch ops)
 //   - Peephole (load+op fusion, mask elimination when sf=1)
 //   - Local register caching (LOAD_REG → reuse cached vreg if value is live)
-void optimize_ir(IRBlock& block, bool force_fwd = false);
+void optimize_ir(IRBlock& block);
 // Validate an IR block's per-op parameter contracts (see the typed
 // factories above). Only migrated ops are checked; unmigrated ops are
 // skipped. Violations are reported to `out` (returns false if any found)

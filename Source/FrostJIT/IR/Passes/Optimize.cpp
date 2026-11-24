@@ -263,7 +263,7 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
     }
 }
 // ── The main optimizer ────────────────────────────────────────────────
-void optimize_ir(IRBlock& block, bool force_fwd) {
+void optimize_ir(IRBlock& block) {
     if (block.insts.empty()) return;
     // LDXR_FAST, STXR_FAST, or STLR_FAST ops. If so, disable the
     // arm_reg_cache load-forwarding (FWD) for the ENTIRE block. These
@@ -279,20 +279,14 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     static bool fwd_off_ = dbg().no_fwd;
     // (legacy BIFROST_ENABLE_FWD=1 is accepted and means on, which is now
     // the default — it only matters if some script still exports it.)
-    // The tier-2 walker forces FWD on for region blocks: without the
-    // STORE_REG→LOAD_REG forwarding, real guest invariant chains (threaded
-    // through a GPR) keep a memory round-trip on every step and LICM can
-    // never hoist them. FWD is verified correct (2026-08-15 fix + suites);
-    // forcing it here only affects region IR, never the standalone JIT.
-    bool fwd_requested = !fwd_off_ || force_fwd;
+    bool fwd_requested = !fwd_off_;
     // BIFROST_FWD_RANGES bisects FWD bugs by block start address.
     const auto& fwd_ranges = dbg().fwd_ranges;
     if (!fwd_ranges.empty() && !bifrost::DebugFlags::in_ranges(fwd_ranges, block.start_pc))
         fwd_requested = false;
     // Tier-1 blocks keep the legacy scalar pipeline unless BIFROST_TIER1_SSA=1: the SSA adapter was a third of translation time
-    // for under 1% fewer instructions (Docs/JIT.md). Tier-2 still concatenates legacy blocks with globally allocated vregs;
-    // its region needs one SSA graph (RegionPlanner) rather than independently lowered blocks.
-    block.ssa_optimized = !force_fwd && fwd_requested && dbg().tier1_ssa && !dbg().no_ssa &&
+    // for under 1% fewer instructions (Docs/JIT.md).
+    block.ssa_optimized = fwd_requested && dbg().tier1_ssa && !dbg().no_ssa &&
         optimize_ir_ssa(block, dbg().ir_validate);
     bool block_has_atomics = false;
     if (fwd_requested) {

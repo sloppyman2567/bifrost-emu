@@ -1,5 +1,5 @@
-/* Concurrent hot-region publication, both branch edges, and invalidation of
- * a region's non-head page. Results use an independent closed-form oracle. */
+/* Concurrent hot-loop execution, both branch edges, and invalidation of a loop's
+ * non-head page. Results use an independent closed-form oracle. */
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,7 +39,7 @@ static void *worker(void *arg) {
         }
         if (id == 0 && (i % 16) == 0)
             __builtin___clear_cache((char *)code + 4096, (char *)code + 4120);
-        /* Data-only mapping churn must not revoke unrelated hot regions. */
+        /* Data-only mapping churn must not revoke unrelated hot loops. */
         if (id == 0 && (i % 8) == 0) {
             void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -72,6 +72,6 @@ int main(void) {
         if (failed) return 1;
     }
     munmap(code, 8192);
-    puts("jit_mt_tier2: ALL PASS");
+    puts("jit_mt_loops: ALL PASS");
     return 0;
 }
