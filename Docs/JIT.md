@@ -1350,7 +1350,7 @@ exit. A simulation on CoreMark puts that at 0.93 moves per guest instruction, an
 window removes 63 to 84% of them ([the measurement and its limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)).
 It is an upper bound on one small workload, not a promise.
 
-A start-up run of SpongeBob found the hottest 200 blocks holding 27% of the JIT samples and loops of several blocks only 1.4%
+A run of SpongeBob through loading into the lobby found the hottest 200 blocks holding 27% of the JIT samples and loops of several blocks only 1.4%
 ([numbers](archive/JIT-history.md#carry-loop-report-on-a-game-and-chain-edge-carrying-2026-11-24)), so loop regions alone would reach little of
 that workload; merging a block into its single predecessor (a unit that loads and stores each register once) removed 26-31% of CoreMark's
 register moves in a simulation and needs no profile. Which of the two comes first is open until a steady-gameplay profile exists.
