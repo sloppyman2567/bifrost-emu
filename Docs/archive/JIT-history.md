@@ -4,7 +4,7 @@ Dated optimization checkpoints, measurements and fixes moved out of [the JIT gui
 
 ## FP equality compare and branch on the raw ucomis flags (2026-11-23)
 
-The scalar `fcmp` + `BRCOND` fusion (next section down) left EQ and NE on the old sequence: `ucomis` sets ZF for an unordered compare as
+The scalar `fcmp` + `BRCOND` fusion (the section two down) left EQ and NE on the old sequence: `ucomis` sets ZF for an unordered compare as
 well as an equal one, so EQ is ZF without PF and NE is the reverse, which one `jcc` cannot say. They now use the raw flags too, with a
 `jp` ahead of the ZF jump: EQ is `jp over; je taken` (unordered falls through), NE is `jp taken; jne taken`. The operand order does not
 matter for an equality, so there is no swapped form. The exits convert the raw flags exactly as for the other conditions. A self-loop
@@ -93,7 +93,7 @@ patterns (a C comparison would compile to the instruction under test). QEMU, the
 flag-neutral. `verify_jit.sh` (113 differential fixtures, 12 threaded oracle runs), 100 name-filtered unit tests and 65 Toybox and
 real-world programs pass.
 
-Not measured: gameplay, cycles, Tier-2 (it keeps the old sequence), EQ and NE branches, the vector compares (`fcmeq`, `fcmgt`), and
+Not measured: gameplay, cycles, Tier-2 (it keeps the old sequence), EQ and NE branches (done later the same day, the top section), the vector compares (`fcmeq`, `fcmgt`), and
 a successor that starts with an FP load or store (the scan still stops there, as a load can fault).
 
 ## Widening multiply-accumulate is extend, multiply and add (2026-11-23)

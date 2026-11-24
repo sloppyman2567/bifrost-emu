@@ -444,7 +444,7 @@ struct IRInst {
     uint16_t dest;   // destination vreg (0 if no dest)  [was uint8_t]
     uint16_t src1;   // source vreg 1                     [was uint8_t]
     uint16_t src2;   // source vreg 2                     [was uint8_t]
-    uint16_t aux;    // auxiliary operand (source element index, FMA lane + 1)
+    uint16_t aux;    // auxiliary operand: SIMD element or lane number (FMA lane + 1); never a vreg
     uint64_t arm_pc; // PC of the original ARM instruction (for CALL_INTERP, BRCOND, SVC)
  private:
     // ── Private parameter fields ──────────────────────────────────

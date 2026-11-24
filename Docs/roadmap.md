@@ -333,7 +333,7 @@ interpreter's share of Zenless Zone Zero fell from about 8.5% to 4.9%; [details]
 The widening multiplies (`umull`, `smull`, `umaddl` and the rest) are `SEXT`/`ZEXT`, `MUL` and `ADD` instead of a fixed-register emitter that
 spilled and reloaded: the `collide` kernel runs 14.0% fewer host instructions per frame, `skinning` 2.6%, CoreMark no change
 ([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)). A scalar `fcmp` followed by a
-conditional branch is one `ucomis` and one `jcc` (9 instructions before), and the NZCV store is dropped when only scalar FP
+conditional branch is one `ucomis` and one `jcc` (two for equal and not-equal; 9 instructions before), and the NZCV store is dropped when only scalar FP
 arithmetic precedes the next rewrite: `cull` 11.7% fewer host instructions per frame, `collide` 6.5%, `particles` 4.5%
 ([details](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)). No game was run with either.
 Measured the same day: Tier-2 regions are +4.7% on CoreMark at 200,000 iterations (+2.1% at 40,000; still opt-in, no game run with

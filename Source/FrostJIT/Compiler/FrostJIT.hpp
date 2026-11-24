@@ -2045,7 +2045,7 @@ private:
     size_t fp_raw_flags_op_ = kNoFpRawFlags;
     bool fp_raw_swapped_ = false;
     bool fp_raw_flags_live() const { return flags_in_host_ && fp_raw_flags_op_ == cur_op_index_; }
-    // Maps an ARM condition to a single x86 jcc on raw ucomis flags; false when it needs two (EQ/NE) or is AL/NV.
+    // Maps an ARM condition to the x86 jcc on raw ucomis flags (EQ/NE: the ZF jump, which BRCOND precedes with a jp); false for AL/NV.
     static bool fp_raw_flags_cc(uint8_t arm_cond, bool& swapped, uint8_t& cc);
     // Builds SUB-convention host flags (SF=N, ZF=Z, CF=!C, OF=V) from raw ucomis flags; clobbers RAX, RCX, RDX.
     void emit_fp_raw_flags_to_sub(bool swapped);
