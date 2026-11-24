@@ -2037,6 +2037,20 @@ private:
     bool rax_holds_next_pc_ = false;
     bool flags_in_host_ = false;
     bool flags_from_sub_ = false;
+    // A scalar FP_CMP followed directly by a BRCOND leaves its raw ucomis flags in the host (no SUB-convention
+    // build-up). fp_raw_flags_op_ is the IR index of that BRCOND; the flags are raw only while the op being
+    // compiled has that index (fp_raw_flags_live()), so a stale value can never match a later op.
+    // fp_raw_swapped_: the compare was emitted as ucomis b, a. fp_raw_flags_cc() maps the condition to its jcc.
+    static constexpr size_t kNoFpRawFlags = SIZE_MAX;
+    size_t fp_raw_flags_op_ = kNoFpRawFlags;
+    bool fp_raw_swapped_ = false;
+    bool fp_raw_flags_live() const { return flags_in_host_ && fp_raw_flags_op_ == cur_op_index_; }
+    // Maps an ARM condition to a single x86 jcc on raw ucomis flags; false when it needs two (EQ/NE) or is AL/NV.
+    static bool fp_raw_flags_cc(uint8_t arm_cond, bool& swapped, uint8_t& cc);
+    // Builds SUB-convention host flags (SF=N, ZF=Z, CF=!C, OF=V) from raw ucomis flags; clobbers RAX, RCX, RDX.
+    void emit_fp_raw_flags_to_sub(bool swapped);
+    // A BRCOND exit's NZCV store from raw ucomis flags (the counterpart of materialize_flags_to_pstate).
+    void materialize_fp_raw_flags_to_pstate(bool dead);
     // True if the block reads guest NZCV before a flag-setting op runs
     // (computed by translate_block's pre-scan). A self-loop block with
     // this false can skip the taken-path pstate materialization on its

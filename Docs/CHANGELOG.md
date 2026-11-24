@@ -10,6 +10,10 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 ## [Unreleased] — profile reports and guest instruction counts (2026-11-23)
 
+- A float compare followed by a branch (`fcmp` then `b.lt`, `b.mi`, `b.gt` and the rest, except equal and not-equal) is one compare
+  and one jump instead of nine instructions, and the condition flags are no longer saved when the next instructions only do float
+  arithmetic before another compare. A culling loop runs 12% fewer host instructions, a collision loop 6.5% and a particle loop
+  4.5%. Checked against QEMU for every condition, outcome and precision.
 - The widening multiplies (`umull`, `smull`, `umaddl`, `smaddl`, `umsubl`, `smsubl`, `umnegl`, `smnegl`) compile to a multiply and an
   add through the register allocator, not a fixed-register sequence that saved and reloaded values on the stack. A game-style
   collision loop runs 14% fewer host instructions; code without them is unchanged. Checked against QEMU and the differential suite.

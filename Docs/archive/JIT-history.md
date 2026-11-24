@@ -2,6 +2,39 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## FP compare and branch on the raw ucomis flags (2026-11-23)
+
+Next in the block that exposed the widening multiply: `fcmpe s31, s30; b.mi` was `ucomiss`, then `seta`, `setb`, `cmovp` and a `cmp`
+between zeroing and constant moves (nine instructions) to build the flags a subtraction would leave, which one `jcc` then read. The flags
+were built for any later consumer, and every exit stored them whenever its successor was not proved to overwrite them.
+
+Now a scalar `fcmp` whose next op is a `BRCOND` (any condition but EQ and NE) leaves the raw `ucomis` flags and the branch is one jump.
+Unordered sets CF, ZF and PF, so GE, LT, GT, LE, VS and VC read them directly (`jae`, `jb`, `ja`, `jbe`, `jp`, `jnp`) and HI, LS, MI,
+PL, CS and CC do after swapping the compare's operands (`jb`, `jae`, `ja`, `jbe`, `jbe`, `ja`); EQ and NE need ZF without PF, two jumps,
+so they keep the old sequence. An exit that must store NZCV converts the raw flags first (the old sequence, one `mov`/`cmovp` more in the
+swapped order, then the pack), so a live exit costs about what it did and a dead one nothing. Mechanism:
+[the guide](../JIT.md#scalar-fp-in-the-xmm-caches).
+
+The first version regressed `cull` by 2.4% and `particles` by 0.9%: their exits are all live, because the dead-NZCV scan stopped at any
+scalar FP instruction other than `fcmp` and these blocks begin with `fmul`/`fmadd`, and the swapped conversion costs two more
+instructions. The scan now skips scalar FP data processing (everything in that class except `fcsel` and `fccmp`, which read the flags;
+`fccmp` only writes them, so excluding it is conservative, not needed).
+
+Measured (host instructions per frame on the nine-kernel set, against the build after the multiply change; checksums equal):
+`cull` 845,817 to 747,001 (-11.7%), `collide` 176,320 to 164,939 (-6.5%), `particles` 446,826 to 426,759 (-4.5%); the six others within
+0.1%. The two changes together took `collide` from 204,949 to 164,939 (-19.5%). FP benchmark outputs match; cycles were not compared.
+
+Checked: `jit_fcmp_branch` runs every ARM condition against every outcome (greater, equal, less, unordered, signed zeros, infinities,
+subnormals; 16 values squared) in both precisions with live exits (`mrs` on both), dead exits, an `fcsel` after scalar FP arithmetic, an
+`fccmp` after it, and loops whose back edge is the compare and branch; the expected outcome comes from an integer model of the bit
+patterns (a C comparison would compile to the instruction under test). QEMU, the old build and the new one agree, also under
+`BIFROST_JIT_VERIFY=1`. Mutants that fail it: HI on the wrong jump, the swapped conversion without its unordered fix, `fcsel` taken as
+flag-neutral. `verify_jit.sh` (113 differential fixtures, 12 threaded oracle runs), 100 name-filtered unit tests and 65 Toybox and
+real-world programs pass.
+
+Not measured: gameplay, cycles, Tier-2 (it keeps the old sequence), EQ and NE branches, the vector compares (`fcmeq`, `fcmgt`), and
+a successor that starts with an FP load or store (the scan still stops there, as a load can fault).
+
 ## Widening multiply-accumulate is extend, multiply and add (2026-11-23)
 
 Found by reading the generated code of a hot block, not from a profile: the loop body of the `collide` game-style kernel

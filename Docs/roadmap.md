@@ -332,7 +332,10 @@ the saturating narrowing shifts (`sqrshrun`, `sqshrn`, ...) are native for 16- a
 interpreter's share of Zenless Zone Zero fell from about 8.5% to 4.9%; [details](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)).
 The widening multiplies (`umull`, `smull`, `umaddl` and the rest) are `SEXT`/`ZEXT`, `MUL` and `ADD` instead of a fixed-register emitter that
 spilled and reloaded: the `collide` kernel runs 14.0% fewer host instructions per frame, `skinning` 2.6%, CoreMark no change
-([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)). No game was run with it.
+([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)). A scalar `fcmp` followed by a
+conditional branch is one `ucomis` and one `jcc` (9 instructions before), and the NZCV store is dropped when only scalar FP
+arithmetic precedes the next rewrite: `cull` 11.7% fewer host instructions per frame, `collide` 6.5%, `particles` 4.5%
+([details](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)). No game was run with either.
 Measured the same day: Tier-2 regions are +4.7% on CoreMark at 200,000 iterations (+2.1% at 40,000; still opt-in, no game run with
 it), and on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
 
@@ -347,9 +350,9 @@ Open, in priority order:
      need relaxed NaN semantics, which is the maintainer's decision. A plain `v_hi` zero store (cull and collide about 30%
      slower) and `insertps` result writes were slower, so measure each change on a branchy and a predictable kernel, over
      several code placements ([details](archive/JIT-history.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
-     Reading a hot block's generated code found the widening-multiply emitter (done, above) and a scalar `fcmp` + `b.mi` pair that
-     takes 9 host instructions; fusing a compare with its branch into one `ucomiss` and a condition-specific jump is the next
-     candidate, and other fixed-register emitters have not been audited.
+     Reading a hot block's generated code found the widening-multiply emitter and the scalar `fcmp` + branch pair (both done, above);
+     the other fixed-register emitters have not been audited, EQ/NE branches after `fcmp` still take two jumps' worth of the old
+     sequence, and the dead-flags scan stops at FP loads and stores and at vector instructions.
    - *Across blocks* (games, 2026-11-23, dispatched uops of the generated code): guest state traffic is about 24% (Zenless Zone
      Zero) and 23% (Umamusume). On Umamusume's direct chained edges the exit sequence (`movabs r11, cell; jmp [r11]`) is 5.8%, the
      loads at block entries 4.8% of which 49% are redundant (2.3%), and about 9% of uops are guest-register stores inside

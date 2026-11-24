@@ -109,6 +109,11 @@ it under the guide's Recorded changes.
   32, `MUL` and `ADD`/`SUB`, so the allocator sees them. Do not bring back a fixed-register emitter for a multiply form. `IRInst::aux`
   carries SIMD element and lane numbers; no op keeps a vreg in it. `jit_maddl` compares against a multiply-free reference: a C
   widening multiply compiles into the instruction under test.
+- An `FP_CMP` directly followed by a `BRCOND` (Tier-1 only, any condition but EQ/NE/AL/NV) leaves raw `ucomis` flags: the host
+  flags are in no convention then, only `fp_raw_flags_live()` (the op index of that BRCOND) says so, and the branch picks one jcc
+  and swaps the compare's operands where `fp_raw_flags_cc` says. Nothing but that BRCOND may read them: every exit that needs
+  NZCV converts them with `materialize_fp_raw_flags_to_pstate` before its pack, on both paths. A new consumer or an op between
+  the two must not see `fp_raw_flags_live()`; `jit_fcmp_branch` covers every condition and exit shape.
 - `FP_CMP` (not `FCCMP`) leaves SUB-convention host flags (`flags_in_host_`, `flags_from_sub_`) with no pstate store when its
   consumer, found past constants, moves, register loads and adds, is a conditional branch or an integer select; `fcsel`, `mrs`
   and anything else keep the branchy pstate sequence (jumps on the compare's own PF/CF/ZF, never `pushfq`), which measured faster
@@ -158,7 +163,8 @@ it under the guide's Recorded changes.
 - An exit may omit its NZCV store only through `exit_flags_dead` (public Tier-1
   compiles): the successor's first words must overwrite all four flags
   (`ADDS`/`SUBS`/`ANDS`/`FCMP`) after nothing but flag-neutral, fault-free, non-branching
-  integer instructions. A successor that merely does not read the flags proves nothing.
+  integer or scalar FP data-processing instructions (`fcsel` and `fccmp` read the flags and end the scan as live;
+  FP loads and stores are other classes and also end it). A successor that merely does not read the flags proves nothing.
   Extend `nzcv_dead_in`'s neutral list only with instructions that cannot fault, trap,
   branch or read NZCV. The words become a block dependency (`flag_dep_table_`, checked
   by `invalidate_range`, `remember_code_granules`, `staged_entry_invalidated` and

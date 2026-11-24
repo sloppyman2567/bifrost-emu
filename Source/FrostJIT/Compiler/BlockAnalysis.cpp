@@ -205,9 +205,17 @@ bool nzcv_dead_in(const uint32_t* words, int count, int& used) {
             case InstClass::ADDS_REG: case InstClass::SUBS_REG:
             case InstClass::ANDS_IMM: case InstClass::ANDS_REG:
                 return true;
-            case InstClass::FP_SCALAR:
-                // FCMP/FCMPE (register and zero forms); FCCMP reads the flags.
-                return (words[n] & 0xFF20FC07u) == 0x1E202000u;
+            case InstClass::FP_SCALAR: {
+                const uint32_t w = words[n];
+                // FCMP/FCMPE (register and zero forms) rewrite all four.
+                if ((w & 0xFF20FC07u) == 0x1E202000u) return true;
+                // FCCMP/FCCMPE and FCSEL read the flags (bits 11:10 = 01 and 11).
+                const uint32_t sel = w & 0xFF200C00u;
+                if (sel == 0x1E200400u || sel == 0x1E200C00u) return false;
+                // Every other scalar FP and Advanced SIMD scalar data-processing encoding leaves NZCV alone and cannot
+                // fault (loads and stores are other classes, below).
+                break;
+            }
             // Pure integer data processing: no flag access, no fault.
             case InstClass::ADR: case InstClass::ADRP:
             case InstClass::MOVN: case InstClass::MOVZ: case InstClass::MOVK:

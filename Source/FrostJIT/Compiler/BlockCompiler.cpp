@@ -115,6 +115,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     flags_in_host_ = false;
     flags_match_pstate_ = false;
     flags_from_sub_ = false;
+    fp_raw_flags_op_ = kNoFpRawFlags;
     chain_target_pc_ = 0;
     unchainable_end_ = false;
     indirect_exit_ = false;

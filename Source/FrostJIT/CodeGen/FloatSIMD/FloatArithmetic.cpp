@@ -905,14 +905,34 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // FCMP Dn, #0.0 — XORPS xmm1, xmm1 to get 0.0
                 emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC9); // xorps xmm1, xmm1
             }
-            // UCOMISD/UCOMISS xmm0, xmm1
+            // A compare that the next op, a BRCOND, consumes alone (Tier-1 only, like branch_follows below): leave the
+            // raw ucomis flags in the host and let the branch pick one jcc for its condition, swapping the operands where
+            // that saves a second jump (fp_raw_flags_cc). The exits that still need NZCV convert the raw flags
+            // themselves (materialize_fp_raw_flags_to_pstate), so the common exit whose successor rewrites the flags
+            // costs the compare and one jump.
+            bool raw_swapped = false;
+            bool raw_fused = false;
+            if (!cp.conditional && cur_insts_ && cur_op_index_ + 1 < cur_insts_->size()) {
+                const IRInst& next = (*cur_insts_)[cur_op_index_ + 1];
+                uint8_t raw_cc = 0;
+                if (next.op == IROp::BRCOND && fp_raw_flags_cc(next.brcond_params().cond, raw_swapped, raw_cc))
+                    raw_fused = true;
+            }
+            // UCOMISD/UCOMISS xmm0, xmm1 (swapped: xmm1, xmm0)
             // Encoding: UCOMISD = 66 0F 2E /r ; UCOMISS = NP 0F 2E /r
             // (NOT F2/F3 — those prefixes are for arithmetic ops like ADDSD,
             // not for compare ops. Using F2/F3 here emits an illegal
             // instruction that raises SIGILL on real hardware.)
             if (is_double) emit_byte(0x66);
             emit_byte(0x0F); emit_byte(0x2E);
-            emit_byte(0xC1);  // xmm0, xmm1
+            emit_byte(raw_swapped ? 0xC8 : 0xC1);  // xmm1, xmm0 / xmm0, xmm1
+            if (raw_fused) {
+                flags_in_host_ = true; flags_match_pstate_ = false;
+                flags_from_sub_ = true;  // never read: fp_raw_flags_live() routes the branch and its exits
+                fp_raw_flags_op_ = cur_op_index_ + 1;
+                fp_raw_swapped_ = raw_swapped;
+                return true;
+            }
             // A compare that feeds a conditional branch or an integer select leaves its result in the
             // host flags, as a SUBS would, and the consumer reads them: no store and reload of pstate, and no data-dependent
             // branches to build it (random outcomes, as in culling and collision, mispredicted up to
