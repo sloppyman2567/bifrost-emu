@@ -63,7 +63,7 @@ versions, frame rates and known problems, is [What has been run](Docs/COMPATIBIL
 
 | | |
 |---|---|
-| Android is experimental | Google Play services come from microG, so Google sign-in works only up to Google's own page. Media decoding and many system services are partial or missing. |
+| Android is experimental | Google Play services come from microG. Google sign-in works in Zenless Zone Zero, Arknights and Azur Lane (maintainer-reported); a game's own Play Games sign-in may still fail. Media decoding and many system services are partial or missing. |
 | ARM64 only | An app that ships only 32-bit ARM or x86 code cannot start. |
 | x86_64 Linux only | Other distributions should work, but only Ubuntu 24.04 is tested in CI; see the [support matrix](Docs/SUPPORT.md). |
 

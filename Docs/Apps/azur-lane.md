@@ -44,8 +44,9 @@ improvement.
   (input/service, rendering, ART and JIT costs); the playable report does not
   say whether they remain.
 - Toasts no longer end apps (`notification.enqueueToast` is implemented since
-  October 21); the Google sign-in failure path that exited the app was not
-  re-run.
+  October 21). The maintainer reports (2026-11-23, no capture or log kept) that
+  Google sign-in through microG works; the failure path that exited the app was
+  not re-run.
 - Capture the fight itself and resize evidence; WebView pointer, focus and scroll
   interaction are still partial (see the roadmap).
 
