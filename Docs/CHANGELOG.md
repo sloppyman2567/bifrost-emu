@@ -13,6 +13,8 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 - `make uninstall`, `make uninstall-asgard` and `make uninstall-rootfs` look in `/usr/local` unless you pass `PREFIX`, so they found nothing
   for a `make bootstrap` install and said so without a hint. They now say where the install is and which command removes it (also under
   `sudo`), and the docs show how to remove the games libraries.
+- The app launcher writes a log, `<state>/.asgard/launcher.log`: the commands it ran, the notices it showed, how it ended and, after a crash,
+  where it died. Account names are not logged.
 - The app launcher shows Asgard's warning (for example that Asgard and the emulator were installed from different builds) instead of
   "Couldn't read the app library: Expecting value".
 - Translating code takes about half the time (the JIT no longer runs its SSA pass on every block, stops building a verification

@@ -1,7 +1,9 @@
 """Desktop app library using the same CLI and process supervisor as terminal launches."""
+import faulthandler
 import html
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -197,6 +199,34 @@ def json_output(output):
         if line.lstrip()[:1] in ("[", "{"):
             return json.loads("".join(lines[i:])), "".join(lines[:i]).strip()
     raise ValueError(short_error(output, "The command printed nothing"))
+
+
+log = logging.getLogger("asgard.launcher")
+log.addHandler(logging.NullHandler())   # silent until start_log gives it a file
+ROUTINE = {"list", "status", "refresh-icons"}   # polled or housekeeping: logged only when they fail
+
+
+def command_label(args):
+    """An asgard command for the log: its verb and arguments, without account names or file paths."""
+    if args[:1] == ["google"]: return " ".join(args[:2])
+    if args[:1] == ["install"] and len(args) > 1: return "install " + Path(args[1]).name
+    return " ".join(args)
+
+
+def start_log(directory, application):
+    """<state>/.asgard/launcher.log: what the launcher ran, every notice it showed and how it ended, next to broker.log.
+    The last run's log is kept as launcher.log.1 once the file passes 512 KiB; a fatal signal (Qt aborts on an exception in
+    a slot) also writes the Python traceback there. A log that cannot be written never stops the launcher."""
+    path = directory / "launcher.log"
+    try:
+        if path.exists() and path.stat().st_size > 512 * 1024: os.replace(path, path.with_name(path.name + ".1"))
+        handler = logging.FileHandler(path, encoding="utf-8")
+    except OSError: return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler); log.setLevel(logging.INFO); log.propagate = False
+    faulthandler.enable(handler.stream)
+    log.info("launcher started: pid %d, python %s, Qt platform %s, state %s",
+             os.getpid(), sys.version.split()[0], application.platformName(), directory.parent)
 
 
 # Desktops that keep the clock format apart from the locale: (schema, key, value meaning 12-hour).
@@ -1570,6 +1600,8 @@ def build(state, application, settings=None, pads=None):
         def command(self, args, done=None, env=None, progress=None):
             """Run an asgard command. `progress(line)` gets each line of its output as it arrives; `done(code, output)` ends it."""
             process = QProcess(self)
+            label, routine, began = command_label(args), args[0] in ROUTINE, time.monotonic()
+            if not routine: log.info("run: %s", label)
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             received, pending = [], [b""]
             def read():
@@ -1590,11 +1622,18 @@ def build(state, application, settings=None, pads=None):
                 read()
                 output = b"".join(received).decode(errors="replace")
                 self.jobs.discard(process); process.deleteLater()
+                took, crashed = time.monotonic() - began, status != QProcess.ExitStatus.NormalExit
+                if code or crashed:
+                    # A Google command's error can repeat an account name: its text stays out of the log.
+                    detail = "" if args[:1] == ["google"] else ": " + short_error(output)
+                    log.warning("%s failed (exit %s%s, %.1f s)%s", label, code, ", crashed" if crashed else "", took, detail)
+                elif not routine: log.info("%s done (%.1f s)", label, took)
                 if done: done(code, output)
             process.finished.connect(finished)
             def failed(error):
                 if error == QProcess.ProcessError.FailedToStart:
                     self.jobs.discard(process); process.deleteLater()
+                    log.error("%s could not start: %s", label, process.errorString())
                     self.show_notice("Couldn't run Asgard: " + process.errorString(), error=True)
                     if done: done(1, process.errorString())
             process.errorOccurred.connect(failed)
@@ -1907,6 +1946,7 @@ def build(state, application, settings=None, pads=None):
 
         def show_notice(self, text, error=False, package=None, timeout=0, action=None):
             """`action` is (button text, what it runs): a way to fix what the notice says."""
+            log.log(logging.WARNING if error else logging.INFO, "notice: %s", text)
             self.notice_icon.setPixmap(glyph("alert", "danger").pixmap(ICON, ICON) if error
                                        else glyph("info", "accent").pixmap(ICON, ICON))
             self.notice_text.setText(text)
@@ -2097,7 +2137,9 @@ def build(state, application, settings=None, pads=None):
     window = Library()
     backend = android_gamepad.open_backend() if pads is None else (pads or None)
     if backend: android_gamepad.connect(window, application, backend)
-    elif pads is None: print("Asgard: gamepad control is off: " + android_gamepad.STATUS["reason"], file=sys.stderr)
+    elif pads is None:
+        print("Asgard: gamepad control is off: " + android_gamepad.STATUS["reason"], file=sys.stderr)
+        log.info("gamepad control is off: %s", android_gamepad.STATUS["reason"])
     window.apply_theme(); window.update_hints()
     return window
 
@@ -2119,11 +2161,14 @@ def show(state, fullscreen=False):
     signal.signal(signal.SIGINT, lambda *_: QTimer.singleShot(0, application.quit))
     directory = state / '.asgard'
     directory.mkdir(parents=True, exist_ok=True)
+    start_log(directory, application)
     server = QLocalServer(application)
     server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
     with (directory / 'launcher.lock').open('a+b') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if activate_existing(state): return 0
+        if activate_existing(state):
+            log.info("a launcher is already running: activated its window")
+            return 0
         path = launcher_socket(state)
         if path.exists() or path.is_symlink():
             info = path.lstat()
@@ -2156,4 +2201,6 @@ def show(state, fullscreen=False):
     # Any way out of the event loop (the window closing, Ctrl-C asking it to quit) ends the window's commands while their
     # objects are still alive; Python's teardown destroys them otherwise, mid-signal.
     application.aboutToQuit.connect(window.stop_jobs)
-    return application.exec()
+    code = application.exec()
+    log.info("launcher closed (exit %s)", code)
+    return code
