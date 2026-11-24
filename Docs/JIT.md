@@ -445,12 +445,13 @@ References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsi
   [hi], 0` for the upper-half zero and `insertps` for the result write, both slower on a culling kernel.
 - **NaN checks stay exact.** Dropping one needs a result that cannot be NaN or whose payload nothing can observe; in the
   measured FP kernels 3 of 277 checked ops qualify. Relaxing NaN semantics is the maintainer's decision.
-- **Compares.** A scalar `fcmp` whose next op is a `BRCOND` on any condition but EQ/NE leaves the raw `ucomis` flags in the host
+- **Compares.** A scalar `fcmp` whose next op is a `BRCOND` on any condition but AL/NV leaves the raw `ucomis` flags in the host
   (`fp_raw_flags_live()`, valid only for that next op) and the branch is one `jcc`: GE `jae`, LT `jb`, GT `ja`, LE `jbe`, VS `jp`,
   VC `jnp` after `ucomis a, b`, and HI `jb`, LS `jae`, MI `ja`, PL `jbe`, CS `jbe`, CC `ja` after the swapped `ucomis b, a`
-  (`fp_raw_flags_cc`; unordered sets CF, ZF and PF, which each of those reads as ARM does). An exit whose successor reads NZCV
-  converts the raw flags itself (`materialize_fp_raw_flags_to_pstate`: the sequence below, then the pack), so a live exit
-  costs what the old sequence did and a dead one nothing. Tier-2 and EQ/NE (two jumps) use the sequence below.
+  (`fp_raw_flags_cc`; unordered sets CF, ZF and PF, which each of those reads as ARM does). EQ and NE are `je`/`jne` behind a
+  `jp`, since unordered sets ZF too: EQ is `jp over; je taken`, NE is `jp taken; jne taken`. An exit whose successor reads
+  NZCV converts the raw flags itself (`materialize_fp_raw_flags_to_pstate`: the sequence below, then the pack), so a live exit
+  costs what the old sequence did and a dead one nothing. Tier-2 uses the sequence below.
   When `fcmp` feeds an integer select or a branch that does not qualify, `FP_CMP` leaves its result in the host flags as
   `SUBS` does: `seta`, `setb` and a `cmovp` pick two small integers, and one `cmp` of them leaves the flags a subtraction
   would (greater 1-0, equal 0-0, less 0-1, unordered 0x80000000-1). A compare feeding `fcsel`, `mrs` or anything else keeps
@@ -1906,6 +1907,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [FP equality compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-equality-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)
 - [Translation cost: no Tier-1 SSA, no store footprints outside verify, flat vreg tables (2026-11-23)](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)
 - [FP compare and branch on the raw ucomis flags (2026-11-23)](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)
 - [Widening multiply-accumulate is extend, multiply and add (2026-11-23)](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)

@@ -358,8 +358,7 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
      slower) and `insertps` result writes were slower, so measure each change on a branchy and a predictable kernel, over
      several code placements ([details](archive/JIT-history.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
      Reading a hot block's generated code found the widening-multiply emitter and the scalar `fcmp` + branch pair (both done, above);
-     the other fixed-register emitters have not been audited, EQ/NE branches after `fcmp` still take two jumps' worth of the old
-     sequence, and the dead-flags scan stops at FP loads and stores and at vector instructions.
+     the other fixed-register emitters have not been audited, and the dead-flags scan stops at FP loads and stores and at vector instructions.
    - *Across blocks* (games, 2026-11-23, dispatched uops of the generated code): guest state traffic is about 24% (Zenless Zone
      Zero) and 23% (Umamusume). On Umamusume's direct chained edges the exit sequence (`movabs r11, cell; jmp [r11]`) is 5.8%, the
      loads at block entries 4.8% of which 49% are redundant (2.3%), and about 9% of uops are guest-register stores inside

@@ -473,7 +473,14 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             } else if (need_cmc_for_hi_ls) {
                 emit_byte(0xF5);  // cmc — invert CF for HI/LS after ADD/TST
             }
+            // Raw FP flags set ZF for an unordered compare too: EQ must not take it, NE must. The parity jump decides
+            // that before the ZF jump (EQ hops over it, NE takes the branch).
+            const bool fp_zf_cond = fp_raw && (bp.cond & 0xE) == 0;
+            size_t parity_patch = 0;
+            if (fp_zf_cond) parity_patch = emit_jcc_rel32_placeholder(0xA);  // JP
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
+            if (fp_zf_cond && (bp.cond & 0xF) == 0)
+                patch_jcc_rel32(parity_patch, 6);  // EQ, unordered: past the 6-byte jcc, into the fall-through path
             // ── Fall-through (not-taken) path: materialize flags, set RAX = fall-through PC ──
             // If CMC was emitted (for HI/LS after ADD/TST), re-invert CF so
             // materialize_flags_to_pstate sees the original carry flag.
@@ -499,6 +506,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             const size_t taken_label = code_buf_used_;
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
+            if (fp_zf_cond && (bp.cond & 0xF) == 1)
+                patch_jcc_rel32(parity_patch, static_cast<int32_t>(code_buf_used_ - (parity_patch + 6)));  // NE, unordered
             static bool no_selfloop_ = dbg().no_selfloop;
             bool is_selfloop = (bp.target == current_start_pc_) &&
                 (!mt_active() || !dbg().no_chain);

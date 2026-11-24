@@ -69,10 +69,13 @@ void FrostJIT::materialize_flags_to_pstate(bool preserve_flags, bool dead) {
 // but EQ/NE is one jcc on those flags, with the operands swapped (ucomis b, a) where the plain order would need two:
 //   a, b order:   GE jae, LT jb, GT ja, LE jbe, VS jp, VC jnp
 //   b, a order:   HI jb, LS jae, MI ja, PL jbe, CS jbe, CC ja
-// EQ is ZF and not PF and NE the reverse: two jumps, so those keep the SUB-convention sequence.
+// EQ is ZF and not PF, NE is not ZF or PF (unordered sets ZF too): the cc is the ZF half, je/jne, and the branch
+// adds a jp (BRCOND: `jp over; je` for EQ, `jp taken; jne taken` for NE). The operand order does not matter there.
 bool FrostJIT::fp_raw_flags_cc(uint8_t arm_cond, bool& swapped, uint8_t& cc) {
     swapped = false;
     switch (arm_cond & 0xF) {
+        case 0x0: cc = 0x4; return true;                  // EQ (with the parity jump)
+        case 0x1: cc = 0x5; return true;                  // NE (with the parity jump)
         case 0xA: cc = 0x3; return true;                  // GE
         case 0xB: cc = 0x2; return true;                  // LT
         case 0xC: cc = 0x7; return true;                  // GT

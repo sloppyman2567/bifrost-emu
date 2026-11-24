@@ -2,6 +2,25 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## FP equality compare and branch on the raw ucomis flags (2026-11-23)
+
+The scalar `fcmp` + `BRCOND` fusion (next section down) left EQ and NE on the old sequence: `ucomis` sets ZF for an unordered compare as
+well as an equal one, so EQ is ZF without PF and NE is the reverse, which one `jcc` cannot say. They now use the raw flags too, with a
+`jp` ahead of the ZF jump: EQ is `jp over; je taken` (unordered falls through), NE is `jp taken; jne taken`. The operand order does not
+matter for an equality, so there is no swapped form. The exits convert the raw flags exactly as for the other conditions. A self-loop
+back edge retargets only the ZF jump past the patchable slot (`note_selfloop_jcc`); the `jp` of an NE keeps landing on the slot,
+which is patched to the body, and replay finds the unpatched slot where it always did.
+
+Measured on one throwaway kernel (two compares per iteration, `if (l2 != 0) inv = 1 / l2` and `if (w == 1) ...`, 20% zeros and 50%
+ones in the data; both exits live, as the successor starts with an FP load): 587,437 to 566,962 host instructions per repetition
+(-3.5%), checksum equal to QEMU and to the old build. The nine game kernels are unchanged within 0.05% (none compares floats for
+equality), checksums equal. A dead exit should gain more; that case was not measured. Cycles were not compared.
+
+Checked: `jit_fcmp_branch` already covered EQ and NE against every outcome (it passed before this change on the old sequence and passes
+now, also under `BIFROST_JIT_VERIFY=1`); a mutant that drops the `jp` fails it. `verify_jit.sh` (113 differential fixtures, 12 threaded
+oracle runs), 100 name-filtered unit tests and 65 Toybox and real-world programs pass. Not tested: gameplay, Tier-2 (it keeps the old
+sequence), multi-threaded self-loops with an NE back edge beyond what `jit_fcmp_branch` and the threaded oracle runs contain.
+
 ## Translation cost: no Tier-1 SSA, no store footprints outside verify, flat vreg tables (2026-11-23)
 
 Chosen by the maintainer over cross-block register allocation: make translation itself cheaper first. Workload: the headless ART
