@@ -8,84 +8,50 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
-## [2.0.0-rc.1] — several threads translate at once, registers stay in registers across branches and blocks, windows keep their shape and rotate inside (2026-11-25)
+## [2.0.0-rc.1] — faster translation on several threads, faster code, and windows that keep their shape (2026-11-25)
 
-A release candidate. Most games tried so far play well, and it is not production grade yet: [what is missing](roadmap.md#what-keeps-it-from-being-production-grade).
-CoreMark reaches 49.5% of native speed on one thread, 28% more than beta.3 ([numbers](PERFORMANCE.md)); none of the speed changes below has been timed in a game.
+This is a release candidate. Most games tried so far play well, but it isn't production grade yet; see [what's missing](roadmap.md#whats-missing).
+CoreMark now runs at about half of native speed, 28% faster than beta.3 ([numbers](PERFORMANCE.md)). No game has been timed with these changes yet.
 
 Speed:
 
-- Several threads of a program can translate code at the same time; before, one did and the others waited. A test that only translates
-  finishes in 0.39 s instead of 3.99 s with eight threads and in 2.09 s instead of 2.49 s with one, and the pauses of 26 ms and more
-  while the JIT's tables grew are gone. Starting the Android runtime takes 9% fewer CPU cycles. No game has been timed. `BIFROST_JIT_COMPILERS=1` goes back to one at a time.
-- Carry is now on by default (`BIFROST_CARRY=0`, or "JIT Carry" set to Off for an app, turns it off): about 10% fewer CPU cycles on CoreMark,
-  0 to 10% on small command-line programs (zstd 1% more). Starting a large Android app costs more, because translating does (ART start-up:
-  21% more cycles, 24% more code memory). No game has been timed.
-- Carry lets a block continue past a forward conditional branch, keeping registers in host registers
-  across it: CoreMark 2.0% fewer host instructions and about 4.7% more iterations per second; no game has been timed carefully.
-  An app's settings page has a "JIT Carry" choice for it, per app (`asgard config APP jit_carry off`).
-- With Carry a block that follows another one in a chain also starts with the registers the first one left in host registers instead
-  of loading them again: CoreMark another 1.1% fewer host instructions and about 5% more iterations per second (`BIFROST_NO_REG_PASS=1`
-  turns it off). Only CoreMark has been timed, not a game. A switch, `BIFROST_REG_PASS_THROUGH=1`, also hands registers over blocks that do not
-  use them; it was slower on every benchmark tried, so it is off.
-- With Carry a block that continues past a forward branch also notices when the branch is taken most of the time and is translated again
-  along the taken side. CoreMark: 0.15% fewer host instructions (the same loop shape with an always-taken branch: 22% fewer); the Android runtime's start-up
-  spends about 11% longer translating. `BIFROST_NO_CARRY_FOLLOW=1` turns it off. The `cbz`/`tbz` exits also skip a flag store that nothing reads (0.75%).
-- Tight loops run with fewer instructions: they read and write the registers they keep in host registers directly, without copies and stores on each
-  pass. CoreMark: 6.7% fewer host instructions and about 2% fewer cycles, 7.6% and 3.5% with JIT Carry; gzip, bzip2, zstd and sha256sum 1.5 to 2%
-  fewer instructions. No game has been timed. `BIFROST_NO_PIN_INPLACE=1` switches it off.
-- Loops that test a register or a condition and leave (walking a list until a null pointer, scanning until a zero byte, searching for a match)
-  now run as one block that keeps the loop's registers in host registers (CoreMark: 1.8% fewer host instructions, from the `cbz` loops alone). `BIFROST_NO_SIDE_EXIT=1` turns it off.
-- Code that reads and writes memory runs a little faster: the window address is loaded once per call chain instead of at every block
-  (CoreMark: 2.8% fewer host instructions and about 2.4% fewer cycles, five alternating runs; no game has been timed).
-- Android apps run memory-heavy code with fewer instructions: an access through a tagged pointer (Android's allocator tags them) is one
-  instruction shorter, about 5% fewer in the Android runtime's start-up code.
-- Hot loops in Android code run three instructions shorter per iteration (the loop's stop check now runs once when the loop is entered).
-- NEON narrowing instructions (`xtn`, `sqxtn`, `uqxtn`, `sqxtun`) keep their result in a host register, and vector results that fill half a register are
-  written with one store instead of two. Blocks that hold an `ldar`, `stlr`, `ldxr`, `stxr` or a NEON instruction no longer reload every register
-  from memory at each instruction (a frame setup around an `ldar` did that for `sp`). A micro workload built from these patterns needs 7% fewer host
-  instructions and about 35% fewer cycles; CoreMark is unchanged, and no game has been timed.
-- A game that clamps with `fmax(x, 0)` or `fmin` no longer drops into the slow interpreter when the result is zero (a loop of them runs
-  about 20 times faster here). Checked against QEMU; no game has been timed.
-- Storing a constant into a guest register (`mov w0, #0`) is one instruction instead of two (CoreMark: 0.9% fewer host instructions).
+- Several threads can translate code at the same time. Before, one did it and the others waited. With eight threads a translation test takes 0.39 s instead of
+  3.99 s. Short pauses while the JIT's tables grew are gone too. `BIFROST_JIT_COMPILERS=1` goes back to one at a time.
+- Starting the Android runtime uses 10% fewer CPU cycles than before that change.
+- Carry is on by default. It lets translated code run past a branch, and into the next block, without putting registers back in memory. CoreMark uses about
+  10% fewer CPU cycles. Translating takes longer with it, so big Android apps use more CPU and memory while they start. You can turn it off for an app with
+  "JIT Carry" in its settings (`asgard config APP jit_carry off`), or everywhere with `BIFROST_CARRY=0`.
+- Tight loops and loops that search for something run with fewer instructions.
+- Code that reads and writes a lot of memory runs a bit faster, most of all in Android apps.
+- `fmax(x, 0)` and `fmin` no longer fall back to the slow interpreter when the result is zero.
+- NEON narrowing instructions are cheaper, and code with `ldar`, `stlr`, `ldxr` or `stxr` reloads fewer registers.
 
 Windows and games:
 
-- A game you close maximised opens maximised next time, before it starts. Games that cannot follow a resize (Geometry Dash Lite, Family
-  Island) are drawn right from the first frame, and games of a fixed size fill the window instead of showing black bars. The first
-  start after this update still opens small: maximise it and close it once. Confirmed in Hungry Shark World on a 21:9 display; other games not tried yet.
-- Geometry Dash Lite and Family Island keep the shape they opened at and are scaled when you resize (Window: "Keep the app's shape").
-- A game that turns between portrait and landscape leaves your window alone and turns inside it, so it no longer grows past the
-  edge of the screen. A new Rotation setting (`asgard config APP rotation reshape`) brings the old behaviour back for an app.
-- SpongeBob: Krusty Cook-Off now gets past the age question with an adult age too: the lobby opens on fresh data (it used to stop at 73%).
-- Melon Sandbox is recorded as playable, and Hungry Shark World's Play Games sign-in now connects the account, both on the maintainer's
-  report of 2026-11-25. Seven other games were played the same day without a crash. Melon is slow to load; see
-  [COMPATIBILITY.md](COMPATIBILITY.md). 18 of 21 games are playable.
-- The stats overlay is restyled after MangoHud: a half-transparent panel with smooth, outlined text, a coloured label for GPU, CPU,
-  VRAM and RAM, small units beside the figures (`58 %`, `64 °C`, `1.2 GB`) and a green graph of the last 120 frame times. The
-  pixel font and the load meters are gone; the text size follows the window height. Turn it on as before (`--window-stats-mode overlay`).
+- A game you close maximised opens maximised next time. The first start after this update still opens small, so maximise it and close it once. This was
+  confirmed in Hungry Shark World only.
+- Geometry Dash Lite and Family Island keep the shape they opened at and scale when you resize the window.
+- A game that rotates now turns inside its window instead of resizing it off the screen. `asgard config APP rotation reshape` brings the old behaviour back.
+- SpongeBob: Krusty Cook-Off gets past the age question with an adult age.
+- Melon Sandbox is playable (slow to load), and Hungry Shark World connects to Play Games. 18 of 21 games are playable ([list](COMPATIBILITY.md)).
+- The stats overlay has a new look, modelled on MangoHud.
 
 Fixed:
 
-- On Wayland a window change that kept the same size (maximising, moving to another display) could be ignored. Hungry Shark World
-  stayed stuck when maximised on a second display, and no longer does.
-- A Google sign-in window opened by a game saved its own size over the game's.
-- A loop left early through `cbz`, `cbnz`, `tbz` or `tbnz` could hand wrong condition flags to the code after it.
+- Maximising a window, or moving it to another display, could be ignored on Wayland.
+- A game's Google sign-in window overwrote the size saved for the game.
+- A loop left through `cbz`, `cbnz`, `tbz` or `tbnz` could pass on wrong condition flags.
 
-Diagnostics and names:
+Other changes:
 
-- The profiler, the stall report, the Tracy timeline and the trace switches have a page of their own, [PROFILING.md](PROFILING.md); the
-  [JIT guide](JIT.md) is now a short description of how the JIT works, and its old text is [in the archive](archive/JIT-guide-2.0.0-beta.3.md).
-- `BIFROST_PROF`'s waiting report says, per thread, how long it spent translating code and how long it waited for another thread's
-  translation to finish, with the longest wait. It only reports.
-- `BIFROST_PROF` with `BIFROST_PC_HIST=1` also lists the hot loops of several blocks (`[carry]` lines): how much of the JIT time they take and how many
-  registers each touches. It only reports.
-- The JIT's two modes are called Lean (the block compiler, until now "Tier-1") and Carry (what it adds on top, on by default). Only the names
-  changed, with one switch: `BIFROST_TIER1_SSA` is now `BIFROST_LEAN_SSA`.
-- Tier-2 regions are removed. They were opt-in (`BIFROST_TIER2=1`) and never beat Lean by more than a few percent on CoreMark, and no
-  game was shown to gain. `BIFROST_TIER2`, `BIFROST_TIER2_*`, `BIFROST_T2_REGIONDUMP` and the region-only `BIFROST_NO_*` switches
-  (`CALLREGION`, `DESTSRC`, `RDCE`, `LICM`, `KEEPRES`, `EXITCHAIN`) do nothing now, and the `tier2:` and `block-runs` lines are gone
-  from the JIT stats. Nothing changes in a default run, and the emulator binary is about 150 KB smaller.
+- Profiling has its own page, [PROFILING.md](PROFILING.md), and the [JIT guide](JIT.md) is much shorter. The old guide is
+  [in the archive](archive/JIT-guide-2.0.0-beta.3.md).
+- `BIFROST_PROF` also shows how long each thread translated or waited for it and, with `BIFROST_PC_HIST=1`, the hottest loops.
+- The JIT's "Tier-1" is now called Lean, and `BIFROST_TIER1_SSA` is now `BIFROST_LEAN_SSA`.
+- Tier-2 regions are gone. They were off by default and gained little. `BIFROST_TIER2`, `BIFROST_TIER2_*`, `BIFROST_T2_REGIONDUMP` and their
+  `BIFROST_NO_*` switches (`CALLREGION`, `DESTSRC`, `RDCE`, `LICM`, `KEEPRES`, `EXITCHAIN`) do nothing now.
+- New switches for comparing: `BIFROST_NO_SIDE_EXIT`, `BIFROST_NO_REG_PASS`, `BIFROST_NO_CARRY_FOLLOW`, `BIFROST_NO_PIN_INPLACE`, and the experimental
+  `BIFROST_REG_PASS_THROUGH`.
 
 ## [2.0.0-beta.3] — games spend much less CPU in graphics calls, the JIT translates twice as fast and runs cheaper float and multiply code, profile reports with a Tracy timeline, a Resolution setting, a launcher log and uninstall hints (2026-11-24)
 

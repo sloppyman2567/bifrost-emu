@@ -1,6 +1,6 @@
 # Profiling and traces
 
-How to see where an emulated program spends its time, and how to trace a fault. All of it is off by default and costs nothing until it is switched on.
+How to see where a program spends its time, and how to trace a crash. Everything here is off by default.
 
 ## Where host time goes: `BIFROST_PROF`
 
@@ -31,7 +31,7 @@ Under the report a second line splits the **body** samples by what the operation
 (`LOAD_REG`/`STORE_REG`), memory (a load or store with its guest-address guard, and atomics), integer ALU, flag setting, branches,
 helper calls, FP and SIMD, and "between operations" (code in the body that belongs to no single operation). The same line gives
 the share of body time that fell inside an operation whose code contains allocator spills or reloads. That share is an upper bound
-on spill cost: the operation's own work is in the same range, and I cannot separate the two. The code that ends a block (the
+on spill cost, because it includes the operation's own work. The code that ends a block (the
 indirect branch of `ret`, flag and register commits) is in the exit section, not the body. The operation table costs 16 bytes per
 IR operation translated while `BIFROST_PROF` is set (capped at 16 Mi operations; a note says when it is full).
 

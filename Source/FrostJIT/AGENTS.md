@@ -11,7 +11,7 @@ One place per kind of fact, so a later change has one place to correct:
 - `Docs/PROFILING.md`: the profiler, the waiting and stall reports, Tracy and the trace switches.
 - The history: dated write-up, every number, rejected attempts, what was and was not tested.
 - This file: contracts, what must not break and which test covers it. A number only where it is the reason for the rule.
-- `Docs/roadmap.md`: open work in full; finished work as one line with the headline number and a link to the history section.
+- `Docs/roadmap.md`: open work in a plain line each. Details, numbers and finished work go to the history or a dated roadmap snapshot in the archive.
 - `Docs/CHANGELOG.md`: 2 to 6 lines for people. The commit message carries the evidence.
 
 A new history section can make an older "not measured" or "next section" line wrong: recheck them.

@@ -45,9 +45,9 @@ maintainer says they always were, and a session ended on a guest null dereferenc
 gameplay on the maintainer's report (2026-11-06). On 2026-11-25 the maintainer played eight games on 2.0.0-beta.3 without a crash, with Melon Sandbox
 now on the list ([games and frame rates](COMPATIBILITY.md)). YouTube shows its home screen. Firefox reaches its onboarding and
 browser screens, but pages do not load. Uptodown starts and runs a bounded session. Subway Surfers was run on a Steam Deck in Desktop mode (2026-11-08) at 20 to 40 FPS. Oddmar's first level plays very well on the maintainer's report
-(2026-11-08, no stutter noticed; a recording frame shows gameplay) and a later session is very stable (2026-11-25). Roblox, TrickCal
-and Umamusume JP are blocked by the app itself (Umamusume JP at a device
-integrity check when it connects). These are single checks, not compatibility
+(2026-11-08, no stutter noticed; a recording frame shows gameplay) and a later session is very stable (2026-11-25). Roblox gets disconnected
+about 170 seconds after joining a game, with error 304, and the cause isn't known ([what has been run](COMPATIBILITY.md)). TrickCal is stopped by its anti-cheat, and
+Umamusume JP by a device integrity check when it connects. These are single checks, not compatibility
 guarantees, and gameplay is confirmed only where the file says `playable`.
 
 Google account support is experimental. Play services come from microG, so behaviour that needs real Google services

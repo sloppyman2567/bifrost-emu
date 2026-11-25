@@ -30,8 +30,8 @@ There is no phone, no emulated device and no virtual machine to set up. It trans
 | Asgard | Its Android layer. `bifrost-emu game.apk` installs a game and starts it, and `asgard launcher` opens a library of what you installed. |
 
 > [!NOTE]
-> 2.0.0-rc.1 is a release candidate: most games tried so far play well, and it is not production grade yet.
-> Expect rough edges, above all in Android apps.
+> This is a release candidate. Most games tried so far play well, but it isn't production grade yet, so expect
+> some rough edges, especially with Android apps.
 > [What has been run](Docs/COMPATIBILITY.md) says which.
 
 ## Quick start
@@ -57,7 +57,7 @@ Updating, removing, Debian packages and immutable systems such as Bazzite are in
 ## Does my game run?
 
 18 of the 21 games tried so far are playable, according to the people who played them: SpongeBob Krusty Cook-Off, Azur Lane,
-Arknights, Umamusume (Global), Subway Surfers, Neverball, Doom 3 and more. Roblox and TrickCal are blocked. The full list, with
+Arknights, Umamusume (Global), Subway Surfers, Neverball, Doom 3 and more. Roblox and TrickCal don't work yet. The full list, with
 versions, frame rates and known problems, is [What has been run](Docs/COMPATIBILITY.md).
 
 ## Good to know

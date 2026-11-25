@@ -82,8 +82,8 @@
       "name": "Roblox",
       "status": "blocked",
       "checked": "2026-10-19",
-      "evidence": "Logs in and joins live servers; about 170 s later the server disconnects it with reason 304. The client's Play Integrity token request fails; that this causes the kick is inferred, not proven.",
-      "notes": ["Needs real Google attestation; Bifrost does not bypass or forge it."]
+      "evidence": "Logs in and joins live servers; about 170 s later the server disconnects it with reason 304 (missing or corrupted files). The cause is not known. Roblox does not use Google attestation by default, and the games the maintainer tried work in Sober, which runs the Android build of Roblox on the same CPU type.",
+      "notes": ["Bifrost does not bypass or forge any integrity check."]
     },
     "com.bilibili.trickcal": {
       "name": "TrickCal",

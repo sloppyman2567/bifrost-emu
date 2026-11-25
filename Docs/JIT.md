@@ -1,13 +1,11 @@
 # JIT guide
 
-How the AArch64-to-x86_64 JIT works now, and how to change it without letting decode, translation, optimization and code
-generation drift apart. Read it before any JIT, shared decoder or IR work.
+How the JIT turns AArch64 code into x86_64 code, and what to do when you change it. Read this before working on the JIT, the decoder or the IR.
 
-- **Why** something is shaped the way it is, with measurements and rejected attempts: [the JIT history](archive/JIT-history.md),
-  newest first. Read the matching entry before changing that code.
-- **What must not break**, and which test covers it: [Source/FrostJIT/AGENTS.md](../Source/FrostJIT/AGENTS.md).
-- **Per-instruction notes** (old bugs, encodings, references): [the guide as it was until 2.0.0-beta.3](archive/JIT-guide-2.0.0-beta.3.md).
-- **Profiling and traces**: [PROFILING.md](PROFILING.md). **Speed**: [PERFORMANCE.md](PERFORMANCE.md). **Open work**: [the roadmap](roadmap.md).
+- [JIT history](archive/JIT-history.md): why things are the way they are, with measurements and things that didn't work. Read the entry for what you're changing.
+- [Source/FrostJIT/AGENTS.md](../Source/FrostJIT/AGENTS.md): the rules that must not be broken, and the tests for them.
+- [The old, long guide](archive/JIT-guide-2.0.0-beta.3.md): notes on single instructions and old bugs.
+- [Profiling](PROFILING.md), [speed](PERFORMANCE.md) and the [roadmap](roadmap.md).
 
 ## Overview
 
@@ -19,202 +17,184 @@ AArch64 word
   → translate_to_ir() / typed IR
   → optimize_ir() and validate_ir_block()
   → compile_ir_inst() / x86_64 code
-  → publication and chaining
+  → publish and chain
 ```
 
-| Responsibility | Where (`Source/FrostJIT/` unless it says otherwise) |
+| What | Where (in `Source/FrostJIT/` unless noted) |
 |---|---|
-| Decode; reference semantics | `Source/Interpreter/` (`Decoder/`, `Core/`, `FloatSIMD/`), shared by both engines |
-| IR: ops, typed parameters, factories, validation | `IR/IR.hpp`, `Parameters.hpp`, `Factories.hpp`, `Passes/Validate.cpp` |
-| Translate and optimize | `IR/Translate/`, `IR/Passes/Optimize.cpp`; scalar SSA (off by default) in `IR/SSA/` |
-| Form and compile a block | `Compiler/BlockCompiler.cpp`, `BlockAnalysis.cpp`; mid-block exits in `SideExit.cpp`, register passing in `RegisterPassing.cpp` |
-| Emit x86_64 | `CodeGen/Integer/`, `CodeGen/FloatSIMD/`, `CodeGen/Native/` (generated SIMD helpers), `Backend/X86Emitter.cpp` |
-| Registers | `RegisterAlloc/RegisterAllocator.cpp`; vectors in `CodeGen/FloatSIMD/VectorCache.cpp` |
-| Carry's profile and flip | `Carry/HotSide.cpp` |
-| Run, publish, invalidate | `Runtime/Dispatch.cpp`, `CodeCache.cpp`, `Compilers.cpp`, `FaultHandler.cpp`, `Generations.cpp`, `Fork.cpp` |
-| Persistent cache | `Runtime/CacheRecording.cpp`, `PersistentCache.*` |
+| Decoder and interpreter, shared by both engines | `Source/Interpreter/` |
+| IR operations, parameters, factories, validation | `IR/IR.hpp`, `Parameters.hpp`, `Factories.hpp`, `Passes/Validate.cpp` |
+| Translating to IR and optimizing it | `IR/Translate/`, `IR/Passes/Optimize.cpp`; scalar SSA in `IR/SSA/` (off by default) |
+| Building a block | `Compiler/BlockCompiler.cpp`, `BlockAnalysis.cpp`, `SideExit.cpp`, `RegisterPassing.cpp` |
+| Writing x86_64 code | `CodeGen/Integer/`, `CodeGen/FloatSIMD/`, `CodeGen/Native/`, `Backend/X86Emitter.cpp` |
+| Register allocation | `RegisterAlloc/RegisterAllocator.cpp`; vectors in `CodeGen/FloatSIMD/VectorCache.cpp` |
+| Carry's profile | `Carry/HotSide.cpp` |
+| Running, publishing and invalidating code | `Runtime/Dispatch.cpp`, `CodeCache.cpp`, `Compilers.cpp`, `FaultHandler.cpp`, `Generations.cpp`, `Fork.cpp` |
+| Disk cache | `Runtime/CacheRecording.cpp`, `PersistentCache.*` |
 
-### Two modes, two kinds of code
+### Lean and Carry
 
-- **Lean** is the block compiler: one block at a time (32 instructions by default, a loop body up to twice that), chained to other blocks.
-- **Carry** is what it adds on top, on by default (`BIFROST_CARRY=0` is Lean alone): blocks that go on past forward branches, and
-  registers handed from block to block. Dated history calls Lean "Tier-1".
-- **ST code** runs while the program has one thread: chaining patches jumps in place. **MT code** starts with the second thread: published
-  instructions never change, and everything that can move is an atomic data cell. The switch throws the ST code away once.
+- **Lean** compiles one block at a time, up to 32 instructions, or 64 for a loop body. The history calls it "Tier-1".
+- **Carry** adds to Lean: blocks can go on past a forward branch, and registers are handed from one block to the next. It's on by default; `BIFROST_CARRY=0`
+  turns it off.
 
-The interpreter defines the semantics and runs every instruction the JIT does not emit natively.
+The interpreter decides what's correct. It also runs any instruction the JIT can't.
+
+### Single-threaded and multithreaded code
+
+While the program has one thread, blocks are connected by patching jumps. When a second thread starts, that code is thrown away once. From then on,
+published code never changes, and anything that has to change is kept in data the code reads.
 
 ### Host registers
 
-RBX holds the CPU, R10 the guest window base (loaded once by the cold prologue and valid along a whole chain), RBP the frame. Ten registers are
-allocatable (RAX, RCX, RDX, R8, R9, R11, R12 to R15). XMM3 to XMM15 cache guest vectors; XMM0 to XMM2 are scratch.
+RBX points to the CPU state, R10 to the start of guest memory, and RBP to the frame. R10 is loaded once when a chain of blocks is entered. Ten registers can be
+allocated: RAX, RCX, RDX, R8, R9, R11 and R12 to R15. XMM3 to XMM15 hold guest vectors, and XMM0 to XMM2 are scratch.
 
 ## Adding or changing an instruction
 
-1. Make `decode()` classify the encoding and extract every field both engines need.
-2. Get the interpreter right. Unsupported operations raise the guest's decode error; they are never silent no-ops.
-3. Add the opcode in `IR.hpp`, its parameters in `Parameters.hpp`, its factory and reader in `Factories.hpp` and its contract in `Validate.cpp`. Parameter
-   fields are private: producers use factories, consumers use readers.
-4. Translate through the factory. Do not patch `insts.back()` afterwards (forward skips use `set_skip_count()`).
-5. Emit it in the matching `CodeGen/` family. Check register aliasing (source equals destination), W-register zero-extension, the Q=0 upper half,
-   host feature gates and the fallback.
-6. Keep `BlockAnalysis.cpp`'s fallback prediction in step. The final count of `CALL_INTERP` ops comes from the optimized IR.
-7. Think through chained, self-loop and MT control flow, then add a focused guest test and register it in `Scripts/Testing/run_tests.sh`.
+1. Make `decode()` recognise it and read every field.
+2. Get the interpreter right. An unsupported instruction has to raise an error, not do nothing.
+3. Add the opcode to `IR.hpp`, its parameters to `Parameters.hpp`, its factory and reader to `Factories.hpp`, and its rules to `Validate.cpp`.
+4. Translate it through the factory. Don't change `insts.back()` afterwards; forward skips use `set_skip_count()`.
+5. Write the code generation in the matching `CodeGen/` directory. Watch for source and destination being the same register, zero-extension of W registers, the
+   upper half of a vector when Q is 0, and CPUs without a feature.
+6. Keep `BlockAnalysis.cpp` in step: it predicts which instructions fall back to the interpreter.
+7. Think about chained blocks, loops and several threads. Add a small test and register it in `Scripts/Testing/run_tests.sh`.
 
-Encoding tables are generated by `Tools/CodeGen/`; change the spec, not the generated header. The complex SIMD helpers
-(`native_simd.txt`, `make nativegen`) come with a generated test that runs every accepted encoding against results recorded under QEMU.
+`Tools/CodeGen/` generates the encoding tables. Change the spec, not the generated header. SIMD helpers come from `native_simd.txt` (`make nativegen`), and a
+generated test compares every accepted encoding with QEMU's results.
 
 ## Guest state
 
-**Vectors.** `CPU::v[32]` is `{lo, hi}`, 16-byte aligned, moved with one `movups`. Keep 16-byte reloads behind 16-byte stores: a 16-byte load that
-spans two 8-byte stores cannot be forwarded. A Q=0 result is zero-extended in the XMM and stored as 16 bytes.
+**Vectors.** Each register in `CPU::v[32]` is 16 bytes and is moved in one piece. Don't load 16 bytes that were just written as two 8-byte halves: the CPU
+can't forward that. A 64-bit vector result is zero-extended and stored as 16 bytes.
 
-**NZCV.** `CPU::nzcv_host` holds what `lahf; seto al` leaves in AX (N bit 15, Z bit 14, bit 8 = x86 CF = NOT ARM C, V bit 0), so a save is three
-instructions and a reload (`mov eax; add al, 0x7f; sahf`) clobbers only RAX. The store is 32 bits wide because readers load 32. Flags stay in the host
-registers while nothing needs them. An exit drops its save only when its successor rewrites all four flags before anything can fault
-(`nzcv_dead_in`), because a guest signal frame must show them. C++ uses `nzcv()`/`set_nzcv()`.
+**Flags.** `CPU::nzcv_host` holds the flags the way `lahf; seto al` leaves them: N in bit 15, Z in bit 14, the inverted carry in bit 8 and V in bit 0. Loading them back
+only changes RAX. Flags stay in the host's own flags as long as nothing needs them elsewhere. A block may skip saving them only if the next block overwrites all four
+before anything can fault, because a signal handler must see them. In C++, use `nzcv()` and `set_nzcv()`.
 
-**PC.** `cpu.pc` is current at the dispatcher, at exits and wherever a helper may read it, and stale inside chained code. A static exit stores it after its
-chain slot, so a patched slot skips the store. A block that calls out stores its own start at its chain entry.
+**PC.** `cpu.pc` is right at the dispatcher, at exits and wherever C++ might read it. Inside chained code it's out of date. A block that calls C++ stores its own address
+when it's entered.
 
 ## Blocks
 
-`translate_block` (`Compiler/BlockCompiler.cpp`) decodes until a branch, the instruction cap, the start of a known block, two interpreter fallbacks or two
-calls. A loop that branches back to its own start stays one block; its only other branches may be conditional ones that leave it (below).
+`translate_block` reads instructions until it reaches a branch, the size limit, the start of another block, or its limit of two calls or two interpreter fallbacks. A loop
+that jumps back to its own start stays in one block.
 
 ### Exits and chaining
 
-- A static exit is a **chain slot**. ST: patched to `jmp` the successor's `chain_entry`, past its prologue, so the frame is reused. MT: a jump through an
-  `MtEdge` cell, which holds the successor's address or the exit's own cold path.
-- **Indirect branches** probe a per-thread table (IBL, 1,024 entries growing to 65,536) inline.
-- **Cold code** is shared: one copy per JIT of the page checks, the fault exit and the frame exit (`emit_cold_stubs`).
-- **Syscalls leave generated code first.** A block that reaches an SVC returns and `run_block` runs it from C++, so a thread blocked in a syscall holds no
-  generated frame. Thunk calls (GL, audio, display) stay inline.
-- **Calls to a registered `memcpy`, `memmove` or `memset`** ([below](#host-native-memcpy-memmove-and-memset)) run the host's routine.
+- A direct exit is a slot. With one thread it's patched into a jump to the next block, past its prologue. With several threads it jumps through an `MtEdge`, which
+  holds the target's address.
+- Returns and other indirect branches look up a table that each thread has (1,024 to 65,536 entries).
+- Rarely used code, such as page checks and fault exits, exists once per JIT and is shared (`emit_cold_stubs`).
+- System calls are run from C++ after leaving the block, so a thread that blocks in one isn't inside translated code. Graphics and audio calls stay inside.
 
 ### Loops
 
-A conditional branch to the block's own start jumps to the body, keeping the frame and the registers.
-
 #### Loop pins
 
-Up to four guest registers live in R12 to R15 for the whole loop (`select_arch_pins`): registers read before written, only read, or written first. An op that
-updates a pinned register works on the pin, other ops write their result into it, and readers name it directly (`scan_pin_inplace`, `scan_pin_dests`,
-`scan_pin_reads`; `BIFROST_NO_PIN_INPLACE=1` turns these off). Exits and fault exits write back every mapped register, clean or not, because a pin is ahead of
-memory. Tests: `jit_selfloop_pins`, `jit_pin_inplace`.
+A loop keeps up to four guest registers in R12 to R15 for its whole run (`select_arch_pins`). Instructions read and write them there directly.
+`BIFROST_NO_PIN_INPLACE=1` turns the direct use off. Memory can be behind these registers, so every exit and every fault writes them back. Tests:
+`jit_selfloop_pins`, `jit_pin_inplace`.
 
 #### Mid-block exits
 
-In such a loop `cbz`, `cbnz`, `tbz`, `tbnz` and `b.cond` that leave it become exits inside the block (`SideExit.cpp`): the tail is emitted after the block from
-the register layout captured at the branch. ST code publishes each exit's slot as a stub entry in `blocks_`; in MT code it is one more edge of the block. Such a
-block runs a varying number of instructions, so differential replay skips it and the persistent cache does not record it. Test: `jit_side_exit`.
+A `cbz`, `cbnz`, `tbz`, `tbnz` or `b.cond` that leaves such a loop becomes an exit in the middle of the block (`SideExit.cpp`). Its code is placed after the block and uses the
+registers as they were at the branch. With one thread each exit has a stub entry in `blocks_`; with several it's one more edge. These blocks aren't checked by differential
+replay and aren't stored in the disk cache. Test: `jit_side_exit`.
 
 ### Carry formation
 
-With Carry any forward conditional branch becomes a mid-block exit when the block has room (at most six): the block goes on along the fall-through and its
-registers stay in host registers. Backward branches still end a block. Off while the persistent cache records. An Android app turns Carry off with
-"JIT Carry" on its settings page.
+With Carry, any forward conditional branch can become a mid-block exit, up to six in a block. The block continues with the instruction after the branch.
+Backward branches still end it. It's off while the disk cache is recording. For an Android app it's "JIT Carry" on the settings page.
 
 ### Following the hot side of an exit
 
-A block with such exits starts with a budget of 1,024 entries and counts taken exits. When the budget runs out it leaves for the dispatcher before it runs, and
-`carry_trip` picks the first exit taken more than half the time, records that branch and retires the block; the next translation goes on along the taken side.
-At most two flips a branch and three rounds a block, then no profile code. Test: `jit_carry_follow`.
+A block like that counts how often each exit is taken. After 1,024 runs, `carry_trip` picks the first exit that's taken more than half the time and throws the block away, and the new
+translation follows that side instead. A branch is flipped at most twice and a block is redone at most three times. Test: `jit_carry_follow`.
 
 ### Register passing
 
-A chain slot also leaves clean copies of guest registers in host registers, described by a **layout** of up to seven (guest, host) pairs. A successor has a
-register entry past the loads of the (at most four) registers it reads first, in the host registers its known predecessors use. An edge enters there only
-when its layout covers the entry layout exactly; partial-entry stubs load what is missing. Memory stays authoritative, so faults, signals and the
-dispatcher see what they always did. Not for loops, `BIFROST_JIT_VERIFY`, recording compiles or indirect exits. `BIFROST_NO_REG_PASS=1` turns it off.
-Test: `jit_reg_pass`.
+When a block ends, some guest registers are still in host registers. The exit records which ones (its layout, up to seven). If the next block needs exactly those, it's entered past
+its loads. If some are missing, a small stub loads them first. Memory is always up to date as well, so faults and signals work as before. It isn't used for loops,
+`BIFROST_JIT_VERIFY`, recording or indirect exits. `BIFROST_NO_REG_PASS=1` turns it off. Test: `jit_reg_pass`.
 
 ### Register allocation and peepholes
 
-Belady eviction from per-block use lists. A value dies at its last use and its host register is reused; constants fold into their consumer. The pre-scans in
-`BlockCompiler.cpp` decide each fold (`fold_ahead_kind_`, W-form fusion, sign-extending loads, scaled adds, memory operands of `CMP`) and the emitter
-re-checks the same guards: a skipped `mov` whose consumer does not fold leaves the value unmapped. A compiler keeps its scratch memory from block to block.
+A value's register is free after its last use, and when registers run out, the value needed furthest in the future is evicted. `BlockCompiler.cpp` decides in advance which
+instructions to fold together, and the code generator checks the same conditions again. If the two disagree, a value can end up nowhere.
 
 ## Guest memory
 
 ### Guards
 
-A scalar or single 16-byte access is one bound compare against the window's header page, then the host access. Guest page protection is the host's own, so
-a disallowed access faults and is recovered. Android's top-byte tags are cleared in a scratch copy of the address. An access whose address an earlier
-access of the block already checked emits no compare (`scan_covered_guards`). Pairs and multi-register accesses check their whole span in software first.
+A normal load or store checks the address against the end of guest memory and then accesses it directly. Guest page protection is the host's own, so a forbidden access faults and is
+handled. Android's pointer tags are removed from a copy of the address. A second access to an address that was just checked skips the check (`scan_covered_guards`).
+Pairs check everything first.
 
 ### Registered native memory faults
 
-The host signal handler accepts a fault only inside a `FaultScope`, at a registered native instruction, with the expected window base and an address inside
-the reservation. It looks the site up without a lock and moves RIP to that access's recovery stub, which commits the state before the guest instruction and
-steps it in the interpreter; that raises the guest's signal. Sites are one sorted run per 256 KiB chunk of the code buffer, and each chunk has
-one writer. Test: `jit_host_fault`.
+The signal handler only accepts a fault from a known instruction, inside a `FaultScope`, with the right memory base and an address in guest memory. It then jumps to that
+instruction's recovery code, which puts the guest state back and runs the instruction in the interpreter. Each 256 KiB chunk of code has its own sorted list of
+these instructions. Test: `jit_host_fault`.
 
 ### Software page checks
 
-One byte below the window base switches every guarded access to the software path. It is raised only while some page is registered with userfaultfd and
-missing, the one state the host's protection cannot show. Tests: `test_userfaultfd`, `test_mem_guard`, `jit_guard_stubs`.
+One byte in front of guest memory switches all accesses to a slower check. It's only set while a page is registered with userfaultfd and missing, because the host's protection can't
+show that. Tests: `test_userfaultfd`, `test_mem_guard`, `jit_guard_stubs`.
 
 ### Atomics and exclusives
 
-LSE operations are native inside the window. `LDXR`/`STXR` use one protocol in the interpreter, the helpers and the emitter (`ExclusiveMonitor.hpp`); pair forms
-run in the interpreter. A store reaches the host exactly once per element: a replayed release store once released another thread's lock.
+LSE atomics are native. `LDXR` and `STXR` follow one protocol everywhere (`ExclusiveMonitor.hpp`), and the pair versions run in the interpreter. A store must reach memory
+exactly once.
 
 ### Guest memory barriers
 
-`DMB LD`/`ST` emit nothing, as x86 already keeps those orders for ordinary memory; a full `DMB` and every `DSB` is one `lock not` on a per-CPU word. The IR op
-stays for every kind, so no pass moves a guest access across it. Test: `test_atomic_stress`.
+`DMB LD` and `DMB ST` need no instruction on x86. A full `DMB` and any `DSB` is one `lock not`. The barrier stays in the IR either way, so nothing is moved across it.
+Test: `test_atomic_stress`.
 
 ### Host-native memcpy, memmove and memset
 
-The loader records where the guest's routines start: symbols it links itself, `.symtab` of a static program, and a libc that the guest's own linker maps. A block
-that starts one calls the host's routine for 1 KiB or more, when every byte is accessible and (for `memcpy`) the ranges do not overlap; otherwise the guest
-routine runs, so every fault happens where it always did. A stripped libc gives no names and is not covered. `BIFROST_NO_NATIVE_LIBC=1` turns it off.
-Tests: `jit_native_libc`, `test_native_libc_mt`.
+The loader finds the guest's own routines by name. A call for 1 KiB or more runs the host's version, if all the memory is accessible. Otherwise the guest's routine runs, so faults happen
+where they always did. Stripped libraries have no names, so it doesn't work for those. `BIFROST_NO_NATIVE_LIBC=1` turns it off. Tests: `jit_native_libc`, `test_native_libc_mt`.
 
 ## Floating point and SIMD
 
-- **NaNs are exact.** An operation computes into scratch, tests the result (or, for MIN/MAX, the inputs) and on a NaN runs the instruction's ARM semantics in a cold step
-  placed after the block. FPCR.DN is honoured; FZ, RMode, cumulative FPSR flags and enabled FP traps are outside native arithmetic.
-- **Fused operations are one FMA3 instruction**, never multiply then add.
-- **Compare and branch.** An `fcmp` directly before a `b.cond` leaves raw `ucomis` flags that only that branch reads.
-- **Vector cache.** Guest vectors stay in XMMs inside a block when its operations allow it; scalar FP uses a low-half cache. An operation with an interpreter call or
-  an unknown effect is a boundary.
-- **Structure loads and stores** (`LD2` to `LD4`, `ST2` to `ST4`) and `LD1R` are native; one guard covers the span, so a fault changes no register.
-- **Native helpers** (`CodeGen/Native/`) serve the rest. They specialize one operation at translation time and preserve R10, which is caller-saved.
+- NaNs follow Arm's rules. When a result is NaN, the instruction runs again in the interpreter, in code placed after the block. FPCR.DN works; FZ, rounding modes,
+  FPSR flags and floating-point traps don't apply to native arithmetic.
+- Fused operations use one FMA3 instruction.
+- `fcmp` followed by `b.cond` is one compare and one or two jumps.
+- Vectors stay in XMM registers within a block when every operation allows it.
+- `LD2` to `LD4`, `ST2` to `ST4` and `LD1R` are native. If one faults, no register has changed.
+- The other SIMD instructions call helpers in `CodeGen/Native/`. They must preserve R10.
 
 ## Multithreaded code
 
 ### Publication
 
-Another thread may run a block while it is replaced, so MT code changes only data: cells are written with release stores, and code bytes are never rewritten. Retiring a
-block clears the cells into it and kills the edges out of it; code and metadata stay until the whole code cache is released. Guests still have to
-synchronize their own code changes. Tests: `jit_mt_loops`, `jit_mt_publication`.
+Other threads may be running a block while it's replaced, so only data changes, never code. Removing a block clears the addresses that lead to it. Its code stays until the whole cache
+is released. Tests: `jit_mt_loops`, `jit_mt_publication`.
 
 ### Preemption
 
-A ticker advances `g_jit_preempt_epoch` every millisecond, and so does every invalidation. Backward edges and IBL probes compare it with two loads and leave for
-the dispatcher when it moved; forward edges carry nothing. `cpu.jit_stop_pc` (a callback boundary) is compared once per loop entry. ST code keeps a
-256-edge budget instead.
+`g_jit_preempt_epoch` changes every millisecond, and whenever code is invalidated. Backward jumps and indirect branches compare it and return to the dispatcher if it changed.
+Single-threaded code counts 256 jumps instead. `cpu.jit_stop_pc` is checked once when a loop is entered.
 
 ### Several compilers at once
 
-Several threads translate at the same time (`Runtime/Compilers.cpp`). The **core** is the `FrostJIT` the emulator knows: it owns the code buffer and the tables. A
-**compiler** is another object of the class that borrows them (`core_` points at the core). A miss claims a compiler, translates without a lock and publishes
-under the exclusive table lock (`adopt_staged`). One compiler per host CPU, at most 16; a thread takes the one it used last if it is free.
+Several threads can translate at the same time (`Runtime/Compilers.cpp`). The **core** is the main `FrostJIT` object, which owns the code buffer and tables. A **compiler** is another
+`FrostJIT` object that uses them. A thread takes a compiler, translates without a lock, and publishes the result under the table lock (`adopt_staged`). There's one
+compiler per CPU, at most 16, and a thread gets the one it had last if it's free.
 
-- **What stays in the compiler** until it publishes: everything a compile scribbles on and what it creates (edges, code words, flag dependencies, register-passing
-  records). Edges keep their address, which generated code holds. Generated code addresses the core, globals and cells, never a compiler.
-- **Reading tables** goes through `with_table` (the shared lock). Cold code asks almost only about pcs that are not there, so two bit filters answer "no" without
-  a lock (`PcFilter`: `block_starts_`, `carry_tripped_`); the first run of a block takes no lock before its translation starts.
-- **Edge targets** (`mt_targets_`): one record per target pc, with the edges to it and its translation, behind a lock per shard. A compile finds its records before it
-  locks the table.
-- **Publication** is the serial part, so the map node, the caller's copy and the records exist before the lock; `link_mt_block` follows pointers.
-- **Tables** that grow with the program are sharded or segmented (`GrowingTables.hpp`, `CodeIndex.hpp`): a rehash of one whole table stopped every thread for 26 ms.
-- **Code space.** A compiler leases 256 KiB chunks and writes only inside its lease. A block that does not fit is compiled again in a fresh chunk.
-- **Invalidation** during a compile: a range is logged with every active compile, and an overlap makes the compile run again under the exclusive lock.
-- **The same block twice.** A thread that misses on a pc another is translating waits for that one.
-- **Serialized** with one compiler (`BIFROST_JIT_COMPILERS=1`), per-thread JITs, `BIFROST_JIT_VERIFY`, the persistent cache and a small code cache.
+- Everything a compile creates stays in its compiler until it's published. Generated code never refers to a compiler, only to the core.
+- Use `with_table` to read the core's tables. Two filters (`block_starts_` and `carry_tripped_`, both `PcFilter`) say without a lock that an address isn't in a table, which is the usual answer.
+- `mt_targets_` has one record per jump target, with its own small locks. A compile finds its records before it takes the table lock.
+- Publishing is the only part that can't overlap, so as much as possible is prepared before it.
+- The tables grow in pieces (`GrowingTables.hpp`, `CodeIndex.hpp`), because growing one big table used to stop every thread for 26 ms.
+- Each compiler writes into its own 256 KiB chunk of the code buffer.
+- If code is invalidated while it's being translated, it's translated again under the table lock.
+- If two threads need the same block, the second one waits.
+- There's only one compiler with `BIFROST_JIT_COMPILERS=1`, per-thread JITs, `BIFROST_JIT_VERIFY`, the disk cache, or a small code cache.
 
 Test: `jit_mt_compile` ([numbers](archive/JIT-history.md#several-threads-translate-at-once-2026-11-25)).
 
@@ -222,59 +202,53 @@ Test: `jit_mt_compile` ([numbers](archive/JIT-history.md#several-threads-transla
 
 ### Invalidation
 
-Every `invalidate_jit_range` caller names a reason. Cache maintenance covers exact 64-byte lines; mapping changes cover pages. A block depends on the words it fetched
-(`code_words_`): cache maintenance and `mprotect` keep a block whose words still match and are still executable, everything else retires it.
-`CodeIndex` finds the candidates by 256-byte granule, so a data-only range returns without stopping anyone. Test: `jit_cache_invalidation`.
+Whoever invalidates code gives a reason. Cache maintenance covers exact 64-byte lines, and mapping changes cover pages. After cache maintenance or `mprotect`, a block is kept if its
+instructions are the same and still executable. `CodeIndex` finds the affected blocks, so changes to plain data don't stop other threads. Test: `jit_cache_invalidation`.
 
 ### A full cache
 
-The buffer reserves 1 GiB of address space and uses 512 MiB by default (`BIFROST_JIT_CACHE_MB`). A full cache is replaced as a whole: a fresh `FrostJIT` becomes current and
-the old one is released once every thread passed a dispatch boundary without generated frames or is parked in a syscall (`Runtime/Generations.hpp`). At most one old
-instance may wait; until it is gone, a full current one interprets what it cannot translate. Tests: `jit_cache`, `jit_generations`.
+The cache uses 512 MiB by default (`BIFROST_JIT_CACHE_MB`). When it's full, a new one replaces it, and the old one is released when no thread can still be using it
+(`Runtime/Generations.hpp`). Only one old cache can wait to be released. Until then, a full new one falls back to the interpreter. Tests: `jit_cache`, `jit_generations`.
 
 ### Persistent translation cache
 
-Experimental, off by default (`--jit-disk-cache`). It stores Lean translations of file-backed code per application and codegen fingerprint. A recording compile logs every
-embedded address, and a second compile at shifted guest pcs must explain every difference; anything unexplained is left out, never wrong. Blocks with mid-block exits are
-not recorded. Test: `jit_disk_cache`.
+Experimental and off by default (`--jit-disk-cache`). It saves Lean translations of code that comes from files. Each block is compiled twice, at two addresses, and is only saved if every
+difference can be explained. Blocks with mid-block exits aren't saved. Test: `jit_disk_cache`.
 
 ### Fork children keep the JIT
 
-A fork child keeps its parent's translations, so a Zygote child starts warm. `fork_guest` takes every JIT lock with its own, all or none (compilers must be idle; new ones wait
-2 ms while a fork asks). The child renews the locks and restarts the ticker. If the locks cannot be had within 3 s, the child interprets until its `execve`. Test: `test_fork_jit`.
+A forked child keeps its parent's translations. `fork_guest` takes all the JIT's locks or none, and no compiler may be busy. If it can't get them in 3 seconds, the child runs in the
+interpreter until it calls `execve`. Test: `test_fork_jit`.
 
 ## Planned codegen: retaining guest state across regions
 
-Not built. **The goal is Lean first, Carry when hot**: Lean translates everything, and only code that turns out hot is translated again. Today Carry forms every block on
-its first translation, so code that runs once pays for it (9.0 us a block against 4.8 us with Carry off on the ART start-up, 2026-11-25). The entry budget above is the one piece that already
-works that way; Lean blocks need a trigger that costs little and goes away once it fires.
+Not built yet. The goal is Lean first, Carry when hot: new code gets the quick translation, and only code that runs a lot gets the better one. Today everything gets
+Carry at once, and code that runs once pays for it (9.0 µs a block instead of 4.8 µs when Android starts, 2026-11-25).
 
-Carry regions come after that: loops or small control-flow graphs whose guest registers stay in host registers across blocks. The rules decided so far (2026-11-24):
+After that come regions: loops of several blocks that keep their registers the whole time. Decided so far:
 
-- Hotness from samples or back-edge counters, never counters in block entries. No timed trials.
-- Memory is written only at exits, calls, helper boundaries and fault stubs, and every one of those needs a map from host registers to guest registers.
-- MT promotion swaps an atomic cell. Regions are not recorded in the persistent cache at first.
-- A test forces promotion and checks against an oracle; nothing in a test depends on the clock.
+- Find hot code by sampling or by counting backward jumps. No counters at block entries and no timed trials.
+- Write registers back only at exits, calls and faults. Each of those needs to know which register is where.
+- With several threads, switch to a region by changing one address. Regions aren't saved to disk at first.
+- Tests force a region to be built and check its results, and never depend on timing.
 
-What it can gain at most, and what was measured: [history](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24). Where it stands among
-other work: [the roadmap](roadmap.md).
+[What it could gain at most](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24), and the [roadmap](roadmap.md).
 
 ## Checking a change
 
 ```bash
-make verify                                                       # differential replay and threaded oracles
-./Scripts/Testing/run_tests.sh --strict --filter 'jit|simd|fp'    # focused
-BIFROST_IR_VALIDATE=1 ./bifrost-emu program                       # per-op IR contracts
-BIFROST_JIT_VERIFY=1 ./bifrost-emu program                        # every block against the interpreter (one thread)
-./bifrost-emu --no-jit program                                    # the interpreter
+make verify                                                       # compares with the interpreter, and runs the threaded tests
+./Scripts/Testing/run_tests.sh --strict --filter 'jit|simd|fp'    # a part of the tests
+BIFROST_IR_VALIDATE=1 ./bifrost-emu program                       # checks the IR
+BIFROST_JIT_VERIFY=1 ./bifrost-emu program                        # compares every block with the interpreter (one thread)
+./bifrost-emu --no-jit program                                    # interpreter only
 ```
 
-Differential replay stops, and says so, when a second thread starts; threaded code is checked against independent results instead. A test proves only what it covers: say
-what it leaves out.
+The comparison with the interpreter stops when a second thread starts, and says so. Threaded code is checked against known results instead.
 
 ### Measuring
 
-- **Count, then time.** `perf stat -e instructions:u` repeats to four digits. Cycles move by up to 15% with code placement alone, so compare several placements.
-- **Attribute with IBS** (`perf record -e ibs_op/cnt_ctl=1,swfilt=1/u` and `BIFROST_JIT_DUMP=1`); `instructions:u` skids too far for single instructions.
-- **Translation time** is the `[JIT] compile:` line of `-v`. The ART bootstrap (`Scripts/Android/test_android_jni.py`) translates about 93,000 blocks without a window.
-- **CoreMark**: fix the governor to `performance`, run at least ten seconds, check the CRC. It does not predict game frame rates.
+- Count instructions first (`perf stat -e instructions:u`), because that number is stable. Cycles can change by 15% just from where the code lands, so try several placements.
+- To see which instructions cost time, use `perf record -e ibs_op/cnt_ctl=1,swfilt=1/u` with `BIFROST_JIT_DUMP=1`.
+- For translation time, look at the `[JIT] compile:` line of `-v`. `Scripts/Android/test_android_jni.py` is a good test that opens no window.
+- For CoreMark, set the CPU governor to `performance`, run for at least ten seconds and check the CRC.
