@@ -238,6 +238,8 @@ A new history section can make an older "not measured" or "next section" line wr
   `LDXR/STXR/STLR_FAST` use vregs and need neither; `jit_llsc_native` covers registers across them in one block.
 - A pre-call pinned-vector writeback must include values written anywhere in a
   loop block, including writes after the call that carry into the next iteration.
+- A back edge may skip the NZCV store only when nothing in the loop can observe the previous iteration's flags before the first setter; a mid-block
+  `cbz`/`tbz` exit can (`flags_loop_carried_`). A new kind of mid-block exit belongs in that scan. `jit_side_exit` covers it.
 - An exit may omit its NZCV store only through `exit_flags_dead` (public Tier-1
   compiles): the successor's first words must overwrite all four flags
   (`ADDS`/`SUBS`/`ANDS`/`FCMP`) after nothing but flag-neutral, fault-free, non-branching

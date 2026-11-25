@@ -1336,8 +1336,9 @@ layout. Cells and retired code retain the existing lifetime policy.
 
 BRCOND commits NZCV before the MT guard because its checks overwrite host
 flags and any iteration may become an exit, unless the loop head overwrites
-all four flags first (see [Dead NZCV stores at block exits](archive/JIT-history.md#dead-nzcv-stores-at-block-exits-2026-10-20)). The ST-only
-loop-carry shortcut remains ST-only. CBZ/CBNZ and TBZ/TBNZ preserve their pre-branch NZCV contract.
+all four flags first (see [Dead NZCV stores at block exits](archive/JIT-history.md#dead-nzcv-stores-at-block-exits-2026-10-20)). A
+back edge, in ST and MT code, skips the store when the loop reads no flags before it sets them (`flags_loop_carried_`). A `cbz`/`tbz` mid-block exit
+ahead of the first flag setter counts as a read unless its target overwrites the flags first. CBZ/CBNZ and TBZ/TBNZ preserve their pre-branch NZCV contract.
 `BIFROST_NO_SELFLOOP=1` restores ordinary loop edges; `BIFROST_NO_PIN=1`
 disables GPR pinning, and `BIFROST_NO_CHAIN=1` also disables MT body edges.
 Both frame layouts support this path.
@@ -1736,6 +1737,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [NZCV at a cbz/tbz exit that precedes the loop's first flag setter (2026-11-25)](archive/JIT-history.md#nzcv-at-a-cbztbz-exit-that-precedes-the-loops-first-flag-setter-2026-11-25)
 - [Narrowing in the vector cache, one-store half results and forwarding across LL/SC (2026-11-24)](archive/JIT-history.md#narrowing-in-the-vector-cache-one-store-half-results-and-forwarding-across-llsc-2026-11-24)
 - [CoreMark with Carry on: the bottleneck is still guest state traffic (2026-11-24)](archive/JIT-history.md#coremark-with-carry-on-the-bottleneck-is-still-guest-state-traffic-2026-11-24)
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)

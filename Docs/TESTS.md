@@ -92,7 +92,7 @@ thread names, GL symbol zones, frames, and the fork program with a viewer connec
 `make verify`) run hand-written loops (a list walk, a byte scan with four carried registers, two exits in one loop, a loop faulting
 mid-iteration, one loop per ARM condition for `b.cond` on edge values, and `tbz`/`tbnz` on bits 0 and 63) against C, check that a fault shows the finished iterations' registers in the signal frame, and repeat the loops on five threads, with
 exits on and off, chaining off, the ordinary frame layout and IR validation. With exits on, `-v` must report at least forty blocks formed with a
-mid-block exit. It does not cover a `b.cond` after an `FP_CMP`, loops with an inner branch, a game, or the persistent cache (such blocks are not recorded).
+mid-block exit. `carried_flags` and `carried_flags_bit` read NZCV after an exit that comes before the loop's first flag setter (30 failures on the build before the fix of 2026-11-25). It does not cover a `b.cond` after an `FP_CMP`, loops with an inner branch, a game, or the persistent cache (such blocks are not recorded).
 
 ### Carry follows the hot side of an exit (2026-11-24)
 

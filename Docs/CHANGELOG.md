@@ -69,6 +69,7 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
 - "Preparing Android runtime" no longer copies or reads the app's saved data and downloaded resources when it has to rebuild its
   runtime (after an update, or when you switch between builds). It links them and checks only the runtime's own files. Zenless
   Zone Zero (38 GB of downloaded resources) went from 105 s to about 3 s at that step, measured on a copy of its real data.
+- Fixed: a loop left early through `cbz`, `cbnz`, `tbz` or `tbnz` could hand wrong condition flags to the code after it.
 - Hot loops that count or accumulate in a register (`add x0, x0, #1`, a running sum) update it in place instead of through a
   scratch copy: fewer instructions per iteration. About 1% on CoreMark and gzip on one machine, nothing on programs without
   such loops. `BIFROST_NO_PIN_INPLACE=1` switches it off.

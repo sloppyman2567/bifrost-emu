@@ -489,10 +489,39 @@ static void fault_case(void) {
     munmap(region, 2 * page);
 }
 
+// The exit comes before anything in the loop sets NZCV, so the code it goes to reads the flags the loop's own compare left in the
+// iteration before (those of the first compare below when it exits in the first). x5 alternates, so the flags do.
+static uint64_t carried_flags(const uint64_t *list) {
+    uint64_t nzcv;
+    __asm__ volatile("mov x3, %1\n mov x5, #1\n mov w4, #7\n cmp w4, #7\n"
+        "1: ldr x2, [x3], #8\n cbz x2, 2f\n eor x5, x5, #8\n cmp x5, #3\n b.ne 1b\n"
+        "2: mrs %0, nzcv\n" : "=r"(nzcv) : "r"(list) : "x2", "x3", "x4", "x5", "memory", "cc");
+    return nzcv >> 28;
+}
+static uint64_t carried_flags_bit(const uint64_t *list) {
+    uint64_t nzcv;
+    __asm__ volatile("mov x3, %1\n mov x5, #1\n mov w4, #7\n cmp w4, #7\n"
+        "1: ldr x2, [x3], #8\n tbz x2, #0, 2f\n eor x5, x5, #8\n adds x4, x5, x5, lsl #60\n b.ne 1b\n"
+        "2: mrs %0, nzcv\n" : "=r"(nzcv) : "r"(list) : "x2", "x3", "x4", "x5", "memory", "cc");
+    return nzcv >> 28;
+}
+static void carried_flag_cases(void) {
+    uint64_t list[40];
+    for (int end = 0; end < 32; ++end) {
+        for (int i = 0; i < 40; ++i) list[i] = i == end ? 0 : 1;
+        // cmp 9, #3 leaves C and cmp 1, #3 leaves N; adds 9, 9 << 60 and 1, 1 << 60 leave N and nothing. Z and C from `cmp w4, #7`.
+        const uint64_t want = end == 0 ? 6 : end & 1 ? 2 : 8, want_bit = end == 0 ? 6 : end & 1 ? 8 : 0;
+        const uint64_t got = carried_flags(list), got_bit = carried_flags_bit(list);
+        CHECK(got == want, "carried_flags end=%d: %llx want %llx", end, (unsigned long long)got, (unsigned long long)want);
+        CHECK(got_bit == want_bit, "carried_flags_bit end=%d: %llx want %llx", end, (unsigned long long)got_bit, (unsigned long long)want_bit);
+    }
+}
+
 static void *worker(void *arg) { (void)arg; run_all(3); return NULL; }
 
 int main(void) {
     run_all(20);
+    carried_flag_cases();
     fault_case();
     pthread_t threads[4];
     for (int i = 0; i < 4; ++i) pthread_create(&threads[i], NULL, worker, NULL);

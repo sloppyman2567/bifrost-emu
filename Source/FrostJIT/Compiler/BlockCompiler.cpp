@@ -1172,7 +1172,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Decides whether a self-loop back-edge may skip the taken-path
     // pstate materialization (Branch.cpp BRCOND case). A
     // block is "flag loop-carried" if any flag-CONSUMING op (one that
-    // reads guest NZCV) appears before the first flag-SETTING op. If a
+    // reads guest NZCV, or a mid-block exit whose target may) appears
+    // before the first flag-SETTING op. If a
     // consumer runs first, the flags it reads come from the PREVIOUS
     // iteration, so the loop-back edge must still materialize host flags
     // to pstate for the loop top to reload. Consumers are checked BEFORE
@@ -1191,6 +1192,10 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 case IROp::ADCS: case IROp::SBCS: case IROp::CCMP:
                 case IROp::FP_CSEL: case IROp::BRCOND: case IROp::BRCOND_SKIP:
                     consumer = true;
+                    break;
+                case IROp::BRCOND_ZERO: case IROp::BRCOND_BIT:
+                    // A mid-block exit leaves with NZCV visible to its target; the branch that ends the block is the loop's own edge.
+                    consumer = inst.aux == 1 && !flag_setter_seen && !exit_flags_dead(inst.branch_target());
                     break;
                 default:
                     break;

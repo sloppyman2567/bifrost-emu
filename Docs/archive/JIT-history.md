@@ -2,6 +2,16 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## NZCV at a cbz/tbz exit that precedes the loop's first flag setter (2026-11-25)
+
+A self-loop whose only flag use is its own compare skips the NZCV store on the back edge, because the next iteration sets the flags before it reads
+them. Since loops with `cbz`/`tbz` exits became one block, such an exit can come before that first setter, and the code it goes to saw the flags of some
+earlier store instead of the last iteration's compare (`ldr; cbz out; eor; cmp; b.ne`, then `mrs nzcv` at `out`). Found by the random-loop comparison with
+QEMU (5 of 16,000 loops, every mode, also on the build before); the interpreter was right. `flags_loop_carried_` now counts a mid-block exit that
+precedes the first flag setter as a reader unless `exit_flags_dead` proves its target overwrites the flags. CoreMark: +1.3% host instructions, cycles
+inside run noise. `jit_side_exit` (`carried_flags`, `carried_flags_bit`) covers it: 30 failures on the build before, and it passes with
+`BIFROST_NO_SIDE_EXIT=1` there.
+
 ## Narrowing in the vector cache, one-store half results and forwarding across LL/SC (2026-11-24)
 
 Found by reading the hottest generated code of a 4 minute SpongeBob run (loading and ad start-up only, `BIFROST_PROF=1 BIFROST_PC_HIST=1 BIFROST_CARRY=1`,
