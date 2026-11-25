@@ -436,6 +436,12 @@ public:
     return true;
   }
   bool active() const { return buffer_ != nullptr; }
+  // The same picture again: what the surface's acknowledged state waits for (commit_window_state).
+  void commit() {
+    if (!surface_) return;
+    wl_surface_commit(surface_);
+    wl_display_flush(display_);
+  }
   // The SDL window, and so its wl_surface, outlives this backdrop.
   void reset() {
     if (buffer_) wl_buffer_destroy(buffer_);
@@ -874,8 +880,9 @@ public:
     auto props = sdl_.CreateProperties();
     if (!props) { sdl_.QuitSubSystem(SDL_INIT_VIDEO); return fail("window properties"); }
     bool configured = sdl_.SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title) &&
-        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width) &&
-        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height) &&
+        // A maximised window's own size is the one it returns to.
+        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, maximize ? saved_w_ : width) &&
+        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, maximize ? saved_h_ : height) &&
         sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true) &&
         sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_MAXIMIZED_BOOLEAN, maximize) &&
         sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, true) &&
@@ -892,8 +899,12 @@ public:
     open_panel_w_ = open_panel_h_ = 0;
     area_w_ = area_h_ = INT32_MAX;
     oriented_ = false;
-    if (maximize && opened_maximized()) size_pending_ = false;  // nothing left to restore
-    else if (fit_new_window(width, height)) update_ratio(width_, height_);
+    if (maximize && opened_maximized()) {
+      size_pending_ = false;  // nothing left to restore
+    } else {
+      if (maximize) { sdl_.SetWindowSize(window_, width, height); sdl_.SyncWindow(window_); update_ratio(width_, height_); }
+      if (fit_new_window(width, height)) update_ratio(width_, height_);
+    }
     const char *rotation = std::getenv("BIFROST_ANDROID_ROTATION");
     reshape_on_rotation_ = rotation && !std::strcmp(rotation, "reshape");
     resolution_ = panel_resolution::parse(std::getenv("BIFROST_ANDROID_RESOLUTION"));
@@ -1168,6 +1179,8 @@ private:
                      static_cast<long long>(out.time_ms), id, name,
                      static_cast<unsigned>(e.type), e.window.data1, e.window.data2);
       }
+      if (e.type >= SDL_EVENT_WINDOW_FIRST && e.type <= SDL_EVENT_WINDOW_LAST && e.window.windowID == id)
+        commit_window_state();
       if (e.type == SDL_EVENT_QUIT) { out.type = BIFROST_WINDOW_CLOSE; return 1; }
       if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == id) {
         save_size();  // now: a game may kill its own process while it closes, and close() then never runs
@@ -1754,6 +1767,15 @@ private:
   // Managed SurfaceView layers are subsurfaces; nothing else draws into the
   // SDL window's own surface then (its wl_egl_window may exist but stays
   // unused), and Wayland maps the window only once that surface has a buffer.
+  // SDL acknowledges a new window state (maximised, tiled, on another display) and leaves the commit that applies it to the
+  // window's next frame; during an interactive resize even the acknowledgement waits for a frame callback. The app draws in
+  // child surfaces, so nothing else commits the window's own one, and without this a change that keeps its pixel size is
+  // never applied: the window stays as it was. SDL reports every such change as a window event.
+  void commit_window_state() {
+    if (!backdrop_.active()) return;
+    refresh_backdrop();
+    backdrop_.commit();
+  }
   void refresh_backdrop() {
     auto props = sdl_.GetWindowProperties(window_);
     auto display = static_cast<wl_display*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr));

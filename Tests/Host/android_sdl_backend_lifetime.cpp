@@ -564,8 +564,9 @@ int main() {
     // A compositor that does not maximise (a tiling desktop) gets an ordinary window.
     unsetenv("BIFROST_TEST_SDL_MAXIMIZED");
     win = frost::make_sdl_android_window_backend();
+    remember("640 480 maximized\n");
     CHECK(win->open("not maximized", 1280, 720) == 0);
-    CHECK(win->pixel_size(w, h) && w == 2560 && h == 1440);
+    CHECK(win->pixel_size(w, h) && w == 2560 && h == 1440);   // what the app asked for, not the remembered size
     win->close();
     win = frost::make_sdl_android_window_backend();
     // A size the window has already left (one step of opening maximised) is not reported; its present size is.

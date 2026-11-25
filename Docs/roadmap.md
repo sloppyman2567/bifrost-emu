@@ -142,11 +142,11 @@ app exit leaves the library and the other apps usable.
   checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)).
   Position and fullscreen are deliberately not remembered (a Wayland client cannot place its window). Open: a real
   compositor check, including whether the window visibly resizes once at launch. `--fullscreen` still belongs to the library.
-- Rotation and scaling of the host window. Done 2026-11-25, checked against a fake SDL, not on a real compositor: a fixed-size app's
+- Rotation and scaling of the host window. Done 2026-11-25, checked against a fake SDL (opening maximised also in Hungry Shark World on KWin): a fixed-size app's
   host window keeps its size on rotation and the panel refits inside it, with a per-app Rotation setting for the old reshaping;
   a window that closed maximised opens maximised, so a game's first size is the one it keeps
-  ([details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)). Open: confirm both in Umamusume, Geometry Dash
-  Lite, Family Island and a 16:9-only game; restoring the remembered size when a window that opened maximised is un-maximised;
+  ([details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)). Open: confirm rotation in Umamusume and opening
+  maximised in Geometry Dash Lite and Family Island; a game maximised on a second display of another scale (reported stuck 2026-11-25; a fix is in, not re-tested);
   `eglQuerySurface` answering the old size right after a resize (read from source, no fault tied to it); fractional scales and
   several monitors, with no other report so far.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested

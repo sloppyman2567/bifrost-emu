@@ -2530,17 +2530,27 @@ fixed-size app's panel. So a resizable app is told a new window size as if the u
 and is fitted into the remembered shape; an app that asked for an orientation keeps its shape and takes the largest window of it
 inside the remembered size. The size is held inside the display. Position is not remembered: a Wayland client cannot place its
 window, and an X11-only position would differ between desktops. Fullscreen is not remembered either, so a game never opens full
-screen unexpectedly. Leaving a window that opened maximised gives the 1280x720 default, not the remembered size.
+screen unexpectedly. A window that opened maximised returns to the remembered size.
 
 A Google window that a game opens (`android_google.ActivityRelay`) is started without the game's window settings
 (`android_settings.WINDOW_ENVIRONMENT`). It used to inherit the state file and save its own size over the game's: Hungry Shark
 World's file was rewritten at 02:31:08 on 2026-11-25, the second the sign-in window's log ended.
 
+**The window's own surface is committed on every window event (2026-11-25).** On Wayland SDL acknowledges a configure and leaves
+the commit to the window's next frame (`ConfigureWindowGeometry`, SDL 3.4.20: "the client needs to commit a new frame for the
+changes to take effect"), and while an interactive resize runs it acknowledges only from the surface's frame callback. The app
+draws in child surfaces; the window's own one holds the black backdrop, which was committed only when the pixel size changed. A
+state with the same pixel size was acknowledged and never applied. `commit_window_state` commits the backdrop again. Reported
+by the maintainer on KWin 6.8.3 with displays at scale 2 (21:9) and 1.5 (16:9): a game maximised on the 16:9 one stayed put until
+the title bar's menu sent it back. Not reproduced here, so that this was its cause is not established.
+
 Checked: the file contract and fitting (`make test-android-window-size`), and the backend against a fake SDL
 (`make test-android-sdl-backend`): F11 toggling, never reaching the app, opening maximised (landscape, portrait, refused), restore
 once, clamping to the display, orientation fit, a fixed-size app's panel unchanged, stale resize events, saving at the close
 request and skipped for the three states, and no file without the variable. The SDL 3.2 source maximises a window created that
-way before showing it and waits for it in `SDL_SyncWindow`. Not checked: a real compositor or a game.
+way before showing it and waits for it in `SDL_SyncWindow`. On KWin 6.8.3 (2026-11-25) Hungry Shark World, closed maximised, opened
+its next session at 3440x1384 before its first frame (session log) and looks right on the 21:9 display (maintainer-reported).
+Not checked: other games and compositors, rotation, and the surface commit above.
 
 Found by reading, not fixed and not shown to cause a fault: `eglQuerySurface` after a resize. On Android the size comes from the
 native window at once (Mesa `droid_query_surface`); Mesa's Wayland platform keeps the old size while a back buffer is held

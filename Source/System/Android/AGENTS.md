@@ -109,7 +109,8 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   poll), so the app never sees a second size. Any other remembered size (`BIFROST_ANDROID_WINDOW_STATE`,
   `Window/RememberedSize.hpp`) is applied as a resize after the app has set up its window, never as the opening size (a
   fixed-size app's panel comes from the opening size). Saved at the close request and at close, not for a fullscreen, minimised
-  or hidden window. Keep position and fullscreen out of it. A window of another app that a session starts must not inherit
+  or hidden window. Keep position and fullscreen out of it. Every window event commits the window's own Wayland surface
+  (`commit_window_state`): SDL leaves that commit to the client, and the app draws only in child surfaces. A window of another app that a session starts must not inherit
   `android_settings.WINDOW_ENVIRONMENT`.
 - A host window resize reaches Activities through `FrameworkActivities.configurationChanged`: relaunch exactly when Android
   would (`ActivityRecord`: the diff from `Record.reported`, size buckets, no window bounds, `& ~getRealConfigChanged()`), else
