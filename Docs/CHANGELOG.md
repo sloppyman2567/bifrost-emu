@@ -23,7 +23,8 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   across it: CoreMark 2.0% fewer host instructions and about 4.7% more iterations per second; no game has been timed carefully.
 - With `BIFROST_CARRY=1` a block that follows another one in a chain also starts with the registers the first one left in host registers instead
   of loading them again: CoreMark another 1.1% fewer host instructions and about 5% more iterations per second (`BIFROST_NO_REG_PASS=1`
-  turns it off). Only CoreMark has been timed, not a game.
+  turns it off). Only CoreMark has been timed, not a game. A switch, `BIFROST_REG_PASS_THROUGH=1`, also hands registers over blocks that do not
+  use them; it was slower on every benchmark tried, so it is off.
 - Code that reads and writes memory runs a little faster: the window address is loaded once per call chain instead of at every block
   (CoreMark: 2.8% fewer host instructions and about 2.4% fewer cycles, five alternating runs; no game has been timed).
 - `BIFROST_PROF` with `BIFROST_PC_HIST=1` also lists the hot loops of several blocks (`[carry]` lines): how much of the JIT time they take and how many

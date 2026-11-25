@@ -25,6 +25,10 @@ extern uint64_t calls(uint64_t n, uint64_t a);
 extern uint64_t walk_sum(const uint64_t *, uint64_t, uint64_t);
 // x0 = a, x1 = b, x2 = n: registers read first by one block come from three different predecessors.
 extern uint64_t merge(uint64_t a, uint64_t b, uint64_t n);
+// x0 = n, x1 = a, x2 = b: a register set before a chain of blocks that do not touch it, read by the last one.
+extern uint64_t passthru(uint64_t n, uint64_t a, uint64_t b);
+// x0 = n, x1..x3 = initial x4..x6: a block reads three registers that one predecessor writes and another leaves alone (partial coverage).
+extern uint64_t partial(uint64_t n, uint64_t a, uint64_t b, uint64_t c);
 
 static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); ++failures; } } while (0)
@@ -84,6 +88,28 @@ static uint64_t merge_c(uint64_t a, uint64_t b, uint64_t n) {
     return acc;
 }
 
+static uint64_t passthru_c(uint64_t n, uint64_t a, uint64_t b) {
+    uint64_t x12 = a + b, acc = 0;
+    for (; n; --n) {
+        uint64_t x5 = acc + b, x6 = x5 ^ (acc << 1), x7 = x6 + 3;
+        acc += x7;
+        acc += x12;
+        x12 += 1;
+    }
+    return acc ^ x12;
+}
+
+static uint64_t partial_c(uint64_t n, uint64_t a, uint64_t b, uint64_t c) {
+    uint64_t x4 = a, x5 = b, x6 = c;
+    for (; n; --n) {
+        if (n & 1) { x4 += 1; x5 += 7; x6 += 9; }
+        else x4 += 2;
+        const uint64_t x7 = x4 + x5 + x6;
+        x4 ^= x7;
+    }
+    return x4 ^ x5 ^ x6;
+}
+
 static const uint64_t values[] = {0, 1, 2, 0x7fffffffffffffffull, 0x8000000000000000ull, 0xffffffffffffffffull, 0x123456789abcdefull, 77};
 
 static void run_all(int rounds) {
@@ -96,6 +122,8 @@ static void run_all(int rounds) {
                 CHECK(swaps(n, a, b) == swaps_c(n, a, b), "swaps(%llu,%llx,%llx)", (unsigned long long)n, (unsigned long long)a, (unsigned long long)b);
                 CHECK(calls(n, a) == calls_c(n, a), "calls(%llu,%llx)", (unsigned long long)n, (unsigned long long)a);
                 CHECK(merge(a, b, n) == merge_c(a, b, n), "merge(%llx,%llx,%llu)", (unsigned long long)a, (unsigned long long)b, (unsigned long long)n);
+                CHECK(passthru(n, a, b) == passthru_c(n, a, b), "passthru(%llu,%llx,%llx)", (unsigned long long)n, (unsigned long long)a, (unsigned long long)b);
+                CHECK(partial(n, a, b, a ^ b) == partial_c(n, a, b, a ^ b), "partial(%llu,%llx,%llx)", (unsigned long long)n, (unsigned long long)a, (unsigned long long)b);
             }
         }
     }
@@ -256,4 +284,36 @@ __asm__(".text\n.align 4\n.global chain\n.type chain,%function\nchain:\n"
         " subs x2, x2, #1\n"
         " b.ne 1b\n"
         "9: mov x0, x6\n ret\n"
-        ".size merge,.-merge\n");
+        ".size merge,.-merge\n"
+        ".global passthru\n.type passthru,%function\npassthru:\n"
+        " add x12, x1, x2\n mov x4, #0\n"
+        " cbz x0, 9f\n"
+        "1: add x5, x4, x2\n"
+        " b 2f\n"
+        "2: eor x6, x5, x4, lsl #1\n"
+        " b 3f\n"
+        "3: add x7, x6, #3\n"
+        " add x4, x4, x7\n"
+        " b 4f\n"
+        "4: add x4, x4, x12\n"
+        " add x12, x12, #1\n"
+        " subs x0, x0, #1\n"
+        " b.ne 1b\n"
+        "9: eor x0, x4, x12\n ret\n"
+        ".size passthru,.-passthru\n"
+        ".global partial\n.type partial,%function\npartial:\n"
+        " mov x4, x1\n mov x5, x2\n mov x6, x3\n"
+        " cbz x0, 9f\n"
+        "1: tbz x0, #0, 3f\n"
+        " add x4, x4, #1\n"
+        " add x5, x5, #7\n"
+        " add x6, x6, #9\n"
+        " b 4f\n"
+        "3: add x4, x4, #2\n"
+        "4: add x7, x4, x5\n"
+        " add x7, x7, x6\n"
+        " eor x4, x4, x7\n"
+        " subs x0, x0, #1\n"
+        " b.ne 1b\n"
+        "9: eor x0, x4, x5\n eor x0, x0, x6\n ret\n"
+        ".size partial,.-partial\n");

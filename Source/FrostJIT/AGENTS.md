@@ -49,7 +49,10 @@ A new history section can make an older "not measured" or "next section" line wr
   the allocator (calls, SVC, `invalidate_all_vregs`), must call `rp_unbind`/`rp_unbind_all`; a block that is a loop (pins own R12-R15), compiles
   for the persistent cache, runs under `BIFROST_JIT_VERIFY` or starts a native libc routine has no copies and no register entry, and the block
   trace stays in front of an entry that would skip it. Everything after the entry loads (the pc store of a block that calls out, the statistics
-  count, the vector loads) runs on both entries. Verifying a change: a temporary compare of each layout entry with `cpu.regs[]` before every
+  count, the vector loads) runs on both entries. A partial-entry stub (`rp_emit_stubs`, compile time only: patch sites do not emit code) loads
+  entry registers from memory and jumps to the register entry, so the entry layout must list every register the block's exit layout may carry
+  that the block did not map itself. A register loaded only to be handed on (`BIFROST_REG_PASS_THROUGH=1`) must be one the block never touches
+  and a block that calls out gets none, because the call drops every copy. Verifying a change: a temporary compare of each layout entry with `cpu.regs[]` before every
   slot (a `cmp reg, [rbx+disp]; je; ud2` per entry, not kept) over the JIT tests and CoreMark found a layout recorded for the wrong slot.
   `jit_reg_pass` covers it.
 - `IR/` owns typed instructions, translation, scalar SSA, optimization and

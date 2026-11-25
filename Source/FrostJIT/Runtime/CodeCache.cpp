@@ -285,8 +285,8 @@ void FrostJIT::dump_code_cache_stats() {
     fprintf(stderr, "[JIT] MT publication: edges=%llu\n", (unsigned long long)mt_edges_published_.load());
     fprintf(stderr, "[JIT] side-exit blocks: %llu\n", (unsigned long long)side_exit_blocks.load());
     if (dbg().carry && !dbg().no_reg_pass)
-        fprintf(stderr, "[JIT] register passing: edges into the register entry=%llu, into a plain entry of a block that has one=%llu\n",
-                (unsigned long long)rp_edges_passed_.load(), (unsigned long long)rp_edges_plain_.load());
+        fprintf(stderr, "[JIT] register passing: edges into the register entry=%llu, into a partial-entry stub=%llu, into a plain entry of a block that has one=%llu\n",
+                (unsigned long long)rp_edges_passed_.load(), (unsigned long long)rp_edges_partial_.load(), (unsigned long long)rp_edges_plain_.load());
     if (dispatch_stats_enabled_) {
         fprintf(stderr, "[JIT] dispatch-cache: last=%llu way0=%llu way1=%llu table=%llu evictions=%llu sets=%d ways=2\n",
                 (unsigned long long)dispatch_last_hits_.load(std::memory_order_relaxed),
@@ -952,7 +952,7 @@ void FrostJIT::invalidate_all() {
     if (blocks_.empty()) return;
     for (const auto& kv : blocks_) retired_pcs_.insert(kv.first);
     if (mt_active()) {
-        blocks_.clear(); back_refs_.clear(); reg_pass_.clear();
+        blocks_.clear(); back_refs_.clear(); reg_pass_.clear(); reg_stubs_.clear();
         tls_last_block_ = LastBlockCache{};
         clear_inline_cache();
         return;
@@ -975,7 +975,7 @@ void FrostJIT::invalidate_all() {
     }
     blocks_.clear();
     back_refs_.clear();
-    reg_pass_.clear();
+    reg_pass_.clear(); reg_stubs_.clear();
     // Keep pending_call_sites_ (see invalidate_range rationale).
     tls_last_block_ = LastBlockCache{};
     clear_inline_cache();
@@ -1022,7 +1022,7 @@ void FrostJIT::enter_multithreaded() {
     }
     invalidate_dispatch_cache();
     for (const auto& kv : blocks_) retired_pcs_.insert(kv.first);
-    blocks_.clear(); back_refs_.clear(); reg_pass_.clear();
+    blocks_.clear(); back_refs_.clear(); reg_pass_.clear(); reg_stubs_.clear();
     code_index_.clear();
 }
 } // namespace arm64emu

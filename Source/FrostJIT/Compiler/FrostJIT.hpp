@@ -1436,7 +1436,10 @@ private:
     // alone (RAX holds the next pc, R11 is the MT cell jump's scratch), the callee-saved ones first because flag and call
     // sequences clobber the others.
     static constexpr int RP_HOSTS[8] = {R12, R13, R14, R15, R9, R8, RDX, RCX};
-    static constexpr int RP_MAX_ENTRIES = 4;
+    static constexpr int RP_MAX_ENTRIES = 4;  // registers a block reads first that its entry loads
+    static constexpr int RP_MAX_PASS = 2;     // registers it neither reads nor writes that its entry loads to hand on
+    static constexpr int RP_MAX_TOTAL = RP_MAX_ENTRIES + RP_MAX_PASS;
+    static constexpr int RP_MAX_STUBS = 4;
     static int rp_host_index(int host) {
         for (int i = 0; i < 8; i++) if (RP_HOSTS[i] == host) return i;
         return -1;
@@ -1464,7 +1467,10 @@ private:
     bool rp_pc_store_ = false;  // the register entry stores the block's pc itself (the block calls out)
     uint64_t rp_entry_layout_ = 0;
     int rp_entry_n_ = 0;
-    int rp_entry_guest_[RP_MAX_ENTRIES] = {}, rp_entry_host_[RP_MAX_ENTRIES] = {};
+    int rp_entry_guest_[RP_MAX_TOTAL] = {}, rp_entry_host_[RP_MAX_TOTAL] = {};
+    bool rp_entry_pass_[RP_MAX_TOTAL] = {};  // loaded only to be handed on: the block does not touch it
+    uint8_t rp_stub_loaded_[RP_MAX_STUBS] = {};  // for each partial-entry stub, the entry registers (bit i = entry i) it loads
+    int rp_stub_n_ = 0;
     // The host register each guest register should be left in or loaded to: where the translated successors of this block expect it,
     // else its canonical register (rp_host_for).
     int8_t rp_want_host_[31];
@@ -1500,14 +1506,26 @@ private:
     struct RegPass {
         uint64_t entry_layout = 0, exit_layout = 0, taken_layout = 0;
         uint32_t regs_entry_off = 0;  // code offset of the register entry, 0 when the block has none
+        uint32_t stub_first = 0;      // reg_stubs_ index of the partial-entry stubs
+        uint8_t stub_count = 0;
     };
+    // A partial-entry stub of a block: loads the entry registers in `loaded` (bit i = entry i of the entry layout) from cpu.regs[], then jumps
+    // into the register entry. An edge whose slot holds the other entry registers is patched to the stub that loads the fewest that covers
+    // what it lacks.
+    struct RegStub { uint32_t off; uint8_t loaded; };
+    std::vector<RegStub> reg_stubs_;
+    void rp_emit_stubs(size_t target_off);
+    std::vector<uint64_t> rp_pred_scratch_;
+    uint32_t rp_succ_want_ = 0;  // guest registers a translated successor of the block reads first
+    uint32_t rp_stub_first_ = 0;
+    int rp_pred_layouts(uint64_t pc, std::vector<uint64_t>& layouts) const;
     std::vector<RegPass> reg_pass_;
     const RegPass* reg_pass_of(const BlockEntry& e) const { return e.reg_pass ? &reg_pass_[e.reg_pass - 1] : nullptr; }
     uint32_t add_reg_pass(const RegPass& info) {
         reg_pass_.push_back(info);
         return static_cast<uint32_t>(reg_pass_.size());
     }
-    mutable std::atomic<uint64_t> rp_edges_passed_{0}, rp_edges_plain_{0};  // chain edges patched to the register entry, and to the plain one while the target had one
+    mutable std::atomic<uint64_t> rp_edges_passed_{0}, rp_edges_partial_{0}, rp_edges_plain_{0};  // chain edges patched to the register entry, and to the plain one while the target had one
     void select_arch_pins(const std::vector<IRInst>& instructions);
     bool rematerialize_vreg(int v, int reg);
     regalloc_stats_t regalloc_stats_;

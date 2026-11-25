@@ -276,12 +276,20 @@ they always did, and `BIFROST_NO_REG_PASS=1` turns it off.
   host register its already translated predecessors leave it in (a register none of them holds is loaded lazily as before), else the host register its
   translated successors expect, else the register's canonical host register. The pc store of a block that calls out, the statistics count and the vector
   loads sit after the entry loads and run on both entries; the block trace and a native libc entry sit before them, so such blocks have none.
+- **Partial entries.** An edge whose slot holds only some of the entry registers is patched to a stub of the successor that loads the missing ones
+  from `cpu.regs[]` and jumps into the register entry (`rp_emit_stubs`; `RegStub` in `reg_stubs_`). The successor emits one stub for each different
+  missing set among its translated predecessors (at most four), and an edge takes the stub that loads the fewest registers and covers what it lacks;
+  an edge nothing fits enters the plain entry. `BIFROST_NO_REG_PASS_PARTIAL=1` turns the stubs off.
+- **Pass-through (`BIFROST_REG_PASS_THROUGH=1`, off by default).** A block that does not call out may also load up to two registers it never touches,
+  only to hand them on: the ones its translated successors read first, then the ones every predecessor slot holds in one host register. They
+  stay mapped to the exit, so a register read three blocks down needs no load in the two between. It is off because it measured as a loss
+  ([history](archive/JIT-history.md#register-passing-partial-entries-and-pass-through-2026-11-24)): the plain and stub entries pay the extra loads.
 - **Results.** The temporary that is finally stored to a guest register is defined in the host register its translated successors expect
   (`rp_prepare_hints`), when that register is free or holds a copy nothing reads again.
 - **Patching.** `chain_target_for` picks the entry at every patch site (`try_chain_block`, `chain_back_references`, `refresh_mt_edges`): the register
   entry when the slot's layout covers the entry layout exactly, the plain chain entry otherwise. A later translation of either block patches again, so
   a layout never outlives the code it describes. MT cells hold the chosen address like any other target.
-- **Where it does not apply.** Loops, blocks that call out before their reads, `BIFROST_JIT_VERIFY`, the persistent cache while it records, indirect
+- **Where it does not apply.** Loops (pins own R12-R15, and their entry loads run once per entry), blocks that call out before their reads, `BIFROST_JIT_VERIFY`, the persistent cache while it records, indirect
   exits (IBL probes enter the plain entry), calls and returns.
 
 `jit_reg_pass` (`Tests/Unit/jit_reg_pass.c`) runs block chains, a diamond, register moves, a call in a chain, a merge and a faulting loop against C,

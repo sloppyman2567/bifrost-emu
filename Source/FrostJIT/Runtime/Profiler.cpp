@@ -250,6 +250,7 @@ void FrostJIT::flush_cache() {
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     blocks_.clear();
     reg_pass_.clear();
+    reg_stubs_.clear();
     side_stubs_.clear();
     side_exit_table_.clear();
     code_index_.clear();

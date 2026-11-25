@@ -2,6 +2,40 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Register passing: partial entries and pass-through (2026-11-24)
+
+The two things the first register-passing write-up (below) left undone: an edge that covers only some of a successor's entry registers, and a
+register that neither block of an edge touches. Both are in; partial entries are on, pass-through is opt-in (`BIFROST_REG_PASS_THROUGH=1`) because it
+measured as a loss.
+
+Partial entries: the successor emits, at compile time, one stub for each different set of entry registers its translated predecessors lack (at most four).
+A stub loads those from `cpu.regs[]` and jumps into the register entry; an edge takes the stub that loads the fewest registers and covers what it lacks.
+Stubs at compile time, not at patch time, so no patch site (single-thread slots, MT cells, the dispatcher's back-reference patch) has to append to the
+code buffer under whichever lock it holds. On CoreMark 12 to 21 edges use one (of about 430), so the instruction count does not move: 17.5846 G with and without.
+
+Pass-through: up to two registers the block never touches are loaded at its entry and kept to the exit, taken first from what its translated successors
+read first and then from what its predecessors hold. CoreMark, 20,000 iterations, one pinned core, five alternating rounds of four variants, host
+instructions: registers only (the previous commit) 17.5846 G; with partial entries 17.5846 G; with pass-through 17.6611 G (+0.43%); the loose form
+(any register one predecessor holds) was 17.7637 G (+1.0%) and the successor-driven form alone +0.06%. Cycles best of five: off 4.698 G, registers
+only 4.479 G, partial 4.554 G, pass-through 4.533 G (the spread between runs of one variant is about 0.15 G, so only the instruction counts are
+trusted). A guess pays on every edge that lacks the register (a stub or plain entry loads something the block never reads) and widens the entry
+layout so later predecessors miss it; it wins only when a later block reads the register on every path.
+
+Why there is little left to win here: `BIFROST_PROF` on CoreMark puts the entry code at 2 to 6% of the JIT samples with register passing, against a body
+whose "guest state moves" are 46% of its time, and CoreMark's hot code is loops, whose pins preload once per loop entry and which register passing does
+not touch. The loads at block entry were never the largest part; the stores after each guest write are, and deferring them was tried (see the Carry
+formation entry) and lost.
+
+Other workloads, host instructions including start-up, `BIFROST_NO_REG_PASS=1` against the default: `bench_fib` -1.5%, `bench_sort` +0.1%, `bench_mips`
++0.05%, `bench_memcpy` +0.1%, `bench_matrix` +0.4%, and +0.9% to +1.7% for the 130 to 170 million instruction runs (`json_test`, `jpegdec_t`, `bst_test`,
+`hashtable_test`, `heap_stress`, `inflate_static`). Those are mostly translation: `jpegdec_t` compiles 247 blocks in 2.75 ms without register passing and
+3.1 to 3.3 ms with it (about 1.5 us more per block). Pass-through adds about 0.1% more on each.
+
+Checked with the compare-and-trap build (a layout entry against `cpu.regs[]` before every slot): the 57 JIT tests, `jit_reg_pass` (two new shapes: a register
+handed over three blocks that do not touch it, and a block whose predecessors hold different parts of its entry registers) and 143 toybox, real-world and
+integration tests, with and without `BIFROST_REG_PASS_THROUGH=1`. Not checked: a game, where pass-through might behave differently from the
+benchmarks above.
+
 ## Register passing between chained blocks (2026-11-24)
 
 The piece the Carry formation write-up below left open: a successor that receives the registers its predecessor holds in host registers skips the
@@ -35,8 +69,8 @@ Checked: `Scripts/Testing/verify_jit.sh` (112 differential fixtures, 14 threaded
 compare-and-trap build; with that build the toybox, real-world and integration tests pass (143) apart from the four SDL/GL tests that also fail on a
 headless baseline build, and the ART bootstrap (`test_android_jni.py`) creates its VM. Not checked: a game, the persistent cache with the feature on
 (blocks with a register entry are not recorded), other hosts. Per block: `BlockEntry` keeps its size (144 bytes); a `RegPass` side-table entry is 32 bytes
-for each block that has a register entry or a layout. Not done: partial coverage (an edge that covers some of a successor's entry registers still
-loads all of them), loops (their pins preload at entry), and passing a register across a block that does not touch it.
+for each block that has a register entry or a layout. Not done here (see [the follow-up](#register-passing-partial-entries-and-pass-through-2026-11-24)):
+partial coverage and passing a register across a block that does not touch it. Still not done: loops (their pins preload at entry).
 
 ## Carry formation behind BIFROST_CARRY, and what did not help (2026-11-24)
 

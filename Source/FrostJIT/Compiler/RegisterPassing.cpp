@@ -35,18 +35,10 @@ static bool rp_straight_line(IROp op) {
     }
 }
 
-// The host registers the translated predecessors of `pc` leave guest registers in: host_of[g] is the host register of the first one
-// that holds g, or -1. Single-thread code finds its predecessors through back_refs_, multithreaded code through its edge cells.
-// Returns how many predecessor slots were found.
-int FrostJIT::rp_pred_hosts(uint64_t pc, int8_t host_of[31]) const {
-    int found = 0;
-    for (int g = 0; g < 31; g++) host_of[g] = -1;
-    auto take = [&](uint64_t layout) {
-        for (int i = 1; i <= static_cast<int>(layout & 0xFF); i++) {
-            const uint8_t entry = static_cast<uint8_t>(layout >> (8 * i));
-            if (host_of[entry >> 3] < 0) host_of[entry >> 3] = static_cast<int8_t>(RP_HOSTS[entry & 7]);
-        }
-    };
+// The layouts the translated predecessor slots of `pc` leave (0 for a slot that leaves none). Single-thread code finds its
+// predecessors through back_refs_, multithreaded code through its edge cells. Returns how many slots were found.
+int FrostJIT::rp_pred_layouts(uint64_t pc, std::vector<uint64_t>& layouts) const {
+    layouts.clear();
     if (mt_active()) {
         const auto refs = mt_edge_refs_.find(pc);
         if (refs == mt_edge_refs_.end()) return 0;
@@ -55,13 +47,13 @@ int FrostJIT::rp_pred_hosts(uint64_t pc, int8_t host_of[31]) const {
             const auto source = blocks_.find(edge->source_pc);
             if (source == blocks_.end()) continue;
             const BlockEntry& e = source->second;
-            ++found;
             const RegPass* info = reg_pass_of(e);
-            if (!info) continue;
-            if (edge->slot == e.chain_patch_off) take(info->exit_layout);
-            else if (e.has_taken_chain_slot && edge->slot == e.taken_chain_patch_off) take(info->taken_layout);
+            uint64_t layout = 0;
+            if (info && edge->slot == e.chain_patch_off) layout = info->exit_layout;
+            else if (info && e.has_taken_chain_slot && edge->slot == e.taken_chain_patch_off) layout = info->taken_layout;
+            layouts.push_back(layout);
         }
-        return found;
+        return static_cast<int>(layouts.size());
     }
     const auto refs = back_refs_.find(pc);
     if (refs == back_refs_.end()) return 0;
@@ -69,12 +61,24 @@ int FrostJIT::rp_pred_hosts(uint64_t pc, int8_t host_of[31]) const {
         const auto source = blocks_.find(key);
         if (source == blocks_.end()) continue;
         const BlockEntry& e = source->second;
-        ++found;
         const RegPass* info = reg_pass_of(e);
-        if (!info) continue;
-        if (e.chain_target_pc == pc) take(info->exit_layout);
-        if (e.has_taken_chain_slot && e.taken_chain_target_pc == pc) take(info->taken_layout);
+        if (e.chain_target_pc == pc) layouts.push_back(info ? info->exit_layout : 0);
+        if (e.has_taken_chain_slot && e.taken_chain_target_pc == pc) layouts.push_back(info ? info->taken_layout : 0);
     }
+    return static_cast<int>(layouts.size());
+}
+
+// The host registers the translated predecessors of `pc` leave guest registers in: host_of[g] is the host register of the first one
+// that holds g, or -1. Returns how many predecessor slots were found.
+int FrostJIT::rp_pred_hosts(uint64_t pc, int8_t host_of[31]) const {
+    for (int g = 0; g < 31; g++) host_of[g] = -1;
+    std::vector<uint64_t> layouts;
+    const int found = rp_pred_layouts(pc, layouts);
+    for (uint64_t layout : layouts)
+        for (int i = 1; i <= static_cast<int>(layout & 0xFF); i++) {
+            const uint8_t entry = static_cast<uint8_t>(layout >> (8 * i));
+            if (host_of[entry >> 3] < 0) host_of[entry >> 3] = static_cast<int8_t>(RP_HOSTS[entry & 7]);
+        }
     return found;
 }
 
@@ -83,14 +87,49 @@ int FrostJIT::rp_pred_hosts(uint64_t pc, int8_t host_of[31]) const {
 // qualify (a register no predecessor holds would make every edge from them miss the entry, and loads lazily as it always did),
 // each in the host register they leave it in; with none, the first ones read, in the host register the successors want. No two
 // share a host register.
+//
+// Then up to RP_MAX_PASS registers the block does not touch at all, loaded only to be handed on: the ones its translated successors
+// read first (in the host register they expect), else ones its predecessors hold. They are kept to the exit like any copy, so a
+// register read three blocks down needs no load in the two between. Not for a block that calls out (the call drops every copy).
+//
+// Last, the partial-entry stubs: for each translated predecessor that holds some but not all of the entry registers, the loads of
+// the ones it lacks (at most RP_MAX_STUBS different sets).
 void FrostJIT::rp_select_entry(const IRBlock& block, uint64_t start_pc) {
     rp_entry_layout_ = 0;
     rp_entry_n_ = 0;
+    rp_stub_n_ = 0;
+    std::vector<uint64_t>& pred_layouts = rp_pred_scratch_;
+    const bool have_preds = rp_pred_layouts(start_pc, pred_layouts) > 0;
     int8_t pred_host[31];
-    const bool have_preds = rp_pred_hosts(start_pc, pred_host) > 0;
+    for (int g = 0; g < 31; g++) pred_host[g] = -1;
+    for (uint64_t layout : pred_layouts)
+        for (int i = 1; i <= static_cast<int>(layout & 0xFF); i++) {
+            const uint8_t entry = static_cast<uint8_t>(layout >> (8 * i));
+            if (pred_host[entry >> 3] < 0) pred_host[entry >> 3] = static_cast<int8_t>(RP_HOSTS[entry & 7]);
+        }
+    // The registers every translated predecessor slot holds, in one host register: handing one of those on costs no edge a load.
+    const bool pass_through = have_preds && dbg().reg_pass_through;
+    int8_t all_host[31];
+    if (pass_through) for (int g = 0; g < 31; g++) all_host[g] = -1;
+    if (pass_through) {
+        for (int g = 0; g < 31; g++) {
+            int host = -2;
+            for (uint64_t layout : pred_layouts) {
+                int here = -1;
+                for (int i = 1; i <= static_cast<int>(layout & 0xFF); i++) {
+                    const uint8_t entry = static_cast<uint8_t>(layout >> (8 * i));
+                    if ((entry >> 3) == g) here = RP_HOSTS[entry & 7];
+                }
+                if (here < 0 || (host != -2 && host != here)) { host = -1; break; }
+                host = here;
+            }
+            all_host[g] = static_cast<int8_t>(host == -2 ? -1 : host);
+        }
+    }
     bool seen[32] = {};
     unsigned used_hosts = 0;
-    for (size_t i = 0; i < block.insts.size() && rp_entry_n_ < RP_MAX_ENTRIES; i++) {
+    int reads = 0;
+    for (size_t i = 0; i < block.insts.size() && reads < RP_MAX_ENTRIES; i++) {
         const IRInst& inst = block.insts[i];
         if (!rp_straight_line(inst.op)) break;
         if (inst.op == IROp::LOAD_REG) {
@@ -102,7 +141,9 @@ void FrostJIT::rp_select_entry(const IRBlock& block, uint64_t start_pc) {
             used_hosts |= 1u << host;
             rp_entry_guest_[rp_entry_n_] = inst.src1;
             rp_entry_host_[rp_entry_n_] = host;
+            rp_entry_pass_[rp_entry_n_] = false;
             ++rp_entry_n_;
+            ++reads;
             rp_entry_layout_ = rp_layout_add(rp_entry_layout_, inst.src1, host);
         } else if (inst.op == IROp::STORE_REG) {
             if (!inst.is_fp_store() && inst.dest < 32) seen[inst.dest] = true;
@@ -110,6 +151,72 @@ void FrostJIT::rp_select_entry(const IRBlock& block, uint64_t start_pc) {
         } else if (writes_arch_gpr_directly(inst)) {
             seen[inst.dest] = true;
         }
+    }
+    // Registers to hand on.
+    uint32_t touched = 0;
+    bool calls = !pass_through;
+    for (const IRInst& inst : block.insts) {
+        if (!pass_through) break;
+        switch (inst.op) {
+            case IROp::SVC: case IROp::BR: case IROp::BL_CALL: case IROp::BLR_CALL: case IROp::CALL_INTERP: calls = true; break;
+            case IROp::LOAD_REG: if (!inst.is_fp_load() && inst.src1 < 32) touched |= 1u << inst.src1; break;
+            case IROp::STORE_REG:
+                if (!inst.is_fp_store() && inst.dest < 32) touched |= 1u << inst.dest;
+                if (inst.src1 < 32) touched |= 1u << inst.src1;
+                break;
+            default: if (writes_arch_gpr_directly(inst)) touched |= 1u << inst.dest; break;
+        }
+    }
+    int passed = 0;
+    if (!calls) {
+        for (int pass = 0; pass < 2 && passed < RP_MAX_PASS; pass++) {  // successors' needs first, then what the predecessors hold
+            for (int g = 0; g < 31 && passed < RP_MAX_PASS; g++) {
+                if ((touched >> g) & 1) continue;
+                int host = -1;
+                if (all_host[g] < 0) continue;  // some predecessor slot lacks it: that edge would load a register nothing here reads
+                if (pass == 0 && ((rp_succ_want_ >> g) & 1)) host = all_host[g];
+                else if (pass == 1) host = all_host[g];
+                if (host < 0 || (used_hosts & (1u << host))) continue;
+                bool in_entry = false;
+                for (int e = 0; e < rp_entry_n_; e++) in_entry |= rp_entry_guest_[e] == g;
+                if (in_entry) continue;
+                used_hosts |= 1u << host;
+                rp_entry_guest_[rp_entry_n_] = g;
+                rp_entry_host_[rp_entry_n_] = host;
+                rp_entry_pass_[rp_entry_n_] = true;
+                ++rp_entry_n_;
+                ++passed;
+                rp_entry_layout_ = rp_layout_add(rp_entry_layout_, g, host);
+            }
+        }
+    }
+    // Partial-entry stubs.
+    const unsigned all = (1u << rp_entry_n_) - 1;
+    for (uint64_t layout : pred_layouts) {
+        unsigned covered = 0;
+        for (int e = 0; e < rp_entry_n_; e++) {
+            const uint8_t want = static_cast<uint8_t>(((rp_entry_guest_[e] << 3) | rp_host_index(rp_entry_host_[e])));
+            for (int j = 1; j <= static_cast<int>(layout & 0xFF); j++)
+                if (static_cast<uint8_t>(layout >> (8 * j)) == want) covered |= 1u << e;
+        }
+        const unsigned missing = all & ~covered;
+        if (!covered || !missing || rp_stub_n_ >= RP_MAX_STUBS || dbg().no_reg_pass_partial) continue;
+        bool known = false;
+        for (int k = 0; k < rp_stub_n_; k++) known |= rp_stub_loaded_[k] == missing;
+        if (!known) rp_stub_loaded_[rp_stub_n_++] = static_cast<uint8_t>(missing);
+    }
+}
+
+// The partial-entry stubs of the block just compiled: each loads the entry registers of one set from cpu.regs[] and jumps to the
+// register entry at `target_off`. Their count and first index go to the RegPass of the block.
+void FrostJIT::rp_emit_stubs(size_t target_off) {
+    for (int k = 0; k < rp_stub_n_; k++) {
+        const size_t off = code_buf_used_;
+        for (int e = 0; e < rp_entry_n_; e++)
+            if ((rp_stub_loaded_[k] >> e) & 1) emit_load_arm(rp_entry_host_[e], rp_entry_guest_[e]);
+        const size_t jump = emit_jmp_rel32_placeholder();
+        patch_jmp_rel32(jump, static_cast<int32_t>(static_cast<int64_t>(target_off) - static_cast<int64_t>(jump + 5)));
+        reg_stubs_.push_back({static_cast<uint32_t>(off), rp_stub_loaded_[k]});
     }
 }
 
@@ -125,6 +232,7 @@ void FrostJIT::rp_clear_hints() {
 void FrostJIT::rp_prepare_hints(const IRBlock& block, uint64_t start_pc) {
     rp_clear_hints();
     for (int g = 0; g < 31; g++) rp_want_host_[g] = static_cast<int8_t>(rp_host_for(g));
+    rp_succ_want_ = 0;
     // The static successors: both ends of a conditional branch, the target of a direct one, else the next block in memory.
     uint64_t targets[2];
     int target_count = 0;
@@ -147,6 +255,7 @@ void FrostJIT::rp_prepare_hints(const IRBlock& block, uint64_t start_pc) {
         for (int i = 1; i <= static_cast<int>(info->entry_layout & 0xFF); i++) {
             const uint8_t entry = static_cast<uint8_t>(info->entry_layout >> (8 * i));
             rp_want_host_[entry >> 3] = static_cast<int8_t>(RP_HOSTS[entry & 7]);
+            rp_succ_want_ |= 1u << (entry >> 3);
         }
     }
     for (const IRInst& inst : block.insts) {
@@ -260,9 +369,30 @@ const uint8_t* FrostJIT::chain_target_for(const BlockEntry& source, size_t slot,
     uint64_t layout = 0;
     if (have && slot == source.chain_patch_off) layout = have->exit_layout;
     else if (have && source.has_taken_chain_slot && slot == source.taken_chain_patch_off) layout = have->taken_layout;
-    if (layout && rp_layout_covers(layout, want->entry_layout)) {
+    // Which entry registers the slot leaves in the host registers the entry expects.
+    const int n = static_cast<int>(want->entry_layout & 0xFF);
+    unsigned covered = 0;
+    for (int e = 0; e < n; e++) {
+        const uint8_t wanted = static_cast<uint8_t>(want->entry_layout >> (8 * (e + 1)));
+        for (int j = 1; j <= static_cast<int>(layout & 0xFF); j++)
+            if (static_cast<uint8_t>(layout >> (8 * j)) == wanted) covered |= 1u << e;
+    }
+    const unsigned all = (1u << n) - 1;
+    if (covered == all) {
         ++rp_edges_passed_;
         return code_buf_ + want->regs_entry_off;
+    }
+    if (covered) {  // the stub that loads the fewest registers and covers every one the slot lacks
+        const RegStub* best = nullptr;
+        for (int k = 0; k < want->stub_count; k++) {
+            const RegStub& stub = reg_stubs_[want->stub_first + k];
+            if ((stub.loaded & (all & ~covered)) != (all & ~covered)) continue;
+            if (!best || __builtin_popcount(stub.loaded) < __builtin_popcount(best->loaded)) best = &stub;
+        }
+        if (best) {
+            ++rp_edges_partial_;
+            return code_buf_ + best->off;
+        }
     }
     ++rp_edges_plain_;
     return plain;

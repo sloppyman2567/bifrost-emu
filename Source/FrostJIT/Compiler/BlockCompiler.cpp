@@ -144,6 +144,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     rp_entry_ = false;
     rp_entry_layout_ = 0;
     rp_entry_n_ = 0;
+    rp_stub_n_ = 0;
     regs_entry_off_ = 0;
     regs_entry_pc_off_ = SIZE_MAX;
     rp_taken_layout_ = 0;
@@ -1040,7 +1041,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     scan_covered_guards(ir_block.insts);
     scan_pin_inplace(ir_block.insts);
     // A clean copy of a guest register is read at the LOAD_REGs of it: the allocator must see those uses, or it evicts the copy first.
+    // A register loaded only to be handed on is wanted until the exit, which keeps a result's hint from taking its host register.
     if (rp_mirrors_) {
+        for (int e = 0; e < rp_entry_n_; e++)
+            if (rp_entry_pass_[e] && !ir_block.insts.empty())
+                note_vreg_use(static_cast<uint16_t>(rp_entry_guest_[e]), static_cast<uint16_t>(ir_block.insts.size() - 1));
         for (size_t i = 0; i < ir_block.insts.size(); i++) {
             const IRInst& inst = ir_block.insts[i];
             if (inst.op == IROp::LOAD_REG && !inst.is_fp_load() && inst.src1 <= 30)
@@ -1393,6 +1398,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         patch_jmp_rel32(jump, static_cast<int32_t>(static_cast<int64_t>(regs_entry_off_) - static_cast<int64_t>(jump + 5)));
         regs_entry_publish = regs_entry_pc_off_;
     }
+    rp_stub_first_ = static_cast<uint32_t>(reg_stubs_.size());
+    if (rp_entry_) rp_emit_stubs(regs_entry_publish);
     // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
     // Counts the spill/reload instruction density of THIS block. A high
     // reload:spill ratio for the same vreg within a block is the bloat
@@ -1462,6 +1469,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         if (rp_entry_ && chain_skip_enabled()) {
             info.regs_entry_off = static_cast<uint32_t>(regs_entry_publish);
             info.entry_layout = rp_entry_layout_;
+            info.stub_first = rp_stub_first_;
+            info.stub_count = static_cast<uint8_t>(rp_stub_n_);
         }
         info.exit_layout = rp_exit_layout;
         info.taken_layout = has_taken_chain_slot_ ? rp_taken_layout_ : 0;
