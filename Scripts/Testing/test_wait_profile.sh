@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # BIFROST_PROF's waiting report charges each guest thread's time to the kind of call it spent it in: a sleeping,
 # futex-waiting, polling and pipe-reading thread to sleep, futex, poll and io, a computing one to cpu. Run with the
-# JIT and with --no-jit; without BIFROST_PROF nothing is printed.
+# JIT and with --no-jit; without BIFROST_PROF nothing is printed. Translation time is counted with the JIT and is zero without it.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -30,6 +30,11 @@ for mode in "jit" "no-jit"; do
     want "a polling thread's time is poll" w-poll poll
     want "a thread blocked on a pipe is inside io" w-io io
     want "a computing thread is on the cpu" w-spin cpu
+    translating=$(sed -n 's/.*; translating \([0-9.]*\) s, waiting to translate .*/\1/p' <<<"$report")
+    spent=$(awk '/\]   tid / && match($0, /jit: translating [0-9.]+%/) { s = substr($0, RSTART + 17, RLENGTH - 18); if (s + 0 > 0) n++ } END { print n + 0 }' <<<"$report")
+    if [[ -n $translating ]] && { [[ $mode = jit && $spent -gt 0 ]] || [[ $mode = no-jit && $spent -eq 0 && $translating = 0.0 ]]; }; then
+        echo "PASS $mode translation time ($translating s, $spent threads)"
+    else echo "FAIL $mode translation time (got '${translating:-nothing}', $spent threads)"; fail=1; fi
     # CPU time is counted from the thread's first syscall, like its lifetime: startup work before it must not push a share past 100%.
     over=$(awk '/\]   tid / { for (i = 1; i <= NF; i++) if ($i == "cpu") { v = $(i + 1); gsub(/[%,|]/, "", v); if (v + 0 > 105) print $0 } }' <<<"$report")
     if [[ -z $over ]]; then echo "PASS $mode no thread has a cpu share past 100%"; else echo "FAIL $mode cpu share past 100%: $over"; fail=1; fi

@@ -360,8 +360,12 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
 1. **Translation cost.** Translating the ART bootstrap now takes about half the time (1,056 to about 500 ms; the startup 1.57 s to
    1.02 s, [details](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
    Left in the profile: `translate_block` itself (7.6%), `optimize_ir` (6.8%), the guard bookkeeping (2.7%: every deferred guard
-   copies a ~460-byte `GuardState`), the vector and FP cache scans and `remember_code_granules` (about 2% each). Not measured: a game,
-   or several threads compiling at once. Open: whether Tier-1 should run SSA on hot blocks only (about 2% of CoreMark's cycles).
+   copies a ~460-byte `GuardState`), the vector and FP cache scans and `remember_code_granules` (about 2% each). Measured 2026-11-25
+   ([details](archive/JIT-history.md#translation-in-several-threads-measured-2026-11-25)): repeats are not worth chasing (games recompile 2-3% of their blocks
+   while loading; the purge at the first thread costs the Android start-up 4% CPU and no wall time), but MT code compiles one block at a
+   time, and while loading SpongeBob and Battle Cats the threads waited for that 1.2 to 2 times as long as they compiled. Next: a
+   `BIFROST_PROF` run of a game's start (the report now shows translating and waiting per thread) to see whether the game's own threads are the
+   ones waiting; if so, compiling several blocks at once, and then the table growth that stops everyone for 10-30 ms. Open: whether Tier-1 should run SSA on hot blocks only (about 2% of CoreMark's cycles).
 2. **State moves and copies around the arithmetic.** Real FP math is 2-7% of the generated ops in games and in the game-style
    kernels; the rest is moving guest state, copying vector registers and checking results. One track, in three parts:
    - *Inside a block* (game-style kernels, 2026-11-23): XMM moves and zeroing are 28-36% of the generated ops, vector state

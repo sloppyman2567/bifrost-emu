@@ -22,6 +22,7 @@
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "FrostJIT/Runtime/Generations.hpp"
 #include "System/Core/Emulator.hpp"
+#include "System/Core/WaitProfile.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
 #include "FrostJIT/Runtime/Preemption.hpp"
@@ -104,7 +105,30 @@ bool FrostJIT::translate_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     if (renewal_wanted()) emu.renew_jit(this);
     return found;
 }
+namespace {
+// BIFROST_PROF: splits one compile_entry call into waiting for locks and translating, for the thread's waiting report.
+class TranslationClock {
+public:
+    TranslationClock() : on_(dbg().cpu_profile) { if (on_) start_ = std::chrono::steady_clock::now(); }
+    ~TranslationClock() {
+        if (!on_) return;
+        const uint64_t total = elapsed_ns(start_);
+        wait_prof_note_translation(total - wait_ns_, wait_ns_);
+    }
+    template <class Lock> void wait(Lock&& lock) {
+        if (!on_) { lock(); return; }
+        const auto from = std::chrono::steady_clock::now();
+        lock();
+        wait_ns_ += elapsed_ns(from);
+    }
+private:
+    const bool on_;
+    std::chrono::steady_clock::time_point start_;
+    uint64_t wait_ns_ = 0;
+};
+}  // namespace
 bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
+    TranslationClock clock;
     auto copy_locked = [&] {
         auto it = blocks_.find(pc);
         if (it == blocks_.end()) return false;
@@ -114,7 +138,7 @@ bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     if (!mt_active()) {
         // ST code patches published instructions and toggles W^X; keep the
         // whole compile under the exclusive lock.
-        lock_table();
+        clock.wait([&] { lock_table(); });
         if (!copy_locked()) translate_block(emu, pc);
         const bool found = copy_locked();
         blocks_mutex_.unlock();
@@ -124,12 +148,14 @@ bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     // Codegen only reads blocks_; the edge/counter metadata it appends is
     // read by exclusive-lock holders, which cannot run until it finishes.
     std::unique_lock<std::mutex> compiling(compile_mutex_, std::defer_lock);
-    if (!compiling.try_lock()) {
-        const auto start = std::chrono::steady_clock::now();
-        compiling.lock();
-        table_lock_wait_ns.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
-    }
-    lock_table_shared();
+    clock.wait([&] {
+        if (!compiling.try_lock()) {
+            const auto start = std::chrono::steady_clock::now();
+            compiling.lock();
+            table_lock_wait_ns.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
+        }
+        lock_table_shared();
+    });
     if (copy_locked()) { blocks_mutex_.unlock_shared(); return true; }
     {
         std::lock_guard<std::mutex> g(compile_invalidations_mu_);
@@ -146,7 +172,7 @@ bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     const size_t edge_end = mt_edges_.size();
     blocks_mutex_.unlock_shared();
     tier1_shared_compiles.fetch_add(1, std::memory_order_relaxed);
-    lock_table();
+    clock.wait([&] { lock_table(); });
     shared_compile_active_.store(false, std::memory_order_relaxed);
     const bool raced = blocks_.count(pc) != 0;
     const bool stale = staged_ && staged_entry_invalidated(pc);

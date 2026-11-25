@@ -2,6 +2,31 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Translation in several threads, measured (2026-11-25)
+
+Question: is translation time worth hunting? Nothing in the JIT's code generation changed; the waiting report of `BIFROST_PROF` gained
+translating and waiting per thread (`wait_prof_note_translation`).
+
+- **Repeats.** ART JNI bootstrap (window-free, Carry on): 65,334 blocks translated, 33,929 alive at the end. The guest's own code
+  changes retire 285; the table purge in `enter_multithreaded` drops the rest (45,364 blocks). 11,617 of those are translated again
+  and 2,470 others are (Carry's flips, unmaps): 14,087 recompiles, the others never run again. A throwaway build that starts an Android
+  process in MT mode (no purge) has 2,551 recompiles, 552 ms of compile time against 684 and 16% less code, but the same wall time (1.289 s against
+  1.294 s, six alternating runs) and 4% less user time, so it was not kept.
+- **Games recompile almost nothing.** Counters from saved logs, first report interval: SpongeBob loading (2026-11-24, two sessions)
+  774,150 and 1,014,199 blocks, 1.6% and 1.9% recompiles, 8.0 and 8.3 s compile, **13.5 and 16.4 s of lock wait**, longest compile 77 and 74 ms; Battle
+  Cats (2026-10-24, older code, three sessions) 590k to 675k blocks, about 3%, 9.6 to 10.0 s, 11.8 to 13.2 s of wait. Both are sums over threads, and
+  the wait is wall time, not CPU.
+- **Why threads wait.** MT compiles are serialized by `compile_mutex_`. A guest test (throwaway: N threads, each calling 80,000/N distinct
+  generated functions once, about 200k blocks) takes 1.0 s with one thread (ST) and 1.37, 1.46 and 1.52 s with 2, 4 and 8, for 1.0 to 1.1 s of
+  compiling. With 8 threads: compiling 1.19 s, publishing 0.19 s, mutex wait 10.8 s, shared and exclusive table waits 6 ms each. Only 700 to
+  5,900 acquisitions are contended, about 2 ms each: `std::mutex` is not fair and the thread that releases it takes it again.
+  Spinning before sleeping gave 6 to 15% at 2 and 4 threads, 4 to 8% at 8, for more CPU, and was not kept. 8 to 10 compiles or publications take over 2 ms (74 to 91 ms
+  together); growth of the `unordered_map` tables is the suspect, not shown.
+- **Not known:** which threads of a game wait. A UnityMain that translates its own code gains nothing from compiling in parallel; one that
+  waits behind ART's verifier does. Dispatch in the SIGPROF split also holds syscalls, helpers and thunks, so it is not the dispatcher's cost.
+
+Checks: `test_wait_profile.sh` (JIT and `--no-jit`), the guest test's report, and its wall time with and without the change (no difference).
+
 ## Carry on by default (2026-11-25)
 
 The maintainer decided it. `BIFROST_CARRY` unset or anything but `0` is on (before, any value turned it on and unset was off), an app's

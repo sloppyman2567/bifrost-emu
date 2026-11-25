@@ -1601,8 +1601,8 @@ also prints, for each guest thread, how long it spent inside guest syscalls by k
 (`System/Core/WaitProfile.*`):
 
 ```
-[bifrost-emu] waiting, 6 thread(s), 3.6 thread-seconds alive, cpu 0.6 s: blocked in futex 0.6 s, poll 0.6 s, sleep 1.2 s; inside io 0.6 s, ...
-[bifrost-emu]   tid 3 "w-futex": alive 0.6 s, cpu 0.1% | blocked: futex 99.9% poll 0.0% sleep 0.0% | inside: io 0.0% ioctl 0.0% thunk 0.0% other 0.0%
+[bifrost-emu] waiting, 6 thread(s), 3.6 thread-seconds alive, cpu 0.6 s: blocked in futex 0.6 s, poll 0.6 s, sleep 1.2 s; inside io 0.6 s, ...; translating 0.0 s, waiting to translate 0.0 s
+[bifrost-emu]   tid 3 "w-futex": alive 0.6 s, cpu 0.1% | blocked: futex 99.9% poll 0.0% sleep 0.0% | inside: io 0.0% ioctl 0.0% thunk 0.0% other 0.0% | jit: translating 0.1% waiting 0.0%, longest 0.0 ms
 ```
 
 The percentages are shares of the thread's lifetime, counted from its first syscall; the busiest 12 threads by CPU time are listed.
@@ -1610,7 +1610,9 @@ The percentages are shares of the thread's lifetime, counted from its first sysc
 `clock_nanosleep`) are time blocked. **io** (`read`, `write`, their vectored and socket forms, `connect`, `accept`), **ioctl**
 (Binder transactions are ioctls), **thunk** (the GL, EGL, SDL and audio thunks, where a buffer swap waits for the display) and
 **other** are time inside the call, work and waiting together, so they overlap the CPU share. A thread whose CPU share and
-blocked shares are both low is waiting somewhere the report does not see: a lock in the emulator itself, or being scheduled out.
+blocked shares are both low is waiting somewhere the report does not see: another lock in the emulator, or being scheduled out.
+**translating** is the thread's own translation and publication (CPU time too), **waiting** its wait for the compiler and the block
+table, and **longest** its longest such wait. One thread compiles at a time, so a thread that needs one block waits behind the others' blocks.
 **Stall lines.** A freeze is one long wait, which totals hide. Any single call that takes a second or more on a *busy* thread (one
 that spent at least 5% of its lifetime on the CPU, so not a pool worker that sleeps until it is needed) prints one line when it ends,
 with the time of day in the form of Android's log lines, so it lines up with the app's own log:
@@ -1750,6 +1752,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Translation in several threads, measured (2026-11-25)](archive/JIT-history.md#translation-in-several-threads-measured-2026-11-25)
 - [Carry on by default (2026-11-25)](archive/JIT-history.md#carry-on-by-default-2026-11-25)
 - [Pins read and written without copies (2026-11-25)](archive/JIT-history.md#pins-read-and-written-without-copies-2026-11-25)
 - [NZCV at a cbz/tbz exit that precedes the loop's first flag setter (2026-11-25)](archive/JIT-history.md#nzcv-at-a-cbztbz-exit-that-precedes-the-loops-first-flag-setter-2026-11-25)

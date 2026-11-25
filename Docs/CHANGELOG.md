@@ -82,6 +82,8 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
 - Geometry Dash Lite and Family Island keep the shape they opened at and are scaled when you resize (Window: "Keep the app's shape").
 - A game that turns between portrait and landscape leaves your window alone and turns inside it, so it no longer grows past the
   edge of the screen. A new Rotation setting (`asgard config APP rotation reshape`) brings the old behaviour back for an app.
+- `BIFROST_PROF`'s waiting report says, per thread, how long it spent translating code and how long it waited for another thread's
+  translation to finish, with the longest wait. It only reports.
 - Fixed: on Wayland a window change that kept the same size (maximising, moving to another display) could be ignored. Hungry Shark World
   stayed stuck when maximised on a second display, and no longer does.
 - Fixed: a Google sign-in window opened by a game saved its own size over the game's.
