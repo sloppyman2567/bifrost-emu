@@ -417,8 +417,8 @@ response, from a fixture app; each opens the system app's window and returns
 Reported by the maintainer (2026-11-03 for Arknights, 2026-11-23 for the other
 two; no capture or log kept): Google sign-in through microG works in Arknights,
 Azur Lane and Zenless Zone Zero. Not observed here: `LoginActivity`'s own result
-and response relay, and a game's own Play Games sign-in (Hungry Shark World's
-still fails, see below).
+and response relay. A game's own Play Games sign-in was seen once (Hungry
+Shark World, 2026-11-25, see below).
 
 Not modelled: other users, shared and restricted accounts, device-policy
 limits, `startAddAccountSession` and its relatives, the credential-grant and
@@ -430,7 +430,7 @@ copied on the host, so two sessions signing in at once keep the last one to end.
 
 #### Play Games sign-in answers 404 (2026-10-21)
 
-Hungry Shark World and Umamusume complete Google's sign-in window, then fail the game's own
+On 2026-10-21 Hungry Shark World and Umamusume completed Google's sign-in window, then failed the game's own
 Play Games sign-in: microG's `performGamesSignIn` (GmsCore v0.3.17.252432,
 `org.microg.gms.games.extensions.kt`) requests `https://www.googleapis.com/games/v1/players/me`,
 Google answers **404**, and `GamesConnectService` reports `SIGN_IN_REQUIRED`. In microG a 404
@@ -447,8 +447,13 @@ notice that says what it does (`--yes` skips the prompt), under `<state>/.google
 `com.google.android.gms_preferences.xml` before the session starts. Until a choice is made roots
 keep their own preference. The file is guest-writable, so it is read without following
 symlinks and a DOCTYPE is refused. Setting microG's switch through its own window only
-reaches the Google root, because preferences stay per root. Not observed live: the user decides
-whether to turn it on, then a sign-in retry shows whether the profile is created and the 404 ends.
+reaches the Google root, because preferences stay per root. Not observed live with the switch on.
+
+On 2026-11-25 (2.0.0-beta.3, profile creation not allowed) Hungry Shark World's sign-in worked: a silent attempt at launch
+failed, the one the user started opened `AuthSignInActivity`, and 2.5 s after it closed the game's Play Games plugin logged
+`silentSignIn.onSuccess`. The log has no 404, `SIGN_IN_REQUIRED` or "Authentication failed", and the user reports the game said the
+account was connected. The answer to `players/me` is not in the log, and why it changed is not established (the account may have
+gained a profile elsewhere). The next launch's silent sign-in was not checked. Umamusume was not retried.
 
 ### Shared guest processes (October 11, 2026)
 

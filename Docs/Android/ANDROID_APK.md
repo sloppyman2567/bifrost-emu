@@ -572,8 +572,8 @@ Google's embedded sign-in page; the password goes to Google, not to Asgard),
 `google remove ACCOUNT`. One sign-in serves every app: accounts are kept under
 `<state>/.google` and imported into an app's root at each launch; microG's
 settings stay per app. The maintainer reports that Google sign-in works in Arknights,
-Azur Lane and Zenless Zone Zero; a game's own Play Games sign-in can still fail
-(Hungry Shark World). See the
+Azur Lane and Zenless Zone Zero; Hungry Shark World also signs in to Play Games (2026-11-25), but another
+game's own Play Games sign-in can still fail. See the
 [runtime guide](ANDROID_RUNTIME_REFERENCE.md#google-accounts-and-sign-in-2026-10-20) for
 the account service and its limits. When an app itself starts a Google
 screen (a Google Sign-In button, `AccountManager.addAccount`), it opens in the

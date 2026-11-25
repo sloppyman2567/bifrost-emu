@@ -11,11 +11,11 @@
       "name": "SpongeBob: Krusty Cook-Off",
       "tested_version": "5.12.0",
       "status": "playable",
-      "checked": "2026-11-01",
-      "evidence": "The maintainer plays and completes cooking levels, reaching level 16 at about 60 FPS, and uses Settings and Help Center; screenshots in the app page.",
+      "checked": "2026-11-25",
+      "evidence": "The maintainer plays and completes cooking levels, reaching level 16 at about 60 FPS, and uses Settings and Help Center; screenshots in the app page. On 2026-11-25 they report it stable on 2.0.0-beta.3, with a level 4 finish and the next level on screen.",
       "notes": [
-        "Either age choice reaches the lobby. Levels were played on the child-age path; the adult-age path was confirmed to the lobby on 2026-11-25 (older builds stalled at 73% there).",
-        "Rewarded ads do not complete (Kidoz ad stays on its loading screen)."
+        "Either age choice reaches the lobby. Levels up to 16 were played on the child-age path; the adult-age path was confirmed to the lobby on 2026-11-25 (older builds stalled at 73% there), and the level 4 session later that day is probably on it.",
+        "Rewarded ads did not complete when last checked by network (Kidoz ad stays on its loading screen). On 2026-11-25 the maintainer reports that ads work in the games played that day, without naming a network."
       ],
       "page": "Docs/Apps/spongebob.md"
     },
@@ -42,9 +42,10 @@
     },
     "com.mobge.Oddmar": {
       "name": "Oddmar",
+      "tested_version": "0.111",
       "status": "playable",
-      "checked": "2026-11-08",
-      "evidence": "The maintainer reports the first level plays very well on 2.0.0-beta.1 (2026-11-08) with no stutter noticed. A frame from the maintainer's 4 minute screen recording shows level gameplay at 3440x1440; stutter was not measured. Later levels are not confirmed.",
+      "checked": "2026-11-25",
+      "evidence": "The maintainer reports the first level plays very well on 2.0.0-beta.1 (2026-11-08) with no stutter noticed. A frame from the maintainer's 4 minute screen recording shows level gameplay at 3440x1440; stutter was not measured. On 2026-11-25 they report it very stable on 2.0.0-beta.3; a capture shows a level at 164 FPS.",
       "notes": [
         "Needs media.extractor, POSIX timers and the Java Binder attach preload."
       ],
@@ -54,8 +55,8 @@
       "name": "Family Island",
       "tested_version": "2026370.1.94765",
       "status": "playable",
-      "checked": "2026-11-14",
-      "evidence": "The maintainer reports stable play on 2.0.0-beta.2 (2026-11-14), with some lag while other programs loaded the machine. Three screenshots (the home island, an island map, the Beaver Grove screen) show the game drawn at 3440x1384 with the overlay at 26.7 to 47.0 FPS. One session; no longer run and no frame-time measurement are recorded.",
+      "checked": "2026-11-25",
+      "evidence": "The maintainer reports stable play on 2.0.0-beta.2 (2026-11-14), with some lag while other programs loaded the machine. Three screenshots (the home island, an island map, the Beaver Grove screen) show the game drawn at 3440x1384 with the overlay at 26.7 to 47.0 FPS. One session; no longer run and no frame-time measurement are recorded. Reported stable again on 2026-11-25 (2.0.0-beta.3), where the one capture is the game's own update prompt.",
       "notes": [
         "A Defold game whose Activity extends NativeActivity: it needed the surface and the input queue handed over (Docs/Android/ANDROID_RUNTIME_REFERENCE.md)."
       ]
@@ -64,9 +65,9 @@
       "name": "Hungry Shark World",
       "tested_version": "8.2.6",
       "status": "playable",
-      "checked": "2026-11-06",
-      "evidence": "The maintainer reports stable gameplay (2026-11-06); no screenshots or further detail are recorded. Earlier, a 358 s session with ads and taps on the game's links was run by hand (Docs/TESTS.md).",
-      "notes": ["Rewarded video ads had no fill from Google Mobile Ads before the ad-SDK gaps were closed; not re-checked.", "Play Games sign-in does not complete: after the Google window, Google answers games/v1/players/me with HTTP 404 and microG reports SIGN_IN_REQUIRED (2026-10-21)."]
+      "checked": "2026-11-25",
+      "evidence": "The maintainer reports stable gameplay (2026-11-06, and on 2.0.0-beta.3 on 2026-11-25, an 11 minute session with a round captured at 60 FPS). Earlier, a 358 s session with ads and taps on the game's links was run by hand (Docs/TESTS.md).",
+      "notes": ["Rewarded video ads had no fill from Google Mobile Ads before the ad-SDK gaps were closed; not re-checked.", "Play Games sign-in works (2026-11-25): the maintainer reports the account connected and the log has silentSignIn.onSuccess. On 2026-10-21 Google answered games/v1/players/me with HTTP 404 and microG reported SIGN_IN_REQUIRED; why it changed is not established."]
     },
     "com.fgol.HungrySharkEvolution": {
       "name": "Hungry Shark Evolution",
@@ -91,10 +92,10 @@
     },
     "jp.co.ponos.battlecatsen": {
       "name": "The Battle Cats",
-      "tested_version": "15.6.1",
+      "tested_version": "15.7.0",
       "status": "playable",
-      "checked": "2026-10-29",
-      "evidence": "The maintainer reports it is playable; no screenshots or session details are recorded. The version is the installed package's.",
+      "checked": "2026-11-25",
+      "evidence": "The maintainer reports it is playable and stable on 2.0.0-beta.3; captures show the title screen and a battle at 30 FPS.",
       "notes": ["On 2026-10-21 the first ad load blocked the main thread for about 7 s waiting on the Play services Dynamite provider. Six sessions on 2026-11-01 have no such stall, and still skip 1.0 to 1.6 s of frames as that load starts WebView; the maintainer reports ads load at once."]
     },
     "com.uptodown": {
@@ -114,18 +115,18 @@
     },
     "com.cygames.umamusume": {
       "name": "Umamusume: Pretty Derby (Global)",
-      "tested_version": "1.35.2",
+      "tested_version": "1.35.5",
       "status": "playable",
-      "checked": "2026-11-01",
-      "evidence": "The maintainer reports it is playable. Screenshots show the title, home and Career story screens at 30 FPS, the game's own frame cap; no race or training capture.",
+      "checked": "2026-11-25",
+      "evidence": "The maintainer reports 1.35.5 works on 2.0.0-beta.3 with ro.kernel.qemu set to 0 (2026-11-25; with 1 it exits with status 127). On 1.35.2 (2026-11-01) they reported it playable and screenshots show the title, home and Career story screens at 30 FPS, the game's own frame cap; no race or training capture.",
       "page": "Docs/Apps/umamusume.md"
     },
     "com.kiloo.subwaysurf": {
       "name": "Subway Surfers",
-      "tested_version": "3.70.3",
+      "tested_version": "3.71.10",
       "status": "playable",
-      "checked": "2026-11-08",
-      "evidence": "The maintainer reports it is playable and its ads work (APKPure 3.70.3 build). On 2026-11-08 they ran it on a Steam Deck (SteamOS, Desktop mode; the Bifrost build was not recorded): 20 to 40 FPS, mostly 30 to 40, with stutters and a hot CPU but very stable, and close to 30 W of total system power during play (maintainer-reported). Two photos of the Deck's performance overlay are the only capture.",
+      "checked": "2026-11-25",
+      "evidence": "The maintainer reports 3.71.10 playable and stable on 2.0.0-beta.3 (2026-11-25), with a run captured at 58 FPS, and 3.70.3 (APKPure) playable with working ads. On 2026-11-08 they ran it on a Steam Deck (SteamOS, Desktop mode; the Bifrost build was not recorded): 20 to 40 FPS, mostly 30 to 40, with stutters and a hot CPU but very stable, and close to 30 W of total system power during play (maintainer-reported). Two photos of the Deck's performance overlay are the only capture.",
       "notes": [
         "After quitting through the game's own quit confirmation on the Deck, Return to app did not show a window for a while and the audio kept playing. The maintainer's conclusion is that the Deck's CPU was slow to handle windows, not an application bug; it was not traced or reproduced here. A photo of the overlay in that state reads about 1 FPS with a worst frame of 23 s, two CPU threads pinned (100% and 91%) at 90 C, the GPU idle and the battery at 14%, which fits a CPU-bound moment.",
         "In Game Mode on the Deck the maintainer got a black screen (not investigated). The library cannot simply be added as a non-Steam game: Steam's environment variables have to be unset first, or it cannot reach the Android library (maintainer-reported: LD_PRELOAD and related variables; the exact set was not recorded)."
@@ -135,9 +136,17 @@
       "name": "Geometry Dash Lite",
       "tested_version": "2.2.148",
       "status": "playable",
-      "checked": "2026-10-29",
-      "evidence": "The maintainer reports it is playable; no screenshots or session details are recorded.",
-      "notes": ["Ads are only somewhat stable in the maintainer's report; which ads fail, and how, is not recorded."]
+      "checked": "2026-11-25",
+      "evidence": "The maintainer reports it is playable and stable on 2.0.0-beta.3; two captures of level play read 165 FPS.",
+      "notes": ["Ads were only somewhat stable in the maintainer's report of 2026-10-29; which ads failed, and how, is not recorded. On 2026-11-25 they report ads working in the games played, with lag in playable ads."]
+    },
+    "com.studio27.MelonPlayground": {
+      "name": "Melon Sandbox",
+      "tested_version": "38.666.2",
+      "status": "playable",
+      "checked": "2026-11-25",
+      "evidence": "The maintainer reports it is playable and stable on 2.0.0-beta.3; captures show the main menu and a sandbox map at 60 FPS.",
+      "notes": ["Slow to start: on a second launch the window was added about 6 s in, as in other games, but rendering began about 18 s in (6 to 12 s in seven others) and the main menu read 24 FPS while loading. The cause is not established."]
     },
     "org.mozilla.firefox": {
       "name": "Firefox",

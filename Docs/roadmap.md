@@ -61,7 +61,7 @@ Tier-1 got the changes listed under [the JIT workstream](#jit-codegen-retain-gue
 Measured on Battle Cats and Subway Surfers launches and kernels; the shared copy has not run from an installed Asgard and no
 game was timed for the JIT changes.
 
-**Games:** 20 recorded, 17 of them playable (13 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
+**Games:** 21 recorded, 18 of them playable (14 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
 [What has been run](COMPATIBILITY.md) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says
 otherwise.
 
@@ -69,7 +69,8 @@ otherwise.
 
 - **Needs real Google attestation or a real device:** Roblox is disconnected after joining (reason 304); TrickCal's
   anti-cheat ends it; Umamusume JP stops at its device integrity check. Bifrost does not bypass or forge any of them.
-- **Needs Google Play services beyond microG:** Hungry Shark World's Play Games sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
+- **Needs Google Play services beyond microG:** Play Games sign-in got HTTP 404 and `SIGN_IN_REQUIRED` in Hungry Shark World and Umamusume
+  (2026-10-21). Hungry Shark World signed in on 2026-11-25; why it works now is not established, and Umamusume was not re-checked.
 - **Architecture:** Bifrost runs AArch64 only; an APK with only `armeabi-v7a` or `x86` libraries (Angry Birds Space)
   cannot start.
 - **Platform gaps:** YouTube stays in its landscape layout when the window is narrowed, although a host resize reaches an app
@@ -265,7 +266,7 @@ Open:
 - `MediaPlayer` beyond FNAF Mobile Port (video to a Surface, streaming, seeking, long sessions); decoder validation beyond small
   fixtures (flush/reconfigure, B-frames, sustained playback).
 - Audio effects: `android.media.audiofx` loads and reports no effects; `Equalizer` and the like need DSP in front of the host's audio.
-- Activities from other processes beyond Play services; a real Play Games sign-in has not been observed.
+- Activities from other processes beyond Play services; one real Play Games sign-in is on record (Hungry Shark World, 2026-11-25).
 - Orientation, resize, focus, surface loss/recreation and background/foreground tests with real apps. Activity relaunch for apps
   that do not declare `configChanges` is done (fixture only); `onSaveInstanceState` on an ordinary stop and `PersistableBundle`
   state are not.

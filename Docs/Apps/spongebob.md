@@ -12,8 +12,9 @@ at the host display's native density (2560x1384 or 3440x1384 px, 320 dpi on a
 Either age works at the age gate. On 2026-11-25 the user chose the adult age on cleared app data (2.0.0-beta.3 development build, default
 settings, a run limited to 120 s) and reached the lobby, as with the child age. The log has COPPA false, a Firebase consent change at
 01:41:32, an Adjust attribution property sent to Firebase, city level files written and no crash. Earlier builds stalled at 73% on the adult
-age, waiting for Firebase and Google Play services; which change removed the stall was not isolated. Cooking a level on the adult-age
-profile has not been tried.
+age, waiting for Firebase and Google Play services; which change removed the stall was not isolated. A later session that
+day, with no crash reported, finished level 4 and started the next one (41 and 60 FPS on the overlay, about 4.7 GB); it is
+probably the same adult-age profile, which was not confirmed.
 
 On 2026-10-17 the `GoogleApiHandler` crash on `activity.getContentProvider`
 was fixed by running microG in its own processes (see the runtime guide).

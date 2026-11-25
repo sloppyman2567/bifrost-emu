@@ -5,6 +5,9 @@ Status: **playable**, from the user's report on November 8, 2026, on Bifrost 2.0
 stutter was noticed. A frame from the user's 4 minute screen recording at 3440x1440 shows level gameplay (below).
 The user also posted a video of it: [Oddmar on bifrost-emu (YouTube)](https://www.youtube.com/watch?v=5kNMdiAzoLA).
 
+On November 25, 2026 (2.0.0-beta.3) the user reports it is very stable, with no crash in a 2 minute session. Two captures read 163 FPS on the
+title screen and 164 FPS in a rainy level ridden on the boar (frame times 5 to 7 ms on the overlay).
+
 ## Needs
 
 The splash video opens through `media.extractor`, the media daemon uses POSIX timers, and the game ends with `env null. Attach

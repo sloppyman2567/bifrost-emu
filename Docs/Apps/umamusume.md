@@ -1,11 +1,13 @@
 # Umamusume: Pretty Derby
 
-Global package: `com.cygames.umamusume` (tested version 1.35.2).
+Global package: `com.cygames.umamusume` (tested versions 1.35.2 and 1.35.5).
 Status: **playable**, from the user's reports on October 29 and November 1, 2026. The November 1 screenshots show the
 title screen, the home screen and a Career story scene on Bifrost 2.0.0-alpha.3. The JP client
-(`jp.co.cygames.umamusume`) is blocked by the game's device integrity check when it connects.
+(`jp.co.cygames.umamusume`) is blocked by the game's device integrity check when it connects. On November 25, 2026 the user reports that 1.35.5 works on
+2.0.0-beta.3 with the setting below (a session of 3 min 43 s).
 
-The Global client needs `ro.kernel.qemu` set to 0, or it exits about 8 seconds in:
+The Global client needs `ro.kernel.qemu` set to 0, or it exits with status 127 before its first screen
+(seen again on November 25, 2026, four starts in a row). It is "Android emulator flag" in the app's settings:
 
 ```sh
 python3 Scripts/Android/asgard.py config com.cygames.umamusume property.ro.kernel.qemu 0
