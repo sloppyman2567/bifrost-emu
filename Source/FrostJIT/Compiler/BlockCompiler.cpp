@@ -868,9 +868,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     vec_emit_prologue_loads();
     // ── Phase 2 loop-carried arch GPR pinning (self-loop blocks) ──────
     // For a self-loop block (last op BRCOND/BRCOND_ZERO/BRCOND_BIT taken to
-    // our own start_pc), the loop-carried arch GPRs — values READ before they
-    // are WRITTEN in each iteration — are PINNED to fixed callee-saved regs
-    // (R12-R15) for the whole loop. The prologue preloads them from
+    // our own start_pc), up to four arch GPRs — first of all the loop-carried
+    // ones, READ before they are WRITTEN in each iteration — are PINNED to fixed
+    // callee-saved regs (R12-R15) for the whole loop (select_arch_pins). The prologue preloads them from
     // cpu.regs[] once (cold/chain entry); STORE_REG refreshes the pin each
     // iteration; the self-loop back-edge jumps to block_body_start_off_ PAST
     // these preloads, so the pinned values survive in the registers —
@@ -890,8 +890,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     //   * the arch vreg is written ONLY via STORE_REG (FP_F2I_FIXED /
     //     FMOV_F2G write arch dests directly through store_reg_to_vreg,
     //     bypassing pin maintenance).
-    //   * the arch vreg is READ (LOAD_REG src1 or STORE_REG src1) before its
-    //     first write (loop-carried), or never written (loop-invariant).
+    //   * any register qualifies: READ (LOAD_REG src1 or STORE_REG src1) before
+    //     its first write (loop-carried), never written (loop-invariant), or
+    //     written first. The last needs no value across the back edge, but a
+    //     fault before the write must show the previous iteration's value, so
+    //     without a pin it costs a store per iteration. BIFROST_NO_PIN_INPLACE
+    //     leaves the written-first ones out.
     {
         for (int i = 0; i < 32; i++) arch_pin_[i] = -1;
         pinned_host_regs_ = 0;
@@ -1117,6 +1121,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     scan_w32_and_sext_loads(ir_block.insts);
     scan_covered_guards(ir_block.insts);
     scan_pin_inplace(ir_block.insts);
+    scan_pin_dests(ir_block.insts);
+    scan_pin_reads(ir_block.insts);
     // A clean copy of a guest register is read at the LOAD_REGs of it: the allocator must see those uses, or it evicts the copy first.
     // A register loaded only to be handed on is wanted until the exit, which keeps a result's hint from taking its host register.
     if (rp_mirrors_) {
@@ -1252,17 +1258,37 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             in_place.dest = in_place.src1 = static_cast<uint16_t>(pin_inplace_[i] - 1);
             to_compile = &in_place;
         }
+        const int pin_dest = !pin_in_place && i < pin_dest_.size() ? pin_dest_[i] - 1 : -1;
+        if (pin_dest >= 0) {
+            in_place = inst;
+            in_place.dest = static_cast<uint16_t>(pin_dest);
+            to_compile = &in_place;
+        }
+        if (!pin_alias_.empty() && inst.op != IROp::LOAD_REG) {
+            // Operands that are a pinned register's value read the pin (scan_pin_reads).
+            const auto alias = [&](uint16_t v) -> int { return v > 32 && v < 4096 ? pin_alias_[v] : 0; };
+            const int a1 = pin_in_place ? 0 : alias(to_compile->src1), a2 = alias(to_compile->src2);
+            if (a1 || a2) {
+                if (to_compile == &inst) in_place = inst;
+                if (a1) in_place.src1 = static_cast<uint16_t>(a1 - 1);
+                if (a2) in_place.src2 = static_cast<uint16_t>(a2 - 1);
+                to_compile = &in_place;
+            }
+        }
         if (rp_mirrors_ && inst.dest > 32 && inst.dest < 4096) {
             rp_unbind_temp(inst.dest);
             rp_dest_hint_ = rp_pref_[inst.dest] ? rp_pref_[inst.dest] - 1 : -1;
         }
+        pin_dest_active_ = pin_dest >= 0;
         const bool compile_ended = compile_ir_inst(*to_compile);
+        pin_dest_active_ = false;
         rp_dest_hint_ = -1;
         if (compile_ended) break;
-        if (pin_in_place && pin_result_[i]) {
+        if (pin_dest >= 0) finish_pin_dest(pin_dest);
+        if ((pin_in_place || pin_dest >= 0) && pin_result_[i]) {
             // The new value is read after the STORE_REG: those readers get a copy, off the loop-carried chain.
             const int copy = alloc_reg();
-            emit_mov_reg(copy, arch_pin_[pin_inplace_[i] - 1]);
+            emit_mov_reg(copy, arch_pin_[pin_in_place ? pin_inplace_[i] - 1 : pin_dest]);
             set_vreg_reg(pin_result_[i], copy);
         }
         // A non-IMM op defining a vreg invalidates any const entry for it
@@ -1305,6 +1331,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     pin_inplace_.clear();
     pin_skip_.clear();
     pin_result_.clear();
+    pin_dest_.clear();
+    pin_alias_.clear();
     sext_load_done_ = SIZE_MAX;
     lazy_load_vreg_ = -1;
     scaled_vreg_ = -1;
@@ -1789,6 +1817,125 @@ void FrostJIT::scan_pin_inplace(const std::vector<IRInst>& insts) {
         if (only_reader) pin_skip_[j] = 1;
         for (size_t m = i + 1; m <= k; m++) pin_skip_[m] = 1;
         i = k;  // the chain's ops are consumed
+    }
+}
+// An op whose result goes into a pinned register next: the exact adjacent shape OP, the SEXT and ZEXT 32 fused into it
+// (sext_load_, zext32_fused_), STORE_REG a <- result. The OP is compiled with dest = a, so a load that faults leaves the pin
+// alone (x86 writes a load's destination only when it succeeds) and nothing sits between the write and the end of the guest
+// instruction. An op the in-place pass took already writes its pin.
+void FrostJIT::scan_pin_dests(const std::vector<IRInst>& insts) {
+    pin_dest_.clear();
+    if (pin_inplace_.empty()) return;  // no pins, or BIFROST_NO_PIN_INPLACE
+    const size_t n = insts.size();
+    pin_dest_.assign(n, 0);
+    for (size_t i = 0; i + 1 < n; i++) {
+        const IRInst& op = insts[i];
+        if (pin_inplace_[i] || pin_skip_[i] || !(op.dest > 32 && op.dest < 4096)) continue;
+        switch (op.op) {
+            case IROp::ADD: case IROp::SUB: case IROp::AND: case IROp::OR: case IROp::XOR: case IROp::MUL:
+            case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
+            case IROp::NOT: case IROp::NEG: case IROp::SEXT: case IROp::ZEXT:
+            case IROp::UBFM: case IROp::SBFM: case IROp::ADDS: case IROp::SUBS:
+            case IROp::LOAD_MEM: break;
+            default: continue;
+        }
+        size_t k = i + 1;
+        uint16_t result = op.dest;
+        if (op.op == IROp::LOAD_MEM && sext_load_[i]) {
+            result = insts[k].dest;
+            if (++k >= n) continue;
+        }
+        if (insts[k].op == IROp::ZEXT && zext32_fused_[k - 1] && insts[k].src1 == result) {
+            result = insts[k].dest;
+            if (++k >= n) continue;
+        }
+        const IRInst& st = insts[k];
+        if (st.op != IROp::STORE_REG || st.is_fp_store() || st.dest > 30 || st.src1 != result) continue;
+        if (!(result > 32 && result < 4096) || arch_pin_[st.dest] < 0) continue;
+        pin_dest_[i] = static_cast<uint8_t>(st.dest + 1);
+        if (vreg_last_use_op_[result] > static_cast<int>(k)) pin_result_[i] = result;
+        for (size_t m = i + 1; m <= k; m++) pin_skip_[m] = 1;
+        i = k;
+    }
+}
+// Put the result of a pin_dest_ op in its pin, wherever the emitter left it.
+void FrostJIT::finish_pin_dest(int a) {
+    const int pin = arch_pin_[a], home = vreg_home_[a];
+    if (home != pin) {
+        if (home >= 0) {
+            emit_mov_reg(pin, home);
+            reg_vreg_[home] = -1;
+            dirty_host_regs_ &= ~(1u << home);
+        } else {
+            emit_load_arm(pin, a);  // the emitter committed it to cpu.regs[]
+        }
+        vreg_home_[a] = pin;
+        reg_vreg_[pin] = a;
+        if (a > max_vreg_) max_vreg_ = a;
+    }
+    vreg_dirty_[a] = true;
+    dirty_host_regs_ |= 1u << pin;
+    vreg_last_use_[a] = ++regalloc_lru_counter_;
+}
+// Whether `inst` takes vreg `v` as a plain operand that its emitter leaves where it is, so a pinned register can stand in for
+// it. Every emitter below reuses an operand's register only for a dead scratch vreg (> 32) or when dest == src1, and none moves
+// an operand to a fixed register; the count of a variable shift, which goes to RCX, is the exception and is left out.
+bool FrostJIT::pin_readable(const IRInst& inst, uint16_t v) {
+    if (inst.aux == v || inst.dest == v) return false;
+    switch (inst.op) {
+        case IROp::ADD: case IROp::SUB: case IROp::AND: case IROp::OR: case IROp::XOR: case IROp::MUL:
+        case IROp::ADDS: case IROp::SUBS: case IROp::TST:
+        case IROp::CSEL: case IROp::CCMP:
+        case IROp::STORE_MEM:
+            return true;
+        case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
+        case IROp::NOT: case IROp::NEG: case IROp::SEXT: case IROp::ZEXT:
+        case IROp::UBFM: case IROp::SBFM:
+        case IROp::LOAD_MEM: case IROp::BRCOND_ZERO: case IROp::BRCOND_BIT:
+            return inst.src2 != v;
+        case IROp::STORE_REG:
+            return !inst.is_fp_store() && inst.src2 != v;
+        default:
+            return false;
+    }
+}
+// Readers of a pinned register take the pin instead of a LOAD_REG copy, and readers of a value an op wrote into the pin
+// (scan_pin_inplace, scan_pin_dests) take it instead of the copy made after the op (pin_alias_). All readers of the value must qualify: one that does not needs the
+// copy anyway. Order is by op index, so a write inside a BRCOND_SKIP region counts as a write.
+void FrostJIT::scan_pin_reads(const std::vector<IRInst>& insts) {
+    pin_alias_.clear();
+    if (pin_inplace_.empty()) return;  // no pins, or BIFROST_NO_PIN_INPLACE
+    const size_t n = insts.size();
+    pin_alias_.assign(4096, 0);
+    // Every read of `v` after op `from` is a plain operand, and register `a` keeps its value until the last of them.
+    const auto can_alias = [&](uint16_t v, int a, size_t from) {
+        size_t last = from;
+        for (uint16_t u : vreg_uses_[v]) {
+            if (u <= from) continue;
+            // An in-place update of `a` reads its old value as the pin; as its other operand `v` is a plain one.
+            const bool updates = pin_inplace_[u] && insts[u].src1 == v;
+            if (!updates && !pin_readable(insts[u], v)) return false;
+            last = std::max<size_t>(last, u);
+        }
+        for (size_t k = from + 1; k < last; k++)
+            if (pin_inplace_[k] == a + 1 || pin_dest_[k] == a + 1 ||
+                (insts[k].op == IROp::STORE_REG && !insts[k].is_fp_store() && insts[k].dest == a)) return false;
+        return true;
+    };
+    for (size_t i = 0; i < n; i++) {
+        const IRInst& inst = insts[i];
+        if (inst.op == IROp::LOAD_REG && !inst.is_fp_load() && inst.src1 <= 30 && arch_pin_[inst.src1] >= 0 && !pin_skip_[i]) {
+            if (!(inst.dest > 32 && inst.dest < 4096) || !can_alias(inst.dest, inst.src1, i)) continue;
+            pin_alias_[inst.dest] = static_cast<uint8_t>(inst.src1 + 1);
+            pin_skip_[i] = 1;
+        } else if (pin_result_[i]) {
+            const uint8_t written = pin_inplace_[i] ? pin_inplace_[i] : pin_dest_[i];
+            size_t end = i + 1;  // the ops folded into this one: extensions, the STORE_REG
+            while (insts[end].op != IROp::STORE_REG) end++;
+            if (!can_alias(pin_result_[i], written - 1, end)) continue;
+            pin_alias_[pin_result_[i]] = written;
+            pin_result_[i] = 0;
+        }
     }
 }
 // A guarded scalar access whose address an earlier access of the same block already checked (the same base value

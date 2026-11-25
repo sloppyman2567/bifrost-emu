@@ -353,6 +353,11 @@ from 864 to 44 host instructions per iteration; checked against QEMU, no game ru
 [details](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)).
 Measured the same day, on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
 
+Also done on 2026-11-25: self-loops read and write their pinned registers without copies, and registers they write first are pinned too (CoreMark -6.7%
+host instructions and about -2% cycles, with Carry -7.6% and -3.5%; [details](archive/JIT-history.md#pins-read-and-written-without-copies-2026-11-25)).
+Open from that work: loop bodies are not aligned (a body crossing a 64-byte line costs a cycle per iteration on Zen 3, and placement alone moves bzip2 by
+17%), RSI and RDI as more pins, and the flag stores before memory accesses (6.5% of CoreMark's generated-code ops).
+
 Open, in priority order (the maintainer put translation speed ahead of the cross-block work on 2026-11-23, so item 1 comes first):
 
 1. **Translation cost.** Translating the ART bootstrap now takes about half the time (1,056 to about 500 ms; the startup 1.57 s to
@@ -454,6 +459,8 @@ Open:
   crashes at address 0.
 - Doom 3 frame pacing: profiler attribution for every thread, matched-scene median and p95/p99 frame times, then the
   remaining drops. Fix save/load fidelity so routes are reproducible.
+- A guest process hangs at exit while another of its threads is blocked in `pause()` (JIT and interpreter; QEMU exits). Found on 2026-11-25, not
+  investigated.
 
 Acceptance: matched cold/warm scene runs show better frame times and demanding-scene minimums with no correctness
 regressions, published with host, settings, scene and duration.

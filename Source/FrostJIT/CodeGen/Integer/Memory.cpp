@@ -151,9 +151,12 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
             // LDRSB/LDRSH/LDRSW: one sign-extending load (see sext_load_).
             const bool sext = inst.op == IROp::LOAD_MEM && cur_op_index_ < sext_load_.size() &&
                               sext_load_[cur_op_index_];
-            emit_load_mem(page, effective, 0, mp.width, sext, true);
+            // `page` stays the tail's scratch: a pin the load writes must keep its value until the load succeeds.
+            const int pin = pin_for_dest(inst.dest);
+            const int into = pin >= 0 ? pin : page;
+            emit_load_mem(into, effective, 0, mp.width, sext, true);
             if (sext) sext_load_done_ = cur_op_index_;
-            set_vreg_reg(inst.dest, page);
+            set_vreg_reg(inst.dest, into);
         } else {
             emit_store_mem(effective, 0, value, mp.width, true);
         }

@@ -368,6 +368,11 @@ A new history section can make an older "not measured" or "next section" line wr
   path's dead-`src2` reuse is skipped for `dest == src1`. Widen the shape (an op between, a later write) only with the fault and
   exit argument: the pin must not change before the end of the guest instruction. Never alias a vreg to a pin's register: the
   allocator keeps `reg_vreg_[vreg_home_[v]] == v`. `jit_pin_inplace` covers it; `BIFROST_NO_PIN_INPLACE=1` turns it off.
+- Readers name a pinned register instead of a copy (`scan_pin_reads`) only through `pin_readable`: add an op or operand there only if its emitter never
+  moves that operand to a fixed register and reuses its register only for a dead scratch vreg (`> 32`) or `dest == src1`. No write of the register may sit
+  between the `LOAD_REG` and the last reader. An op compiled with a pinned destination (`scan_pin_dests`, `pin_dest_active_`) may not fault after writing
+  it: a load's software-check tail keeps `page` as its scratch, never the pin. `dest == 0` means x0 there, so an emitter that takes `dest == 0` as "no
+  result" must check `pin_dest_active_`. A written-first register is pinned for its fault-visible old value: do not drop its preload.
 - No self-loop back-edge (`BRCOND` through `flush_all_vregs_but_pins`, `BRCOND_ZERO`, `BRCOND_BIT`) stores the loop pins
   (R12-R15), so inside the body a pin can be ahead of `cpu.regs[]` although it is mapped clean. The body must read a pin
   through its mapping: the preload raises `max_vreg_`, because `load_vreg_to_reg` and `store_reg_to_vreg` trust

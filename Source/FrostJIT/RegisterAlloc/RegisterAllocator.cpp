@@ -107,7 +107,7 @@ bool FrostJIT::rematerialize_vreg(int v, int reg) {
 }
 
 void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
-    std::array<int, 32> first_read, first_write, benefit{};
+    std::array<int, 32> first_read, first_write, benefit{}, stores{};
     std::array<bool, 32> direct{};
     std::array<int, 4096> last_use;
     first_read.fill(INT_MAX); first_write.fill(INT_MAX); last_use.fill(-1);
@@ -117,6 +117,7 @@ void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
             if (inst.dest < 31) {
                 first_write[inst.dest] = std::min(first_write[inst.dest], int(i));
                 ++benefit[inst.dest];
+                ++stores[inst.dest];
             }
             if (inst.src1 < 31) {
                 first_read[inst.src1] = std::min(first_read[inst.src1], int(i));
@@ -129,34 +130,56 @@ void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
         for (unsigned v : {inst.src1, inst.src2, inst.aux})
             if (v > 32 && v < 4096) last_use[v] = i;
     }
-    // Estimate simultaneous scalar temporaries, not the total number of
-    // definitions. At most four candidate prefixes are scored; no search
-    // through register permutations on Tier-1's compilation path.
-    std::array<bool, 4096> live{};
-    int live_count = 0, peak = 0;
-    for (size_t i = 0; i < instructions.size(); ++i) {
-        const auto& inst = instructions[i];
-        if (inst.dest > 32 && inst.dest < 4096 && last_use[inst.dest] >= int(i) && !live[inst.dest]) {
-            live[inst.dest] = true; ++live_count;
-        }
-        peak = std::max(peak, live_count);
-        for (unsigned v : {inst.src1, inst.src2, inst.aux})
-            if (v > 32 && v < 4096 && last_use[v] == int(i) && live[v]) {
-                live[v] = false; --live_count;
-            }
-    }
     std::vector<int> candidates;
     for (int a = 0; a < 31; ++a)
-        if (!direct[a] && first_read[a] != INT_MAX && first_read[a] <= first_write[a])
+        if (!direct[a] && (first_read[a] != INT_MAX || first_write[a] != INT_MAX) &&
+            (first_read[a] <= first_write[a] || !dbg().no_pin_inplace))
             candidates.push_back(a);
     std::sort(candidates.begin(), candidates.end(), [&](int a, int b) {
-        return benefit[a] != benefit[b] ? benefit[a] > benefit[b] : a < b;
+        if (benefit[a] != benefit[b]) return benefit[a] > benefit[b];
+        return stores[a] != stores[b] ? stores[a] > stores[b] : a < b;
     });
+    // Estimate simultaneous scalar temporaries, not the total number of
+    // definitions. A LOAD_REG of a chosen register is read from its pin
+    // (scan_pin_reads) and takes no register, unless `no_pin_inplace` keeps the
+    // copies; a constant takes none (it folds or is rematerialized); a result
+    // may take the register of an operand that dies in the op; a guarded access
+    // needs a scratch register besides its address and result, and one for the
+    // address when it has an offset. At most four candidate prefixes are scored;
+    // no search through register permutations on Tier-1's compilation path.
+    std::array<bool, 32> chosen{};
+    const auto peak_temporaries = [&]() {
+        std::array<bool, 4096> live{};
+        int live_count = 0, peak = 0;
+        for (size_t i = 0; i < instructions.size(); ++i) {
+            const auto& inst = instructions[i];
+            const bool from_pin = inst.op == IROp::LOAD_REG && !inst.is_fp_load() && inst.src1 < 31 &&
+                                  chosen[inst.src1] && !dbg().no_pin_inplace;
+            const bool load = inst.op == IROp::LOAD_MEM, store = inst.op == IROp::STORE_MEM;
+            const bool defines = inst.dest > 32 && inst.dest < 4096 && last_use[inst.dest] >= int(i) &&
+                                 !live[inst.dest] && !from_pin && inst.op != IROp::IMM;
+            if (load || store) {
+                const uint64_t offset = load ? inst.load_mem_params().offset : inst.store_mem_params().offset;
+                peak = std::max(peak, live_count + 2 + (offset || data_tbi() ? 1 : 0));
+            }
+            for (unsigned v : {inst.src1, inst.src2, inst.aux})
+                if (v > 32 && v < 4096 && last_use[v] == int(i) && live[v]) {
+                    live[v] = false; --live_count;
+                }
+            if (defines) {
+                live[inst.dest] = true; ++live_count;
+            }
+            peak = std::max(peak, live_count);
+        }
+        return peak;
+    };
+    const int peak_unpinned = peak_temporaries();
     int best = 0, score = 0, best_score = 0;
     for (int k = 1; k <= NUM_PIN_REGS && k <= int(candidates.size()); ++k) {
         score += benefit[candidates[k - 1]];
-        const int extra_pressure = std::max(0, peak - (NUM_ALLOC_REGS - k)) -
-                                   std::max(0, peak - NUM_ALLOC_REGS);
+        chosen[candidates[k - 1]] = true;
+        const int extra_pressure = std::max(0, peak_temporaries() - (NUM_ALLOC_REGS - k)) -
+                                   std::max(0, peak_unpinned - NUM_ALLOC_REGS);
         const int value = score - 2 * extra_pressure;
         if (value > best_score) { best = k; best_score = value; }
     }

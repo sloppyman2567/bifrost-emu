@@ -208,7 +208,8 @@ code before its slot (stores of dirty unpinned registers, flag materialization).
 
 ### Loop pins
 
-A self-loop keeps up to four loop-carried GPRs in R12-R15. `BRCOND` flushes with `flush_all_vregs_but_pins`, so a
+A self-loop keeps up to four GPRs in R12-R15: registers it reads before it writes them, registers it only reads, and registers it writes first
+(`select_arch_pins` ranks them by loads and stores saved, and stops when the loop's temporaries would no longer fit). `BRCOND` flushes with `flush_all_vregs_but_pins`, so a
 `cmp; b.cond` loop leaves its pins mapped and dirty across iterations as a `cbz` loop does; the exits write them back, and
 fault exits and the FP cold step store every mapped architectural register, clean or not. The pin preload must raise
 `max_vreg_`: the allocator trusts a mapping only for `v <= max_vreg_`, so an op that reads a pin before anything else is
@@ -224,7 +225,18 @@ emits it as `a <- a OP y`, the existing `dest == src1` form, on the pin, skips t
 that only the op read, and gives readers of the new value after the `STORE_REG` a copy of the pin. Nothing sits between the
 op and the end of the guest instruction, so no fault or exit can see the new value early. Readers of the old value before the
 op keep their `LOAD_REG` copy. An `ADD` with `dest == src1` never moves its result into a dead second operand's register
-(the pin would lose the value). `BIFROST_NO_PIN_INPLACE=1` goes back to the scratch copy. `jit_pin_inplace` covers it.
+(the pin would lose the value).
+
+Other ops put their result in a pin the same way. `scan_pin_dests` marks an op whose value the next `STORE_REG` puts in a pinned register (the `SEXT` and
+`ZEXT` fused into it may sit between), and the compile loop compiles it with the guest register as its destination, so `ldr x0, [x0]` is
+`mov r12, [r10+r12]`. A load writes the pin only when it succeeds, so a fault still shows the old value. Emitters choose the pin through `pin_for_dest`;
+one that puts the result elsewhere is corrected by `finish_pin_dest`. That is what makes a pin useful for a register the loop writes first: without one
+its value must be stored every iteration, because a fault before the next write has to show it.
+
+`scan_pin_reads` removes the copies made to read a pin. When every reader of a pinned register's `LOAD_REG` takes it as a plain operand (`pin_readable`) and
+nothing writes the register before the last of them, the `LOAD_REG` is skipped and the readers name the guest register itself, which the allocator maps
+to the pin. Readers of a value an op wrote into a pin are treated the same way. `BIFROST_NO_PIN_INPLACE=1` turns all three passes off. CoreMark: 6.7%
+fewer host instructions and about 2% fewer cycles, 7.6% and 3.5% with Carry (median of 16 code placements). `jit_pin_inplace` covers them.
 
 ### Loops with CBZ/CBNZ exits
 
@@ -1737,6 +1749,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Pins read and written without copies (2026-11-25)](archive/JIT-history.md#pins-read-and-written-without-copies-2026-11-25)
 - [NZCV at a cbz/tbz exit that precedes the loop's first flag setter (2026-11-25)](archive/JIT-history.md#nzcv-at-a-cbztbz-exit-that-precedes-the-loops-first-flag-setter-2026-11-25)
 - [Narrowing in the vector cache, one-store half results and forwarding across LL/SC (2026-11-24)](archive/JIT-history.md#narrowing-in-the-vector-cache-one-store-half-results-and-forwarding-across-llsc-2026-11-24)
 - [CoreMark with Carry on: the bottleneck is still guest state traffic (2026-11-24)](archive/JIT-history.md#coremark-with-carry-on-the-bottleneck-is-still-guest-state-traffic-2026-11-24)

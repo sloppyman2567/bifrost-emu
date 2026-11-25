@@ -619,7 +619,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             {
                 const bool imm_sub = inst.op == IROp::SUBS;
                 const bool imm_32 = inst.addsub_params().bits == 32;
-                const bool imm_discard = inst.dest == 0 ||
+                const bool imm_discard = (inst.dest == 0 && !pin_dest_active_) ||
                     (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
                      cur_op_index_ < kills_per_op_.size() &&
                      vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
@@ -636,6 +636,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                             if (inst.dest == inst.src1) d = s1;
                             else if (inst.src1 > 32 && vreg_last_use_this_op(inst.src1) &&
                                      !(pinned_host_regs_ & (1u << s1))) d = s1;
+                            else if (const int pin = pin_for_dest(inst.dest, s1); pin >= 0) d = pin;
                             else d = alloc_reg_excluding(s1, -1);
                             if (d != s1) emit_mov_reg(d, s1);
                         }
@@ -660,7 +661,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 // The second operand is a register nothing else reads
                 // (lazy_load_): CMP r, [cpu.regs]. The 32-bit form reads the
                 // low half of the little-endian home.
-                const bool discard = inst.dest == 0 ||
+                const bool discard = (inst.dest == 0 && !pin_dest_active_) ||
                     (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
                      cur_op_index_ < kills_per_op_.size() &&
                      vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
@@ -682,7 +683,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             // CMP normally has an unused temporary destination in the IR.
             // Restrict this test to body liveness.
-            const bool discard_result = inst.dest == 0 ||
+            const bool discard_result = (inst.dest == 0 && !pin_dest_active_) ||
                 (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
                  cur_op_index_ < kills_per_op_.size() &&
                  vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
@@ -696,6 +697,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 else if (!is_sub && !discard_result && inst.dest == inst.src2) d = s2;
                 else if (consumable(inst.src1, s1)) d = s1;
                 else if (!is_sub && consumable(inst.src2, s2)) d = s2;
+                else if (const int pin = pin_for_dest(inst.dest, s1, s2); pin >= 0) d = pin;
                 else d = alloc_reg_excluding(s1, s2 == s1 ? -1 : s2);
                 // Addition may consume src2 in place; subtraction must
                 // retain operand order, including equal-source aliases.

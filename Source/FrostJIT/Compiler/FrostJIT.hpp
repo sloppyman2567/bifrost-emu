@@ -1461,7 +1461,8 @@ private:
     // vregs); kept as a strict allocator capacity increase for
     // pressure-heavy blocks that DO exceed 9 live vregs.
     static constexpr int ALLOC_REGS[10] = {RAX, RCX, RDX, R8, R9, R11, R12, R13, R15, R14};
-    // Phase 2 (self-loop pinning): loop-carried arch GPR vregs are
+    // Phase 2 (self-loop pinning): loop-carried, loop-invariant and (for
+    // their stores) written-first arch GPR vregs are
     // PINNED to fixed callee-saved host regs for the whole loop. The pin pool
     // is a subset of ALLOC_REGS (R12/R13/R14/R15): callee-saved (survives
     // memory-op C calls), OUTSIDE the flag-prep clobber set (RAX/RCX/RDX/R8)
@@ -2077,11 +2078,33 @@ private:
     // loop-carried chain. For such a chain, pin_inplace_[i] = a + 1 on the OP: the compile loop emits it as `a <- a OP y`
     // (an IRInst copy with dest = src1 = a, the existing in-place form) on the pin itself, skips the ops folded into it
     // (pin_skip_[j] = 1: the LOAD_REG when the OP is its only reader, the ZEXT, the STORE_REG), and pin_result_[i] names
-    // the vreg that later ops read when the new value has readers after the STORE_REG: they get a copy of the pin.
+    // the vreg that later ops read when the new value has readers after the STORE_REG: they get a copy of the pin,
+    // unless scan_pin_reads (below) lets them read the pin itself.
     std::vector<uint8_t> pin_inplace_;
     std::vector<uint8_t> pin_skip_;
     std::vector<uint16_t> pin_result_;
     void scan_pin_inplace(const std::vector<IRInst>& insts);
+    // Results written into a pin (scan_pin_dests; the same loops): pin_dest_[i] = a + 1 on an op whose value the next STORE_REG
+    // puts in a pinned register (through a fused SEXT/ZEXT). The compile loop compiles it with dest = a, skips the folded ops
+    // and, when an emitter placed the result elsewhere, moves it to the pin (finish_pin_dest). pin_result_ as above.
+    std::vector<uint8_t> pin_dest_;
+    void scan_pin_dests(const std::vector<IRInst>& insts);
+    void finish_pin_dest(int a);
+    // The pin to compute a pin_dest_ op's result in, or -1 (not such an op, or the pin is an operand that must survive).
+    int pin_for_dest(int dest, int excl1 = -1, int excl2 = -1) const {
+        if (dest > 30 || !pin_dest_active_) return -1;
+        const int pin = arch_pin_[dest];
+        return pin == excl1 || pin == excl2 ? -1 : pin;
+    }
+    bool pin_dest_active_ = false;  // the op being compiled writes a pinned register: dest 0 is x0, not "no result"
+    // Reads of a pin without a copy (scan_pin_reads; the same loops). A LOAD_REG of a pinned register copies the pin into a
+    // scratch register. When every reader only reads (pin_readable) and nothing writes the register before the last one,
+    // pin_alias_[t] = a + 1: the compile loop skips the LOAD_REG and gives the readers the register itself, which the
+    // allocator maps to the pin. No scratch vreg is ever mapped to the pin (`reg_vreg_[vreg_home_[v]] == v` holds).
+    // Likewise for the new value of an in-place update (pin_result_). Indexed by vreg; empty without pins.
+    std::vector<uint8_t> pin_alias_;
+    void scan_pin_reads(const std::vector<IRInst>& insts);
+    static bool pin_readable(const IRInst& inst, uint16_t v);
     int scaled_vreg_ = -1;
     int scaled_shift_ = 0;
     void materialize_scaled();

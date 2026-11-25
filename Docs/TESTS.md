@@ -52,7 +52,10 @@ shapes the optimisation takes: a counter in `x0` with a later reader of the new 
 add/sub/eor/mul, the old value read before the update, a `madd`, each checked against plain C for several trip counts, and a
 faulting load on either side of the update (the registers in the signal frame must show the update done or not). It passes
 under the interpreter and the JIT, with and without `BIFROST_NO_PIN_INPLACE`, and it fails (7 `madd_shape` checks) with the
-`ADD` guard in `Arithmetic.cpp` removed. It does not run threads or a game.
+`ADD` guard in `Arithmetic.cpp` removed. Since 2026-11-25 it also covers pins read without a copy (an old value read after the register is
+rewritten, operands equal to the result, a shift count, `subs` into x0) and results written straight into a pin (every load width, a list walk
+`ldr x0, [x0]`, two written-first registers, each faulting at several iterations); it fails with the write check of `scan_pin_reads`, the shift
+count rule, the x0 rule or `finish_pin_dest` removed. It does not run threads or a game.
 
 ### Stall lines (2026-11-19)
 

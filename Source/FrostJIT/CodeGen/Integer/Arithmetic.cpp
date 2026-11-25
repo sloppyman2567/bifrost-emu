@@ -69,6 +69,8 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
     // Reuse a consumed scratch value instead of allocating, spilling and
     // copying it. Architectural values and pinned loop state stay live.
     auto result_reg = [&](int source, int home, int excluded = -1) {
+        if (inst.dest != source)
+            if (const int pin = pin_for_dest(inst.dest, home, excluded); pin >= 0) return pin;
         if (home != excluded && (inst.dest == source ||
             (source > 32 && vreg_last_use_this_op(source) &&
              !(pinned_host_regs_ & (1u << home))))) return home;
@@ -258,7 +260,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int d;
             if (inst.op == IROp::ADD) {
                 // dest == src1 computes in place (a pinned register's update must stay in its pin).
-                if (inst.dest == inst.src2 || (inst.dest != inst.src1 && inst.src2 > 32 &&
+                if (inst.dest == inst.src2 || (inst.dest != inst.src1 && pin_for_dest(inst.dest) < 0 && inst.src2 > 32 &&
                     vreg_last_use_this_op(inst.src2) &&
                     !(pinned_host_regs_ & (1u << s2)))) d = s2;
                 else d = result_reg(inst.src1, s1, s2 == s1 ? -1 : s2);

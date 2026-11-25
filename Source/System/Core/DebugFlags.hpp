@@ -92,7 +92,7 @@ struct DebugFlags {
     bool class_prof = false;  // BIFROST_CLASS_PROF: instruction-class counts for blocks that fall back to the interpreter
     bool jit_dump = false;  // BIFROST_JIT_DUMP: dump the IR of every compiled block
     bool no_pin = false;  // BIFROST_NO_PIN: no pinned host registers in loops
-    bool no_pin_inplace = false;  // BIFROST_NO_PIN_INPLACE: pinned registers update through a scratch copy, not in place
+    bool no_pin_inplace = false;  // BIFROST_NO_PIN_INPLACE: pinned registers are read and updated through scratch copies
     bool no_chain_skip = false;  // BIFROST_NO_CHAIN_SKIP: chain edges do not skip the frame teardown and prologue
     bool no_direct_call = false;  // BIFROST_NO_DIRECT_CALL: BL sites call through the helper, not a patched direct call
     bool no_fwd = false;  // BIFROST_NO_FWD: skip load/store forwarding in the optimizer

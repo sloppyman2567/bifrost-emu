@@ -2,6 +2,37 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Pins read and written without copies (2026-11-25)
+
+Found by joining IBS op samples of CoreMark to the live translations: 57% of the executed generated-code ops are in single-block self-loops, and in those
+loops 47.6k ops per iteration copied a pin to a scratch register to read it, 18.9k moved a result into a pin, 46.8k stored a guest register and 31.4k
+loaded one (of 743k in all). Read-only analysis first, no change to the pass order.
+
+Changes (guide: [Loop pins](../JIT.md#loop-pins)): `scan_pin_reads` (readers name the pinned register), `scan_pin_dests` (results and loads go straight
+into the pin, `finish_pin_dest` corrects an emitter that chose another register), written-first registers may be pinned, and the pressure estimate in
+`select_arch_pins` no longer counts pin copies, constants or operands that die in the op, and counts a guarded access's scratch registers instead.
+The fourth pin (R15) had stayed empty in the hot matrix loops. A loop head `ldr x0, [x0]` is now `mov r12, [r10+r12]`.
+
+The figures compare the build before both changes of this day with the one after, so they include the NZCV fix below (+1.3% instructions on its own). CoreMark, one pinned core, governor `performance`, no
+other load, identical CRC. Instructions: -6.7% default, -7.6% `BIFROST_CARRY=1`. Cycles at 16 placements of the generated code (a throwaway `int3` pad
+ahead of the cold stubs, not committed): median -2.0% default (better at 11 of 16), -3.5% Carry (16 of 16). 200,000 iterations, alternating, native
+37.9-38.4k it/s: Carry 19.1-19.7k before, 19.6-20.3k after. Other programs, instructions: busybox gzip -1.5%, sha256sum -2.0%, bzip2 -2.0%, sort -2.1%,
+zstd -1.7%, md5sum 0, ART bootstrap -0.5% (translation time no worse), `bench_mips` -28% (cycles -0.1%). Same output everywhere.
+
+Placement is the bigger effect: a bzip2 slice spans 7.08-8.29 G cycles on the old build by placement alone, and one run per build showed +6% on the new one.
+At 16 placements the medians are 7.296 and 7.294 G. A native loop whose body crosses a 64-byte line takes one more cycle per iteration on this Zen 3
+(1.2 against 2.0), and nothing aligns loop bodies here. Do not judge a JIT change by cycles at one placement.
+
+Checked: a throwaway generator of random self-loops (ALU, bitfield, flags, conditional select, every load and store width, pairs, post-index, early exits,
+faults in the middle) against QEMU in default, Carry, ordinary frames, pin passes off, forwarding on and with a second thread: 600 seeds of 400 loops, no
+mismatch. The generator was first blind to old values read after a rewrite (0 of 1,200 loops on a build without the write check); with more moves and
+fewer registers it found 69 of 1,600 on that build. `make verify`, 136 JIT-related tests, ART bootstrap 12 runs. Deliberate breaks caught by
+`jit_pin_inplace`: no write check, variable shift count from a pin, `subs` into x0 taken as a compare, no `finish_pin_dest`.
+
+Not done or not tested: RSI and RDI as more pins (the matrix loop still reloads three invariants and stores one temporary), games, other CPUs, AVX-512
+hosts. Two bugs were found and not fixed: a fault in a `subs; b.cond` loop shows stale NZCV in the signal frame (known, guide), and a guest process hangs in
+`exit_group` while another thread is in `pause()` (interpreter too, not a JIT matter; [roadmap](../roadmap.md#linux-games-linker-rootfs-and-performance)).
+
 ## NZCV at a cbz/tbz exit that precedes the loop's first flag setter (2026-11-25)
 
 A self-loop whose only flag use is its own compare skips the NZCV store on the back edge, because the next iteration sets the flags before it reads
