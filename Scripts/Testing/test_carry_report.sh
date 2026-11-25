@@ -13,8 +13,8 @@ for need in "$EMU" "$FIXTURE"; do [[ -e "$need" ]] || { echo "missing: $need" >&
 fail=0
 check() { if [[ $2 == "$3" ]]; then echo "PASS $1"; else echo "FAIL $1 (expected '$2', got '$3')"; fail=1; fi; }
 
-# The loop is checked as Lean splits it: BIFROST_CARRY would merge the diamond into fewer blocks and fewer registers.
-out=$(env -u BIFROST_CARRY BIFROST_PROF=1 BIFROST_PC_HIST=1 timeout 120 "$EMU" "$FIXTURE" 2>&1 || true)
+# The loop is checked as Lean splits it: Carry would merge the diamond into fewer blocks and fewer registers.
+out=$(env BIFROST_CARRY=0 BIFROST_PROF=1 BIFROST_PC_HIST=1 timeout 120 "$EMU" "$FIXTURE" 2>&1 || true)
 check "the fixture passes" 1 "$(grep -c 'carry_loop: ALL PASS' <<<"$out" || true)"
 line=$(grep -m1 '\[carry\] loop head=' <<<"$out" || true)
 if [[ -z $line ]]; then

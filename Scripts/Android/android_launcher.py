@@ -540,8 +540,8 @@ def settings_dialog(window, app, settings):
             self.carry = QComboBox()
             for name, text in JIT_CARRIES: self.carry.addItem(text, name)
             self.carry.setCurrentIndex(max(0, self.carry.findData(settings.get("jit_carry", "default"))))
-            self.carry.setToolTip("Experimental: the JIT keeps guest registers in host registers across branches and between blocks. "
-                                  "A few percent faster on CoreMark; not yet checked on many apps. Default is off")
+            self.carry.setToolTip("The JIT keeps guest registers in host registers across branches and between blocks. "
+                                  "Faster code, but translating takes longer. Code that the JIT disk cache stores does not use it. Default is on")
             form.addRow("JIT Carry", self.carry)
             self.network = QComboBox()
             for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)

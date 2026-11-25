@@ -143,8 +143,8 @@ read it; inside chained code it is stale.
   each site: a shared lookup stub made `bench_dispatch` 44% slower (2026-11-03). `jit_dispatch_cache_growth` replaces code
   at an address only a grown table reaches.
 - **Chain targets.** A static slot patches to the successor's `chain_entry`, past its prologue, so the successor reuses the frame. With
-  `BIFROST_CARRY=1` it patches to the successor's register entry instead when the registers the slot leaves in host registers cover the
-  successor's first loads ([Register passing](#register-passing-bifrost_carry1)); dispatcher and IBL entries always use the plain entry.
+  Carry it patches to the successor's register entry instead when the registers the slot leaves in host registers cover the
+  successor's first loads ([Register passing](#register-passing)); dispatcher and IBL entries always use the plain entry.
 - **CSET.** A `CSEL` whose operands are XZR or block constants 0 and 1 emits `setcc` and `movzx` (fold-lookahead kind 3
   skips the constants' moves). A `CSEL` read only by a ZEXT 32 joins W-form fusion: its 32-bit `cmov` clears bits 63:32.
 - **Constants and flag saves.** `emit_mov_const` picks the shortest load (a sign-extended imm32 for small negatives).
@@ -258,21 +258,22 @@ and is never formed under `BIFROST_JIT_VERIFY`. `BIFROST_NO_SIDE_EXIT=1` turns t
 six loop shapes against C, a fault inside a loop (the signal frame shows the finished iterations) and five threads; `[JIT] side-exit blocks`
 in `-v` shows how many blocks were formed. On CoreMark it removes 1.8% of host instructions.
 
-### Carry formation (`BIFROST_CARRY=1`)
+### Carry formation
 
-An Android app turns Carry on from its settings page in the library ("JIT Carry"), or with `asgard config APP jit_carry on`; both set `BIFROST_CARRY=1` for that app's launches.
+Carry is on by default (since 2026-11-25). `BIFROST_CARRY=0` turns it off; an Android app does so with "JIT Carry" on its settings page in the
+library or `asgard config APP jit_carry off`, which sets that variable for its launches. It covers the three parts below.
 
-The mid-block exits above also let a block go on past an ordinary forward conditional branch. With `BIFROST_CARRY=1`, `translate_block` treats every
+The mid-block exits above also let a block go on past an ordinary forward conditional branch. With Carry, `translate_block` treats every
 forward `cbz`, `cbnz`, `tbz`, `tbnz` or `b.cond` (taken target above the branch) as an exit when the block has room (at most six such exits, and two
 instructions of the cap left): the not-taken side is the next instruction in memory, so the block stays contiguous and its code words stay one run,
 and the registers the code between the two blocks used to store and reload stay in host registers. The direction is the static fall-through, not a
 profile. Backward branches still end a block. It is not used while the persistent cache records (or checks a recording), because a block with a
-mid-block exit is not recordable. It is off by default: on CoreMark it removes 2.0% of host instructions and 4.5% of cycles (the best of five
-alternating runs), and a 100 s SpongeBob start-up showed no crash and about 10% less process CPU, but that pair was not repeated and the exits are
-taken often enough in game code (the cold share of JIT samples went from 0.3% to 2.9%) that a direction chosen from samples is the next step.
-The registers that stay in host registers across a block edge are handed on by [register passing](#register-passing-bifrost_carry1).
+mid-block exit is not recordable. The three parts together, Carry on against off (2026-11-25, 16 code placements): CoreMark 10% fewer cycles and 4.9% fewer host instructions.
+The cost is translation: the ART bootstrap takes about 28% more translation time and 21% more cycles, with 24% more generated code. Forming a block
+alone removed 2.0% of CoreMark's instructions; a 100 s SpongeBob start-up showed about 10% less process CPU in one unrepeated pair.
+The registers that stay in host registers across a block edge are handed on by [register passing](#register-passing).
 
-### Following the hot side of an exit (`BIFROST_CARRY=1`)
+### Following the hot side of an exit
 
 Carry continues a block along a forward branch's fall-through and makes the taken side an exit. When the branch is taken more often than not, the
 common path leaves through an exit tail and the code it goes on to runs in a block of its own. So a block that has exits Carry formed starts with a
@@ -296,10 +297,10 @@ first (`exit_flags_dead`; for a flipped exit the code after the branch is the br
 skips it when its own target overwrites them. The guard-cover scan steps over mid-block exits: a later access to the address of an earlier one needs no
 compare of its own on the path that went on.
 
-### Register passing (`BIFROST_CARRY=1`)
+### Register passing
 
 A chain edge used to hand over nothing: the predecessor stored what it wrote, and the successor loaded the registers it reads first. With
-`BIFROST_CARRY=1` the predecessor also leaves clean copies of guest registers in host registers at each chain slot, and a successor that has a
+Carry the predecessor also leaves clean copies of guest registers in host registers at each chain slot, and a successor that has a
 register entry, its normal entry minus the loads of the registers in its entry layout, is entered there when the copies cover every one of
 them. Memory stays authoritative (a copy never gets ahead of `cpu.regs[]`), so fault recovery, signals, the dispatcher and IBL entries see what
 they always did, and `BIFROST_NO_REG_PASS=1` turns it off.
@@ -1467,7 +1468,7 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
 
 This is the proposed direction, with milestones and targets in [the roadmap](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions).
 Nothing in this section is built (its first piece that runs, passing registers along chain edges between Lean blocks, is
-[Register passing](#register-passing-bifrost_carry1)). **Lean** is the working name for today's first JIT (what these docs still call Tier-1: cheap
+[Register passing](#register-passing)). **Lean** is the working name for today's first JIT (what these docs still call Tier-1: cheap
 translation and chaining); **Carry** is the planned second JIT. The names are used for new work only; Tier-1 has not been renamed.
 Tier-2 regions, the only code that fused blocks, were removed on 2026-11-24
 ([why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)); Carry starts again from Lean blocks. Scalar SSA does not yet model
@@ -1749,6 +1750,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Carry on by default (2026-11-25)](archive/JIT-history.md#carry-on-by-default-2026-11-25)
 - [Pins read and written without copies (2026-11-25)](archive/JIT-history.md#pins-read-and-written-without-copies-2026-11-25)
 - [NZCV at a cbz/tbz exit that precedes the loop's first flag setter (2026-11-25)](archive/JIT-history.md#nzcv-at-a-cbztbz-exit-that-precedes-the-loops-first-flag-setter-2026-11-25)
 - [Narrowing in the vector cache, one-store half results and forwarding across LL/SC (2026-11-24)](archive/JIT-history.md#narrowing-in-the-vector-cache-one-store-half-results-and-forwarding-across-llsc-2026-11-24)

@@ -20,7 +20,7 @@ out=$(run BIFROST_CARRY=1); check "following on: the fixture passes" 1 "$(passes
 check "following on: at least one branch is flipped" 1 "$(awk -v n="$(flipped "$out")" 'BEGIN { print (n+0 >= 1) }')"
 out=$(run BIFROST_CARRY=1 BIFROST_NO_CARRY_FOLLOW=1); check "following off: the fixture passes" 1 "$(passes "$out")"
 check "following off: no profile, no flip" 0 "$(flipped "$out" | grep -c . || true)"
-out=$(run); check "Carry off: the fixture passes" 1 "$(passes "$out")"
+out=$(run BIFROST_CARRY=0); check "Carry off: the fixture passes" 1 "$(passes "$out")"
 out=$(run BIFROST_CARRY=1 BIFROST_NO_CHAIN=1); check "no chaining: the fixture passes" 1 "$(passes "$out")"
 out=$(run BIFROST_CARRY=1 BIFROST_NO_CHAIN_SKIP=1); check "ordinary frames: the fixture passes" 1 "$(passes "$out")"
 out=$(run BIFROST_CARRY=1 BIFROST_IR_VALIDATE=1); check "IR validation on: the fixture passes" 1 "$(passes "$out")"

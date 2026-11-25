@@ -405,8 +405,8 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    shown to gain, [why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)). It keeps guest registers in host registers across blocks and
    back edges, with sampled hotness and no timed trials. A CoreMark simulation puts the ceiling at 63-84% of register moves
    ([limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)). Next: a clean gameplay profile, then the
-   [design](JIT.md#planned-codegen-retaining-guest-state-across-regions). Nothing of the second JIT is built. Two pieces of its register traffic
-   work inside Lean blocks behind `BIFROST_CARRY=1`: blocks continue past forward branches (CoreMark -2.0% host instructions) and chain edges pass
+   [design](JIT.md#planned-codegen-retaining-guest-state-across-regions). Nothing of the second JIT is built. Pieces of its register traffic
+   work inside Lean blocks, on by default since 2026-11-25 (`BIFROST_CARRY=0` turns them off; CoreMark about 10% fewer cycles, ART start-up 21% more): blocks continue past forward branches (CoreMark -2.0% host instructions) and chain edges pass
    registers in host registers ([-1.08% instructions, -4.9% cycles](archive/JIT-history.md#register-passing-between-chained-blocks-2026-11-24)).
    A profile also makes a block follow the hot side of its forward branches ([-0.15% on CoreMark](archive/JIT-history.md#carry-flag-stores-at-exits-covered-guards-across-exits-the-hot-side-of-an-exit-2026-11-24),
    about 11% more translation time in the Android runtime's start-up; why it gains so little is not established).

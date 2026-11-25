@@ -28,7 +28,7 @@ out=$(run BIFROST_CARRY=1 BIFROST_NO_REG_PASS_PARTIAL=1); check "partial entries
 check "partial entries off: no edge enters a stub" 0 "$(stubbed "$out")"
 out=$(run BIFROST_CARRY=1 BIFROST_NO_REG_PASS=1); check "register passing off: the fixture passes" 1 "$(grep -c 'jit_reg_pass: ALL PASS' <<<"$out" || true)"
 check "register passing off: no edge enters a register entry" 0 "$(passed "$out" | grep -c . || true)"
-out=$(run); check "Carry off: the fixture passes" 1 "$(grep -c 'jit_reg_pass: ALL PASS' <<<"$out" || true)"
+out=$(run BIFROST_CARRY=0); check "Carry off: the fixture passes" 1 "$(grep -c 'jit_reg_pass: ALL PASS' <<<"$out" || true)"
 out=$(run BIFROST_CARRY=1 BIFROST_NO_CHAIN=1); check "no chaining: the fixture passes" 1 "$(grep -c 'jit_reg_pass: ALL PASS' <<<"$out" || true)"
 out=$(run BIFROST_CARRY=1 BIFROST_NO_CHAIN_SKIP=1); check "ordinary frames: the fixture passes" 1 "$(grep -c 'jit_reg_pass: ALL PASS' <<<"$out" || true)"
 out=$(run BIFROST_CARRY=1 BIFROST_IR_VALIDATE=1); check "IR validation on: the fixture passes" 1 "$(grep -c 'jit_reg_pass: ALL PASS' <<<"$out" || true)"

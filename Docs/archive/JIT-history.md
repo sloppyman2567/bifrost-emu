@@ -2,6 +2,20 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Carry on by default (2026-11-25)
+
+The maintainer decided it. `BIFROST_CARRY` unset or anything but `0` is on (before, any value turned it on and unset was off), an app's
+`jit_carry` setting has `off`, and the tests that meant "Lean" by leaving the variable unset now set it to 0. No emitter changed.
+
+On against off at the same build, Ryzen 5800X3D, one pinned core. CoreMark at 16 placements: cycles median -10.3% (better at 16 of 16), instructions
+-4.9%. Programs, median of three at one placement (see the placement warning below): md5sum -10.3% cycles, grep -9.5%, gzip -5.7%, awk and bzip2 -2.1%,
+sha256sum -0.4%, sort 0, zstd +1.4%, outputs identical. ART JNI bootstrap (four runs each): 5.48-5.65 G cycles against 4.47-4.69 (+21% median),
+8.28 G instructions against 7.27 (+14%), translation 722-859 ms against 558-674 (about +28%), generated code 34.8 MB against 28.0 (+24%).
+
+Not measured: a game, several threads translating, memory at a 512 MiB cache limit, other CPUs, the persistent cache (code it stores is
+translated without Carry). `make verify`, 144 JIT-related tests (one, `jit_mt_publication`, timed out while it rebuilt the library and passes
+alone) and the settings test pass. The random-loop comparison with QEMU had run with Carry on, one and two threads, before this.
+
 ## Pins read and written without copies (2026-11-25)
 
 Found by joining IBS op samples of CoreMark to the live translations: 57% of the executed generated-code ops are in single-block self-loops, and in those

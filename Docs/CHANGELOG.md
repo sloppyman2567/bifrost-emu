@@ -19,14 +19,17 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
 - Loops that test a register or a condition and leave (walking a list until a null pointer, scanning until a zero byte, searching for a match)
   now run as one block that keeps the loop's registers in host registers (CoreMark: 1.8% fewer host instructions, from the `cbz` loops alone). `BIFROST_NO_SIDE_EXIT=1` turns it off.
 - Storing a constant into a guest register (`mov w0, #0`) is one instruction instead of two (CoreMark: 0.9% fewer host instructions).
-- `BIFROST_CARRY=1` (experimental, off by default) lets a block continue past a forward conditional branch, keeping registers in host registers
+- Carry is now on by default (`BIFROST_CARRY=0`, or "JIT Carry" set to Off for an app, turns it off): about 10% fewer CPU cycles on CoreMark,
+  0 to 10% on small command-line programs (zstd 1% more). Starting a large Android app costs more, because translating does (ART start-up:
+  21% more cycles, 24% more code memory). No game has been timed.
+- Carry lets a block continue past a forward conditional branch, keeping registers in host registers
   across it: CoreMark 2.0% fewer host instructions and about 4.7% more iterations per second; no game has been timed carefully.
-  An app's settings page has a "JIT Carry" choice for it, per app (`asgard config APP jit_carry on`; default off).
-- With `BIFROST_CARRY=1` a block that follows another one in a chain also starts with the registers the first one left in host registers instead
+  An app's settings page has a "JIT Carry" choice for it, per app (`asgard config APP jit_carry off`).
+- With Carry a block that follows another one in a chain also starts with the registers the first one left in host registers instead
   of loading them again: CoreMark another 1.1% fewer host instructions and about 5% more iterations per second (`BIFROST_NO_REG_PASS=1`
   turns it off). Only CoreMark has been timed, not a game. A switch, `BIFROST_REG_PASS_THROUGH=1`, also hands registers over blocks that do not
   use them; it was slower on every benchmark tried, so it is off.
-- With `BIFROST_CARRY=1` a block that continues past a forward branch also notices when the branch is taken most of the time and is translated again
+- With Carry a block that continues past a forward branch also notices when the branch is taken most of the time and is translated again
   along the taken side. CoreMark: 0.15% fewer host instructions (the same loop shape with an always-taken branch: 22% fewer); the Android runtime's start-up
   spends about 11% longer translating. `BIFROST_NO_CARRY_FOLLOW=1` turns it off. The `cbz`/`tbz` exits also skip a flag store that nothing reads (0.75%).
 - Code that reads and writes memory runs a little faster: the window address is loaded once per call chain instead of at every block

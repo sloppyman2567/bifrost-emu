@@ -43,7 +43,8 @@ A new history section can make an older "not measured" or "next section" line wr
 - `fold_ahead_kind_` 4 (a constant stored by the next eager `STORE_REG`) is decided by the pre-scan under the same guards the `STORE_REG` case re-checks
   (not `keep_store_dest_`, GPR/SP destination, imm32 fit): a skipped `mov` whose consumer then stores a register leaves the vreg unmapped. Do not
   defer stores into RAX/RCX/RDX/R8 for a block that is not a loop to save the eager store: it was tried and added instructions (a spill at each clobber).
-  Carry formation (`BIFROST_CARRY`) stays off while the persistent cache records, as its blocks are unrecordable.
+  Carry is on by default; only `BIFROST_CARRY=0` turns it off, so a test that needs Lean's blocks must set that, not unset the variable.
+  Carry formation stays off while the persistent cache records, as its blocks are unrecordable.
 - Register passing (`BIFROST_CARRY`, `Compiler/RegisterPassing.cpp`; off with `BIFROST_NO_REG_PASS`): a chain edge may enter its target past the loads
   of the guest registers the predecessor already holds. The predecessor's copies are clean arch-vreg mappings (`vreg_home_[a]` clean, equal to
   `cpu.regs[a]`) in `RP_HOSTS` (never RAX, which carries the next pc, or R11, the MT cell jump's scratch); `rp_release` makes one when a temporary

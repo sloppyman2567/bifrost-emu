@@ -236,7 +236,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                                     !(mt_active() && dbg().no_chain) && !recording_ && !record_oracle_;
     bool side_exit_scanned = false;
     std::vector<uint64_t> side_exit_pcs;
-    // Carry formation (BIFROST_CARRY=1): past any forward conditional branch the block goes on along its fall-through, the taken side
+    // Carry formation (on unless BIFROST_CARRY=0): past any forward conditional branch the block goes on along its fall-through, the taken side
     // becomes a mid-block exit, and the guest registers stay in host registers across what used to be a block edge.
     const bool carry_formation = dbg().carry && side_exits_allowed;
     int carry_exits = 0;
