@@ -76,6 +76,13 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   pass. CoreMark: 6.7% fewer host instructions and about 2% fewer cycles, 7.6% and 3.5% with JIT Carry; gzip, bzip2, zstd and sha256sum 1.5 to 2%
   fewer instructions. No game has been timed. `BIFROST_NO_PIN_INPLACE=1` switches it off.
 - SpongeBob: Krusty Cook-Off now gets past the age question with an adult age too: the lobby opens on fresh data (it used to stop at 73%).
+- A game you close maximised opens maximised next time, before it starts. Games that cannot follow a resize (Geometry Dash Lite, Family
+  Island) are drawn right from the first frame, and games of a fixed size fill the window instead of showing black bars. The first
+  start after this update still opens small: maximise it and close it once. Not yet tried on a real desktop.
+- Geometry Dash Lite and Family Island keep the shape they opened at and are scaled when you resize (Window: "Keep the app's shape").
+- A game that turns between portrait and landscape leaves your window alone and turns inside it, so it no longer grows past the
+  edge of the screen. A new Rotation setting (`asgard config APP rotation reshape`) brings the old behaviour back for an app.
+- Fixed: a Google sign-in window opened by a game saved its own size over the game's.
 - Melon Sandbox is recorded as playable, and Hungry Shark World's Play Games sign-in now connects the account, both on the maintainer's
   report of 2026-11-25. Seven other games were played the same day without a crash. Melon is slow to load; see
   [COMPATIBILITY.md](COMPATIBILITY.md). 18 of 21 games are playable.

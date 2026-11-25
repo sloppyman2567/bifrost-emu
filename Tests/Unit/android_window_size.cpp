@@ -20,31 +20,36 @@ int main() {
     ~Cleanup() { unlink(path.c_str()); unlink((path + ".tmp").c_str()); rmdir(directory.c_str()); }
   } cleanup{directory, path};
   int32_t w = 7, h = 7;
+  bool full = false;
 
   // No file, no size; a stored size comes back exactly and leaves no temporary file.
-  CHECK(!rs::load(path, w, h) && w == 7 && h == 7);
-  CHECK(rs::store(path, 1280, 720) && rs::load(path, w, h) && w == 1280 && h == 720);
+  CHECK(!rs::load(path, w, h, full) && w == 7 && h == 7);
+  CHECK(rs::store(path, 1280, 720, false) && rs::load(path, w, h, full) && w == 1280 && h == 720);
   CHECK(access((path + ".tmp").c_str(), F_OK) != 0);
-  CHECK(rs::store(path, 720, 1280) && rs::load(path, w, h) && w == 720 && h == 1280);  // replaced whole
+  CHECK(rs::store(path, 720, 1280, false) && rs::load(path, w, h, full) && w == 720 && h == 1280);  // replaced whole
 
-  // Anything but "WIDTH HEIGHT" is a damaged file: the previous values stay untouched.
+  // A maximised window keeps the size it had before, and the mark goes away with the next ordinary one.
+  CHECK(rs::store(path, 1280, 720, true) && rs::load(path, w, h, full) && w == 1280 && h == 720 && full);
+  CHECK(rs::store(path, 720, 1280, false) && rs::load(path, w, h, full) && !full);
+
+  // Anything but "WIDTH HEIGHT" or "WIDTH HEIGHT maximized" is a damaged file: the previous values stay untouched.
   w = h = 7;
-  for (const char *bad : {"", "\n", "1280", "1280 ", "1280x720\n", "1280 720 5\n", "1280 720x\n", "abc def\n", "0 0\n",
+  for (const char *bad : {"", "\n", "1280", "1280 ", "1280x720\n", "1280 720 5\n", "1280 720 maximizedx\n", "1280 maximized\n", "1280 720 max\n", "1280 720maximized\n", "1280 720x\n", "abc def\n", "0 0\n",
                           "-640 480\n", "159 480\n", "640 159\n", "32769 480\n", "480 32769\n", "99999999999 480\n",
                           "4294967936 480\n", "480 4294967936\n", "99999999999999999999 480\n"}) {
     write(path, bad);
-    CHECK(!rs::load(path, w, h) && w == 7 && h == 7);
+    CHECK(!rs::load(path, w, h, full) && w == 7 && h == 7);
   }
   write(path, "  640   480  \r\n");  // tolerated whitespace
-  CHECK(rs::load(path, w, h) && w == 640 && h == 480);
+  CHECK(rs::load(path, w, h, full) && w == 640 && h == 480);
   write(path, "160 32768");  // the limits themselves, no final newline
-  CHECK(rs::load(path, w, h) && w == 160 && h == 32768);
+  CHECK(rs::load(path, w, h, full) && w == 160 && h == 32768);
 
   // A size outside the limits is not written, and an unwritable directory fails without a trace.
   write(path, "640 480\n");
-  CHECK(!rs::store(path, 159, 480) && !rs::store(path, 640, 32769) && !rs::store(path, 0, 0));
-  CHECK(rs::load(path, w, h) && w == 640 && h == 480);
-  CHECK(!rs::store(std::string(directory) + "/missing/launcher-window.txt", 640, 480));
+  CHECK(!rs::store(path, 159, 480, false) && !rs::store(path, 640, 32769, false) && !rs::store(path, 0, 0, false));
+  CHECK(rs::load(path, w, h, full) && w == 640 && h == 480);
+  CHECK(!rs::store(std::string(directory) + "/missing/launcher-window.txt", 640, 480, false));
 
   // fit: held inside the room the desktop gave, never a sliver; a bound that is not positive is none.
   w = 3000; h = 2000;

@@ -14,7 +14,7 @@ bool SDL_GetWindowPosition(SDL_Window *window, int *x, int *y) {
     (void)window; *x = 0; *y = 0; return true;
 }
 static void record(const char *event);
-static bool fake_fullscreen;
+static bool fake_fullscreen, fake_maximized;
 bool SDL_SetWindowFullscreen(SDL_Window *window, bool fullscreen) {
     (void)window;
     fake_fullscreen = fullscreen;
@@ -22,7 +22,7 @@ bool SDL_SetWindowFullscreen(SDL_Window *window, bool fullscreen) {
     return true;
 }
 /* BIFROST_TEST_SDL_WINDOW_FLAGS lists the state flags the window has: minimized, hidden, occluded, maximized, fullscreen
-   (also what SDL_SetWindowFullscreen set). */
+   (also what SDL_SetWindowFullscreen and a maximised window set). */
 SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) {
     (void)window;
     const char *state = getenv("BIFROST_TEST_SDL_WINDOW_FLAGS");
@@ -30,7 +30,7 @@ SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) {
     if (state && strstr(state, "minimized")) flags |= SDL_WINDOW_MINIMIZED;
     if (state && strstr(state, "hidden")) flags |= SDL_WINDOW_HIDDEN;
     if (state && strstr(state, "occluded")) flags |= SDL_WINDOW_OCCLUDED;
-    if (state && strstr(state, "maximized")) flags |= SDL_WINDOW_MAXIMIZED;
+    if (fake_maximized || (state && strstr(state, "maximized"))) flags |= SDL_WINDOW_MAXIMIZED;
     if (fake_fullscreen || (state && strstr(state, "fullscreen"))) flags |= SDL_WINDOW_FULLSCREEN;
     return flags;
 }
@@ -137,8 +137,15 @@ static void clamp_to_work_area(int *width, int *height) {
         if (*height > area_h) *height = area_h;
     }
 }
-static bool external_context, high_density;
-SDL_PropertiesID SDL_CreateProperties(void) { external_context = high_density = false; return 100; }
+/* BIFROST_TEST_SDL_MAXIMIZED is the size a maximised window gets; without it the compositor refuses to maximise. */
+static void maximize(int *width, int *height) {
+    const char *size = getenv("BIFROST_TEST_SDL_MAXIMIZED");
+    int w = 0, h = 0;
+    if (!size || sscanf(size, "%dx%d", &w, &h) != 2) return;
+    *width = w; *height = h; fake_maximized = true;
+}
+static bool external_context, high_density, create_maximized;
+SDL_PropertiesID SDL_CreateProperties(void) { external_context = high_density = create_maximized = false; return 100; }
 void SDL_DestroyProperties(SDL_PropertiesID props) { (void)props; }
 bool SDL_SetStringProperty(SDL_PropertiesID props, const char *name, const char *value) {
     (void)props; (void)name; (void)value; return true;
@@ -153,6 +160,7 @@ bool SDL_SetBooleanProperty(SDL_PropertiesID props, const char *name, bool value
     (void)props;
     if (!strcmp(name, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN)) external_context = value;
     if (!strcmp(name, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN)) high_density = value;
+    if (!strcmp(name, SDL_PROP_WINDOW_CREATE_MAXIMIZED_BOOLEAN)) create_maximized = value;
     return true;
 }
 SDL_Window *SDL_CreateWindowWithProperties(SDL_PropertiesID props) {
@@ -164,6 +172,8 @@ SDL_Window *SDL_CreateWindowWithProperties(SDL_PropertiesID props) {
         struct fake_window *w = calloc(1, sizeof(*w));
         if (!w) return NULL;
         clamp_to_work_area(&width, &height);
+        fake_maximized = false;
+        if (create_maximized) maximize(&width, &height);
         w->width = width; w->height = height; w->scale = high_density ? 2 : 1;
         w->id = i + 1; windows[i] = w;
         record("window-create"); return (SDL_Window *)w;
@@ -189,6 +199,10 @@ bool SDL_SetWindowSize(SDL_Window *window, int width, int height) {
     if (getenv("BIFROST_TEST_SDL_RESIZE_FAIL")) return false;
     struct fake_window *w = (struct fake_window *)window;
     w->width = width; w->height = height; record("host-resize"); return true;
+}
+bool SDL_MaximizeWindow(SDL_Window *window) {
+    struct fake_window *w = (struct fake_window *)window;
+    maximize(&w->width, &w->height); record("maximize"); return true;
 }
 bool SDL_SyncWindow(SDL_Window *window) { (void)window; return true; }
 bool SDL_SetWindowAspectRatio(SDL_Window *window, float minimum, float maximum) {
@@ -272,6 +286,14 @@ bool SDL_PollEvent(SDL_Event *event) {
         if (!strcmp(mode, delivered_mode)) return false;
         snprintf(delivered_mode, sizeof(delivered_mode), "%s", mode);
         const bool up = !strncmp(mode + 5, "f11-up", 6);
+        if (sscanf(mode + 5, "pixels:%dx%d", &event->window.data1, &event->window.data2) == 2) {
+            event->type = SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED; event->window.windowID = 1;
+            return true;
+        }
+        if (!strncmp(mode + 5, "close", 5)) {
+            event->type = SDL_EVENT_WINDOW_CLOSE_REQUESTED; event->window.windowID = 1;
+            return true;
+        }
         if (strncmp(mode + 5, "f11", 3)) return false;
         event->type = up ? SDL_EVENT_KEY_UP : SDL_EVENT_KEY_DOWN; event->key.windowID = 1;
         event->key.scancode = SDL_SCANCODE_F11; event->key.raw = 68;

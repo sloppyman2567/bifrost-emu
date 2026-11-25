@@ -1024,8 +1024,9 @@ def confirm(question, assume_yes):
         raise ValueError("Cancelled")
 
 
-def start_background(package, state, options=()):
+def start_background(package, state, options=(), environment=None):
     from android_sessions import control
+    environment = os.environ if environment is None else environment
     if not PACKAGE.fullmatch(package) or not (state / package / "package.json").is_file():
         raise ValueError("Package is not installed: " + package)
     app = state / package
@@ -1035,13 +1036,13 @@ def start_background(package, state, options=()):
     session_id = uuid.uuid4().hex
     directory = app / "managed/sessions" / session_id
     directory.mkdir(parents=True)
-    options, saved_environment = android_settings.apply_to_launch(app, options, os.environ)
+    options, saved_environment = android_settings.apply_to_launch(app, options, environment)
     with (directory / "launcher.log").open("wb") as log:
         child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
                                   "--state-root", str(state.resolve()), "run", package,
                                   "--session-id", session_id, *options], stdout=log,
                                  stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-                                 env=dict(os.environ, **saved_environment))
+                                 env=dict(environment, **saved_environment))
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         saved = control(app)
@@ -1116,7 +1117,7 @@ def main():
     configuration = commands.add_parser("config", help="show, set or reset an app's saved settings (applied at each start)")
     configuration.add_argument("package")
     configuration.add_argument("key", nargs="?", type=android_settings.setting_key,
-                               help="window_stats, window_stats_mode, back_key, enter_key, jit_disk_cache, jit_disk_cache_mb, jit_carry, network, window_mode, resolution, controller, menu_entry or property.NAME")
+                               help="window_stats, window_stats_mode, back_key, enter_key, jit_disk_cache, jit_disk_cache_mb, jit_carry, network, window_mode, resolution, rotation, controller, menu_entry or property.NAME")
     configuration.add_argument("value", nargs="?")
     configuration.add_argument("--reset", action="store_true", help="restore the default of KEY, or of every setting")
     configuration.add_argument("--json", action="store_true")

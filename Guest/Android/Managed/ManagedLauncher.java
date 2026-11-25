@@ -1466,8 +1466,16 @@ public final class ManagedLauncher {
             // The per-app Resolution setting is a fixed panel too: the app draws at the chosen size and the host scales it
             // to the window, so an app that keeps the size it started with (Unity) is not left at the first, small window.
             int resolution = resolutionSetting();
-            if (keepShape || resolution > 0
-                    || ActivityInfo.class.getField("resizeMode").getInt(activity) == 0 /* RESIZE_MODE_UNRESIZEABLE */) {
+            boolean unresizeable = ActivityInfo.class.getField("resizeMode").getInt(activity) == 0; // RESIZE_MODE_UNRESIZEABLE
+            if (keepShape || resolution > 0 || unresizeable) {
+                // An unresizeable app's bounds also stop at the aspect ratio its manifest allows (ActivityRecord
+                // .applyAspectRatio): a maximised ultra-wide window is wider than any phone such a game was drawn for.
+                float widest = unresizeable ? (Float) call(activity, "getMaxAspectRatio", new Class<?>[0]) : 0;
+                if (widest >= 1 && Math.max(width, height) > Math.min(width, height) * widest) {
+                    if (width > height) width = Math.round(height * widest); else height = Math.round(width * widest);
+                    displays.setMetrics(width, height, (int) metrics[2]);
+                    System.out.println("APP_MAX_ASPECT " + widest);
+                }
                 error = fixWindow(width, height);
                 fixedWindow = error == 0;
                 fixedWindowSize = fixedWindow;

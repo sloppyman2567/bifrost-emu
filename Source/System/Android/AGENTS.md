@@ -105,9 +105,12 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   every uiMode comes from `FrameworkUiMode.configurationUiMode()`, never a constant. The backend reports a change of light or
   dark, never unknown, and a backend that cannot tell leaves the app light. Native queues drop the event, like `0x102`.
 - F11 in a game window is the host's fullscreen key: the SDL3 backend takes the press, repeat and release, so it never
-  reaches an app. The window's remembered size (`BIFROST_ANDROID_WINDOW_STATE`, `Window/RememberedSize.hpp`) is applied as
-  a resize after the app has set up its window, never as the opening size (a fixed-size app's panel comes from the opening
-  size), and is not saved for a fullscreen, maximised, minimised or hidden window. Keep position and fullscreen out of it.
+  reaches an app. A window that closed maximised is created maximised (landscape only; a portrait one is maximised on the first
+  poll), so the app never sees a second size. Any other remembered size (`BIFROST_ANDROID_WINDOW_STATE`,
+  `Window/RememberedSize.hpp`) is applied as a resize after the app has set up its window, never as the opening size (a
+  fixed-size app's panel comes from the opening size). Saved at the close request and at close, not for a fullscreen, minimised
+  or hidden window. Keep position and fullscreen out of it. A window of another app that a session starts must not inherit
+  `android_settings.WINDOW_ENVIRONMENT`.
 - A host window resize reaches Activities through `FrameworkActivities.configurationChanged`: relaunch exactly when Android
   would (`ActivityRecord`: the diff from `Record.reported`, size buckets, no window bounds, `& ~getRealConfigChanged()`), else
   `onConfigurationChanged`; a stopped Activity waits for its restart. A relaunch replaces `Record.activity` and keeps the
@@ -279,7 +282,8 @@ launchers in `Launchers/`, the managed launcher and Java services in `Managed/`
   it. A call that needs a model, not a stub, is `ISurfaceComposer.createConnection` (the SurfaceControl layers); do not
   answer it with an empty success.
 - A new host window is fitted once at `open` (`fit_new_window`: the compositor clamps it to the work area and changes
-  its shape; the clamp is the work area limit). A fixed-size app's rotation takes the panel's shape within that limit
+  its shape; the clamp is the work area limit). A fixed-size app's rotation takes its opening panel, or the phone panel of the other shape
+  within that limit, inside the host window as it is (only the first request, or `BIFROST_ANDROID_ROTATION=reshape`, reshapes it)
   and keeps its pixel dimensions whatever the user does to the window; never derive them from the window. A
   fixed-size app's window is never aspect-locked (a locked window cannot be tiled to a half or a corner): the fit
   centres the panel in any shape; only a resizable app that requests an orientation is locked. Apps

@@ -142,16 +142,13 @@ app exit leaves the library and the other apps usable.
   checked against a fake SDL, not on a real compositor; [details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)).
   Position and fullscreen are deliberately not remembered (a Wayland client cannot place its window). Open: a real
   compositor check, including whether the window visibly resizes once at launch. `--fullscreen` still belongs to the library.
-- Rotation and scaling of the host window (reported 2026-11-24, planned, not started). Umamusume Global sometimes resizes itself past
-  the right edge of a 3440x1440 monitor when it turns to landscape for a race. Read from the code, not yet reproduced live:
-  `set_orientation` gives a fixed-size app a window of the panel's other shape (1230x692 desktop units, 389x692 in portrait, per the
-  [reference](Android/ANDROID_RUNTIME_REFERENCE.md)), a resize keeps the window's top-left corner, and a Wayland client can neither
-  move its window nor read its position, so a window that starts right of about 490 units reaches past the edge of a desktop 1720
-  units wide (3440 px at 2x). Decided with the maintainer: by default a fixed-size app's host window keeps its size on rotation and
-  the panel refits inside it (people mostly play full screen, and the window is the user's, as for any Linux app); a per-app setting
-  next to Resolution reshapes the window as it does today. First a probe window on KWin to confirm the cause, and
-  `make test-android-sdl-backend` (fake SDL3) updated for the new default. The wider aim stays open: content that scales seamlessly
-  and windows that behave like other Linux windows at fractional scales and across monitors, with no other report so far.
+- Rotation and scaling of the host window. Done 2026-11-25, checked against a fake SDL, not on a real compositor: a fixed-size app's
+  host window keeps its size on rotation and the panel refits inside it, with a per-app Rotation setting for the old reshaping;
+  a window that closed maximised opens maximised, so a game's first size is the one it keeps
+  ([details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)). Open: confirm both in Umamusume, Geometry Dash
+  Lite, Family Island and a 16:9-only game; restoring the remembered size when a window that opened maximised is un-maximised;
+  `eglQuerySurface` answering the old size right after a resize (read from source, no fault tied to it); fractional scales and
+  several monitors, with no other report so far.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested
   with the real emulator, not with media services attached; the retired broker leaves its 750 MB service root until the next
   sweep). Open: every service child (WebView service and renderers, microG) is a whole emulated runtime of 350 to 450 MiB

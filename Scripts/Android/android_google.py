@@ -28,6 +28,7 @@ from xml.etree import ElementTree
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Tools/Android"))
 import android_microg
+import android_settings
 
 GMS = "com.google.android.gms"
 ACCOUNT_TYPE = "com.google"
@@ -378,7 +379,9 @@ class ActivityRelay:
         while self.last is not None and alive(self.last) and time.monotonic() < deadline: time.sleep(.1)
         if control(app).get("state") in ACTIVE: raise RuntimeError("A Google window is already open")
         prepare(self.state, activity, directory, self.requester(directory))
-        started = android_package.start_background(GMS, self.state, self.options)
+        # This process carries the game's saved settings. The Google window keeps its own size: it must not save over the game's.
+        environment = {k: v for k, v in os.environ.items() if k not in android_settings.WINDOW_ENVIRONMENT}
+        started = android_package.start_background(GMS, self.state, self.options, environment)
         pid, stopping, ended = started.get("supervisor_pid"), False, None
         self.last = pid
         while True:

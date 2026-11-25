@@ -17,7 +17,7 @@ import time
 
 import android_gamepad
 from android_package import PACKAGE, ROOT
-from android_settings import (BACK_KEYS, ENTER_KEYS, JIT_CARRIES, JIT_DISK_CACHE_SIZES, JIT_DISK_CACHES, NETWORKS, RESOLUTIONS, STATS_MODES, WINDOW_MODES,
+from android_settings import (BACK_KEYS, ENTER_KEYS, JIT_CARRIES, JIT_DISK_CACHE_SIZES, JIT_DISK_CACHES, NETWORKS, RESOLUTIONS, ROTATIONS, STATS_MODES, WINDOW_MODES,
                               CONTROLLERS,
                               load as load_settings, save as save_settings)
 from android_sessions import session_log
@@ -561,7 +561,16 @@ def settings_dialog(window, app, settings):
                                        "The window scales it to its own size. Follow the window: the app draws at the size the "
                                        "window has when it starts, and a game that keeps that size looks soft once the window "
                                        "grows. Bigger is sharper and slower")
-            form.addRow("Resolution", self.resolution)
+            self.rotation = QComboBox()
+            for name, text in ROTATIONS: self.rotation.addItem(text, name)
+            self.rotation.setCurrentIndex(max(0, self.rotation.findData(settings.get("rotation", "keep"))))
+            self.rotation.setToolTip("For an app whose shape is fixed, when it turns between portrait and landscape. Keep the "
+                                     "window: the app turns inside the window you have. Reshape the window: the window takes "
+                                     "the app's new shape each time, and may reach past the edge of the screen")
+            # One row: the dialog must fit a 720-unit desktop (3440x1440 at 200%).
+            panel = QHBoxLayout(); panel.setSpacing(8)
+            panel.addWidget(self.resolution); panel.addWidget(QLabel("Rotation")); panel.addWidget(self.rotation); panel.addStretch(1)
+            form.addRow("Resolution", panel)
             self.controller = QComboBox()
             for name, text in CONTROLLERS: self.controller.addItem(text, name)
             self.controller.setCurrentIndex(max(0, self.controller.findData(settings.get("controller", "auto"))))
@@ -576,7 +585,8 @@ def settings_dialog(window, app, settings):
             self.menu.setChecked(settings.get("menu_entry", self.menu_default)); form.addRow("Application menu", self.menu)
             self.choices = {"window_stats_mode": self.stats_mode, "back_key": self.back, "enter_key": self.enter,
                             "jit_disk_cache": self.disk_cache, "jit_disk_cache_mb": self.disk_cache_mb, "jit_carry": self.carry, "network": self.network,
-                            "window_mode": self.window_mode, "resolution": self.resolution, "controller": self.controller}
+                            "window_mode": self.window_mode, "resolution": self.resolution,
+                            "rotation": self.rotation, "controller": self.controller}
             form.addRow("Runtime", dim(QLabel(f"Android API {API} · bundled runtime")))
             directory = window.state / app["package"]
             folder = QPushButton("Open app folder")
@@ -650,7 +660,7 @@ def settings_dialog(window, app, settings):
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                             self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(), self.carry.currentData(),
                             self.network.currentData(), self.window_mode.currentData(), self.resolution.currentData(),
-                            self.controller.currentData(), self.menu.isChecked())
+                            self.rotation.currentData(), self.controller.currentData(), self.menu.isChecked())
             # The gamepad page's rows draw their own focus; the desktop widgets get a ring.
             if getattr(window, "big", False): self.pad_page(intro, tabs, buttons, managed)
             else: android_gamepad.focus_ring(self)
@@ -682,7 +692,7 @@ def settings_dialog(window, app, settings):
                     choice("Back key", self.back), choice("Enter key", self.enter),
                     choice("JIT disk cache", self.disk_cache), choice("JIT disk cache size", self.disk_cache_mb), choice("JIT Carry", self.carry),
                     choice("Network", self.network), choice("Window", self.window_mode),
-                    choice("Resolution", self.resolution), choice("Controller", self.controller),
+                    choice("Resolution", self.resolution), choice("Rotation", self.rotation), choice("Controller", self.controller),
                     toggle("Show in the desktop's application menu", self.menu)]
             if managed: rows.append(choice("Android emulator flag", self.emulator))
             clear, uninstall = self.removals
@@ -753,7 +763,7 @@ def settings_dialog(window, app, settings):
             self.stats.setChecked(False); self.stats_mode.setCurrentIndex(self.stats_mode.findData("normal"))
             self.back.setCurrentIndex(0); self.enter.setCurrentIndex(0); self.disk_cache.setCurrentIndex(0)
             self.disk_cache_mb.setCurrentIndex(0); self.carry.setCurrentIndex(0); self.network.setCurrentIndex(0); self.window_mode.setCurrentIndex(0)
-            self.resolution.setCurrentIndex(0); self.controller.setCurrentIndex(0); self.menu.setChecked(self.menu_default)
+            self.resolution.setCurrentIndex(0); self.rotation.setCurrentIndex(0); self.controller.setCurrentIndex(0); self.menu.setChecked(self.menu_default)
             for key, value in defaults.items():   # the app's own defaults, not the global ones
                 if key in self.choices: self.choices[key].setCurrentIndex(max(0, self.choices[key].findData(value)))
                 elif key == "window_stats": self.stats.setChecked(value)
@@ -761,17 +771,17 @@ def settings_dialog(window, app, settings):
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                             self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(), self.carry.currentData(),
                             self.network.currentData(), self.window_mode.currentData(), self.resolution.currentData(),
-                            self.controller.currentData(), self.menu.isChecked())
+                            self.rotation.currentData(), self.controller.currentData(), self.menu.isChecked())
             self.emulator.setCurrentIndex(0); self.properties.setRowCount(0); self.error.hide()
 
         def result_settings(self):
             result = {k: v for k, v in self.settings.items() if not android_settings.property_name(k)}
             for key, value, initial in zip(("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "jit_carry",
-                     "network", "window_mode", "resolution", "controller", "menu_entry"),
+                     "network", "window_mode", "resolution", "rotation", "controller", "menu_entry"),
                     (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
                      self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(), self.carry.currentData(),
                      self.network.currentData(), self.window_mode.currentData(), self.resolution.currentData(),
-                     self.controller.currentData(), self.menu.isChecked()), self.initial):
+                     self.rotation.currentData(), self.controller.currentData(), self.menu.isChecked()), self.initial):
                 if value != initial or key in result: result[key] = value
             value = self.emulator.currentData()
             if value is not None: result["property.ro.kernel.qemu"] = value

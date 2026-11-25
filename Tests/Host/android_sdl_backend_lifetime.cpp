@@ -239,6 +239,22 @@ int main() {
   CHECK(first->set_orientation(2) == 0);
   CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 2460 && pixel_h == 1384);
   first.reset();
+  // Turning a fixed-size app leaves the host window alone after the first request (a client cannot place it on Wayland, so
+  // one that grows can reach past the screen); BIFROST_ANDROID_ROTATION=reshape gives it the panel's shape each time.
+  setenv("BIFROST_TEST_SDL_WORK_AREA", "1720x692", 1);
+  for (const bool reshape : {false, true}) {
+    if (reshape) setenv("BIFROST_ANDROID_ROTATION", "reshape", 1);
+    first = frost::make_sdl_android_window_backend();
+    arm64emu::window_stats::WindowInfo shape;
+    CHECK(first->open("rotation", 1280, 720) == 0 && first->set_fixed_size(2460, 1384) == 0);
+    CHECK(first->set_orientation(1) == 0);                    // a splash with no orientation, then the app's own request
+    CHECK(first->window_info(shape) && shape.w == 778 && shape.h == 1384);
+    CHECK(first->set_orientation(2) == 0);
+    CHECK(first->pixel_size(pixel_w, pixel_h) && pixel_w == 2460 && pixel_h == 1384);
+    CHECK(first->window_info(shape) && shape.w == (reshape ? 2460 : 778) && shape.h == 1384);
+    first.reset();
+  }
+  unsetenv("BIFROST_ANDROID_ROTATION");
   // A window that fits is untouched.
   setenv("BIFROST_TEST_SDL_WORK_AREA", "3440x1440", 1);
   first = frost::make_sdl_android_window_backend();
@@ -490,8 +506,8 @@ int main() {
     CHECK(win->open("remembered", 800, 600) == 0 && win->poll(ev) == 0);
     CHECK(win->pixel_size(w, h) && w == 1600 && h == 1200);
     win->close();
-    // A window with no size of its own keeps the earlier one: fullscreen, maximised, minimised or hidden.
-    for (const char *flags : {"fullscreen", "maximized", "minimized", "hidden"}) {
+    // A window with no size of its own keeps the earlier one: fullscreen, minimised or hidden (maximised: below).
+    for (const char *flags : {"fullscreen", "minimized", "hidden"}) {
       remember("640 480\n");
       CHECK(win->open("remembered", 800, 600) == 0 && win->poll(ev) == 0);
       win->resize(1000, 800, true);
@@ -513,6 +529,63 @@ int main() {
     arm64emu::window_stats::WindowInfo shape;
     CHECK(win->poll(ev) == 0 && win->window_info(shape) && shape.w == 2000 && shape.h == 1000);
     CHECK(win->pixel_size(w, h) && w == 1600 && h == 1200);   // the app's panel is what it was
+    win->close();
+    // A window that closed maximised opens maximised: the app's first size is the one it keeps, so a game that cannot
+    // follow a resize never sees one, and a fixed-size app's panel is the whole desktop's shape.
+    setenv("BIFROST_TEST_SDL_MAXIMIZED", "1720x692", 1);
+    win->close();
+    win = frost::make_sdl_android_window_backend();
+    remember("640 480 maximized\n");
+    CHECK(win->open("maximized", 1280, 720) == 0);
+    CHECK(win->pixel_size(w, h) && w == 3440 && h == 1384);
+    std::ofstream(log, std::ios::trunc).close();
+    CHECK(win->poll(ev) == 0 && win->pixel_size(w, h) && w == 3440 && h == 1384);
+    CHECK(win->set_fixed_size(3440, 1384) == 0 && win->set_orientation(2) == 0);
+    CHECK(win->pixel_size(w, h) && w == 3440 && h == 1384);   // not back to the 16:9 panel
+    CHECK(win->set_orientation(1) == 0);                      // the phone panel, in the window as it is
+    CHECK(win->pixel_size(w, h) && w == 778 && h == 1384);
+    CHECK(win->window_info(shape) && shape.w == 3440 && shape.h == 1384);
+    CHECK(win->set_orientation(2) == 0 && win->pixel_size(w, h) && w == 3440 && h == 1384);
+    CHECK(contents(log).find("host-resize") == std::string::npos);
+    win->close();
+    CHECK(contents(state.c_str()) == "640 480 maximized\n");  // the size it had before it was maximised stays
+    // A resizable app that asks to turn keeps the maximised window's size: its display is the window, which cannot turn.
+    win = frost::make_sdl_android_window_backend();
+    CHECK(win->open("maximized resizable", 1280, 720) == 0 && win->set_orientation(1) == 0);
+    CHECK(win->pixel_size(w, h) && w == 3440 && h == 1384 && contents(log).find("host-resize") == std::string::npos);
+    win->close();
+    // A portrait app opens in its own shape and is maximised afterwards.
+    win = frost::make_sdl_android_window_backend();
+    CHECK(win->open("maximized portrait", 360, 640) == 0);
+    CHECK(win->pixel_size(w, h) && w == 720 && h == 1280 && win->set_fixed_size(720, 1280) == 0);
+    CHECK(win->poll(ev) == 0 && contents(log).find("maximize") != std::string::npos);
+    CHECK(win->window_info(shape) && shape.w == 3440 && win->pixel_size(w, h) && w == 720 && h == 1280);
+    win->close();
+    // A compositor that does not maximise (a tiling desktop) gets an ordinary window.
+    unsetenv("BIFROST_TEST_SDL_MAXIMIZED");
+    win = frost::make_sdl_android_window_backend();
+    CHECK(win->open("not maximized", 1280, 720) == 0);
+    CHECK(win->pixel_size(w, h) && w == 2560 && h == 1440);
+    win->close();
+    win = frost::make_sdl_android_window_backend();
+    // A size the window has already left (one step of opening maximised) is not reported; its present size is.
+    CHECK(win->open("stale size", 800, 600) == 0);
+    win->poll(ev);
+    setenv("BIFROST_TEST_SDL_EVENT", "once:pixels:640x400#1", 1);
+    CHECK(win->poll(ev) == 0);
+    CHECK(win->pixel_size(w, h));
+    setenv("BIFROST_TEST_SDL_EVENT", ("once:pixels:" + std::to_string(w) + "x" + std::to_string(h) + "#2").c_str(), 1);
+    CHECK(win->poll(ev) == 1 && ev.type == BIFROST_WINDOW_RESIZE && ev.width == w && ev.height == h);
+    unsetenv("BIFROST_TEST_SDL_EVENT");
+    win->close();
+    // Closing the window saves at the request: a game may kill its own process on the way out.
+    remember("640 480\n");
+    CHECK(win->open("close request", 800, 600) == 0 && win->poll(ev) == 0);
+    win->resize(1000, 800, true);
+    setenv("BIFROST_TEST_SDL_EVENT", "once:close#1", 1);
+    CHECK(win->poll(ev) == 1 && ev.type == BIFROST_WINDOW_CLOSE);
+    unsetenv("BIFROST_TEST_SDL_EVENT");
+    CHECK(contents(state.c_str()) == "500 400\n");
     win->close();
     // Without the variable nothing is read or written.
     unsetenv("BIFROST_ANDROID_WINDOW_STATE");

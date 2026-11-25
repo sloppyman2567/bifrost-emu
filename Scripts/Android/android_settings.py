@@ -37,6 +37,10 @@ WINDOW_MODES = (("resizable", "Resizable (default)"), ("keep", "Keep the app's s
 # draws at the size it started with when the window grows later (an app such as a Unity game keeps its first size).
 RESOLUTIONS = (("window", "Follow the window (default)"), ("720", "720p"), ("1080", "1080p"), ("1440", "1440p"),
                ("2160", "2160p (4K)"))
+# What a rotation does to the window of a fixed-size app (resizeableActivity=false, Window: keep, or a Resolution). keep (the
+# default) leaves the window alone and turns the app's panel inside it; reshape gives the window the panel's new shape each
+# time (BIFROST_ANDROID_ROTATION=reshape), which can reach past the screen: a Wayland client cannot place its window.
+ROTATIONS = (("keep", "Keep the window (default)"), ("reshape", "Reshape the window"))
 # auto follows the host's default route; offline blocks all non-loopback IP traffic (BIFROST_ANDROID_OFFLINE=1) and
 # reports no network to Android.
 NETWORKS = ("auto", "offline")
@@ -53,9 +57,10 @@ CHOICES = {"window_stats_mode": tuple(name for name, _ in STATS_MODES),
            "jit_carry": tuple(name for name, _ in JIT_CARRIES), "network": NETWORKS,
            "window_mode": tuple(name for name, _ in WINDOW_MODES),
            "resolution": tuple(name for name, _ in RESOLUTIONS),
+           "rotation": tuple(name for name, _ in ROTATIONS),
            "controller": tuple(name for name, _ in CONTROLLERS)}
 KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "jit_carry",
-        "network", "window_mode", "resolution", "controller", "menu_entry")
+        "network", "window_mode", "resolution", "rotation", "controller", "menu_entry")
 BOOLEANS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False}
 PROPERTY_PREFIX = "property."
 
@@ -177,9 +182,16 @@ def launch_changes(settings):
         env["BIFROST_ANDROID_WINDOW_MODE"] = settings["window_mode"]
     if settings.get("resolution", "window") != "window":
         env["BIFROST_ANDROID_RESOLUTION"] = settings["resolution"]
+    if settings.get("rotation", "keep") != "keep":
+        env["BIFROST_ANDROID_ROTATION"] = settings["rotation"]
     if "controller" in settings:
         env["BIFROST_ANDROID_CONTROLLER"] = settings["controller"]
     return flags, env
+
+
+# One app's window: never passed on to a window of another app that its session starts (a Google sign-in).
+WINDOW_ENVIRONMENT = ("BIFROST_ANDROID_WINDOW_STATE", "BIFROST_ANDROID_WINDOW_MODE", "BIFROST_ANDROID_RESOLUTION",
+                      "BIFROST_ANDROID_ROTATION")
 
 
 def apply_to_launch(app, options, environment):

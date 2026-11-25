@@ -53,12 +53,14 @@
     },
     "com.MelsoftGames.FamilyIslandFarm": {
       "name": "Family Island",
+      "settings": {"window_mode": "keep"},
       "tested_version": "2026370.1.94765",
       "status": "playable",
       "checked": "2026-11-25",
       "evidence": "The maintainer reports stable play on 2.0.0-beta.2 (2026-11-14), with some lag while other programs loaded the machine. Three screenshots (the home island, an island map, the Beaver Grove screen) show the game drawn at 3440x1384 with the overlay at 26.7 to 47.0 FPS. One session; no longer run and no frame-time measurement are recorded. Reported stable again on 2026-11-25 (2.0.0-beta.3), where the one capture is the game's own update prompt.",
       "notes": [
-        "A Defold game whose Activity extends NativeActivity: it needed the surface and the input queue handed over (Docs/Android/ANDROID_RUNTIME_REFERENCE.md)."
+        "A Defold game whose Activity extends NativeActivity: it needed the surface and the input queue handed over (Docs/Android/ANDROID_RUNTIME_REFERENCE.md).",
+        "A resize after the first frame leaves the screen laid out for the old size until the next scene (maintainer-reported 2026-11-25), so the app keeps the shape it opened at by default."
       ]
     },
     "com.ubisoft.hungrysharkworld": {
@@ -134,11 +136,12 @@
     },
     "com.robtopx.geometryjumplite": {
       "name": "Geometry Dash Lite",
+      "settings": {"window_mode": "keep"},
       "tested_version": "2.2.148",
       "status": "playable",
       "checked": "2026-11-25",
       "evidence": "The maintainer reports it is playable and stable on 2.0.0-beta.3; two captures of level play read 165 FPS.",
-      "notes": ["Ads were only somewhat stable in the maintainer's report of 2026-10-29; which ads failed, and how, is not recorded. On 2026-11-25 they report ads working in the games played, with lag in playable ads."]
+      "notes": ["Ads were only somewhat stable in the maintainer's report of 2026-10-29; which ads failed, and how, is not recorded. On 2026-11-25 they report ads working in the games played, with lag in playable ads.", "A resize after the first frame leaves the screen laid out for the old size until the next scene (maintainer-reported 2026-11-25), so the app keeps the shape it opened at by default."]
     },
     "com.studio27.MelonPlayground": {
       "name": "Melon Sandbox",

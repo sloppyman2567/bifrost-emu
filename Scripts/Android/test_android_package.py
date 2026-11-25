@@ -29,6 +29,7 @@ import zipfile
 
 import android_package as package
 import android_paths
+import android_settings
 
 ROOT = package.ROOT
 ARGS = None
@@ -518,6 +519,17 @@ class LauncherArgumentTests(unittest.TestCase):
         backend = (ROOT / "Source/System/Android/Window/WindowBackend.cpp").read_text()
         self.assertIn('"BIFROST_ANDROID_RESOLUTION"', backend)                              # and so does the host window
 
+    def test_the_rotation_setting_reaches_the_host_window(self):
+        from android_settings import KEYS, launch_changes, parse
+        self.assertIn("rotation", KEYS)
+        self.assertEqual([parse("rotation", x) for x in ("keep", "reshape")], ["keep", "reshape"])
+        with self.assertRaises(ValueError):
+            parse("rotation", "Reshape")
+        self.assertEqual(launch_changes({"rotation": "keep"}), ([], {}))                    # the default adds nothing
+        self.assertEqual(launch_changes({"rotation": "reshape"}), ([], {"BIFROST_ANDROID_ROTATION": "reshape"}))
+        backend = (ROOT / "Source/System/Android/Window/WindowBackend.cpp").read_text()
+        self.assertIn('"BIFROST_ANDROID_ROTATION"', backend)                                # and the host reads the same name
+
     def test_the_window_setting_keeps_the_apps_shape_by_default_and_reaches_the_guest(self):
         import android_managed
         from android_settings import KEYS, launch_changes, parse
@@ -843,6 +855,11 @@ class LauncherProfileTests(unittest.TestCase):
         self.assertNotIn("controller", dialog.result_settings())                        # leaving the default saves nothing
         dialog.controller.setCurrentIndex(dialog.controller.findData("gamepad"))
         self.assertEqual(dialog.result_settings()["controller"], "gamepad")
+        dialog = self.edit({})
+        self.assertEqual(dialog.rotation.currentData(), "keep")
+        self.assertNotIn("rotation", dialog.result_settings())
+        dialog.rotation.setCurrentIndex(dialog.rotation.findData("reshape"))
+        self.assertEqual(dialog.result_settings()["rotation"], "reshape")
         dialog = self.edit({"controller": "cursor"})
         self.assertEqual(dialog.controller.currentData(), "cursor")
         dialog.reset_profile()
@@ -3665,7 +3682,10 @@ class GoogleAccountStateTests(unittest.TestCase):
                         size = struct.unpack('!I', client.recv(4))[0]
                         return json.loads(client.recv(size))
 
-                def start(*args):
+                def start(package, state, options, environment):
+                    # The Google window must not save over the size of the game that asked for it.
+                    self.assertEqual([k for k in android_settings.WINDOW_ENVIRONMENT if k in environment], [])
+                    self.assertEqual(environment["BIFROST_ANDROID_OFFLINE"], "0")
                     google.stage_request(gms, request)
                     (gms / google.ACTIVITY / "result.bin").write_bytes(b"activity-data")
                     (gms / google.ACTIVITY / "nested.json").write_text(json.dumps({
@@ -3675,7 +3695,9 @@ class GoogleAccountStateTests(unittest.TestCase):
 
                 live = {"state": "running", "session_id": "still-running"}
                 relay = google.ActivityRelay(state, root, [])
+                game = dict({name: "game" for name in android_settings.WINDOW_ENVIRONMENT}, BIFROST_ANDROID_OFFLINE="0")
                 with patch('android_sessions.control', side_effect=[{"state": "exited"}, live]) as control, \
+                        patch.dict(os.environ, game), \
                         patch('android_package.start_background', side_effect=start), \
                         patch('android_google.publish_shared') as publish:
                     relay.run(request)

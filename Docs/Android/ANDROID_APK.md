@@ -315,8 +315,8 @@ Changes take effect at the next start. A setting you never chose is not stored,
 so it keeps following the emulator's default.
 
 A game window follows desktop habits without a setting: **F11** toggles fullscreen (the key never reaches the app), and the
-window's size is remembered per app in `launcher-window.txt` beside the settings and used at the next start. Position,
-fullscreen and a maximised window are not remembered; delete the file to forget the size.
+window's size, and whether it was maximised, are remembered per app in `launcher-window.txt` beside the settings and used at the
+next start. Position and fullscreen are not remembered; delete the file to forget the rest.
 ([details](ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07))
 
 An app's settings in the launcher are its compatibility profile. General
@@ -356,13 +356,14 @@ mean the game process has already launched.
 | `controller` | `auto`, `gamepad`, `cursor` | what a gamepad does for an app that only takes touch (`BIFROST_ANDROID_CONTROLLER`): `auto` (the default) leaves the pad a pad and lets Start and Select pressed together turn a touch cursor on and off (left stick moves, A touches, X is a second finger; the triggers slow and speed it); `gamepad` never has a cursor and leaves Start and Select to the game; `cursor` has it on from the start. See [Touch cursor](ANDROID_RUNTIME_REFERENCE.md#touch-cursor-2026-11-07) |
 | `window_mode` | `resizable`, `keep` | `resizable` (the default) lets the host window resize the app's display; `keep` gives the app a fixed panel of the shape it opened at, scaled to the window and pillarboxed, as Android does for `resizeableActivity=false` (`BIFROST_ANDROID_WINDOW_MODE=keep`): for a game that draws wrongly in a window of another shape. See [Window shape](ANDROID_RUNTIME_REFERENCE.md#window-shape-2026-10-28) |
 | `resolution` | `window`, `720`, `1080`, `1440`, `2160` | the size the app draws its display at, as the short side in pixels (`1080` is 1080x1920 or 1920x1080), which the host window scales to its own size (`BIFROST_ANDROID_RESOLUTION`); `window` (the default) follows the window. A game that keeps the size it started with, such as a Unity game, draws at the small size the window opened at and looks soft once the window grows; a bigger value is sharper and costs more to draw |
+| `rotation` | `keep`, `reshape` | what happens to the window of an app whose shape is fixed (not resizable, `window_mode=keep` or a `resolution`) when it turns between portrait and landscape: `keep` (the default) leaves your window alone and turns the app inside it; `reshape` gives the window the app's new shape each time (`BIFROST_ANDROID_ROTATION=reshape`), which can reach past the edge of the screen |
 | `menu_entry` | `on`, `off` | whether the app gets a launcher in the desktop's application menu (see [Menu entries](#menu-entries-2026-11-04)); unset follows `asgard desktop --default` (off at first: nothing is added to the menu until you ask) |
 | `network` | `auto`, `offline` | `offline` sets `BIFROST_ANDROID_OFFLINE=1`: the app's sockets cannot reach anything beyond loopback (`ENETUNREACH`), names do not resolve, and Android reports no network |
 
 An app can carry built-in defaults: the `settings` object of its entry in `Scripts/Android/compatibility.json` (any setting above
 except `property.*`; `test_android_package.py` validates them). They apply under what the user saved: `asgard config APP` shows an
 unset one as `keep (default for this app)`, a saved value (including `resizable`) overrides it, `--reset KEY` returns to it, and
-the library's settings page shows it and writes only a change. Doki Doki Literature Club ships `window_mode=keep`.
+the library's settings page shows it and writes only a change. Doki Doki Literature Club, Geometry Dash Lite and Family Island ship `window_mode=keep`.
 
 Managed apps also accept `property.NAME` settings. These override Android
 properties in this app's generated runtime, without changing the shared image:

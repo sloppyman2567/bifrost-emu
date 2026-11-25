@@ -2507,25 +2507,44 @@ sees `KEYCODE_F11`; the compositor's answer arrives as an ordinary size change, 
 fixed-size app's panel is fitted into the screen, and leaving fullscreen returns the windowed size. Back-key choices
 (`F1`, `F2`, `F12`) are unaffected.
 
-The window's size is remembered per app. The session environment names a file beside the app's settings
-(`BIFROST_ANDROID_WINDOW_STATE`, `launcher-window.txt`, set by `android_settings.apply_to_launch` unless the environment
-already names one) holding one line, `WIDTH HEIGHT` in desktop units (`Window/RememberedSize.hpp`, SDL-free, tested by
-`make test-android-window-size`). The backend writes it when the window closes, unless the window is fullscreen, maximised,
-minimised or hidden (it has no size of its own then, so the earlier one stays), and ignores a missing or damaged file.
+The window's size, and whether it was maximised, are remembered per app. The session environment names a file beside the app's
+settings (`BIFROST_ANDROID_WINDOW_STATE`, `launcher-window.txt`, set by `android_settings.apply_to_launch` unless the environment
+already names one) holding one line, `WIDTH HEIGHT` in desktop units, with ` maximized` after it for a maximised window
+(`Window/RememberedSize.hpp`, SDL-free, tested by `make test-android-window-size`). The backend writes it when the user asks to
+close the window and again when it closes (a game may kill its own process in between). A maximised window keeps the size it had
+before; a fullscreen, minimised or hidden one leaves the file as it was. A missing or damaged file is ignored.
 
-It is applied on the first poll after the window is open, as a resize, never as a different size to open at: the app has by
-then fixed its shape (a fixed-size app's panel, an orientation), and a different opening size would change a fixed-size app's
-panel. So a resizable app is told a new window size as if the user had dragged it; a fixed-size app's panel stays and is fitted
-into the remembered shape; an app that asked for an orientation keeps its shape and takes the largest window of it inside the
-remembered size. The size is held inside the display, and a missing, damaged or out-of-range file leaves the window as
-asked. Position is not remembered: a Wayland client cannot place its window, and an X11-only position would differ between
-desktops. Fullscreen is not remembered either, so a game never opens full screen unexpectedly.
+**A window that closed maximised opens maximised (2026-11-25)**, before the app starts: it is created with
+`SDL_PROP_WINDOW_CREATE_MAXIMIZED_BOOLEAN`, `SDL_SyncWindow` waits for the compositor, and the app's display is the size it
+got. So the app's first size is the one it keeps. Until then every game opened at 1280x720 units and was resized afterwards,
+which a game that lays out its first screen once draws wrongly: Geometry Dash Lite and Family Island were broken until the
+next scene unless the user widened the window before the first frame (maintainer-reported; their logs show the surface at
+2460x1384, rendering started, then 3440x1384). A fixed-size app's panel is its opening size, so it was pillarboxed in an
+ultra-wide window (SpongeBob, Battle Cats, Melon Sandbox, Hungry Shark World) and now fills it. A portrait window opens in its own
+shape, so a fixed panel stays a phone's, and is maximised on the first poll. A compositor that does not maximise gives an
+ordinary window. A resize event for a size the window has already left is dropped, so a step on the way is not reported.
+
+Any other remembered size is applied on the first poll after the window is open, as a resize, never as a different size to open
+at: the app has by then fixed its shape (a fixed-size app's panel, an orientation), and a different opening size would change a
+fixed-size app's panel. So a resizable app is told a new window size as if the user had dragged it; a fixed-size app's panel stays
+and is fitted into the remembered shape; an app that asked for an orientation keeps its shape and takes the largest window of it
+inside the remembered size. The size is held inside the display. Position is not remembered: a Wayland client cannot place its
+window, and an X11-only position would differ between desktops. Fullscreen is not remembered either, so a game never opens full
+screen unexpectedly. Leaving a window that opened maximised gives the 1280x720 default, not the remembered size.
+
+A Google window that a game opens (`android_google.ActivityRelay`) is started without the game's window settings
+(`android_settings.WINDOW_ENVIRONMENT`). It used to inherit the state file and save its own size over the game's: Hungry Shark
+World's file was rewritten at 02:31:08 on 2026-11-25, the second the sign-in window's log ended.
 
 Checked: the file contract and fitting (`make test-android-window-size`), and the backend against a fake SDL
-(`make test-android-sdl-backend`): F11 toggling, never reaching the app, restore once, clamping to the display, orientation
-fit, a fixed-size app's panel unchanged, saving skipped for the four states, and no file without the variable. Not checked:
-a real compositor (whether a `SetWindowSize` right after opening is honoured on KWin or GNOME, whether an app visibly resizes
-once at launch, and how fullscreen behaves with an orientation lock or on several monitors), or a game.
+(`make test-android-sdl-backend`): F11 toggling, never reaching the app, opening maximised (landscape, portrait, refused), restore
+once, clamping to the display, orientation fit, a fixed-size app's panel unchanged, stale resize events, saving at the close
+request and skipped for the three states, and no file without the variable. The SDL 3.2 source maximises a window created that
+way before showing it and waits for it in `SDL_SyncWindow`. Not checked: a real compositor or a game.
+
+Found by reading, not fixed and not shown to cause a fault: `eglQuerySurface` after a resize. On Android the size comes from the
+native window at once (Mesa `droid_query_surface`); Mesa's Wayland platform keeps the old size while a back buffer is held
+(`resize_callback`), so a game that asks once, right after its swap (Defold does), can read the old size.
 
 ### Window shape (2026-10-28)
 
@@ -2543,8 +2562,17 @@ black at the side. Observed with a probe of the real backend on this KWin/Waylan
 - An Activity opens portrait only when its manifest asks for portrait; otherwise the window is landscape.
 - `set_orientation` for a fixed-size app turns the panel to its other shape (1280x720 or 720x1280 units, shrunk to the
   work area limit, so landscape is 1230x692 and portrait 389x692 here), and `set_window_orientation` reports the size
-  the backend ended with instead of assuming a swap. The panel's pixel dimensions do not follow the window: a
-  maximized 21:9 window shows the 16:9 panel pillarboxed by the fit (`g_fit`), never cut off.
+  the backend ended with instead of assuming a swap. The panel's pixel dimensions do not follow the window: a 16:9 panel in a
+  window maximized later is pillarboxed by the fit (`g_fit`), never cut off. Turned back to the shape it opened in, the panel
+  has its opening size again (a window that opened maximised: the work area).
+- The host window keeps its size when a fixed-size app turns (2026-11-25): the panel turns inside it. Umamusume's window grew past
+  the right edge of a 3440x1440 monitor on a landscape race, because a resize keeps the top-left corner and a Wayland client
+  cannot move its window (read from the code, not reproduced live). The app's first request still shapes the window, as part of
+  opening, unless it is maximised or fullscreen. The per-app `rotation` setting (`BIFROST_ANDROID_ROTATION=reshape`, read by the
+  host only) reshapes it each time, as before. A resizable app that asks for an orientation is reshaped as it always was.
+- An unresizeable app's panel stops at its manifest's maximum aspect ratio (`ActivityInfo.getMaxAspectRatio`, `APP_MAX_ASPECT`
+  in the log), as `ActivityRecord.applyAspectRatio` does: 2.1 for SpongeBob, 2.4 for The Battle Cats, none for Melon Sandbox and
+  Hungry Shark World (from their manifests). A resizable app, or one kept by the Window setting, is not limited.
 
 The window of a fixed-size app is not aspect-locked (2026-11-07). It used to be (`SDL_SetWindowAspectRatio` to the panel's
 shape), and a compositor cannot tile a window with a locked aspect ratio: SpongeBob (`APP_WINDOW_FIXED`) could not be put on the
@@ -2575,6 +2603,9 @@ size-only change, which is what the runtime delivers, so the guest's own resize 
 (the render thread's textures are generated, deleted and bound consistently). Whether a real device with a resizable window
 behaves the same was not checked. With `window_mode=keep` Ren'Py never sees a resize and the images stay (user-confirmed
 2026-11-08), so the app's `compatibility.json` entry carries `"settings": {"window_mode": "keep"}` as its built-in default.
+Geometry Dash Lite and Family Island carry it too (2026-11-25): a resize after the first frame leaves their screen laid out for the
+old size until the next scene (maintainer-reported). Stock Cocos2d-x 2.2.6 ignores `onSurfaceChanged` (its source); the game's own
+fork was not read. Both are games the AOSP rule would not freeze, since neither declares `resizeableActivity=false`.
 
 #### The Resolution setting (2026-11-14)
 
