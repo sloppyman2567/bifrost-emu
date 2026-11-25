@@ -1466,6 +1466,30 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
   at its own address). `jit_native_libc` (single thread, run by `make verify` too), `test_native_libc_mt`,
   `test_jit_native_libc.sh` and, for Bionic under `linker64`, `Scripts/Android/test_android_native_libc.sh` cover it.
 
+## Planned: several compilers at once
+
+Not built. In MT code one thread compiles at a time (`compile_mutex_`), so a thread that needs one block waits behind the others' blocks.
+One JIT per thread (`BIFROST_NO_SHARED_JIT=1`, nothing shared) shows the ceiling on a guest test that only translates: 1.4 s to 0.27 s with four threads
+and 1.6 s to 0.14 s with eight ([numbers](archive/JIT-history.md#translation-in-several-threads-measured-2026-11-25)). Publication stays serial (about 0.18 s there), so a shared JIT
+cannot reach that. That mode also shows that a `FrostJIT` object is a complete compiler, which the design uses: a few compiler contexts
+(objects of the same class) over one shared core.
+
+- **Shared core:** the block table and its indices, chaining and edge tables, the code buffer, fault sites and Carry's decisions. Written only under
+  the exclusive table lock, at publication, or by the invalidation that already holds it.
+- **Context:** everything a compile scribbles on (IR, allocator, scans, staging). What it creates (edges, code words, flag dependencies, register
+  passing layouts, side exits) stays in the context until it publishes; edge cells keep a fixed address because generated code holds it.
+- **Code space:** a context leases a chunk of the buffer and has its own cursor. `rewind_codegen` and the overflow path work inside the lease. The stubs
+  every block shares (`cold_stubs_ready_`) must exist before the second context starts.
+- **Fault sites** are one array, sorted because code only grows, which the SIGSEGV handler binary-searches. It becomes one array per chunk, found by
+  the chunk the faulting pc is in; a chunk has one writer, so each stays sorted.
+- **The same block twice:** a thread that misses on a pc another context is compiling waits for that one. The existing `raced` path covers the rest.
+- **Invalidation** logs its range for every active compile (`log_invalidation_for_compiles` has one log), **fork** takes every context or
+  none (`try_lock_for_fork`), and generated code must address the core, never the context that emitted it.
+- **Stays serial:** verify, the persistent cache's recording, per-thread JIT mode and ST code.
+
+Steps: (1) split core and context with one context, no behaviour change; (2) chunked code space and fault sites, still one context; (3) several
+contexts, with a switch back to one; then Lean first, Carry when hot (below).
+
 ## Planned codegen: retaining guest state across regions
 
 This is the proposed direction, with milestones and targets in [the roadmap](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions).

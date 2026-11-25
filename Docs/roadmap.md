@@ -365,7 +365,7 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    while loading; the purge at the first thread costs the Android start-up 4% CPU and no wall time), but MT code compiles one block at a
    time, and while loading SpongeBob and Battle Cats the threads waited for that 1.2 to 2 times as long as they compiled. Next: a
    `BIFROST_PROF` run of a game's start (the report now shows translating and waiting per thread) to see whether the game's own threads are the
-   ones waiting; if so, compiling several blocks at once, and then the table growth that stops everyone for 10-30 ms. Open: whether Lean should run SSA on hot blocks only (about 2% of CoreMark's cycles).
+   ones waiting; if so, compiling several blocks at once (item 4), and then the table growth that stops everyone for 10-30 ms. Open: whether Lean should run SSA on hot blocks only (about 2% of CoreMark's cycles).
 2. **State moves and copies around the arithmetic.** Real FP math is 2-7% of the generated ops in games and in the game-style
    kernels; the rest is moving guest state, copying vector registers and checking results. One track, in three parts:
    - *Inside a block* (game-style kernels, 2026-11-23): XMM moves and zeroing are 28-36% of the generated ops, vector state
@@ -403,10 +403,13 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    still runs in the interpreter (Zenless Zone Zero, 2026-11-23, `BIFROST_CLASS_PROF`): the exclusive pairs `ldxp`/`stxp`/`ldaxp`/
    `stlxp` with their retry loops; 64-bit-lane saturating narrowing shifts stay interpreted too (scalar `fmax`/`fmin` stepped
    the interpreter for every zero result until 2026-11-24; now only a NaN input does).
-4. **Lean first, Carry when hot** is the goal (maintainer, 2026-11-25): Lean translates everything, Carry only hot code. Not built: today every block is formed
+4. **Several compilers at once** ([design](JIT.md#planned-several-compilers-at-once), not built; maintainer, 2026-11-25): one thread compiles at a time in MT code. The
+   ceiling on a guest test that only translates is 5 times faster at four threads and 11 times at eight; no game is measured. Accept when that test scales, `jit_mt_*`,
+   fork and invalidation tests pass under stress, and a game's loading is shorter or no worse.
+5. **Lean first, Carry when hot** is the goal (maintainer, 2026-11-25): Lean translates everything, Carry only hot code. Not built: today every block is formed
    with Carry on its first translation ([the gap](JIT.md#planned-codegen-retaining-guest-state-across-regions)). Next: give a Lean block a trigger that
    costs little and goes away once it fires, as Carry's entry budget does; accept when the ART start-up is back near Lean's time and CoreMark keeps Carry's.
-5. **Carry regions** (planned second JIT; Tier-2 was removed on 2026-11-24 because it never beat Lean by more than a few percent and no game was
+6. **Carry regions** (planned second JIT; Tier-2 was removed on 2026-11-24 because it never beat Lean by more than a few percent and no game was
    shown to gain, [why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)). It keeps guest registers in host registers across blocks and
    back edges, with sampled hotness and no timed trials. A CoreMark simulation puts the ceiling at 63-84% of register moves
    ([limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)). Next: a clean gameplay profile, then the
@@ -421,7 +424,7 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    JIT samples with Carry on (1.4% with `BIFROST_NO_REG_PASS=1`, so it is the register-passing entry loads) and guest state moves at 37% of all
    samples (42% of the body); only 11.3% of samples are in loops of several blocks, and 50.1% are outside any loop, so loop residency alone reaches
    little of it.
-6. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
+7. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the
 5800X3D on November 7, native CoreMark v1.01 built with gcc 16.2.1 `-O2` ran 37,950 iterations/s on one core and the JIT 14,785,

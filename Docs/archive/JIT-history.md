@@ -22,6 +22,9 @@ translating and waiting per thread (`wait_prof_note_translation`).
   5,900 acquisitions are contended, about 2 ms each: `std::mutex` is not fair and the thread that releases it takes it again.
   Spinning before sleeping gave 6 to 15% at 2 and 4 threads, 4 to 8% at 8, for more CPU, and was not kept. 8 to 10 compiles or publications take over 2 ms (74 to 91 ms
   together); growth of the `unordered_map` tables is the suspect, not shown.
+- **Ceiling of compiling in parallel.** The same guest test under `BIFROST_NO_SHARED_JIT=1` (a JIT per thread, no sharing), three runs each, same checksums:
+  2, 4 and 8 threads take 0.54-0.57, 0.26-0.27 and 0.14 s against 1.31-1.39, 1.41-1.48 and 1.51-1.61 s shared (Carry on; off is alike). The test is the best case: every
+  thread runs its own code and nothing else. One thread takes 1.86-1.92 s against 0.95-1.00 in that mode, which is not explained.
 - **Not known:** which threads of a game wait. A UnityMain that translates its own code gains nothing from compiling in parallel; one that
   waits behind ART's verifier does. Dispatch in the SIGPROF split also holds syscalls, helpers and thunks, so it is not the dispatcher's cost.
 
