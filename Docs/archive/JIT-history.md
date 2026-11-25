@@ -2,6 +2,42 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Register passing between chained blocks (2026-11-24)
+
+The piece the Carry formation write-up below left open: a successor that receives the registers its predecessor holds in host registers skips the
+loads of them (design and rules in `Docs/JIT.md`, "Register passing"). Behind `BIFROST_CARRY=1`; `BIFROST_NO_REG_PASS=1` turns it off.
+
+CoreMark, 20,000 iterations, one pinned core, five alternating pairs of the same binary with `BIFROST_CARRY=1` and with `BIFROST_CARRY=1
+BIFROST_NO_REG_PASS=1`: host instructions 17.777 G to 17.585 G (-1.08%, the same to five digits in every run); cycles 4.716 G to 4.486 G
+best of five (-4.9%), median 4.733 G to 4.528 G (-4.3%); iterations per second best of five 18,975 to 19,960 (+5.2%). CRCs unchanged. The cycles fall
+by more than the instructions because the removed loads sat after stores to the same slot (store forwarding on the dependency chain), and the kept
+values are register moves or nothing. Against Carry off, best of three alternating runs: 18.138 G to 17.585 G instructions (-3.05%), cycles 4.962 G to
+4.475 G (-9.8%), 17,544 to 19,157 iterations per second (+9.2%). With `-v` on 2,000 iterations 262 chain edges enter a register entry and 163 enter
+the plain entry of a block that has one. One benchmark; no game was run.
+
+How it got there, in the order the numbers moved:
+
+- First version, one canonical host register per guest register, a successor loading its first four reads, patching only on an exact match: 35 of
+  932 edges entered the register entry (-0.3% instructions). A histogram of the edges said why: across 887 edges the successors read 1,784 registers
+  first, the predecessor touched 742 of them (42%) and still held 312 (17%) at its exit. That 42% is the ceiling of this scheme, since it passes a
+  register only when the predecessor read or wrote it; a register neither block touches would have to be kept alive across both.
+- Copies in any `RP_HOSTS` register, an entry layout taken from the already translated predecessors (and result registers from the successors):
+  94 edges, -0.55%.
+- Entry set limited to registers the predecessors hold, so a register no predecessor holds loads lazily as before instead of making every
+  edge from them miss: 62% of edges, -1.08%. Before that, CoreMark hung at 100 iterations. Bisecting by the number of register-passing compiles
+  (the 254th block) and reading its code showed a taken edge that claimed `x0` in R12 although the block had just overwritten `x0`: the layout of the
+  last deferred mid-block exit, emitted after the block, overwrote the member the block's own taken slot was read from at publication
+  (`flush_deferred_side_exits` now restores it). A temporary build that compares every layout entry with `cpu.regs[]` before each slot
+  (`cmp reg, [rbx+disp]; je; ud2`, not kept) is what makes this class of bug visible without a hang; it ran clean afterwards.
+- Tried and dropped: six entry registers and a wider scan (CSEL family and CCMP admitted): 17.585 G instructions, the same as four.
+
+Checked: `Scripts/Testing/verify_jit.sh` (112 differential fixtures, 14 threaded oracle runs, `jit_reg_pass` among them) passes with and without `BIFROST_CARRY=1` (differential replay itself runs without the feature); `jit_reg_pass` (new) and the 57 JIT tests of `run_tests.sh --filter 'jit|reg_pass' --strict --quick` pass with `BIFROST_CARRY=1`, and with the
+compare-and-trap build; with that build the toybox, real-world and integration tests pass (143) apart from the four SDL/GL tests that also fail on a
+headless baseline build, and the ART bootstrap (`test_android_jni.py`) creates its VM. Not checked: a game, the persistent cache with the feature on
+(blocks with a register entry are not recorded), other hosts. Per block: `BlockEntry` keeps its size (144 bytes); a `RegPass` side-table entry is 32 bytes
+for each block that has a register entry or a layout. Not done: partial coverage (an edge that covers some of a successor's entry registers still
+loads all of them), loops (their pins preload at entry), and passing a register across a block that does not touch it.
+
 ## Carry formation behind BIFROST_CARRY, and what did not help (2026-11-24)
 
 With every conditional kind a mid-block exit, `translate_block` can go on past a forward conditional branch (design in `Docs/JIT.md`, "Carry
@@ -33,7 +69,7 @@ What the remaining guest-register traffic could still give, from the CoreMark bl
 register moves are loads at block entry, and a successor that received the registers its predecessor holds in host registers would skip 56% of those
 loads, 30% of all moves, which is at most about 9% of host instructions before Carry merges some of those edges. It needs a second entry per block that
 expects a register layout, a predecessor compiled knowing the successor's layout, and a patch-time check that the layouts still agree (the
-predecessor still stores what it wrote, so the successor's registers are clean mirrors and recovery stays as it is). Not built.
+predecessor still stores what it wrote, so the successor's registers are clean mirrors and recovery stays as it is). Built the same day: [register passing](#register-passing-between-chained-blocks-2026-11-24).
 
 The generated code of a Carry block still shows, on CoreMark's state machine (`core_state_transition`): a store of each guest register at every
 definition (the dead-store pass clears at each branch and memory op), the flag pack at both exits, one `lea` per guarded access with an offset, and a

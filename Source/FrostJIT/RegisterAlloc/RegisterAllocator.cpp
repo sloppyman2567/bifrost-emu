@@ -332,6 +332,7 @@ void FrostJIT::clobber_host_reg(int host_reg) {
     dirty_host_regs_ &= ~(1u << host_reg);  // host_reg no longer holds dirty vreg
 }
 int FrostJIT::alloc_reg(int preferred) {
+    if (preferred < 0) preferred = rp_take_hint(-1, -1);  // register passing: the op's result should land in its canonical register
     // Try preferred first.
     if (preferred >= 0 && reg_vreg_[preferred] == -1 &&
         !(pinned_host_regs_ & (1u << preferred))) {
@@ -377,6 +378,7 @@ int FrostJIT::alloc_reg(int preferred) {
 // to place `dest` in a reg that doesn't collide with src1/src2's host regs,
 // so we can compute dest = src1 op src2 without spilling the operands.
 int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
+    if (const int h = rp_take_hint(excl1, excl2); h >= 0) return h;  // register passing: the result goes to its canonical register
     // First pass: look for a free reg (skipping excluded ones).
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
@@ -529,6 +531,7 @@ void FrostJIT::ensure_two_vregs(uint16_t v1, uint16_t v2, int* r1, int* r2) {
 // ensure dirty vregs are evicted BEFORE overwriting the register.
 void FrostJIT::set_vreg_reg(int v, int r) {
     if (v > max_vreg_) max_vreg_ = v;
+    if (v <= 30) rp_unbind(v);  // a guest register written straight into a host register: no temporary holds its value any more
     // If v was in a different reg, drop that mapping (v is moving).
     if (vreg_home_[v] >= 0 && vreg_home_[v] != r) {
         // Clear dirty bit for the old reg if v was dirty there.
@@ -557,6 +560,7 @@ void FrostJIT::set_vreg_reg(int v, int r) {
 // set_vreg_reg when you need to preserve the old occupant's value.
 int FrostJIT::alloc_reg_for(int v, int preferred) {
     if (v > max_vreg_) max_vreg_ = v;
+    if (v <= 30) rp_unbind(v);
     // If v is already in a reg, use it.
     if (vreg_home_[v] >= 0) return vreg_home_[v];
     // Allocate a reg, evicting if needed.
@@ -897,6 +901,7 @@ void FrostJIT::load_vreg_to_reg(int dst, int v) {
     }
 }
 void FrostJIT::store_reg_to_vreg(int v, int src) {
+    if (v <= 30) rp_unbind(v);
     // Write to memory (cpu.regs[] or stack slot).
     if (v <= 31) {
         emit_store_arm(v, src);
@@ -921,6 +926,7 @@ void FrostJIT::store_reg_to_vreg(int v, int src) {
 // so all dirty values were already written back. This just drops the
 // stale reg→vreg associations.
 void FrostJIT::invalidate_all_vregs() {
+    rp_unbind_all();  // the call may have written any guest register
     for (int v = 0; v <= max_vreg_; v++) {
         int r = vreg_home_[v];
         if (r >= 0) {

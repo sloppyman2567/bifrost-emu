@@ -141,6 +141,9 @@ read it; inside chained code it is stale.
   takes its lease before it syncs the table. ST code keeps the generation check. Keep the probe inline at
   each site: a shared lookup stub made `bench_dispatch` 44% slower (2026-11-03). `jit_dispatch_cache_growth` replaces code
   at an address only a grown table reaches.
+- **Chain targets.** A static slot patches to the successor's `chain_entry`, past its prologue, so the successor reuses the frame. With
+  `BIFROST_CARRY=1` it patches to the successor's register entry instead when the registers the slot leaves in host registers cover the
+  successor's first loads ([Register passing](#register-passing-bifrost_carry1)); dispatcher and IBL entries always use the plain entry.
 - **CSET.** A `CSEL` whose operands are XZR or block constants 0 and 1 emits `setcc` and `movzx` (fold-lookahead kind 3
   skips the constants' moves). A `CSEL` read only by a ZEXT 32 joins W-form fusion: its 32-bit `cmov` clears bits 63:32.
 - **Constants and flag saves.** `emit_mov_const` picks the shortest load (a sign-extended imm32 for small negatives).
@@ -252,6 +255,38 @@ profile. Backward branches still end a block. It is not used while the persisten
 mid-block exit is not recordable. It is off by default: on CoreMark it removes 2.0% of host instructions and 4.5% of cycles (the best of five
 alternating runs), and a 100 s SpongeBob start-up showed no crash and about 10% less process CPU, but that pair was not repeated and the exits are
 taken often enough in game code (the cold share of JIT samples went from 0.3% to 2.9%) that a direction chosen from samples is the next step.
+The registers that stay in host registers across a block edge are handed on by [register passing](#register-passing-bifrost_carry1).
+
+### Register passing (`BIFROST_CARRY=1`)
+
+A chain edge used to hand over nothing: the predecessor stored what it wrote, and the successor loaded the registers it reads first. With
+`BIFROST_CARRY=1` the predecessor also leaves clean copies of guest registers in host registers at each chain slot, and a successor that has a
+register entry, its normal entry minus the loads of the registers in its entry layout, is entered there when the copies cover every one of
+them. Memory stays authoritative (a copy never gets ahead of `cpu.regs[]`), so fault recovery, signals, the dispatcher and IBL entries see what
+they always did, and `BIFROST_NO_REG_PASS=1` turns it off.
+
+- **Copies.** A copy is a clean mapping of the guest register's own vreg. A temporary loaded from a register, or stored to one, keeps its host
+  register when it dies instead of being killed (`rp_release`), as long as that register is one of `RP_HOSTS` (R12-R15, R9, R8, RDX, RCX; never
+  RAX, which carries the next pc, nor R11, the MT cell jump's scratch). A `LOAD_REG` of a register mapped clean takes the host register over. The
+  allocator evicts a copy first and for free, since it is clean and dead.
+- **Layouts.** A layout is up to seven (guest register, host register) pairs. Each slot's layout is captured where the slot is emitted: the
+  fall-through slot, the taken slot, and the tail of each mid-block exit, which uses the state captured at its branch. Layouts and the entry
+  offset live in `reg_pass_`, indexed by `BlockEntry::reg_pass`.
+- **Entry set.** A block that is not a loop (pins own R12-R15) loads up to four registers it reads first at its entry (`rp_select_entry`), each in the
+  host register its already translated predecessors leave it in (a register none of them holds is loaded lazily as before), else the host register its
+  translated successors expect, else the register's canonical host register. The pc store of a block that calls out, the statistics count and the vector
+  loads sit after the entry loads and run on both entries; the block trace and a native libc entry sit before them, so such blocks have none.
+- **Results.** The temporary that is finally stored to a guest register is defined in the host register its translated successors expect
+  (`rp_prepare_hints`), when that register is free or holds a copy nothing reads again.
+- **Patching.** `chain_target_for` picks the entry at every patch site (`try_chain_block`, `chain_back_references`, `refresh_mt_edges`): the register
+  entry when the slot's layout covers the entry layout exactly, the plain chain entry otherwise. A later translation of either block patches again, so
+  a layout never outlives the code it describes. MT cells hold the chosen address like any other target.
+- **Where it does not apply.** Loops, blocks that call out before their reads, `BIFROST_JIT_VERIFY`, the persistent cache while it records, indirect
+  exits (IBL probes enter the plain entry), calls and returns.
+
+`jit_reg_pass` (`Tests/Unit/jit_reg_pass.c`) runs block chains, a diamond, register moves, a call in a chain, a merge and a faulting loop against C,
+on one thread and four. Figures and the attempts that came before are in
+[the history](archive/JIT-history.md#register-passing-between-chained-blocks-2026-11-24).
 
 ### Peepholes
 
@@ -1376,7 +1411,8 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
 ## Planned codegen: retaining guest state across regions
 
 This is the proposed direction, with milestones and targets in [the roadmap](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions).
-Nothing in this section is built. **Lean** is the working name for today's first JIT (what these docs still call Tier-1: cheap
+Nothing in this section is built (its first piece that runs, passing registers along chain edges between Lean blocks, is
+[Register passing](#register-passing-bifrost_carry1)). **Lean** is the working name for today's first JIT (what these docs still call Tier-1: cheap
 translation and chaining); **Carry** is the planned second JIT. The names are used for new work only; Tier-1 has not been renamed.
 Tier-2 regions, the only code that fused blocks, were removed on 2026-11-24
 ([why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)); Carry starts again from Lean blocks. Scalar SSA does not yet model
@@ -1659,6 +1695,7 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
+- [Register passing between chained blocks (2026-11-24)](archive/JIT-history.md#register-passing-between-chained-blocks-2026-11-24)
 - [Carry formation behind BIFROST_CARRY, and what did not help (2026-11-24)](archive/JIT-history.md#carry-formation-behind-bifrost_carry-and-what-did-not-help-2026-11-24)
 - [Loops with CBZ/CBNZ exits become one block (2026-11-24)](archive/JIT-history.md#loops-with-cbzcbnz-exits-become-one-block-2026-11-24)
 - [Window register loaded once per chain (2026-11-24)](archive/JIT-history.md#window-register-loaded-once-per-chain-2026-11-24)

@@ -249,6 +249,7 @@ void FrostJIT::emit_taken_path_epilogue() {
     if (chain_skip_enabled()) {
         taken_chain_patch_off_ = code_buf_used_;
         has_taken_chain_slot_ = true;
+        rp_taken_layout_ = rp_capture_layout();
         if (mt) emit_mt_chain_slot(taken_chain_target_pc_);
         else emit_slot_nop5();
         // Cold exit (only reached when the slot above is unpatched).

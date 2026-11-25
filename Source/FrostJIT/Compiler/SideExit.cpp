@@ -149,6 +149,7 @@ void FrostJIT::flush_deferred_side_exits() {
     const bool had_slot = has_taken_chain_slot_;
     const size_t saved_off = taken_chain_patch_off_;
     const uint64_t saved_target = taken_chain_target_pc_;
+    const uint64_t saved_layout = rp_taken_layout_;
     for (const DeferredSideExit& exit : deferred_side_exits_) {
         patch_jcc_rel32(exit.branch, static_cast<int32_t>(code_buf_used_ - (exit.branch + 6)));
         GuardState state = exit.state;
@@ -173,13 +174,14 @@ void FrostJIT::flush_deferred_side_exits() {
         edge_source_override_ = side_exit_key(current_start_pc_, compiled_side_exits_.size());
         emit_taken_path_epilogue();
         edge_source_override_ = 0;
-        compiled_side_exits_.push_back({exit.target, taken_chain_patch_off_});
+        compiled_side_exits_.push_back({exit.target, taken_chain_patch_off_, rp_taken_layout_});
         swap_guard_state(state);
     }
     deferred_side_exits_.clear();
     has_taken_chain_slot_ = had_slot;
     taken_chain_patch_off_ = saved_off;
     taken_chain_target_pc_ = saved_target;
+    rp_taken_layout_ = saved_layout;  // the block's own taken slot keeps the layout it was emitted with
 }
 
 // Called by publish_translation: one stub entry per exit, so the existing chaining finds each slot through back_refs_.
@@ -192,6 +194,7 @@ void FrostJIT::register_side_exit_stubs(uint64_t start_pc) {
         BlockEntry stub;
         stub.chain_target_pc = it->second[k].target;
         stub.chain_patch_off = static_cast<uint32_t>(it->second[k].slot);
+        if (it->second[k].layout) stub.reg_pass = add_reg_pass({0, it->second[k].layout, 0, 0});
         stub.verified_once = true;
         blocks_[key] = stub;
         add_back_ref(stub.chain_target_pc, key);

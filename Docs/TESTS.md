@@ -94,6 +94,15 @@ mid-iteration, one loop per ARM condition for `b.cond` on edge values, and `tbz`
 exits on and off, chaining off, the ordinary frame layout and IR validation. With exits on, `-v` must report at least forty blocks formed with a
 mid-block exit. It does not cover a `b.cond` after an `FP_CMP`, loops with an inner branch, a game, or the persistent cache (such blocks are not recorded).
 
+### Register passing (2026-11-24)
+
+`Tests/Unit/jit_reg_pass.c` and `Scripts/Testing/test_jit_reg_pass.sh` (`run_tests.sh` entry `jit_reg_pass`, also a threaded oracle in `make verify`) run
+hand-written block chains (unconditional branches, a diamond, registers moved between each other across edges, a call in the middle of a chain,
+a block reading registers three predecessors write, and a loop faulting mid-iteration) against C, check that the signal frame shows the finished
+iterations' registers, and repeat them on four threads. They run with `BIFROST_CARRY=1`, with `BIFROST_NO_REG_PASS=1`, with Carry off, with
+chaining off, in the ordinary frame layout, with IR validation and with mid-block exits off; with the feature on, `-v` must report at least
+twenty chain edges into a register entry. It does not cover the persistent cache (blocks with register entries are not recorded) or a game.
+
 ### Carry loop report (2026-11-24)
 
 `Tests/Unit/carry_loop.c` and `Scripts/Testing/test_carry_report.sh` (`run_tests.sh` entry `carry_report`) run a hand-written four-block loop over five

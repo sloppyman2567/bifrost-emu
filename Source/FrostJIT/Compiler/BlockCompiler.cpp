@@ -140,6 +140,14 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     chain_entry_off_ = 0;
     chain_entry_pc_off_ = 0;
     block_calls_out_ = false;
+    rp_mirrors_ = false;
+    rp_entry_ = false;
+    rp_entry_layout_ = 0;
+    rp_entry_n_ = 0;
+    regs_entry_off_ = 0;
+    regs_entry_pc_off_ = SIZE_MAX;
+    rp_taken_layout_ = 0;
+    rp_unbind_all();
     late_fall_pc_ = 0;
     frame_return_off_ = SIZE_MAX;
     num_stack_slots_ = 0;
@@ -689,6 +697,27 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // the contract: a block that calls out without the inline store gets the
     // same store in a stub after its code (see block_calls_out_ below).
     chain_entry_pc_off_ = SIZE_MAX;
+    // Register passing (BIFROST_CARRY, RegisterPassing.cpp): a block that is not a loop (its pins own R12-R15) and whose entry runs
+    // nothing a register entry would skip (the block trace, a native libc diversion) loads the guest registers it
+    // reads first at its entry, and a chain edge whose predecessor already holds them enters past those loads (statistics count past them).
+    bool rp_possible = false;
+    {
+        bool loop_block = false;
+        if (!ir_block.insts.empty()) {
+            const IRInst& last = ir_block.insts.back();
+            loop_block = (last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO || last.op == IROp::BRCOND_BIT) &&
+                         last.branch_target() == start_pc;
+        }
+        rp_possible = dbg().carry && !dbg().no_reg_pass && chain_skip_enabled() && !loop_block && !recording_ && !record_oracle_ &&
+                      !dbg().jit_verify && !dbg().jit_slow_stores &&
+                      !bifrost::DebugFlags::in_ranges(dbg().block_trace, start_pc) &&
+                      !(!dbg().no_native_libc && fault_sites_ && emu.native_libc().find(start_pc) != NativeLibcKind::None);
+        if (rp_possible) {
+            rp_prepare_hints(ir_block, start_pc);
+            rp_select_entry(ir_block, start_pc);
+            rp_entry_ = rp_entry_n_ > 0;
+        }
+    }
     if (defer_pc_store()) {
         bool may_call_out = false;
         for (const IRInst& inst : ir_block.insts) {
@@ -711,17 +740,22 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             }
             if (may_call_out) break;
         }
-        if (may_call_out) {
+        // A register-entry block stores the pc after its entry loads, so both entries run it once.
+        rp_pc_store_ = may_call_out && rp_entry_;
+        if (may_call_out && !rp_entry_) {
             chain_entry_pc_off_ = code_buf_used_;
             emit_mov_imm_to_rax(start_pc);
             emit_store(CPU_REG, PC_OFF, RAX);
         }
+    } else {
+        rp_pc_store_ = false;
     }
     chain_entry_off_ = code_buf_used_;
+    if (rp_pc_store_) chain_entry_pc_off_ = chain_entry_off_;
     current_block_instr_count_ = ir_block.count;
     // -v / BIFROST_STATS_PERIOD: count this entry's guest instructions, after chain_entry_off_ so chain-skip
     // edges count too.
-    emit_guest_stat(static_cast<uint32_t>(ir_block.count));
+    if (!rp_entry_) emit_guest_stat(static_cast<uint32_t>(ir_block.count));  // a register-entry block counts past its entry loads
     // BIFROST_BLOCK_TRACE: log every cold and chained entry. It runs before anything is cached, so the
     // caller-saved registers are free. Self-loop iterations re-enter past the prologue and are not logged.
     if (bifrost::DebugFlags::in_ranges(dbg().block_trace, start_pc)) {
@@ -742,6 +776,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // is recorded: self-loop re-entry jumps directly to the body start, so
     // these loads run only on cold entry (dispatcher / chain entry) and the
     // pinned XMM regs persist as loop-carried state across iterations.
+    if (rp_entry_) {
+        // The loads of the registers a predecessor may pass, then the register entry: the pc store (a block that calls out) and the
+        // vector loads run on both entries.
+        rp_emit_entry_loads();
+        regs_entry_off_ = code_buf_used_;
+        emit_guest_stat(static_cast<uint32_t>(ir_block.count));
+        if (rp_pc_store_) {
+            emit_mov_imm_to_rax(start_pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
+        }
+    }
     vec_emit_prologue_loads();
     // ── Phase 2 loop-carried arch GPR pinning (self-loop blocks) ──────
     // For a self-loop block (last op BRCOND/BRCOND_ZERO/BRCOND_BIT taken to
@@ -805,6 +850,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             }
         }
     }
+    rp_mirrors_ = rp_possible && !keep_store_dest_;
+    if (!rp_mirrors_) rp_clear_hints();
     // Emit the pin preloads (cpu.regs[a] → pin reg) right after the vec
     // prologue loads — after chain_entry_off_ (so chain entries run them)
     // but before block_body_start_off_ (the self-loop back-edge jumps there,
@@ -992,6 +1039,14 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     scan_w32_and_sext_loads(ir_block.insts);
     scan_covered_guards(ir_block.insts);
     scan_pin_inplace(ir_block.insts);
+    // A clean copy of a guest register is read at the LOAD_REGs of it: the allocator must see those uses, or it evicts the copy first.
+    if (rp_mirrors_) {
+        for (size_t i = 0; i < ir_block.insts.size(); i++) {
+            const IRInst& inst = ir_block.insts[i];
+            if (inst.op == IROp::LOAD_REG && !inst.is_fp_load() && inst.src1 <= 30)
+                note_vreg_use(inst.src1, static_cast<uint16_t>(i));
+        }
+    }
     // Loads into cached XMMs and compares against a register's memory home
     // (see fp_load_ and lazy_load_). They read the last-use table as it
     // stands and change nothing; both need this compile loop's materializers.
@@ -1110,7 +1165,13 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             in_place.dest = in_place.src1 = static_cast<uint16_t>(pin_inplace_[i] - 1);
             to_compile = &in_place;
         }
-        if (compile_ir_inst(*to_compile)) break;
+        if (rp_mirrors_ && inst.dest > 32 && inst.dest < 4096) {
+            rp_unbind_temp(inst.dest);
+            rp_dest_hint_ = rp_pref_[inst.dest] ? rp_pref_[inst.dest] - 1 : -1;
+        }
+        const bool compile_ended = compile_ir_inst(*to_compile);
+        rp_dest_hint_ = -1;
+        if (compile_ended) break;
         if (pin_in_place && pin_result_[i]) {
             // The new value is read after the STORE_REG: those readers get a copy, off the loop-carried chain.
             const int copy = alloc_reg();
@@ -1127,7 +1188,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 // Don't kill the dest of this op — it's a new definition
                 // and still live (handles dest == src1 in-place modify).
                 if (v != inst.dest) {
-                    kill_vreg(v);
+                    rp_release(v);
                 }
             }
         }
@@ -1234,6 +1295,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // IBL probe address the CPU through RBX. Only the ordinary layout's
     // slots jump to fn, whose prologue reads RDI=cpu / RSI=emu.
     size_t chain_patch_off;
+    uint64_t rp_exit_layout = 0;
     if (chain_skip_enabled()) {
         // ── Chain-skip epilogue ─────────────────────────────────────
         // Chain edge layout: [slot] [cold exit]. The 5-byte slot is all
@@ -1247,6 +1309,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // for the successor's prologue-agnostic body (it reads cpu/emu
         // from RDI/RSI at chain_entry just like fn does).
         chain_patch_off = code_buf_used_;
+        rp_exit_layout = (unchainable_end_ || indirect_exit_) ? 0 : rp_capture_layout();
         if (mt) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
         else emit_slot_nop5();
         // A register branch's slot is never patched (dynamic target); try
@@ -1319,6 +1382,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
         chain_entry_publish = chain_entry_pc_off_;
     }
+    // The register entry of a block that calls out stores the pc too: inline when the call-out was predicted (rp_pc_store_), else
+    // through a stub like the plain entry's.
+    size_t regs_entry_publish = regs_entry_off_;
+    if (rp_entry_ && defer_pc_store() && block_calls_out_ && !rp_pc_store_) {
+        regs_entry_pc_off_ = code_buf_used_;
+        emit_mov_imm_to_rax(start_pc);
+        emit_store(CPU_REG, PC_OFF, RAX);
+        const size_t jump = emit_jmp_rel32_placeholder();
+        patch_jmp_rel32(jump, static_cast<int32_t>(static_cast<int64_t>(regs_entry_off_) - static_cast<int64_t>(jump + 5)));
+        regs_entry_publish = regs_entry_pc_off_;
+    }
     // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
     // Counts the spill/reload instruction density of THIS block. A high
     // reload:spill ratio for the same vreg within a block is the bloat
@@ -1383,6 +1457,16 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // try_chain_block ignores this field.
     if (chain_skip_enabled())
         entry.chain_entry = (uint64_t(*)(CPU*, Emulator*))(code_buf_ + chain_entry_publish);
+    {
+        RegPass info;
+        if (rp_entry_ && chain_skip_enabled()) {
+            info.regs_entry_off = static_cast<uint32_t>(regs_entry_publish);
+            info.entry_layout = rp_entry_layout_;
+        }
+        info.exit_layout = rp_exit_layout;
+        info.taken_layout = has_taken_chain_slot_ ? rp_taken_layout_ : 0;
+        if (info.regs_entry_off || info.exit_layout || info.taken_layout) entry.reg_pass = add_reg_pass(info);
+    }
     entry.ends_with_branch = ir_block.ends_with_branch;
     entry.chain_patch_off = chain_patch_off;
     entry.chain_target_pc = chain_target_pc_;

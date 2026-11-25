@@ -401,7 +401,11 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    shown to gain, [why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)). It keeps guest registers in host registers across blocks and
    back edges, with sampled hotness and no timed trials. A CoreMark simulation puts the ceiling at 63-84% of register moves
    ([limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)). Next: a clean gameplay profile, then the
-   [design](JIT.md#planned-codegen-retaining-guest-state-across-regions). Nothing is built.
+   [design](JIT.md#planned-codegen-retaining-guest-state-across-regions). Nothing of the second JIT is built. Two pieces of its register traffic
+   work inside Lean blocks behind `BIFROST_CARRY=1`: blocks continue past forward branches (CoreMark -2.0% host instructions) and chain edges pass
+   registers in host registers ([-1.08% instructions, -4.9% cycles](archive/JIT-history.md#register-passing-between-chained-blocks-2026-11-24)).
+   What register passing leaves: a register neither block of an edge touches is not passed (about 58% of the loads at block entry in CoreMark),
+   an edge that covers only some of a successor's entry registers loads them all, and loops still preload their pins.
 5. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the

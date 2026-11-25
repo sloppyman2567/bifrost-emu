@@ -811,7 +811,7 @@ private:
         size_t branch; uint64_t target; GuardState state;
         bool flags_in_host = false, flags_from_sub = false, flags_match_pstate = false, need_cmc = false;
     };
-    struct SideExitSlot { uint64_t target; size_t slot; };
+    struct SideExitSlot { uint64_t target; size_t slot; uint64_t layout; };  // layout: RegLayout the exit passes (register passing)
     std::vector<DeferredSideExit> deferred_side_exits_;
     std::vector<SideExitSlot> compiled_side_exits_;                       // this compile
     std::unordered_map<uint64_t, std::vector<SideExitSlot>> side_exit_table_;  // block pc -> its exits, until published
@@ -943,6 +943,7 @@ private:
         // caller). invalidate_range checks these too — an SMC on an
         // inlined leaf must drop its inliner.
         std::vector<std::pair<uint64_t, int>> inlined_ranges_;
+        uint32_t reg_pass = 0;          // 1 + index into reg_pass_ (register passing, RegisterPassing.cpp); 0: none
         uint32_t chain_patch_off = 0;   // offset of the 5-byte chain slot in code_buf_
         uint32_t taken_chain_patch_off = 0;   // offset of the taken-path slot
         uint32_t selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
@@ -1428,6 +1429,85 @@ private:
     // every loop iteration otherwise pays for its loop-carried arch values.
     static constexpr int PIN_REGS[4] = {R12, R13, R14, R15};
     static constexpr int NUM_PIN_REGS = 4;
+    // ── Register passing (BIFROST_CARRY; RegisterPassing.cpp) ────────────────────────────────
+    // A chain edge may pass guest registers in host registers: the predecessor leaves clean copies at its slot, and a successor
+    // whose entry loads are all covered by them is entered past those loads. A guest register has one canonical host register
+    // (rp_host_for), so layouts agree without negotiation. The host registers are the allocatable ones the chain slot code leaves
+    // alone (RAX holds the next pc, R11 is the MT cell jump's scratch), the callee-saved ones first because flag and call
+    // sequences clobber the others.
+    static constexpr int RP_HOSTS[8] = {R12, R13, R14, R15, R9, R8, RDX, RCX};
+    static constexpr int RP_MAX_ENTRIES = 4;
+    static int rp_host_index(int host) {
+        for (int i = 0; i < 8; i++) if (RP_HOSTS[i] == host) return i;
+        return -1;
+    }
+    static int rp_host_for(int guest) { return RP_HOSTS[guest & 7]; }
+    // A layout is a count byte, then one byte per guest register: (guest << 3) | host index.
+    static uint64_t rp_layout_add(uint64_t layout, int guest, int host) {
+        const int n = static_cast<int>(layout & 0xFF);
+        if (n >= 7) return layout;
+        return ((layout & ~uint64_t(0xFF)) | (uint64_t((guest << 3) | rp_host_index(host)) << (8 * (n + 1)))) | uint64_t(n + 1);
+    }
+    // True when every register of `entry` is in `exit` at the same host register.
+    static bool rp_layout_covers(uint64_t exit, uint64_t entry) {
+        for (int i = 1; i <= static_cast<int>(entry & 0xFF); i++) {
+            const uint8_t want = static_cast<uint8_t>(entry >> (8 * i));
+            bool found = false;
+            for (int j = 1; j <= static_cast<int>(exit & 0xFF) && !found; j++)
+                found = static_cast<uint8_t>(exit >> (8 * j)) == want;
+            if (!found) return false;
+        }
+        return true;
+    }
+    bool rp_mirrors_ = false;   // this compile leaves clean copies of guest registers at its exits
+    bool rp_entry_ = false;     // this compile emits a register-passing entry
+    bool rp_pc_store_ = false;  // the register entry stores the block's pc itself (the block calls out)
+    uint64_t rp_entry_layout_ = 0;
+    int rp_entry_n_ = 0;
+    int rp_entry_guest_[RP_MAX_ENTRIES] = {}, rp_entry_host_[RP_MAX_ENTRIES] = {};
+    // The host register each guest register should be left in or loaded to: where the translated successors of this block expect it,
+    // else its canonical register (rp_host_for).
+    int8_t rp_want_host_[31];
+    size_t regs_entry_off_ = 0;
+    size_t regs_entry_pc_off_ = SIZE_MAX;
+    // The temporary that currently holds guest register a's value (-1: none), and the guest register a temporary was loaded from
+    // or stored to (-1: none). A temporary that dies while it still holds the value becomes the clean copy of the register.
+    int16_t rp_binding_[32] = {};
+    uint8_t rp_arch_of_[4096] = {};  // guest register + 1
+    std::vector<uint16_t> rp_bound_temps_;
+    uint64_t rp_taken_layout_ = 0;
+    // The host register a temporary should be defined in, +1 (0: none): the canonical one of the guest register it is finally stored to,
+    // so that it can stay there as that register's copy. rp_dest_hint_ is the hint of the op being compiled.
+    uint8_t rp_pref_[4096] = {};
+    std::vector<uint16_t> rp_pref_set_;
+    int rp_dest_hint_ = -1;
+    void rp_prepare_hints(const IRBlock& block, uint64_t start_pc);
+    int rp_take_hint(int excl1, int excl2);
+    int rp_pred_hosts(uint64_t pc, int8_t host_of[31]) const;
+    void rp_clear_hints();
+    void rp_select_entry(const IRBlock& block, uint64_t start_pc);
+    void rp_emit_entry_loads();
+    void rp_bind(int guest, int temp);
+    void rp_unbind(int guest);
+    void rp_unbind_temp(int temp);
+    void rp_unbind_all();
+    void rp_release(int temp);
+    uint64_t rp_capture_layout() const;
+    // The entry a chain slot of `source` at code offset `slot` should jump to in `target`.
+    const uint8_t* chain_target_for(const BlockEntry& source, size_t slot, const BlockEntry& target) const;
+    // What a block (or a side-exit stub) passes: its register entry, and the layouts its chain slots leave. Append-only like
+    // flag_dep_table_, indexed by BlockEntry::reg_pass; BlockEntry is read on every dispatch lookup and stays small.
+    struct RegPass {
+        uint64_t entry_layout = 0, exit_layout = 0, taken_layout = 0;
+        uint32_t regs_entry_off = 0;  // code offset of the register entry, 0 when the block has none
+    };
+    std::vector<RegPass> reg_pass_;
+    const RegPass* reg_pass_of(const BlockEntry& e) const { return e.reg_pass ? &reg_pass_[e.reg_pass - 1] : nullptr; }
+    uint32_t add_reg_pass(const RegPass& info) {
+        reg_pass_.push_back(info);
+        return static_cast<uint32_t>(reg_pass_.size());
+    }
+    mutable std::atomic<uint64_t> rp_edges_passed_{0}, rp_edges_plain_{0};  // chain edges patched to the register entry, and to the plain one while the target had one
     void select_arch_pins(const std::vector<IRInst>& instructions);
     bool rematerialize_vreg(int v, int reg);
     regalloc_stats_t regalloc_stats_;

@@ -510,7 +510,18 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     return 0;
                 }
                 int d;
-                if (inst.src1 <= 31 && vreg_home_[inst.src1] >= 0) {
+                if (rp_mirrors_ && inst.src1 <= 30 && !inst.is_fp_load() && vreg_home_[inst.src1] >= 0 &&
+                    !vreg_dirty_[inst.src1]) {
+                    // A clean copy of the register is in a host register (loaded by the entry, or left by an earlier temporary):
+                    // the temporary takes the host register over, and the copy goes (memory still holds the value).
+                    const int s = vreg_home_[inst.src1];
+                    vreg_home_[inst.src1] = -1;
+                    reg_vreg_[s] = -1;
+                    set_vreg_reg(inst.dest, s);
+                    rp_bind(inst.src1, inst.dest);
+                    return 0;
+                }
+                if (inst.src1 <= 31 && !inst.is_fp_load() && vreg_home_[inst.src1] >= 0) {
                     int s = vreg_home_[inst.src1];
                     d = alloc_reg_excluding(s, -1);
                     emit_mov_reg(d, s);
@@ -525,10 +536,11 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                         emit_load(d, CPU_REG, vlo_off(inst.src1));
                     }
                 } else {
-                    d = alloc_reg();
+                    d = alloc_reg(rp_mirrors_ && inst.src1 <= 30 ? rp_want_host_[inst.src1] : -1);
                     emit_load_arm(d, inst.src1);
                 }
                 set_vreg_reg(inst.dest, d);
+                if (!inst.is_fp_load()) rp_bind(inst.src1, inst.dest);
             }
             return 0;
         case IROp::STORE_REG:
@@ -623,6 +635,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     kill_vreg(inst.dest);
                     return 0;
                 }
+                rp_unbind(inst.dest);
                 if (cur_op_index_ > 0 && cur_op_index_ - 1 < fold_ahead_kind_.size() && fold_ahead_kind_[cur_op_index_ - 1] == 4) {
                     // The constant was never put in a register (fold_ahead_kind_ 4): store it as an immediate.
                     emit_store_arm_imm32(inst.dest, static_cast<int32_t>(jit_consts_.at(inst.src1)));
@@ -647,6 +660,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 if (inst.dest <= 31) {
                     kill_vreg(inst.dest);
                 }
+                if (!inst.is_fp_store()) rp_bind(inst.dest, inst.src1);
             }
             return 0;
         case IROp::LOAD_MEM: {

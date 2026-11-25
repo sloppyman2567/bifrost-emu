@@ -64,7 +64,7 @@ void FrostJIT::dump_memory_stats() {
     const size_t edges = vector_bytes(mt_edges_) + mt_edges_.size() * chunk(sizeof(MtEdge));
     const size_t edge_maps = hash_bytes(mt_edge_refs_) + vector_values_bytes(mt_edge_refs_) +
                              hash_bytes(mt_source_refs_) + vector_values_bytes(mt_source_refs_);
-    const size_t words = vector_bytes(code_words_) + vector_bytes(flag_dep_table_);
+    const size_t words = vector_bytes(code_words_) + vector_bytes(flag_dep_table_) + vector_bytes(reg_pass_);
     const size_t retired = hash_bytes(retired_pcs_);
     const size_t total = blocks + index + back_refs + calls + edges + edge_maps + words + retired;
     fprintf(stderr, "[JIT] metadata MiB: total=%.1f per_block=%zuB blocks=%.1f(%zu) code_index=%.1f(%zu granules) "

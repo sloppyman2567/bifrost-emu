@@ -228,6 +228,7 @@ void FrostJIT::release_resources() {
     clear(side_stubs_);
     clear(side_exit_table_);
     clear(flag_dep_table_);
+    clear(reg_pass_);
     clear(retired_pcs_);
     clear(compile_invalidations_);
     clear(allocation_events_);

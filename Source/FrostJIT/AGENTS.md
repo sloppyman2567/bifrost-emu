@@ -35,6 +35,23 @@ A new history section can make an older "not measured" or "next section" line wr
   (not `keep_store_dest_`, GPR/SP destination, imm32 fit): a skipped `mov` whose consumer then stores a register leaves the vreg unmapped. Do not
   defer stores into RAX/RCX/RDX/R8 for a block that is not a loop to save the eager store: it was tried and added instructions (a spill at each clobber).
   Carry formation (`BIFROST_CARRY`) stays off while the persistent cache records, as its blocks are unrecordable.
+- Register passing (`BIFROST_CARRY`, `Compiler/RegisterPassing.cpp`; off with `BIFROST_NO_REG_PASS`): a chain edge may enter its target past the loads
+  of the guest registers the predecessor already holds. The predecessor's copies are clean arch-vreg mappings (`vreg_home_[a]` clean, equal to
+  `cpu.regs[a]`) in `RP_HOSTS` (never RAX, which carries the next pc, or R11, the MT cell jump's scratch); `rp_release` makes one when a temporary
+  that still holds a guest register's value dies, and `rp_capture_layout` records them where a slot is emitted (the block's fall-through slot,
+  `emit_taken_path_epilogue` for the taken slot and for each deferred mid-block exit, which swaps in the state captured at its branch; the
+  emitter that writes `rp_taken_layout_` for an exit tail must not leave it set for the block's own taken slot, `flush_deferred_side_exits` restores it).
+  The successor's register entry follows its entry loads (`rp_emit_entry_loads`) and is published in `RegPass` (`reg_pass_`, indexed by
+  `BlockEntry::reg_pass`, with the layouts), never in `BlockEntry` itself. A slot is patched to the register entry only through
+  `chain_target_for`, which requires the slot's layout to cover the entry layout exactly (guest register and host register), at every patch
+  site (`try_chain_block`, `chain_back_references`, `refresh_mt_edges`). A copy must stay equal to memory: anything that writes a guest register's
+  memory without going through `STORE_REG`, `store_reg_to_vreg`, `set_vreg_reg` or `alloc_reg_for` on that register, or that may change one behind
+  the allocator (calls, SVC, `invalidate_all_vregs`), must call `rp_unbind`/`rp_unbind_all`; a block that is a loop (pins own R12-R15), compiles
+  for the persistent cache, runs under `BIFROST_JIT_VERIFY` or starts a native libc routine has no copies and no register entry, and the block
+  trace stays in front of an entry that would skip it. Everything after the entry loads (the pc store of a block that calls out, the statistics
+  count, the vector loads) runs on both entries. Verifying a change: a temporary compare of each layout entry with `cpu.regs[]` before every
+  slot (a `cmp reg, [rbx+disp]; je; ud2` per entry, not kept) over the JIT tests and CoreMark found a layout recorded for the wrong slot.
+  `jit_reg_pass` covers it.
 - `IR/` owns typed instructions, translation, scalar SSA, optimization and
   validation. Factories/readers are the parameter contract. SSA currently models
   scalar values; do not assume MemorySSA or complete vector/FP state coverage.

@@ -284,6 +284,9 @@ void FrostJIT::dump_code_cache_stats() {
     }
     fprintf(stderr, "[JIT] MT publication: edges=%llu\n", (unsigned long long)mt_edges_published_.load());
     fprintf(stderr, "[JIT] side-exit blocks: %llu\n", (unsigned long long)side_exit_blocks.load());
+    if (dbg().carry && !dbg().no_reg_pass)
+        fprintf(stderr, "[JIT] register passing: edges into the register entry=%llu, into a plain entry of a block that has one=%llu\n",
+                (unsigned long long)rp_edges_passed_.load(), (unsigned long long)rp_edges_plain_.load());
     if (dispatch_stats_enabled_) {
         fprintf(stderr, "[JIT] dispatch-cache: last=%llu way0=%llu way1=%llu table=%llu evictions=%llu sets=%d ways=2\n",
                 (unsigned long long)dispatch_last_hits_.load(std::memory_order_relaxed),
@@ -452,6 +455,12 @@ void FrostJIT::refresh_mt_edges(uint64_t pc) {
         if (!edge->live || edge->internal_loop) continue;
         uint64_t target = edge->cold_entry && block != blocks_.end()
             ? reinterpret_cast<uint64_t>(block->second.fn) : fn;
+        // An edge out of a block that passes registers may enter the target past its entry loads.
+        if (fn && !edge->cold_entry && block != blocks_.end()) {
+            const auto source = blocks_.find(edge->source_pc);
+            if (source != blocks_.end())
+                target = reinterpret_cast<uint64_t>(chain_target_for(source->second, edge->slot, block->second));
+        }
         if (edge->target.exchange(target, std::memory_order_release) != target && target && mt_active())
             mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -554,9 +563,7 @@ void FrostJIT::try_chain_block(uint64_t pc, BlockEntry& entry) {
         if (it != blocks_.end() && it->second.fn != nullptr) {
             // Chain-skip: patch to the successor's chain_entry (past its
             // prologue) so the successor reuses this block's frame.
-            const uint8_t* target = (chain_skip_enabled() && it->second.chain_entry)
-                ? reinterpret_cast<const uint8_t*>(it->second.chain_entry)
-                : reinterpret_cast<const uint8_t*>(it->second.fn);
+            const uint8_t* target = chain_target_for(entry, entry.chain_patch_off, it->second);
             if (patch_chain(pc, entry.chain_patch_off, target)) {
                 entry.chained = true;
                 block_chains_patched++;
@@ -569,9 +576,7 @@ void FrostJIT::try_chain_block(uint64_t pc, BlockEntry& entry) {
     if (!entry.taken_chained && entry.has_taken_chain_slot && entry.taken_chain_target_pc != 0) {
         auto it = blocks_.find(entry.taken_chain_target_pc);
         if (it != blocks_.end() && it->second.fn != nullptr) {
-            const uint8_t* target = (chain_skip_enabled() && it->second.chain_entry)
-                ? reinterpret_cast<const uint8_t*>(it->second.chain_entry)
-                : reinterpret_cast<const uint8_t*>(it->second.fn);
+            const uint8_t* target = chain_target_for(entry, entry.taken_chain_patch_off, it->second);
             if (patch_chain(pc, entry.taken_chain_patch_off, target)) {
                 entry.taken_chained = true;
                 block_chains_patched++;
@@ -601,7 +606,7 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         BlockEntry& entry = sit->second;
         // Fall-through slot.
         if (!entry.chained && entry.chain_target_pc == target_pc) {
-            if (patch_chain(src_pc, entry.chain_patch_off, target_fn)) {
+            if (patch_chain(src_pc, entry.chain_patch_off, chain_target_for(entry, entry.chain_patch_off, target_it->second))) {
                 entry.chained = true;
                 block_chains_patched++;
             }
@@ -609,7 +614,7 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         // Taken-path slot.
         if (!entry.taken_chained && entry.has_taken_chain_slot
             && entry.taken_chain_target_pc == target_pc) {
-            if (patch_chain(src_pc, entry.taken_chain_patch_off, target_fn)) {
+            if (patch_chain(src_pc, entry.taken_chain_patch_off, chain_target_for(entry, entry.taken_chain_patch_off, target_it->second))) {
                 entry.taken_chained = true;
                 block_chains_patched++;
             }
@@ -947,7 +952,7 @@ void FrostJIT::invalidate_all() {
     if (blocks_.empty()) return;
     for (const auto& kv : blocks_) retired_pcs_.insert(kv.first);
     if (mt_active()) {
-        blocks_.clear(); back_refs_.clear();
+        blocks_.clear(); back_refs_.clear(); reg_pass_.clear();
         tls_last_block_ = LastBlockCache{};
         clear_inline_cache();
         return;
@@ -970,6 +975,7 @@ void FrostJIT::invalidate_all() {
     }
     blocks_.clear();
     back_refs_.clear();
+    reg_pass_.clear();
     // Keep pending_call_sites_ (see invalidate_range rationale).
     tls_last_block_ = LastBlockCache{};
     clear_inline_cache();
@@ -1016,7 +1022,7 @@ void FrostJIT::enter_multithreaded() {
     }
     invalidate_dispatch_cache();
     for (const auto& kv : blocks_) retired_pcs_.insert(kv.first);
-    blocks_.clear(); back_refs_.clear();
+    blocks_.clear(); back_refs_.clear(); reg_pass_.clear();
     code_index_.clear();
 }
 } // namespace arm64emu
