@@ -1487,6 +1487,12 @@ A run of SpongeBob through loading into the lobby found the hottest 200 blocks h
 that workload; merging a block into its single predecessor (a unit that loads and stores each register once) removed 26-31% of CoreMark's
 register moves in a simulation and needs no profile. Which of the two comes first is open until a steady-gameplay profile exists.
 
+**The goal (maintainer, 2026-11-25): Lean first, Carry when hot.** A block is translated by Lean, and only code that turns out hot is translated
+again with Carry. Today Carry forms every block on its first translation, so code that runs once pays for it: 10.2 us a block against
+5.6 us on the ART start-up (bigger blocks, fewer of them: 669 ms against 522 ms in all), and one compiler serves every thread. The one piece
+that already works this way is [Following the hot side of an exit](#following-the-hot-side-of-an-exit): an entry budget that retires and retranslates the block
+when it runs out. Lean's blocks have no such trigger yet.
+
 Rules the design follows (decided 2026-11-24):
 
 - **Cheap hotness.** No counter in block entries (Tier-2's hot and branch counters cost CoreMark 18-29%, and its entry counter was a `lock xadd` in MT). Hot blocks
