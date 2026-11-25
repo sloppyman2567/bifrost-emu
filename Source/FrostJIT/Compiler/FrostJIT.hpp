@@ -39,74 +39,32 @@
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/Backend/CpuFeatures.hpp"
 #include "FrostJIT/Runtime/CodeInvalidation.hpp"
+#include "FrostJIT/Runtime/CodeIndex.hpp"
+#include "FrostJIT/Runtime/GrowingTables.hpp"
+#include "FrostJIT/Runtime/PcFilter.hpp"
 #include "FrostJIT/Runtime/Preemption.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <map>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <deque>
 #include <vector>
 namespace arm64emu {
 struct CPU;
 class Emulator;
 class Memory;
 class PersistentCache;
-// ── Tier-2 trace (ROADMAP #14, Phase 1 step 2) ──────────────────────────
-// A candidate tier-2 trace: a linear run of guest blocks whose IR will be
-// compiled as ONE region with ONE register allocation. Pure
-// data collection — collect_tier2_trace() emits no code, touches no block
-// cache, and compiles nothing.
-struct Tier2Trace {
-    struct Block {
-        uint64_t pc;            // block start PC
-        IRBlock  ir;            // translated IR for this block
-        bool follows_taken = false; // conditional hot successor, terminator inverted
-        uint64_t hot_successor = 0; // original target, checked before compilation
-
-        // Terminal edge (target_pc, ir_op_index): conditional taken exit,
-        // direct jump or synthetic cap continuation. The compiler identifies
-        // inline direct edges and the final back-edge to head_pc.
-        std::vector<std::pair<uint64_t, int>> side_exits;
-        // kDynamicExit side exit: leave to the address in this guest register (a RET).
-        int dynamic_exit_reg = -1;
-    };
-    // Side-exit target of a RET: a final BR, or the guard a matched RET becomes.
-    static constexpr uint64_t kDynamicExit = ~0ull;
-    std::vector<Block> blocks;
-    uint64_t head_pc = 0;
-    uint64_t total_insts = 0;   // sum of block instruction counts
-    double path_probability = 1.0; // measured probability of completing the path
-    bool fully_profiled = true;
-    bool ok = false;            // complete path/prefix is safe to compile
-    const char* stop_reason = nullptr;  // why collection stopped (debug)
-};
-// Output of plan_tier2_region(): the trace's IR concatenated, SSA-optimized
-// and transformed (DCE, LICM, dest-sourcing), ready for region codegen.
-struct Tier2RegionPlan {
-    struct Block {
-        size_t   start;      // first op index in region_ir
-        size_t   term;       // terminating branch op index
-        uint64_t side_pc;    // taken (side-exit / back-edge) target
-        uint64_t pc;         // block start PC (for exit_pc)
-        size_t   inst_count; // ARM instructions in this block
-        int dynamic_exit_reg = -1;  // side_pc == Tier2Trace::kDynamicExit: target register
-    };
-    std::vector<Block> blocks;
-    std::vector<IRInst> region_ir;  // loop body
-    std::vector<IRInst> preheader;  // SSA entry + LICM-hoisted ops
-    int region_max_vreg = 32;
-    bool last_is_backedge = false;
-    bool ssa_region = false;
-    bool has_call = false;
-};
+struct ProfReport;
 // Regalloc bloat diagnostics (BIFROST_REGALLOC_STATS=1). Counted at the
 // (codegen-time) spill/reload emit sites; reset per translated block.
 struct regalloc_stats_t {
@@ -135,17 +93,9 @@ extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
 extern "C" uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_excl_lock_slow(std::atomic<uint64_t>* word);
-// Tier-2 in-code fire stub: called from generated block prologues (the
-// per-block hot-head counter, BIFROST_TIER2=1). A plain free function so the
-// prologue can take its address at codegen time; forwards to
-// emu->jit()->tier2_fire_region(). Implemented in Tier2/Promotion.cpp.
-void tier2_fire_stub(Emulator* emu, uint64_t pc, size_t site);
 void bifrost_prof_init(class FrostJIT* jit);
 class FrostJIT {
-    struct Tier2Trial;
     struct BlockEntry;
-    bool tier2_sampling_compile_ = false;
-    friend struct Tier2TestAccess;
 public:
     FrostJIT();
     ~FrostJIT();
@@ -254,27 +204,11 @@ public:
     std::atomic<uint64_t> cache_misses{0};
     std::atomic<uint64_t> interpreter_fallbacks{0};
     std::atomic<uint64_t> block_chains_patched{0};
-    // Tier-2 hot-head counter (ROADMAP #14, Phase 1): blocks that crossed
-    // tier2_hits_threshold() slow-path executions while BIFROST_TIER2=1.
-    // Printed by dump_periodic_stats alongside the block-end reasons.
-    std::atomic<uint64_t> tier2_hot_heads{0};
-    // Tier-2 trace counter (ROADMAP #14, Phase 1 step 2): traces that reached
-    // ok=true (>= 2 blocks) during collection. Not yet wired into periodic
-    // stats — that belongs to the compilation task.
-    std::atomic<uint64_t> tier2_traces{0};
-    // Tier-2 region counter (ROADMAP #14, Phase 1 step 3): traces successfully
-    // compiled as a whole-region function (blocks_[head_pc] replaced by the
-    // region fn). Printed by dump_periodic_stats alongside hot_heads/traces.
-    // Inert (0) unless BIFROST_TIER2=1 and a hot head fires.
-    std::atomic<uint64_t> tier2_regions{0};
-    std::atomic<uint64_t> tier2_profit_rejections{0}, tier2_profile_retries{0};
-    std::atomic<uint64_t> tier2_measured_pairs{0}, tier2_measured_keeps{0}, tier2_measured_rejections{0};
-    std::atomic<uint64_t> tier2_phase_retirements{0}, tier2_compile_ns{0}, tier2_code_bytes{0};
-    // Tier-1 compile cost and churn (BIFROST_STATS_PERIOD). The max is an
+    // Lean compile cost and churn (BIFROST_STATS_PERIOD). The max is an
     // interval value that the periodic reporter resets. Lock waits count
     // only contended table/compiler lock acquisitions on dispatch paths.
-    std::atomic<uint64_t> tier1_compile_ns{0}, tier1_compile_max_ns{0}, tier1_recompiles{0};
-    std::atomic<uint64_t> tier1_shared_compiles{0}, tier1_compile_retries{0};
+    std::atomic<uint64_t> lean_compile_ns{0}, lean_compile_max_ns{0}, lean_recompiles{0};
+    std::atomic<uint64_t> lean_shared_compiles{0}, lean_compile_retries{0};
     std::atomic<uint64_t> table_lock_wait_ns{0};
     struct InvalidationStats {
         std::atomic<uint64_t> calls{0}, retired{0}, kept{0};
@@ -356,13 +290,16 @@ public:
         if (tls_cache_owner_ == this && tls_cache_generation_ == generation) return;
         // Never attribute another JIT owner's pending diagnostic counts here.
         if (tls_cache_owner_ != this) tls_dispatch_stats_ = DispatchStats{};
+        wipe_local_dispatch_caches(generation);
+        tls_cache_owner_ = this;
+        tls_cache_generation_ = generation;
+        bifrost_prof_init(this);
+    }
+    void wipe_local_dispatch_caches(uint64_t generation) {
         tls_last_block_ = LastBlockCache{};
         ensure_inline_cache();
         clear_inline_cache();
-        tls_cache_owner_ = this;
-        tls_cache_generation_ = generation;
         if (tls_ibl_) reset_ibl(generation);
-        bifrost_prof_init(this);
     }
     // ── Indirect-branch target table (IBL) ──────────────────────────
     // Chain-skip BR/BLR/RET exits look their dynamic guest target up here
@@ -370,8 +307,8 @@ public:
     // dispatcher (every guest return used to cost a full dispatcher round
     // trip). One table per host thread: generated code reads it without
     // locks, so cpu.jit_ibl_table is rebound at every native entry
-    // (run_block, jit_call_helper); Tier-2 trials and differential replay
-    // unbind it to preserve their execution boundaries. Its generation is this
+    // (run_block, jit_call_helper); differential replay
+    // unbinds it to preserve its execution boundaries. Its generation is this
     // JIT's dispatch generation, so every invalidation revokes all entries;
     // the probe also honors jit_stop_pc, nested helper calls and the shared
     // 256-edge chain budget. See emit_indirect_branch_probe.
@@ -587,7 +524,7 @@ public:
     // modify published instructions (patch_chain / chain_back_references /
     // patch_pending_calls bail). MT chaining and promotion use atomic data
     // cells; only single-thread mode retains legacy instruction patches.
-    // New code is appended under the compiler lock. Published instructions
+    // New code is appended in the compiler's own lease. Published instructions
     // remain immutable without cross-core serialization. Sticky for the JIT's
     // lifetime (re-enabling would reopen a spawn-vs-patch race).
     std::atomic<bool>     mt_active_{false};
@@ -609,81 +546,31 @@ public:
         }
     };
     static_assert(offsetof(MtCell, word) == 0);
+    struct EdgeTarget;
     struct MtEdge {
         MtCell target;
         uint64_t source_pc = 0, target_pc = 0;
-        uint32_t slot = 0;  // code offset the edge was emitted for (fits the padding)
-        bool live = true; // compiler lock only
+        uint64_t layout = 0;         // RegLayout its slot leaves (register passing)
+        EdgeTarget* to = nullptr;    // the record of target_pc
+        MtEdge* next_out = nullptr;  // the source's next edge (BlockEntry::edges)
+        MtEdge* next_in = nullptr;   // the next edge to the same target (EdgeTarget::in)
+        uint32_t slot = 0;  // code offset the edge was emitted for
+        std::atomic<bool> live{true};  // written under the table lock
         bool cold_entry = false;
-        bool sampling_private = false;
-        bool internal_loop = false; // body entry retains this block's register state
     };
-    // Outcome counts of one Tier-1 conditional exit: generated code only does
-    // `inc qword [profile+offset]` (no checks, no saturation), and the trace
-    // collector reads the ratio once per decision.
-    struct Tier2BranchProfile {
-        std::atomic<uint64_t> taken{0}, fallthrough{0};
-    };
-    static_assert(sizeof(std::atomic<uint64_t>) == 8);
-    static_assert(offsetof(Tier2BranchProfile, taken) < 128 &&
-                  offsetof(Tier2BranchProfile, fallthrough) < 128);
-    std::vector<std::unique_ptr<Tier2BranchProfile>> tier2_branch_profiles_;
-    std::map<uint64_t, Tier2BranchProfile*> tier2_profiles_by_pc_;  // ordered: retirement erases a range
-    Tier2BranchProfile* tier2_branch_profile_ = nullptr; // current Tier-1 codegen
-    void emit_tier2_edge_profile(bool taken);
-    void invalidate_tier2_profiles(uint64_t lo, uint64_t hi);
-    void clear_tier2_profiles();
-    // Instrumentation has no way out of a block: its hot counter and branch counters cost CoreMark 22-29% of its
-    // cycles for life. Once promotion has decided about a block it is retranslated without them. The compiler
-    // lock guards the set and queue; the swap waits for the dispatcher, because the decision is made inside
-    // the running block. A code change forgets the decision, as it does the profile.
-    std::set<uint64_t> tier2_settled_;
-    std::vector<uint64_t> tier2_settle_queue_;
-    // Blocks to retranslate at the current block boundaries without settling them: a head whose
-    // trial could not start because a constituent no longer translates to its traced length.
-    std::vector<uint64_t> tier2_refresh_queue_;
-    // Retired region blocks and the predecessors retirement forgot, to rebuild at a dispatch boundary.
-    std::vector<uint64_t> tier2_rebuild_queue_, tier2_rebuild_sources_;
-    std::atomic<bool> tier2_settle_pending_{false};
-    bool tier2_settling_ = false;  // compiler lock; blocks are retired and not yet back
-    void tier2_settle_locked(uint64_t pc);
-    void tier2_settle_queued(Emulator& emu);
     void retire_blocks_locked(const std::vector<uint64_t>& victims);
-    struct Tier2RegionMonitor {
-        std::atomic<uint32_t> enabled{1};
-        uint64_t head = 0, identity = 0;
-        unsigned slot = 0;
-        Tier2Trial* trial = nullptr;
-        // A feedback window (kTier2FeedbackWindowExits side exits) that completed fewer iterations than this
-        // exited too often for the trial's verdict; the exit stub reads it, a kept trial sets it.
-        uint32_t min_window_iterations = kTier2FeedbackWindowExits * kTier2ExitRateFloor;
-    };
-    std::vector<std::unique_ptr<Tier2RegionMonitor>> tier2_region_monitors_;
-    Tier2RegionMonitor* tier2_current_monitor_ = nullptr;
-    std::unordered_map<uint64_t, unsigned> tier2_retrains_; // compiler lock; lifetime budget
-    // A measured loss retries a strictly smaller prefix, at most 8 -> 4 -> 2.
-    // Kept until code invalidation or a selected region changes phase.
-    std::unordered_map<uint64_t, unsigned> tier2_block_limits_; // compiler lock
-    // Entry counts live outside the code buffer. A store to the cache line
-    // being executed is self-modifying code to the CPU: 62 cycles of pipeline
-    // resync per block entry when the counters sat in front of each block.
-    struct HotCounter {
-        std::atomic<uint32_t> enabled{1}, hits{0};
-        bool patchable = false;  // single-thread prologue: disabled by a jump over it
-        // Guest-work rate gate: when the current window began, and how many came up short.
-        uint64_t window_start_ns = 0;
-        unsigned slow_windows = 0;
-    };
-    static_assert(std::atomic<uint64_t>::is_always_lock_free);
-    static_assert(std::atomic<uint32_t>::is_always_lock_free);
-    static_assert(offsetof(HotCounter, hits) == 4);
-    std::vector<std::unique_ptr<MtEdge>> mt_edges_;
-    std::unordered_map<uint64_t, std::vector<MtEdge*>> mt_edge_refs_, mt_source_refs_;
-    // The edge source_pc emitted at code offset `slot`; its 1-3 edges are scanned.
-    MtEdge* mt_slot_edge(uint64_t source_pc, size_t slot);
-    std::vector<std::unique_ptr<HotCounter>> hot_counters_;
-    std::unordered_map<size_t, HotCounter*> hot_counter_sites_;
-    std::atomic<uint64_t> mt_edges_published_{0}, mt_regions_published_{0};
+    SegmentedArray<std::unique_ptr<MtEdge>> mt_edges_;
+    // A guest pc as a target of multithreaded edges: the edges of published blocks to it, and its translation in blocks_. A
+    // compile finds the records it needs (or makes them) before it locks the table, so that publication follows pointers.
+    // Written under the table lock and the record's own (mt_targets_.mutex_of): either is enough to read. Records are never
+    // removed while the JIT runs, and whatever removes an entry from blocks_ clears `block`.
+    struct EdgeTarget { MtEdge* in = nullptr; const BlockEntry* block = nullptr; };
+    LockedMap<EdgeTarget> mt_targets_;
+    size_t compile_edge_mark_ = 0;  // mt_edges_ size when this compile began
+    void collect_edges(BlockEntry& entry);
+    void link_mt_edge(MtEdge& edge, const BlockEntry* target);
+    void link_mt_block(uint64_t pc, EdgeTarget& self, const BlockEntry& entry);
+    std::atomic<uint64_t> mt_edges_published_{0};
     MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
     // cpu_reg holds the CPU at the slot: RDI after an exit that restored the
     // caller's callee-saved registers, where RBX is no longer ours.
@@ -691,24 +578,23 @@ public:
     // MT preemption poll (loads only); returns the jne-to-cold patch offset.
     size_t emit_preempt_poll(int cpu_reg, int scratch);
     void emit_preempt_compare(int cpu_reg, int scratch);  // leaves the flags for a JNE on expiry
-    // Published MT code polls the epoch; ST code and timed Tier-2 sampling code
-    // (whose windows count dispatcher resumptions) keep the 256-edge budget.
-    bool preempt_by_epoch() const { return mt_active() && !tier2_sampling_compile_; }
     // Chain-skip BR/BLR/RET exit: jump through the IBL table on a hit.
     void emit_indirect_branch_probe();
     bool emit_selfloop_backedge(uint64_t target_pc);
+    void emit_selfloop_stop_entry_check(uint64_t start_pc);
+    size_t emit_selfloop_stop_compare(uint64_t target_pc, uint8_t condition);
     void emit_selfloop_reconcile_stub();
-    void refresh_mt_edges(uint64_t target_pc);
-    void retire_mt_source(uint64_t source_pc);
+    void refresh_mt_edges(EdgeTarget& target);  // the caller holds both locks
+    static void retire_mt_source(const BlockEntry& entry);
 
     // ── Shared-JIT mode (default) ───────────────────────────────────
     // Spawned threads share the main thread's FrostJIT instance, saving
     // 64 MiB of code-cache per thread. blocks_mutex_ protects the block
-    // table and code-buffer writes. It is held ONLY for table mutations
+    // table and, in single-thread code, code-buffer writes. It is held ONLY for table mutations
     // (translate, chain, hotness, watchdog) and RELEASED before block
     // execution (entry.fn) so threads can block in syscalls without
     // deadlocking. Per-thread state (watchdog, hotness) is thread-local.
-    std::shared_mutex blocks_mutex_;  // protects blocks_, back_refs_, code_buf_ writes
+    std::shared_mutex blocks_mutex_;  // protects blocks_, the edges and the tables beside them (ST: also code_buf_ writes)
     void flush_cache();
     std::atomic<uint64_t> code_cache_growths{0};
     std::atomic<uint64_t> code_cache_overflows{0};
@@ -716,7 +602,9 @@ public:
     void dump_code_cache_stats();
     // Host heap held by per-block bookkeeping (Runtime/MemoryStats.cpp).
     void dump_memory_stats();
-    // Interval Tier-1 compile time/stalls and invalidations by reason.
+    // BIFROST_PROF with BIFROST_PC_HIST: the cycles among the hottest blocks (Carry/LoopReport.cpp). Prints; changes no code.
+    void dump_carry_candidates(const ProfReport& report);
+    // Interval Lean compile time/stalls and invalidations by reason.
     void dump_compile_stats();
     // ── SMC / mapping invalidation ──────────────────────────────────
     // Erase every cached block whose guest range [pc, pc+instr_count*4)
@@ -782,10 +670,12 @@ public:
     bool try_lock_for_fork();
     void unlock_after_fork();
     void reset_after_fork_child();
-    size_t code_buf_used()  const { return code_buf_used_; }
+    size_t code_buf_used()  const { const size_t leased = code_next_lease_.load(std::memory_order_relaxed); return leased ? leased : code_buf_used_; }
     size_t code_buf_size()  const { return code_buf_limit_; }
     size_t cache_entries()  const { return blocks_.size(); }
     const uint8_t* code_buf() const { return code_buf_; }
+    // Published code as {offset in code_buf(), bytes}; the rest of the used part is leased to compilers and not written yet.
+    std::vector<std::pair<size_t, size_t>> published_code();
     // x8 value of the host-call trampolines (GraphicThunk/AudioThunk/DisplayThunk
     // SYSCALL_NUMBER; InterpreterBridge.cpp asserts they agree). Such SVCs stay
     // inline in generated code; every other SVC leaves it first (see
@@ -848,83 +738,6 @@ public:
     // through jit_call_helper → lookup_call_target. Disable with
     // BIFROST_NO_DIRECT_CALL=1 (bisection / debugging).
     static bool direct_call_enabled();
-    // Tier-2 (trace/region JIT) env gates (ROADMAP #14). Read once
-    // at first use. Experimental and opt-in with BIFROST_TIER2=1.
-    // BIFROST_TIER2_HITS = the "hot head" threshold (default 1000);
-    // BIFROST_TIER2_TRACE=1 logs compiled candidates and timing decisions;
-    // BIFROST_TIER2_TRACE_VERBOSE=1 adds discovery and codegen details.
-    static bool     tier2_enabled();
-    static uint32_t tier2_hits_threshold();
-    static bool     tier2_trace_enabled();
-    // Tier-2 trace collection (ROADMAP #14, Phase 1 step 2). Walks guest
-    // code from a hot head, translating each instruction to IR, and returns
-    // a candidate trace (blocks + side exits) for a later task to compile as
-    // one region. PURE COLLECTION: emits no code, never touches blocks_ beyond
-    // read-only membership checks, and resets g_alloc per block so it never
-    // consumes the global regalloc. Call with the block table quiescent (the
-    // hot-head fire site holds the exclusive lock). Implemented in
-    // Tier2/TraceCollector.cpp.
-    Tier2Trace collect_tier2_trace(Emulator& emu, uint64_t head_pc);
-    // The natural loop around a hot head, both sides of its branches, for graph regions.
-    struct Tier2Loop { std::vector<uint64_t> blocks; unsigned insts = 0, backedges = 0; double coverage = 0; bool capped = false; };
-    Tier2Loop find_tier2_loop(Emulator& emu, uint64_t head_pc);
-    // Tier-2 region compilation (ROADMAP #14, Phase 1 step 3 / M1). Compiles
-    // a collected trace as ONE x86 function with ONE region-wide register
-    // allocation: the blocks' IR is vreg-remapped to a single space and
-    // concatenated, the terminating branch of each block is handled by the
-    // region compiler (internal fall-through edges stay inline, side exits /
-    // the loop back-edge jump to the shared epilogue or the region body).
-    // Region-internal edges carry flags in host RFLAGS (no per-edge pstate
-    // materialize); only the back-edge and side exits materialize. No
-    // cross-block optimization (M1 scope), no vec-cache/fp-cache (blocks use
-    // the memory paths). Call with the blocks_mutex_ held EXCLUSIVE (the
-    // region fn is written into code_buf_ alongside translate_block's).
-    // Returns nullptr if the trace shape isn't region-qualified. The CALLER
-    // replaces blocks_[head_pc].fn with the returned fn; publication is
-    // centralized in tier2_fire_region in Tier2/Promotion.cpp.
-    // chain_out (optional): receives the region's CHAIN-SKIP entry point
-    // (code_buf_ + the post-frame-setup label, mirroring BlockEntry.
-    // chain_entry for standalone blocks) when chain-skip is enabled. Chain
-    // edges are bare jmps carrying the ROOT's rbp/rsp, so they must enter
-    // past the region's frame allocation; cold dispatches use fn (which
-    // allocates the unified kChainSkipFrameBytes frame under chain-skip).
-    // nullptr when chain-skip is off (fn handles both entries there).
-    // Region-qualification checks and IR transforms (RegionPlanner.cpp).
-    // Also selects loop-carried pins (arch_pin_/pinned_host_regs_) and the
-    // phase-feedback monitor. False when the trace does not qualify.
-    bool plan_tier2_region(const Tier2Trace& trace, Tier2RegionMonitor* monitor_override,
-                           Tier2RegionPlan& plan);
-    uint64_t (*compile_tier2_region(Emulator& emu, const Tier2Trace& trace,
-                                    uint64_t (**chain_out)(CPU*, Emulator*) = nullptr,
-                                    Tier2RegionMonitor* monitor_override = nullptr))(CPU*, Emulator*);
-    // Tier-2 in-code fire path (ROADMAP #14, Phase 1 step 4). Called from the
-    // per-block hot-head counter emitted in block prologues (BIFROST_TIER2=1):
-    // counts CHAINED execution (which never reaches run_block's slow path),
-    // and once a block crosses tier2_hits_threshold() mid-run this collects +
-    // compiles a region for it and re-patches the loop back-edge chain slot(s)
-    // so the next iteration jumps into the region. Executes from INSIDE a
-    // running block: must not throw (wrapped in try/catch), must not touch the
-    // W^X machinery (bails when wex_enabled_ — disabling a counter patches the
-    // code page, which only exists in non-W^X shared-JIT mode), and takes the
-    // exclusive lock only around the map mutations. Implemented in
-    // Tier2/Promotion.cpp.
-    void tier2_fire_region(Emulator& emu, uint64_t pc, size_t site = 0);
-    void tier2_region_feedback(CPU& cpu, void* monitor);
-    uint64_t tier2_measure(CPU& cpu, Emulator& emu, void* trial);
-private:
-    void emit_tier2_work_probe(unsigned count);
-    void finish_tier2_trial(Tier2Trial& trial, bool keep);
-    void retire_tier2_region_locked(uint64_t pc);
-    void redirect_tier2_head_locked(uint64_t pc);
-    void revoke_tier2_samples_locked(Tier2Trial& trial);
-public:
-    // Neutralize a block's tier-2 counter after it fires: overwrites the start
-    // of a single-thread prologue with `jmp rel32` past the whole
-    // counter+fire sequence so the block stops paying ~6 cycles/entry. No-op
-    // when no counter was emitted (off==0). Writes the code page directly —
-    // callers hold the exclusive blocks_mutex_ (and tier-2 only runs in
-    // non-W^X mode, so the buffer is RWX). Implemented in Tier2/Promotion.cpp.
-    void tier2_counter_disable(size_t counter_off, size_t counter_len, bool legacy_transition = false);
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. One
     // constant, so a future change (e.g. adding XMM regs to the allocator)
@@ -940,29 +753,44 @@ private:
     size_t code_capacity_ = 64 * 1024 * 1024;
     bool ensure_code_space(size_t bytes);
     uint8_t* code_buf_ = nullptr;
-    size_t   code_buf_used_ = 0;
+    size_t   code_buf_used_ = 0;                // where this compiler emits next
+    size_t   code_lease_end_ = CODE_BUF_SIZE;   // and where it must stop: the buffer's end, or its lease's
     bool     code_buf_overflow_ = false;
-    bool     code_budget_exhausted_ = false;
+    std::atomic<bool> code_budget_exhausted_{false};
+    // Several compilers emit into one buffer: each leases a chunk at a time (Runtime/Compilers.cpp). 0 until the first lease.
+    static constexpr size_t kCodeChunk = 256 * 1024;
+    std::atomic<size_t> code_next_lease_{0};
+    std::mutex lease_mutex_;
+    bool lease_code_chunk(size_t& start);   // on the core
+    bool take_code_lease();                 // this compiler's next chunk
     bool renewable_ = false;
     std::atomic<bool> renewal_wanted_{false}, retired_{false}, released_{false};
     uint64_t retired_epoch_ = 0;
     uint8_t* window_base_ = nullptr;
     const Memory* guest_memory_ = nullptr;
-    // Address-sorted fault sites, packed as {code offset, recovery offset}.
-    // mmap reserves a worst-case bound; only appended records acquire backing.
+    // Fault sites, packed as {code offset, recovery offset}: one address-sorted run per code chunk, at the chunk's own
+    // place in the reservation, so a chunk's one writer appends in code order and the handler searches one run. mmap
+    // reserves a worst-case bound (a site per two bytes of code); only appended records acquire backing.
+    struct FaultChunk { std::atomic<uint32_t> count; uint32_t constructed; };
+    static constexpr size_t kFaultSitesPerChunk = kCodeChunk / 2;
     std::atomic<uint64_t>* fault_sites_ = nullptr;
-    std::atomic<size_t> fault_site_count_{0};
-    size_t fault_site_constructed_ = 0;
+    FaultChunk* fault_chunks_ = nullptr;
+    size_t fault_chunk_count() const { return (code_buf_limit_ + kCodeChunk - 1) / kCodeChunk; }
+    size_t fault_table_bytes() const {
+        return fault_chunk_count() * (kFaultSitesPerChunk * sizeof(*fault_sites_) + sizeof(FaultChunk));
+    }
+    uint64_t fault_sites_added_ = 0;  // by this compiler: did the last access register one?
+    size_t fault_last_site_ = 0;      // its index
     size_t memory_fault_stub_ = 0; // current IR op, zero when software-only
     bool struct_guard_emitted_ = false; // SIMD_STRUCT_MEM's guard was emitted ahead of the cache switch-off
     bool compile_guarded_mem(const IRInst& inst);
     bool compile_guarded_vec16(const IRInst& inst);
     void emit_memory_fault_exit(const IRInst& inst, bool recoverable);
-    // Tier-1 guarded accesses keep only the bounds and sticky software-check
+    // Lean guarded accesses keep only the bounds and sticky software-check
     // tests inline. The software page checks and the recoverable fault exit
     // are emitted after the block (flush_deferred_guards) from the GPR/vector
     // cache state captured where the access diverts, so the fast path takes
-    // no branch. Tier-2 regions use it too.
+    // no branch.
     struct GuardState {
         int reg_vreg[16];
         uint16_t dirty_mask;
@@ -985,7 +813,7 @@ private:
     };
     bool defer_guards_ = false;
     std::vector<DeferredGuard> deferred_guards_;
-    // One copy per JIT of what each Tier-1 cold tail would otherwise repeat:
+    // One copy per JIT of what each Lean cold tail would otherwise repeat:
     // the software page checks (per address register, width and direction) and
     // the recoverable fault exit. A persistent-cache recording keeps the full
     // tails, since a call out of the block has no meaning in another process.
@@ -996,6 +824,43 @@ private:
     void emit_cold_stubs();
     bool use_cold_stubs() const { return cold_stubs_ready_ && defer_guards_ && !recording_; }
     static constexpr bool cold_stub_register(int r);
+    // ── Compilers (Runtime/Compilers.cpp) ───────────────────────────
+    // The core is the JIT everything else knows: it owns the code buffer and the tables. A compiler is another object of this
+    // class that borrows them, so several threads translate at once: what a compile scribbles on and what it creates stay in
+    // the compiler until the core adopts the result under the exclusive table lock. The core is its own compiler for
+    // single-thread code and wherever compiles are serialized.
+    FrostJIT* core_ = this;
+    class TranslationClock;    // Runtime/TranslationClock.hpp
+    static constexpr size_t kMaxCompilers = 16;
+    explicit FrostJIT(FrostJIT& core);        // a compiler of `core`
+    void init_compiler_state();
+    std::mutex pool_mutex_;                   // the members below; never held while compiling or waiting for a lock
+    std::condition_variable pool_free_, pool_done_;
+    std::unique_ptr<FrostJIT> compilers_[kMaxCompilers];
+    std::atomic<size_t> compilers_count_{0};  // compilers_ only grows
+    std::vector<FrostJIT*> free_compilers_;
+    static thread_local const FrostJIT* tls_last_compiler_;  // only compared: the one this thread used last has its state in this CPU's cache
+    std::vector<uint64_t> compiling_pcs_;     // what the busy ones are translating
+    size_t pool_waiters_ = 0, done_waiters_ = 0;
+    std::atomic<int> parallel_compiles_{-1};  // decided at the first multithreaded compile: 0 serialized, else how many compilers
+    std::chrono::steady_clock::time_point compiles_paused_until_{};  // a fork is waiting for the compilers to drain
+    bool parallel_compiles(Emulator& emu);
+    int set_up_compilers(Emulator& emu);
+    bool compile_entry_parallel(Emulator& emu, uint64_t pc, BlockEntry& out, TranslationClock& clock);
+    FrostJIT* claim_compiler(uint64_t pc);    // null: another thread translated pc meanwhile
+    void release_compiler(FrostJIT* compiler, uint64_t pc);
+    void adopt_staged(FrostJIT& compiler, uint64_t pc, BlockEntry& out);  // on the core, under the exclusive table lock
+    void discard_staged();                    // what an unpublished compile created
+    size_t staged_start_ = 0;                 // the cursor when this compile began
+    bool table_held_ = false;  // this compiler runs under the exclusive table lock (a retry)
+    // Reads the core's tables from a compile. A compiler holds no lock while it works, so it takes the lock for the read and
+    // keeps nothing that points into a table; the core's callers hold the lock already.
+    template <class Read> auto with_table(Read&& read) const {
+        if (core_ == this || table_held_) return read(static_cast<const FrostJIT&>(*core_));
+        core_->lock_table_shared();
+        std::shared_lock<std::shared_mutex> lock(core_->blocks_mutex_, std::adopt_lock);
+        return read(static_cast<const FrostJIT&>(*core_));
+    }
     struct SimdFpGuard {
         size_t site = 0;
         bool deferred = false;
@@ -1007,6 +872,77 @@ private:
         size_t extra = 0;  // a second branch to the same step (scalar min/max), 0 when unused
     };
     std::vector<DeferredFpStep> deferred_fp_steps_;
+    // A conditional exit out of the middle of a block (CBZ/CBNZ whose IR `aux` is 1): the test and a jcc stay in the hot path, and the
+    // exit (commit every mapped guest register, then a chain slot to `target`) is emitted after the block from the captured layout.
+    // Each exit's slot is recorded in side_exit_table_ and published as a stub entry of its own (publish_translation), so chaining,
+    // unpatching and invalidation treat it like any block that has one successor.
+    // The host-flag state at the jcc, for a b.cond exit: the tail commits NZCV from it (after undoing a CF inversion the test applied).
+    struct DeferredSideExit {
+        size_t branch; uint64_t target; GuardState state;
+        bool flags_in_host = false, flags_from_sub = false, flags_match_pstate = false, need_cmc = false;
+        uint64_t branch_pc = 0;  // the guest branch (CarryExit lookup)
+    };
+    struct SideExitSlot { uint64_t target; size_t slot; uint64_t layout; };  // layout: RegLayout the exit passes (register passing)
+    std::vector<DeferredSideExit> deferred_side_exits_;
+    std::vector<SideExitSlot> compiled_side_exits_;                       // this compile
+    std::unordered_map<uint64_t, std::vector<SideExitSlot>> side_exit_table_;  // block pc -> its exits, until published
+    std::unordered_map<uint64_t, std::vector<uint64_t>> side_stubs_;      // block pc -> the stub keys in blocks_
+    bool block_has_side_exit_ = false;
+    // ── Following the hot side of a mid-block exit (BIFROST_CARRY; Carry/HotSide.cpp) ──────────────────────────
+    // A block with exits Carry formed starts with a profile: an entry budget and a count of taken exits per exit. When the budget runs out the
+    // block leaves for the dispatcher before running (carry_trip), the first exit taken more than half of the time is flipped (the block goes
+    // on at the branch's target, and the exit leaves on the other side), and the block is retired so the next dispatch translates it again.
+    // The decision is stored by branch pc (carry_follow_taken_); a block that had its rounds is translated without profile code (carry_done_).
+    struct CarryExit {
+        uint64_t pc;      // the guest branch
+        uint64_t cont;    // where the code goes on after the exit (pc + 4, or the branch target when the exit was flipped)
+        bool eligible;    // formed by BIFROST_CARRY (a loop's own exits are not profiled or flipped)
+        bool flipped;
+    };
+    std::vector<CarryExit> carry_exits_;  // this compile, in the order the exits were formed
+    const CarryExit* carry_exit_at(uint64_t pc) const {
+        for (const CarryExit& e : carry_exits_) if (e.pc == pc) return &e;
+        return nullptr;
+    }
+    uint64_t carry_continuation(uint64_t pc) const {
+        const CarryExit* e = carry_exit_at(pc);
+        return e ? e->cont : pc + 4;
+    }
+public:
+    static constexpr int kCarryMaxExits = 6;
+    static constexpr int32_t kCarryProfileBudget = 1024;  // entries a profiled block runs before its decision
+    struct CarryProfile {
+        int32_t budget = 0;                   // entries left
+        uint32_t taken[kCarryMaxExits] = {};  // times each exit was taken
+        uint32_t branch_off[kCarryMaxExits] = {};  // each exit's branch pc minus the block's
+        uint64_t block_pc = 0;
+        uint8_t exits = 0;
+        uint8_t flipped = 0;                  // bit i: exit i is already a flipped one
+        std::atomic<bool> tripped{false};
+    };
+    // Called from a block's trip stub (jit_carry_trip): decides, then retires the block.
+    void carry_trip(CarryProfile* profile);
+    std::atomic<uint64_t> carry_trips{0}, carry_flips{0};
+private:
+    std::deque<CarryProfile> carry_profiles_;  // addressed by generated code: never freed before the JIT
+    CarryProfile* carry_profile_ = nullptr;    // this compile
+    std::atomic<uint64_t> carry_profiled{0};   // profiles made, on the core
+    size_t carry_trip_jcc_ = SIZE_MAX;
+    std::unordered_set<uint64_t> carry_follow_taken_, carry_done_;  // under blocks_mutex_
+    std::unordered_map<uint64_t, uint8_t> carry_toggles_, carry_rounds_;
+    PcFilter<11> carry_tripped_;  // the blocks in carry_rounds_ (and so carry_done_) and the branches in carry_follow_taken_
+    void emit_carry_budget_check();
+    void emit_carry_trip_stub(uint64_t start_pc);
+    std::atomic<uint64_t> side_exit_blocks{0};  // blocks translated with a mid-block exit (-v)
+    static constexpr uint64_t kSideExitKeyBit = 1ull << 63;
+    static uint64_t side_exit_key(uint64_t pc, size_t index) { return kSideExitKeyBit | (pc << 8) | index; }
+    // Scan from the block start for a loop whose only inner branches are CBZ/CBNZ exits (see translate_block).
+    int side_exit_loop_extent(uint64_t start_pc, int limit, std::vector<uint64_t>& exits);
+    void flush_deferred_side_exits();
+    int compile_cbz_side_exit(const IRInst& inst);
+    int compile_bit_side_exit(const IRInst& inst);
+    int compile_cond_side_exit(const IRInst& inst);
+    void register_side_exit_stubs(uint64_t start_pc);
     GuardState capture_guard_state() const;
     void swap_guard_state(GuardState& state);  // exchange with the live state
     void flush_deferred_guards();
@@ -1089,8 +1025,7 @@ private:
         uint64_t (*chain_entry)(CPU*, Emulator*) = nullptr;
         uint64_t chain_target_pc = 0;  // statically-known next PC, or 0
         uint64_t taken_chain_target_pc = 0;  // taken-path target, or 0
-        uint64_t verify_count = 0; // independent of Tier-2 entry hotness
-        Tier2RegionMonitor* tier2_monitor = nullptr;
+        uint64_t verify_count = 0;
         // Verify-mode memory save/restore: list of (arm_reg, offset, width)
         // for every STORE_MEM in this block whose address can be statically
         // resolved to (saved_arm_reg + offset). At verify time, we snapshot
@@ -1123,32 +1058,19 @@ private:
         // caller). invalidate_range checks these too — an SMC on an
         // inlined leaf must drop its inliner.
         std::vector<std::pair<uint64_t, int>> inlined_ranges_;
+        MtEdge* edges = nullptr;        // the multithreaded edges it leaves through, linked by next_out
+        uint32_t reg_pass = 0;          // 1 + index into reg_pass_ (register passing, RegisterPassing.cpp); 0: none
         uint32_t chain_patch_off = 0;   // offset of the 5-byte chain slot in code_buf_
         uint32_t taken_chain_patch_off = 0;   // offset of the taken-path slot
         uint32_t selfloop_patch_off = 0;  // ST jump slot or MT guarded body edge
         uint16_t selfloop_jcc_back = 0;   // ST: slot offset minus the retargeted jcc's offset (0: none)
-        uint32_t emitted_bytes = 0;    // actual host code size for region admission
-        // Offset of the tier-2 hot-head counter sequence in the prologue (the
-        // count is a HotCounter, found through hot_counter_sites_). 0 = no
-        // counter emitted (block ineligible, or tier-2 off). Single-thread
-        // firing overwrites the sequence's start with a `jmp rel32` over the
-        // whole counter+fire sequence once the block fires, so a hot block
-        // stops paying the per-entry counter cost for the rest of the run.
-        uint32_t tier2_counter_off = 0;
-        // Total length of the tier-2 counter+fire sequence at
-        // tier2_counter_off (mov+inc+cmp+jne+fire path). tier2_counter_disable
-        // overwrites its first five bytes with `jmp rel32` of
-        // (tier2_counter_len - 5) to skip the whole sequence. 0 = none.
-        uint32_t tier2_counter_len = 0;
+        uint32_t emitted_bytes = 0;    // actual host code size
         int     instr_count = 0;      // number of ARM64 instructions in this block
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
         int     call_interp_count = 0; // post-optimization IR CALL_INTERP count
-        // Generated entry counters own Tier-2 hotness. Each translation
-        // bounds promotion attempts; differential replay has a separate budget.
-        unsigned tier2_attempts = 0; // bounded retries while branch samples warm up
         // The instruction words this translation fetched, as a span of
-        // code_words_. Recorded only for contiguous Tier-1 blocks (no
-        // inlined leaf, no region). Cache maintenance and mprotect keep a
+        // code_words_. Recorded only for contiguous Lean blocks (no
+        // inlined leaf). Cache maintenance and mprotect keep a
         // block whose words still match and remain executable; a zero
         // count always retires it.
         uint32_t code_words_off = 0;
@@ -1167,15 +1089,6 @@ private:
         bool    chained = false;       // true once the slot has been patched to a jmp
         bool    taken_chained = false;       // true once patched to a jmp
         bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
-        bool     tier2_hot_logged = false;
-        // True if this BlockEntry is a tier-2 region fn (registered by
-        // tier2_fire_region). Region entries have NO chain slots (their
-        // chained/taken_chained are set true and the slots are 0), so any
-        // repatch logic must never treat them as standalone blocks — and a
-        // region fire must not repatch the stale standalone slots of a block
-        // that has since become a DIFFERENT region's head (overlapping
-        // traces share blocks; hijacking those slots cross-wires regions).
-        bool     is_region = false;
         // True if the block contains an SVC (syscall / thunk) instruction.
         // The verify re-run must NOT re-execute such blocks (the syscall has
         // host side effects), so the full-memory verifier (MEMFULL) skips them.
@@ -1226,58 +1139,15 @@ private:
         bool skips_dead_flag_store = false;
     };
     static_assert(CODE_BUF_SIZE <= UINT32_MAX, "BlockEntry code offsets are 32-bit");
-    // Measured trials: a timing pool closes after kTier2TrialWindowNs and the baseline's work (shorter
-    // pools were dominated by the switch between the arms' code); kTier2TrialPairs pairs decide, keeping
-    // the candidate when their median is under 0.97 and three quarters of them are.
-    static constexpr uint64_t kTier2TrialWindowNs = 100000;
-    static constexpr size_t kTier2TrialPairs = 12;
-    // Phase feedback: a kept region's side exits are judged in windows of kTier2FeedbackWindowExits. A window
-    // is bad when its exit rate (exits per completed iteration) is above kTier2ExitRateSlack times the rate its
-    // trial measured, or above 1/kTier2ExitRateFloor when that is higher; kTier2FeedbackStrikes bad windows in
-    // a row retire the region, and a new trial judges the new phase. The exit stub and tier2_region_feedback
-    // implement one rule.
-    static constexpr uint32_t kTier2FeedbackWindowExits = 32;
-    static constexpr uint32_t kTier2FeedbackStrikes = 4;
-    static constexpr uint32_t kTier2ExitRateSlack = 4;
-    static constexpr uint32_t kTier2ExitRateFloor = 16;
-    struct Tier2Trial {
-        Tier2RegionMonitor* monitor = nullptr;
-        BlockEntry baseline, candidate_entry;
-        uint64_t (*candidate)(CPU*, Emulator*) = nullptr;
-        uint64_t (*candidate_chain)(CPU*, Emulator*) = nullptr;
-        // Private instrumented entries; only plain entries can be selected.
-        // Timing tests may override these without publishing non-JIT rel32s.
-        uint64_t (*baseline_sample)(CPU*, Emulator*) = nullptr;
-        uint64_t (*candidate_sample)(CPU*, Emulator*) = nullptr;
-        uint64_t (*baseline_chain_sample)(CPU*, Emulator*) = nullptr;
-        uint64_t (*candidate_chain_sample)(CPU*, Emulator*) = nullptr;
-        uint64_t lo = 0, hi = 0;
-        bool linear = false;
-        std::vector<std::pair<uint64_t, uint64_t (*)(CPU*, Emulator*)>> baseline_blocks;
-        std::vector<MtEdge*> baseline_edges, candidate_edges, sampling_edges;
-        std::vector<std::pair<uint64_t, BlockEntry>> sampling_blocks;
-        std::mutex mutex;
-        std::vector<double> ratios;
-        bool sampling_revoked = false; // compiler lock only
-        bool sampling_cells = false;  // copies compiled in MT: data cells, no instruction slots
-        unsigned attempts = 0;
-        unsigned entries = 0;
-        // What the candidate's sampling copy did in its visits: completed iterations and side exits.
-        uint64_t candidate_iterations = 0, candidate_exits = 0;
-        std::atomic<unsigned> decision{0}; // 0 trial, 1 keep, 2 reject
-    };
-    std::vector<std::unique_ptr<Tier2Trial>> tier2_trials_;
-    std::unordered_map<uint64_t, BlockEntry> blocks_;
-    // Conservative 256-byte guest granule -> block PC index, protected by
-    // blocks_mutex_. A block is listed on every granule of its own and
-    // inlined/Tier-2 ranges. Lists may hold retired or non-overlapping PCs;
-    // range invalidation checks each candidate exactly and prunes absent ones
-    // from the granules it visits. A granule smaller than a page keeps a
-    // cache-line publish from scanning every live block on its page. Whole-
-    // cache clears reset it.
-    static constexpr uint64_t CODE_INDEX_GRANULE = 256;
-    std::map<uint64_t, std::vector<uint64_t>> code_index_;
+    using BlockMap = std::unordered_map<uint64_t, BlockEntry>;
+    Sharded<BlockMap> blocks_;
+    // Lock-free "no" for blocks_ lookups: most of what a compile asks about, and every first run of a block, is not there.
+    PcFilter<14> block_starts_;
+    // Which blocks depend on which guest code (own range, inlined ranges, flag dependencies), under blocks_mutex_. Range
+    // invalidation checks each candidate exactly. Whole-cache clears reset it.
+    CodeIndex code_index_;
     void remember_code_granules(uint64_t pc, const BlockEntry& entry);
+    void note_published(uint64_t pc, const BlockEntry& entry);  // what every publication records beside blocks_
     void publish_block(uint64_t pc, const BlockEntry& entry);
     void write_perf_map(uint64_t pc, const BlockEntry& entry);  // BIFROST_PERF_MAP
     // Back-reference index: maps target_pc → list of source_pcs whose
@@ -1303,16 +1173,16 @@ private:
     void unpatch_direct_calls(uint64_t target_pc);
     // Instruction words recorded per translation (BlockEntry::code_words_off).
     // Append-only like code_buf_. The compiler writes and invalidation reads
-    // it under the compiler lock; block_words_ collects the current compile.
-    std::vector<uint32_t> code_words_;
+    // it under the table lock; block_words_ collects the current compile.
+    SegmentedArray<uint32_t, 16384> code_words_;
     std::vector<uint32_t> block_words_;
     // Append-only like code_words_ (BlockEntry::flag_deps_off).
     struct FlagDep { uint64_t pc; uint32_t count; uint32_t words_off; };
-    std::vector<FlagDep> flag_dep_table_;
+    SegmentedArray<FlagDep> flag_dep_table_;
     // Dead-NZCV successor scans of the current compile (see exit_flags_dead).
     struct FlagDepScratch { uint64_t pc; std::vector<uint32_t> words; };
     std::vector<FlagDepScratch> flag_deps_scratch_;
-    bool flag_scan_active_ = false;   // public Tier-1 compiles only
+    bool flag_scan_active_ = false;   // public Lean compiles only
     // The host flags were loaded from cpu.pstate and nothing has changed them
     // since, so storing them back would rewrite what pstate already holds.
     // Set by a BRCOND that loads its flags; cleared by every flag setter.
@@ -1326,11 +1196,12 @@ private:
     // One past the highest recorded call slot; rewind_codegen purges records
     // in a discarded tail only when this lies beyond the rewind point.
     size_t call_site_end_ = 0;
-    // Retired Tier-1 PCs, so a later publication counts as a recompile.
-    std::unordered_set<uint64_t> retired_pcs_;
-    // MT Tier-1 compiles run under the shared table lock, serialized by
-    // compile_mutex_, and publish under the exclusive lock. Invalidations
-    // in that window are logged and checked before publication.
+    // Retired Lean PCs, so a later publication counts as a recompile.
+    Sharded<std::unordered_set<uint64_t>> retired_pcs_;
+    // MT Lean compiles publish under the exclusive lock. Where they are
+    // serialized (compile_mutex_) they run under the shared one, otherwise
+    // under none. Invalidations meanwhile are logged and checked before
+    // publication.
     std::mutex compile_mutex_;
     std::atomic<bool> shared_compile_active_{false};
     std::mutex compile_invalidations_mu_;
@@ -1342,6 +1213,11 @@ private:
     // code) over a plain publish_block (interpreter decisions).
     bool staging_ = false, staged_ = false, staged_linked_ = false;
     BlockEntry staged_entry_;
+    // A copy of it as a node of blocks_, made before the table is locked.
+    BlockMap staged_nodes_;         // empty between compiles; keeps its bucket array
+    BlockMap::node_type staged_node_;
+    EdgeTarget* staged_self_ = nullptr;
+    void prepare_publication(uint64_t pc);
     void publish_translation(uint64_t start_pc, const BlockEntry& entry);
     void publish_or_stage(uint64_t pc, const BlockEntry& entry);
     bool staged_entry_invalidated(uint64_t pc);
@@ -1356,14 +1232,14 @@ private:
     void lock_table();
     // Patch a block's chain slot to jump directly to `target_fn`.
     // Returns true if the patch was applied.
-    // MT stores the target in source_pc's edge cell emitted at that offset.
-    bool patch_chain(uint64_t source_pc, size_t chain_patch_off, const uint8_t* target_fn);
+    // Single-thread code only: multithreaded edges are data cells (link_mt_block).
+    bool patch_chain(size_t chain_patch_off, const uint8_t* target_fn);
     // Patch every recorded direct BL call slot targeting `target_pc` so the
     // `call rel32` lands on `target_fn`. Mirrors patch_chain's W^X pattern.
     void patch_pending_calls(uint64_t target_pc, const uint8_t* target_fn);
     // Try to chain `entry` to its already-translated target (if any),
     // and try to chain any existing blocks whose target is `pc`.
-    void try_chain_block(uint64_t pc, BlockEntry& entry);
+    void try_chain_block(BlockEntry& entry);
     // Chain every cached block whose chain slot targets `target_pc`,
     // found through back_refs_ in O(k). No entry means no block targets it.
     void chain_back_references(uint64_t target_pc);
@@ -1413,7 +1289,7 @@ private:
     PersistentCache* disk_cache_ = nullptr;
     bool disk_cache_checked_ = false;
     struct { uint64_t file_key = 0, file_offset = 0; } record_origin_;
-    size_t record_fault_mark_ = 0, record_flagdep_mark_ = 0, record_call_end_ = 0;
+    size_t record_flagdep_mark_ = 0, record_call_end_ = 0;
     bool record_unrecordable_ = false;
     CompileCapture* oracle_out_ = nullptr;
     bool disk_cache_ready(Emulator& emu);
@@ -1463,9 +1339,11 @@ private:
     // Android data TBI (Memory::data_address): clear bits 63:56 of the final
     // data address in `reg` before its bound check and access. `reg` must be a
     // scratch copy; the guest register keeps its tag. Emits nothing without
-    // TBI, and clobbers host flags otherwise.
+    // TBI, and clobbers host flags otherwise. With `window_valid` (WIN_REG holds
+    // the window base here) it is one `and reg, [WIN_REG + JIT_UNTAG_MASK_OFF]`;
+    // without it, `shl reg, 8; shr reg, 8`, which needs no register.
     bool data_tbi() const { return guest_memory_ && guest_memory_->data_top_byte_ignore(); }
-    void emit_untag_data_address(int reg);
+    void emit_untag_data_address(int reg, bool window_valid = false);
     void emit_mov_reg(int dst, int src);
     void emit_load(int dst, int base, int32_t off);
     void emit_store(int base, int32_t off, int src);
@@ -1596,6 +1474,7 @@ private:
     // ARM64 reg access.
     void emit_load_arm(int xr, int ar);
     void emit_store_arm(int ar, int xr);
+    void emit_store_arm_imm32(int ar, int32_t imm);  // mov qword [cpu.regs[ar]], imm32 (sign-extended)
     // Flag materialization.
     void emit_materialize_flags(bool from_sub = false, bool keep_rax = true);
     void emit_load_flags_from_pstate();
@@ -1641,7 +1520,7 @@ private:
     // traffic in SIMD-heavy blocks that fall back to the interpreter
     // frequently.
     static constexpr int NUM_ALLOC_REGS = 10;
-    // Translation complexity budgets, shared with the region collector.
+    // Translation complexity budgets.
     // These bound scratch/frame growth, not the precise peak live set.
     // Retain the original 32-instruction allowance for dense instructions.
     static bool block_translation_budget_reached(const IRBlock& ir, int count,
@@ -1657,7 +1536,8 @@ private:
     // vregs); kept as a strict allocator capacity increase for
     // pressure-heavy blocks that DO exceed 9 live vregs.
     static constexpr int ALLOC_REGS[10] = {RAX, RCX, RDX, R8, R9, R11, R12, R13, R15, R14};
-    // Phase 2 (tier-2 whole-region regalloc): loop-carried arch GPR vregs are
+    // Phase 2 (self-loop pinning): loop-carried, loop-invariant and (for
+    // their stores) written-first arch GPR vregs are
     // PINNED to fixed callee-saved host regs for the whole loop. The pin pool
     // is a subset of ALLOC_REGS (R12/R13/R14/R15): callee-saved (survives
     // memory-op C calls), OUTSIDE the flag-prep clobber set (RAX/RCX/RDX/R8)
@@ -1670,6 +1550,104 @@ private:
     // every loop iteration otherwise pays for its loop-carried arch values.
     static constexpr int PIN_REGS[4] = {R12, R13, R14, R15};
     static constexpr int NUM_PIN_REGS = 4;
+    // ── Register passing (BIFROST_CARRY; RegisterPassing.cpp) ────────────────────────────────
+    // A chain edge may pass guest registers in host registers: the predecessor leaves clean copies at its slot, and a successor
+    // whose entry loads are all covered by them is entered past those loads. A guest register has one canonical host register
+    // (rp_host_for), so layouts agree without negotiation. The host registers are the allocatable ones the chain slot code leaves
+    // alone (RAX holds the next pc, R11 is the MT cell jump's scratch), the callee-saved ones first because flag and call
+    // sequences clobber the others.
+    static constexpr int RP_HOSTS[8] = {R12, R13, R14, R15, R9, R8, RDX, RCX};
+    static constexpr int RP_MAX_ENTRIES = 4;  // registers a block reads first that its entry loads
+    static constexpr int RP_MAX_PASS = 2;     // registers it neither reads nor writes that its entry loads to hand on
+    static constexpr int RP_MAX_TOTAL = RP_MAX_ENTRIES + RP_MAX_PASS;
+    static constexpr int RP_MAX_STUBS = 4;
+    static int rp_host_index(int host) {
+        for (int i = 0; i < 8; i++) if (RP_HOSTS[i] == host) return i;
+        return -1;
+    }
+    static int rp_host_for(int guest) { return RP_HOSTS[guest & 7]; }
+    // A layout is a count byte, then one byte per guest register: (guest << 3) | host index.
+    static uint64_t rp_layout_add(uint64_t layout, int guest, int host) {
+        const int n = static_cast<int>(layout & 0xFF);
+        if (n >= 7) return layout;
+        return ((layout & ~uint64_t(0xFF)) | (uint64_t((guest << 3) | rp_host_index(host)) << (8 * (n + 1)))) | uint64_t(n + 1);
+    }
+    // True when every register of `entry` is in `exit` at the same host register.
+    static bool rp_layout_covers(uint64_t exit, uint64_t entry) {
+        for (int i = 1; i <= static_cast<int>(entry & 0xFF); i++) {
+            const uint8_t want = static_cast<uint8_t>(entry >> (8 * i));
+            bool found = false;
+            for (int j = 1; j <= static_cast<int>(exit & 0xFF) && !found; j++)
+                found = static_cast<uint8_t>(exit >> (8 * j)) == want;
+            if (!found) return false;
+        }
+        return true;
+    }
+    bool rp_mirrors_ = false;   // this compile leaves clean copies of guest registers at its exits
+    bool rp_entry_ = false;     // this compile emits a register-passing entry
+    bool rp_pc_store_ = false;  // the register entry stores the block's pc itself (the block calls out)
+    uint64_t rp_entry_layout_ = 0;
+    int rp_entry_n_ = 0;
+    int rp_entry_guest_[RP_MAX_TOTAL] = {}, rp_entry_host_[RP_MAX_TOTAL] = {};
+    bool rp_entry_pass_[RP_MAX_TOTAL] = {};  // loaded only to be handed on: the block does not touch it
+    uint8_t rp_stub_loaded_[RP_MAX_STUBS] = {};  // for each partial-entry stub, the entry registers (bit i = entry i) it loads
+    int rp_stub_n_ = 0;
+    // The host register each guest register should be left in or loaded to: where the translated successors of this block expect it,
+    // else its canonical register (rp_host_for).
+    int8_t rp_want_host_[31];
+    size_t regs_entry_off_ = 0;
+    size_t regs_entry_pc_off_ = SIZE_MAX;
+    // The temporary that currently holds guest register a's value (-1: none), and the guest register a temporary was loaded from
+    // or stored to (-1: none). A temporary that dies while it still holds the value becomes the clean copy of the register.
+    int16_t rp_binding_[32] = {};
+    uint8_t rp_arch_of_[4096] = {};  // guest register + 1
+    std::vector<uint16_t> rp_bound_temps_;
+    uint64_t rp_taken_layout_ = 0;
+    // The host register a temporary should be defined in, +1 (0: none): the canonical one of the guest register it is finally stored to,
+    // so that it can stay there as that register's copy. rp_dest_hint_ is the hint of the op being compiled.
+    uint8_t rp_pref_[4096] = {};
+    std::vector<uint16_t> rp_pref_set_;
+    int rp_dest_hint_ = -1;
+    void rp_prepare_hints(const IRBlock& block, uint64_t start_pc);
+    int rp_take_hint(int excl1, int excl2);
+    int rp_pred_hosts(uint64_t pc, int8_t host_of[31]);
+    void rp_clear_hints();
+    void rp_select_entry(const IRBlock& block, uint64_t start_pc);
+    void rp_emit_entry_loads();
+    void rp_bind(int guest, int temp);
+    void rp_unbind(int guest);
+    void rp_unbind_temp(int temp);
+    void rp_unbind_all();
+    void rp_release(int temp);
+    uint64_t rp_capture_layout() const;
+    // The entry a chain slot of `source` at code offset `slot` should jump to in `target`.
+    const uint8_t* chain_target_for(const BlockEntry& source, size_t slot, const BlockEntry& target) const;
+    const uint8_t* chain_target_for(uint64_t layout, const BlockEntry& target) const;  // `layout`: what the slot leaves
+    // What a block (or a side-exit stub) passes: its register entry, and the layouts its chain slots leave. Append-only like
+    // flag_dep_table_, indexed by BlockEntry::reg_pass; BlockEntry is read on every dispatch lookup and stays small.
+    struct RegPass {
+        uint64_t entry_layout = 0, exit_layout = 0, taken_layout = 0;
+        uint32_t regs_entry_off = 0;  // code offset of the register entry, 0 when the block has none
+        uint32_t stub_first = 0;      // reg_stubs_ index of the partial-entry stubs
+        uint8_t stub_count = 0;
+    };
+    // A partial-entry stub of a block: loads the entry registers in `loaded` (bit i = entry i of the entry layout) from cpu.regs[], then jumps
+    // into the register entry. An edge whose slot holds the other entry registers is patched to the stub that loads the fewest that covers
+    // what it lacks.
+    struct RegStub { uint32_t off; uint8_t loaded; };
+    SegmentedArray<RegStub> reg_stubs_;
+    void rp_emit_stubs(size_t target_off);
+    std::vector<uint64_t> rp_pred_scratch_;
+    uint32_t rp_succ_want_ = 0;  // guest registers a translated successor of the block reads first
+    uint32_t rp_stub_first_ = 0;
+    int rp_pred_layouts(uint64_t pc, std::vector<uint64_t>& layouts);
+    SegmentedArray<RegPass> reg_pass_;
+    const RegPass* reg_pass_of(const BlockEntry& e) const { return e.reg_pass ? &reg_pass_[e.reg_pass - 1] : nullptr; }
+    uint32_t add_reg_pass(const RegPass& info) {
+        reg_pass_.push_back(info);
+        return static_cast<uint32_t>(reg_pass_.size());
+    }
+    mutable std::atomic<uint64_t> rp_edges_passed_{0}, rp_edges_partial_{0}, rp_edges_plain_{0};  // chain edges patched to the register entry, and to the plain one while the target had one
     void select_arch_pins(const std::vector<IRInst>& instructions);
     bool rematerialize_vreg(int v, int reg);
     regalloc_stats_t regalloc_stats_;
@@ -1685,11 +1663,15 @@ private:
     };
     std::vector<AllocationEvent> allocation_events_;
     bool allocation_profile_active_ = false;
-    void write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin,
-                                  bool region);
+    void write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin);
     // BIFROST_PROF: registers where the parts of the block just emitted are, for the sample report (SampleProfile.cpp).
     // The body starts at the first IR instruction; everything before it is the entry that loads the register layout.
     bool profile_sections_active_ = false;
+    // The guest registers a block reads before writing and the ones it writes, bit n = xn (31 = sp), recorded only when the loop report
+    // will print (BIFROST_PROF with BIFROST_PC_HIST). Written under the compile lock, read under it by dump_carry_candidates.
+    struct CarryBlockInfo { uint32_t reads = 0, writes = 0; };
+    std::unordered_map<uint64_t, CarryBlockInfo> carry_info_;
+    void note_carry_block(uint64_t pc, const IRBlock& block);
     size_t profile_body_begin_ = SIZE_MAX;
     struct ProfileRange { size_t begin, end; uint8_t op; bool spill; };
     std::vector<ProfileRange> profile_ranges_;  // the IR operations of the block being emitted
@@ -1725,7 +1707,7 @@ private:
     int32_t vreg_slot_[4096];
     // Number of stack slots used.
     int num_stack_slots_ = 0;
-    // Phase 2 loop-carried pinning (per-compile, reset at block/region start):
+    // Phase 2 loop-carried pinning (per-compile, reset at block start):
     //   arch_pin_[a]   — host reg pinned to arch GPR vreg a (1-31), -1 if not
     //                    pinned. The pinned vreg's value lives in that reg for
     //                    the WHOLE loop; STORE_REG refreshes it, the back-edge
@@ -1737,7 +1719,7 @@ private:
     //                    store (transferring the stored scratch's reg, or
     //                    refreshing the pin) so later reads of `dest` reuse the
     //                    cached value instead of reloading cpu.regs[dest].
-    //                    Enabled for self-loop blocks and tier-2 regions only.
+    //                    Enabled for self-loop blocks only.
     int8_t   arch_pin_[32];
     uint16_t pinned_host_regs_ = 0;
     bool     keep_store_dest_ = false;
@@ -1747,7 +1729,7 @@ private:
     // LOAD_MEM/ATOMIC results would land in a scratch register the next
     // iteration clobbers. Explicit list, NOT a dest<=30 catch-all: branch
     // ops carry a dummy dest=0 and FP ops use dest for FP register numbers.
-    // Shared by the self-loop and Tier-2 selectors (Tier-1 once lacked
+    // Used by the self-loop pin selector (Lean once lacked
     // SIMD_SMOV and lost loop-carried SMOV results).
     static bool writes_arch_gpr_directly(const IRInst& inst) {
         switch (inst.op) {
@@ -1976,9 +1958,11 @@ private:
     bool compile_simd_widening_(const IRInst& inst);
     // Inline SSE/AVX2 bodies for SIMD_NATIVE_EXTRA kinds (CodeGen/Native/
     // NativeSIMDInline.cpp). The predicate is exact: the emitter succeeds
-    // for every word it accepts, so Tier-2 need not treat those as calls.
+    // for every word it accepts.
     bool native_simd_inlinable(uint32_t w) const;
     bool native_simd_cache_compatible(uint32_t w) const;
+    // SIMD_XTN forms the emitter encodes inline (the others call the interpreter, which the cache treats as a boundary).
+    bool simd_xtn_inline(unsigned subop, unsigned esize) const;
     bool emit_native_simd_inline(const IRInst& inst);
     // SSE/VEX encoding helpers shared by the SIMD families (SIMD/Encoders.cpp).
     void load_fp_vector(int xmm, int v, bool q);
@@ -2065,15 +2049,18 @@ private:
     // reuse without eviction. Only scratch vregs (33+) are tracked — ARM
     // reg vregs (0-31) represent architectural state that must be flushed
     // at the epilogue, so they must not be killed early.
+    // Holds kill_ops_ lists (0 outside the compile loop); the rest keep their memory for the next block.
     std::vector<std::vector<uint16_t>> kills_per_op_;
+    size_t kill_ops_ = 0;
     // Index of the IR op currently being compiled (set in translate_block's
     // compile loop). Lets codegen query kills_per_op_[cur_op_index_] to
     // decide whether a source vreg is dead AFTER this op (no later reader),
     // which permits skipping the flush→reload sandwich for scratch vregs
     // already cached in the target host reg.
     size_t cur_op_index_ = 0;
-    // The IR block being compiled by Tier-1 (null elsewhere), for emitters that look at the next op.
+    // The IR block being compiled by Lean (null elsewhere), for emitters that look at the next op.
     const std::vector<IRInst>* cur_insts_ = nullptr;
+    std::vector<IRInst> ir_insts_scratch_;
     // vreg_last_use_op_[v] = index of the IR op that LAST reads scratch
     // vreg `v` as a source (src1/src2/aux), or -1 if `v` is never read as
     // a source in this block. Populated by the same use-scan that builds
@@ -2083,7 +2070,8 @@ private:
     // Exact because IR scratch vregs are block-local with unique-per-
     // definition numbers (VregAlloc monotonic) and the scan covers aux
     // in addition to src1/src2.
-    std::vector<int> vreg_last_use_op_;
+    std::vector<int> vreg_last_use_op_ = std::vector<int>(4096, -1);
+    int vreg_last_use_high_ = -1;  // the highest entry a block wrote
     // vreg_uses_[v] = sorted (ascending) list of IR op indices that READ
     // vreg `v` as a source (src1/src2/aux), built by the same use-scan as
     // kills_per_op_/vreg_last_use_op_. Powers Belady's-optimal register
@@ -2096,7 +2084,7 @@ private:
     // Indexed by any vreg in [0, 4096). Each compile's use-scan starts with
     // reset_vreg_uses(), which empties only the lists the previous scan
     // filled (vreg_uses_touched_) and keeps their capacity; rebuilding all
-    // 4096 lists per block was a measurable share of Tier-1 compile time.
+    // 4096 lists per block was a measurable share of Lean compile time.
     std::vector<std::vector<uint16_t>> vreg_uses_;
     std::vector<uint16_t> vreg_uses_touched_;
     void reset_vreg_uses();
@@ -2123,7 +2111,7 @@ private:
     // zext32_fused_[i] = 1: op i (ADD/SUB/AND/OR/XOR/MUL, CSEL, SEXT 8/16) defines a
     // scratch vreg read only by op i+1, a ZEXT 32 of it. Op i is emitted in
     // its 32-bit x86 form (bits 63:32 cleared) and the ZEXT emits nothing
-    // when it keeps the same host register. Tier-1 blocks and Tier-2 regions
+    // when it keeps the same host register. Lean blocks
     // (scan_w32_and_sext_loads); empty elsewhere.
     std::vector<uint8_t> zext32_fused_;
     // Fills zext32_fused_ and sext_load_ for one compile unit; needs vreg_last_use_op_.
@@ -2132,12 +2120,12 @@ private:
     // its own width at i + 1 (LDRSB/LDRSH/LDRSW), so the guarded load may
     // sign-extend itself. A request only: the SEXT skips its own extension
     // when sext_load_done_ names the op before it, which the load sets after
-    // emitting that form (the other load paths zero-extend). Tier-1 and regions.
+    // emitting that form (the other load paths zero-extend).
     std::vector<uint8_t> sext_load_;
     size_t sext_load_done_ = SIZE_MAX;
     // guard_cover_[i] = j: op i is a LOAD_MEM/STORE_MEM at the same base value and offset as the earlier access j,
     // of at least its width, with only straight-line scalar ops between (scan_covered_guards; empty for a block
-    // with BRCOND_SKIP and outside Tier-1). guard_checked_[j] = 1 once op j's guarded access emitted its gate
+    // with BRCOND_SKIP and outside Lean). guard_checked_[j] = 1 once op j's guarded access emitted its gate
     // compare or was covered itself; only then does op i skip its own compare. The access stays a registered
     // fault site with its fault exit.
     std::vector<uint32_t> guard_cover_;
@@ -2146,14 +2134,14 @@ private:
     // fp_load_[i] = 1: op i is a 4- or 8-byte LOAD_MEM whose only reader is the
     // FMOV_G2F at i + 1 (LDR S/D). When the destination is in the vector cache
     // the guarded load is `movss/movsd xmm, [mem]` straight into its XMM and
-    // sets fp_load_done_ = i; the FMOV_G2F then emits nothing. Tier-1 only.
+    // sets fp_load_done_ = i; the FMOV_G2F then emits nothing. Lean only.
     std::vector<uint8_t> fp_load_;
     size_t fp_load_done_ = SIZE_MAX;
     // lazy_load_[i] = 1: op i is a LOAD_REG read only by the discarded SUBS
     // (a CMP) at i + 1, as its second operand. The load then emits nothing
     // and the compare reads cpu.regs[] as a memory operand. lazy_load_vreg_
     // is the pending vreg (-1: none); materialize_lazy_load() emits the load
-    // after all for a consumer that does not fold it. Tier-1 only.
+    // after all for a consumer that does not fold it. Lean only.
     std::vector<uint8_t> lazy_load_;
     int lazy_load_vreg_ = -1;
     int lazy_load_arch_ = -1;
@@ -2162,19 +2150,41 @@ private:
     // or i + 2 past one LOAD_REG), as its second operand. For a 64-bit shift by a constant 1-3 the SHL then emits
     // no shift (its result vreg holds the unshifted value, scaled_vreg_ and
     // scaled_shift_ say so) and the ADD is `lea d, [a + b*2^n]`.
-    // materialize_scaled() emits the shift after all. Tier-1 only.
+    // materialize_scaled() emits the shift after all. Lean only.
     std::vector<uint8_t> scaled_add_;
-    // In-place updates of pinned registers (scan_pin_inplace; Tier-1 self-loops with pins, empty elsewhere). A guest
+    // In-place updates of pinned registers (scan_pin_inplace; Lean self-loops with pins, empty elsewhere). A guest
     // `add x0, x0, #1` is LOAD_REG t <- x0; OP s <- t, y; [ZEXT 32 s']; STORE_REG x0 <- s'. With x0 pinned the generic
     // path computes into a scratch copy of the pin and copies the result back: three host instructions on the
     // loop-carried chain. For such a chain, pin_inplace_[i] = a + 1 on the OP: the compile loop emits it as `a <- a OP y`
     // (an IRInst copy with dest = src1 = a, the existing in-place form) on the pin itself, skips the ops folded into it
     // (pin_skip_[j] = 1: the LOAD_REG when the OP is its only reader, the ZEXT, the STORE_REG), and pin_result_[i] names
-    // the vreg that later ops read when the new value has readers after the STORE_REG: they get a copy of the pin.
+    // the vreg that later ops read when the new value has readers after the STORE_REG: they get a copy of the pin,
+    // unless scan_pin_reads (below) lets them read the pin itself.
     std::vector<uint8_t> pin_inplace_;
     std::vector<uint8_t> pin_skip_;
     std::vector<uint16_t> pin_result_;
     void scan_pin_inplace(const std::vector<IRInst>& insts);
+    // Results written into a pin (scan_pin_dests; the same loops): pin_dest_[i] = a + 1 on an op whose value the next STORE_REG
+    // puts in a pinned register (through a fused SEXT/ZEXT). The compile loop compiles it with dest = a, skips the folded ops
+    // and, when an emitter placed the result elsewhere, moves it to the pin (finish_pin_dest). pin_result_ as above.
+    std::vector<uint8_t> pin_dest_;
+    void scan_pin_dests(const std::vector<IRInst>& insts);
+    void finish_pin_dest(int a);
+    // The pin to compute a pin_dest_ op's result in, or -1 (not such an op, or the pin is an operand that must survive).
+    int pin_for_dest(int dest, int excl1 = -1, int excl2 = -1) const {
+        if (dest > 30 || !pin_dest_active_) return -1;
+        const int pin = arch_pin_[dest];
+        return pin == excl1 || pin == excl2 ? -1 : pin;
+    }
+    bool pin_dest_active_ = false;  // the op being compiled writes a pinned register: dest 0 is x0, not "no result"
+    // Reads of a pin without a copy (scan_pin_reads; the same loops). A LOAD_REG of a pinned register copies the pin into a
+    // scratch register. When every reader only reads (pin_readable) and nothing writes the register before the last one,
+    // pin_alias_[t] = a + 1: the compile loop skips the LOAD_REG and gives the readers the register itself, which the
+    // allocator maps to the pin. No scratch vreg is ever mapped to the pin (`reg_vreg_[vreg_home_[v]] == v` holds).
+    // Likewise for the new value of an in-place update (pin_result_). Indexed by vreg; empty without pins.
+    std::vector<uint8_t> pin_alias_;
+    void scan_pin_reads(const std::vector<IRInst>& insts);
+    static bool pin_readable(const IRInst& inst, uint16_t v);
     int scaled_vreg_ = -1;
     int scaled_shift_ = 0;
     void materialize_scaled();
@@ -2186,7 +2196,25 @@ private:
     // allocated monotonically (VregAlloc::next++) and defined exactly once
     // per block, so a vreg keyed here is always an IMM result. Defensively
     // erased when any non-IMM op writes the same dest vreg.
-    std::unordered_map<uint16_t, uint64_t> jit_consts_;
+    // Cleared per block in O(1) and without a hash node per constant.
+    class VregConstants {
+        struct Entry { uint64_t second; uint32_t block; };
+        std::vector<Entry> entries_ = std::vector<Entry>(4096, Entry{0, 0});
+        uint32_t block_ = 1;
+    public:
+        static constexpr const Entry* end() { return nullptr; }
+        const Entry* find(size_t v) const { return v < entries_.size() && entries_[v].block == block_ ? &entries_[v] : nullptr; }
+        size_t count(size_t v) const { return find(v) != nullptr; }
+        uint64_t at(size_t v) const { return entries_.at(v).second; }
+        void set(size_t v, uint64_t value) { if (v < entries_.size()) entries_[v] = {value, block_}; }
+        void erase(size_t v) { if (v < entries_.size()) entries_[v].block = 0; }
+        void clear() {
+            if (++block_ != 0) return;
+            for (Entry& e : entries_) e.block = 0;
+            block_ = 1;
+        }
+    };
+    VregConstants jit_consts_;
     // A CSEL operand's constant value: XZR, or a block constant above.
     bool csel_const(uint16_t v, uint64_t& out) const {
         if (v == 32) { out = 0; return true; }
@@ -2226,7 +2254,7 @@ private:
     // two-operand ops (STORE_MEM) so the first kept reg isn't flushed.
     uint16_t load_vreg_to_reg_fast(int dst, int v, int dest_vreg,
                                    uint16_t clobber_mask);
-    // Predicate form of the Tier-2 fast path: true if scratch vreg `v` is
+    // Predicate form of the fast path: true if scratch vreg `v` is
     // already cached in host reg `reg`, its last use is the current op, and
     // it is not the op's dest. Used by two-operand ops (STORE_MEM) that must
     // decide BOTH operands' fast paths before flushing anything.
@@ -2247,18 +2275,15 @@ private:
     // to the block body start (block_body_start_off_), creating a tight loop
     // that skips the epilogue/dispatcher/prologue.
     bool    has_selfloop_slot_ = false;
+    // The callback-sentinel compare of a published MT self-loop runs once on entry, not on every iteration
+    // (emit_selfloop_stop_entry_check); the back edge then emits no compare of its own.
+    bool    selfloop_stop_hoisted_ = false;
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
     size_t  selfloop_jcc_off_ = 0;       // the 6-byte jcc whose target is that slot with nothing between (0: none)
     void note_selfloop_jcc(size_t jcc_patch, size_t taken_label);
     size_t  selfloop_target_off_ = 0;    // where the patched slot jumps: the body, or the reconcile stub
     bool    selfloop_reconcile_after_ = false;  // an ST back-edge still owes its reconcile stub
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
-    // Tier-2 in-code hot-head counter (BIFROST_TIER2=1): offset of the
-    // prologue counter+fire sequence (0 = none emitted). Carried into
-    // BlockEntry.tier2_counter_off so tier2_counter_disable can neutralize it
-    // after the block fires.
-    size_t  tier2_counter_off_ = 0;
-    size_t  tier2_counter_len_ = 0;  // length of that sequence (see above)
     // Chain-skip entry (BIFROST_CHAIN_SKIP=1): offset right after the
     // window/vec-cache prologue setup but PAST the push/frame/reg-setup,
     // i.e. the earliest point a chain successor may jump to. Chain slots
@@ -2298,9 +2323,9 @@ private:
     std::vector<std::pair<uint64_t, int>> inlined_ranges_;
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
     // ── XMM vector register cache ───────────────────
-    // Tier-1 assigns a fixed hot loop core and, under pressure, a
+    // Lean assigns a fixed hot loop core and, under pressure, a
     // demand-allocated tail in XMM3-15. Unsupported instructions synchronize
-    // locally. Tier-2 uses the same allocator over the complete region.
+    // locally.
     // XMM0-2 remain instruction scratch. Deferred fault guards snapshot the
     // live vector mapping; exits commit all architectural dirty values.
     static constexpr int VEC_XMM_START = 3;
@@ -2313,7 +2338,7 @@ private:
     bool vec_cache_active_ = false;
     int  vec_pinned_count_ = 0;
     int  vec_pinned_[32];     // pinned vector regs, in assignment order
-    // Tier-1 keeps a stable loop core and uses the remaining XMMs on
+    // Lean keeps a stable loop core and uses the remaining XMMs on
     // demand. Loop edges reconcile the initial demand layout explicitly.
     bool vec_allocator_active_ = false;
     int vec_fixed_count_ = 0;
@@ -2345,7 +2370,7 @@ private:
                    ? vec_cache_[vreg] : -1;
     }
     // Shared vector operand/effect scan admits synchronization boundaries
-    // and pressure in both Tier-1 blocks and Tier-2 regions.
+    // and pressure for Lean blocks.
     // Both paths retain the existing FMA3/AVX host feature requirement.
     bool vec_cache_may_enable(const IRBlock& block);
     bool vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& writes) const;
@@ -2359,6 +2384,8 @@ private:
         uint16_t xmm_clobbers = 0;
     };
     bool vec_inst_effects(const IRInst& inst, VectorEffects& effects) const;
+    std::vector<uint32_t> vec_operand_sets_;         // vec_cache_may_enable's
+    std::vector<VectorEffects> vec_effects_by_op_;
     void vec_prepare_operands(uint32_t reads, uint32_t writes);
     void vec_drop_dynamic();
     void vec_writeback_one(int vreg);
@@ -2439,7 +2466,7 @@ private:
     // target): the first instructions at `pc` overwrite all four flags before
     // anything that could read them, fault or branch. Records the words the
     // verdict relies on as a dependency of the block being compiled. Public
-    // Tier-1 compiles only; false otherwise.
+    // Lean compiles only; false otherwise.
     bool exit_flags_dead(uint64_t pc);
     // A loop body just past the block cap would split every iteration in two,
     // reloading the vector cache at the seam. Returns the block length that
@@ -2453,7 +2480,7 @@ private:
     // Does NOT clear flags_in_host_ — the caller manages that.
     void materialize_flags_to_pstate(bool preserve_flags = true, bool dead = false);
     // Translation entry point.
-    uint64_t (*translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry = nullptr))(CPU*, Emulator*);
+    uint64_t (*translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*);
 private:
     void record_verification_stores(const IRBlock& ir_block, uint64_t start_pc, BlockEntry& entry);
 };

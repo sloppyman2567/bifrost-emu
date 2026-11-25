@@ -69,6 +69,8 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
     // Reuse a consumed scratch value instead of allocating, spilling and
     // copying it. Architectural values and pinned loop state stay live.
     auto result_reg = [&](int source, int home, int excluded = -1) {
+        if (inst.dest != source)
+            if (const int pin = pin_for_dest(inst.dest, home, excluded); pin >= 0) return pin;
         if (home != excluded && (inst.dest == source ||
             (source > 32 && vreg_last_use_this_op(source) &&
              !(pinned_host_regs_ & (1u << home))))) return home;
@@ -116,7 +118,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // and emits them as imm64, the only form a relocation can patch.
                 const bool wide = wide_guest_pc(inst.imm_value());
                 if (inst.dest > 32 && inst.dest < 4096 && !wide)
-                    jit_consts_[inst.dest] = inst.imm_value();
+                    jit_consts_.set(inst.dest, inst.imm_value());
                 // Fold lookahead: when the immediately-following op folds
                 // this constant into an x86 immediate form (dead src2), the
                 // mov we'd emit here is dead code — skip it. The pre-scan
@@ -128,6 +130,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // and the consumer's ensure_vreg would reload garbage.
                 if (cur_op_index_ < fold_ahead_kind_.size() && !wide) {
                     uint8_t fa = fold_ahead_kind_[cur_op_index_];
+                    if (fa == 4) return 0;  // the STORE_REG after this stores the immediate itself
                     if (fa == 1) {
                         int64_t c = static_cast<int64_t>(inst.imm_value());
                         if (static_cast<int64_t>(static_cast<int32_t>(c)) == c)
@@ -257,7 +260,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int d;
             if (inst.op == IROp::ADD) {
                 // dest == src1 computes in place (a pinned register's update must stay in its pin).
-                if (inst.dest == inst.src2 || (inst.dest != inst.src1 && inst.src2 > 32 &&
+                if (inst.dest == inst.src2 || (inst.dest != inst.src1 && pin_for_dest(inst.dest) < 0 && inst.src2 > 32 &&
                     vreg_last_use_this_op(inst.src2) &&
                     !(pinned_host_regs_ & (1u << s2)))) d = s2;
                 else d = result_reg(inst.src1, s1, s2 == s1 ? -1 : s2);

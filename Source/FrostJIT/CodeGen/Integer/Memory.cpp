@@ -79,10 +79,15 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     if (mp.offset || data_tbi()) {
         effective = alloc_reg();
         pinned_host_regs_ |= (1u << effective);
-        emit_byte(rex(true, effective >= 8, false, address >= 8));
-        emit_byte(0x8D);
-        emit_modrm_disp(effective, address, static_cast<int32_t>(mp.offset));
-        emit_untag_data_address(effective);
+        // WIN_REG holds the window base here: the bound compare below reads its header page too.
+        if (mp.offset) {
+            emit_byte(rex(true, effective >= 8, false, address >= 8));
+            emit_byte(0x8D);
+            emit_modrm_disp(effective, address, static_cast<int32_t>(mp.offset));
+        } else {
+            emit_mov_reg(effective, address);
+        }
+        emit_untag_data_address(effective, true);
     }
     // A covered access needs no scratch register for the compare.
     const int temp = covered ? -1 : alloc_reg();
@@ -132,7 +137,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         // Placeholder recovery offset: flush_deferred_guards patches the
         // registered site with the real stub offset before publication.
         memory_fault_stub_ = 1;
-        guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
+        const uint64_t sites_before = fault_sites_added_;
         if (load && fp_xmm >= 0) {
             // movss/movsd xmm, [WIN_REG + effective]: zeroes the bits above, as
             // the MOVQ of the FMOV_G2F did. A fault leaves the XMM untouched.
@@ -146,13 +151,17 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
             // LDRSB/LDRSH/LDRSW: one sign-extending load (see sext_load_).
             const bool sext = inst.op == IROp::LOAD_MEM && cur_op_index_ < sext_load_.size() &&
                               sext_load_[cur_op_index_];
-            emit_load_mem(page, effective, 0, mp.width, sext, true);
+            // `page` stays the tail's scratch: a pin the load writes must keep its value until the load succeeds.
+            const int pin = pin_for_dest(inst.dest);
+            const int into = pin >= 0 ? pin : page;
+            emit_load_mem(into, effective, 0, mp.width, sext, true);
             if (sext) sext_load_done_ = cur_op_index_;
-            set_vreg_reg(inst.dest, page);
+            set_vreg_reg(inst.dest, into);
         } else {
             emit_store_mem(effective, 0, value, mp.width, true);
         }
-        guard.has_site = fault_site_count_.load(std::memory_order_relaxed) == guard.site_index + 1;
+        guard.has_site = fault_sites_added_ == sites_before + 1;
+        guard.site_index = fault_last_site_;
         memory_fault_stub_ = 0;
         deferred_guards_.push_back(std::move(guard));
         pinned_host_regs_ = saved_pins;
@@ -164,7 +173,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         }
         return true;
     }
-    // Inline (Tier-2): the open gate or a clear flag jumps over the checks.
+    // Inline checks (no deferred tail): the open gate or a clear flag jumps over them.
     const size_t bypass_pages = emit_jmp_rel32_placeholder();
     patch_jcc_rel32(checked, static_cast<int32_t>(code_buf_used_ - (checked + 6)));
     std::vector<GuardJump> passed = emit_guard_page_checks(effective, temp, page, mp.width,
@@ -187,13 +196,13 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     pinned_host_regs_ = saved_pins;
     return true;
 }
-// A single Q-register load or store (Tier-1): the scalar guard above at width
+// A single Q-register load or store (Lean): the scalar guard above at width
 // 16, then one MOVUPD between guest memory and the register's pinned XMM, or
 // XMM0 and v_lo/v_hi when it is not cached. A fault leaves the register and
 // memory untouched, so the fault exit interprets the whole instruction. A
 // 16-byte access may cross a page in bytes 8-15, so its page checks stay in
 // its own tail rather than the shared stubs (built for widths up to 8). Pairs
-// and Tier-2 keep emit_memory_guard and compile_simd_memory_.
+// keep emit_memory_guard and compile_simd_memory_.
 bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
     const bool load = inst.op == IROp::SIMD_LD16;
     if (!defer_guards_ || !fault_sites_ || !guest_memory_ || !window_base_ || !inst.arm_pc) return false;
@@ -220,10 +229,14 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
     if (disp || data_tbi()) {
         effective = alloc_reg();
         pinned_host_regs_ |= (1u << effective);
-        emit_byte(rex(true, effective >= 8, false, address >= 8));
-        emit_byte(0x8D);
-        emit_modrm_disp(effective, address, static_cast<int32_t>(disp));
-        emit_untag_data_address(effective);
+        if (disp) {
+            emit_byte(rex(true, effective >= 8, false, address >= 8));
+            emit_byte(0x8D);
+            emit_modrm_disp(effective, address, static_cast<int32_t>(disp));
+        } else {
+            emit_mov_reg(effective, address);
+        }
+        emit_untag_data_address(effective, true);  // WIN_REG holds the window base: the bound compare reads it too
     }
     const int temp = alloc_reg();
     pinned_host_regs_ |= (1u << temp);
@@ -247,7 +260,7 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
                         0, checked, 0, false, gated, std::move(cold), capture_guard_state()};
     guard.access = code_buf_used_;
     memory_fault_stub_ = 1;  // placeholder; flush_deferred_guards patches the site
-    guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
+    const uint64_t sites_before = fault_sites_added_;
     const int pinned = vec_xmm(reg);
     // movupd xmm, [WIN_REG + effective]: 66 REX(R=xmm, X=index, B=1) 0F 10/11.
     auto access = [&](int xmm, uint8_t opcode) {
@@ -270,14 +283,15 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
         }
         access(pinned >= 0 ? pinned : 0, 0x11);
     }
-    guard.has_site = fault_site_count_.load(std::memory_order_relaxed) == guard.site_index + 1;
+    guard.has_site = fault_sites_added_ == sites_before + 1;
+    guard.site_index = fault_last_site_;
     memory_fault_stub_ = 0;
     deferred_guards_.push_back(std::move(guard));
     pinned_host_regs_ = saved_pins;
     return true;
 }
 // The fault exit reads only the host-register mappings, their dirty bits and
-// the vector cache's live layout and dirty flags. Tier-1's demand allocator
+// the vector cache's live layout and dirty flags. Lean's demand allocator
 // may reuse an XMM between the access and deferred recovery emission.
 FrostJIT::GuardState FrostJIT::capture_guard_state() const {
     GuardState state;
@@ -382,7 +396,7 @@ constexpr bool FrostJIT::cold_stub_register(int r) {
 // Called once before a JIT's first block. A page-check stub takes the address in
 // its register, preserves every register and returns ZF set when the access may
 // proceed. The fault exit takes the guest PC in RAX and ends the frame, whichever
-// Tier-1 block jumps to it: both frame layouts return the same way.
+// Lean block jumps to it: both frame layouts return the same way.
 void FrostJIT::emit_cold_stubs() {
     const bool recording = recording_;
     recording_ = false;  // not part of the block being recorded
@@ -501,7 +515,18 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     return 0;
                 }
                 int d;
-                if (inst.src1 <= 31 && vreg_home_[inst.src1] >= 0) {
+                if (rp_mirrors_ && inst.src1 <= 30 && !inst.is_fp_load() && vreg_home_[inst.src1] >= 0 &&
+                    !vreg_dirty_[inst.src1]) {
+                    // A clean copy of the register is in a host register (loaded by the entry, or left by an earlier temporary):
+                    // the temporary takes the host register over, and the copy goes (memory still holds the value).
+                    const int s = vreg_home_[inst.src1];
+                    vreg_home_[inst.src1] = -1;
+                    reg_vreg_[s] = -1;
+                    set_vreg_reg(inst.dest, s);
+                    rp_bind(inst.src1, inst.dest);
+                    return 0;
+                }
+                if (inst.src1 <= 31 && !inst.is_fp_load() && vreg_home_[inst.src1] >= 0) {
                     int s = vreg_home_[inst.src1];
                     d = alloc_reg_excluding(s, -1);
                     emit_mov_reg(d, s);
@@ -516,31 +541,31 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                         emit_load(d, CPU_REG, vlo_off(inst.src1));
                     }
                 } else {
-                    d = alloc_reg();
+                    d = alloc_reg(rp_mirrors_ && inst.src1 <= 30 ? rp_want_host_[inst.src1] : -1);
                     emit_load_arm(d, inst.src1);
                 }
                 set_vreg_reg(inst.dest, d);
+                if (!inst.is_fp_load()) rp_bind(inst.src1, inst.dest);
             }
             return 0;
         case IROp::STORE_REG:
             // arm64_reg[dest] = src1. Write to cpu.regs[dest] (or v_lo if is_fp).
             //
-            // Phase 2 (self-loop / tier-2 region): KEEP dest cached after the
+            // Phase 2 (self-loop pins): KEEP dest cached after the
             // store and DEFER the cpu.regs[] write. The value stays in a
             // register (a pinned loop-carried vreg in R12-R15, or the
             // transferred reg of a dead src1) marked DIRTY; the block's own
             // later LOAD_REG reads reuse the cached register, and the loop
-            // exit (self-loop fall-through / region exit, both of which run
+            // exit (the self-loop fall-through, which runs
             // flush_all_vregs before returning OR chaining) writes it back to
             // cpu.regs[dest] ONCE. Per loop iteration this replaces a store→
             // cpu.regs→load round trip with pure register traffic.
             //
             // Deferral is safe ONLY because keep_store_dest_ is enabled
-            // exclusively for self-loop blocks and back-edge regions whose
+            // exclusively for self-loop blocks, whose
             // exits always flush: a self-loop's taken edge is the loop-back
             // (taken target == start_pc, so the exit is the fall-through →
-            // shared epilogue with flush_all_vregs), and regions flush at
-            // every cold/side exit. Call-like ops (interpreter, BL/BLR, SVC)
+            // shared epilogue with flush_all_vregs). Call-like ops (interpreter, BL/BLR, SVC)
             // are excluded from pinning — they read cpu.regs[] directly and
             // would see the stale (deferred) value.
             //
@@ -615,6 +640,13 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     kill_vreg(inst.dest);
                     return 0;
                 }
+                rp_unbind(inst.dest);
+                if (cur_op_index_ > 0 && cur_op_index_ - 1 < fold_ahead_kind_.size() && fold_ahead_kind_[cur_op_index_ - 1] == 4) {
+                    // The constant was never put in a register (fold_ahead_kind_ 4): store it as an immediate.
+                    emit_store_arm_imm32(inst.dest, static_cast<int32_t>(jit_consts_.at(inst.src1)));
+                    if (inst.dest <= 31) kill_vreg(inst.dest);
+                    return 0;
+                }
                 int s = ensure_vreg(inst.src1);
                 if (inst.is_fp_store() && inst.dest <= 30) {
                     // FP register: store to cpu.v[dest].lo (or, when the fp
@@ -633,6 +665,7 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 if (inst.dest <= 31) {
                     kill_vreg(inst.dest);
                 }
+                if (!inst.is_fp_store()) rp_bind(inst.dest, inst.src1);
             }
             return 0;
         case IROp::LOAD_MEM: {

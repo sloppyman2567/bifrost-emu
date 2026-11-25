@@ -113,7 +113,7 @@ void FrostJIT::load_vec(int xmm, int vreg) {
     }
     load_v16(xmm, vreg);
 }
-// Store the low 8 bytes of an XMM reg to a vector, zeroing v_hi for Q=0.
+// Store an XMM reg to a vector: all 16 bytes for Q=1, the low 8 bytes with v_hi zeroed for Q=0 (clobbers the XMM's upper half).
 void FrostJIT::store_vec(int xmm, int vreg, bool q) {
     const int pinned = vec_xmm(vreg);
     if (pinned >= 0 && !fp_cache_active_) {
@@ -122,12 +122,13 @@ void FrostJIT::store_vec(int xmm, int vreg, bool q) {
         vec_cache_mark_dirty(vreg);
         return;
     }
-    if (q) {
-        store_v16(xmm, vreg);
-    } else {
-        store_lo(xmm, vlo_off(vreg));
-        fp_zero_hi(vreg);
+    if (!q) {
+        // movq xmm, xmm zeroes bits 127:64, so the register is one 16-byte store. Two 8-byte stores (lo, then a zero hi)
+        // cannot be forwarded to the 16-byte reload that usually follows. Callers do not use the XMM's upper half afterwards.
+        emit_byte(0xF3); emit_xmm_rex(xmm, xmm); emit_byte(0x0F); emit_byte(0x7E);
+        modrm3(xmm, xmm);
     }
+    store_v16(xmm, vreg);
 }
 // Broadcast a 64-bit constant into both halves of an XMM register:
 // movabs RAX, c; vmovq xmm, rax; punpcklqdq xmm, xmm

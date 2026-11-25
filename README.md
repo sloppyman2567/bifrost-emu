@@ -9,13 +9,15 @@ Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC.
 [Website](https://sloppyman2567.github.io/bifrost-emu/) · [Install](Docs/INSTALL.md) · [What has been run](Docs/COMPATIBILITY.md) · [Screenshots](Docs/SCREENSHOTS.md) · [Changelog](Docs/CHANGELOG.md)
 
 [![CI](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml/badge.svg)](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml)
-[![Version: 2.0.0-beta.3](https://img.shields.io/badge/version-2.0.0--beta.3-orange.svg)](Docs/CHANGELOG.md)
-[![Games: 17 playable of 20](https://img.shields.io/badge/games-17%20playable%20of%2020-brightgreen.svg)](Docs/COMPATIBILITY.md)
+[![Version: 2.0.0-rc.1](https://img.shields.io/badge/version-2.0.0--rc.1-green.svg)](Docs/CHANGELOG.md)
+[![Games: 18 playable of 21](https://img.shields.io/badge/games-18%20playable%20of%2021-brightgreen.svg)](Docs/COMPATIBILITY.md)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 
-<img src="Docs/Images/SpongeBob-2026-11-01/gameplay.png" alt="SpongeBob cooking gameplay" width="260">
-<img src="Docs/Images/AzurLane-2026-10-14/login.png" alt="Azur Lane title and login screen" width="260">
-<img src="Docs/Images/Neverball-2026-10-04/gameplay.png" alt="Neverball gameplay" width="260">
+<img src="Docs/Images/SpongeBob-2026-11-01/gameplay.png" alt="SpongeBob: Krusty Cook-Off, cooking (Android)" width="49%">
+<img src="Docs/Images/AzurLane-2026-11-01/home.png" alt="Azur Lane home screen (Android)" width="49%">
+<br>
+<img src="Docs/Images/Neverball-2026-10-04/gameplay.png" alt="Neverball gameplay (Linux)" width="49%">
+<img src="Docs/Images/MinecraftWeekend-2026-10-04/daytime.png" alt="Minecraft Weekend (Linux)" width="49%">
 
 </div>
 
@@ -30,7 +32,8 @@ There is no phone, no emulated device and no virtual machine to set up. It trans
 | Asgard | Its Android layer. `bifrost-emu game.apk` installs a game and starts it, and `asgard launcher` opens a library of what you installed. |
 
 > [!NOTE]
-> bifrost-emu is a beta. Some games play well, others only start, and a few are blocked.
+> This is a release candidate. Most games tried so far play well, but it isn't production grade yet, so expect
+> some rough edges, especially with Android apps.
 > [What has been run](Docs/COMPATIBILITY.md) says which.
 
 ## Quick start
@@ -55,15 +58,15 @@ Updating, removing, Debian packages and immutable systems such as Bazzite are in
 
 ## Does my game run?
 
-17 of the 20 games tried so far are playable, according to the people who played them: SpongeBob Krusty Cook-Off, Azur Lane,
-Arknights, Umamusume (Global), Subway Surfers, Neverball, Doom 3 and more. Roblox and TrickCal are blocked. The full list, with
+18 of the 21 games tried so far are playable, according to the people who played them: SpongeBob Krusty Cook-Off, Azur Lane,
+Arknights, Umamusume (Global), Subway Surfers, Neverball, Doom 3 and more. Roblox and TrickCal don't work yet. The full list, with
 versions, frame rates and known problems, is [What has been run](Docs/COMPATIBILITY.md).
 
 ## Good to know
 
 | | |
 |---|---|
-| Android is experimental | Google Play services come from microG. Google sign-in works in Zenless Zone Zero, Arknights and Azur Lane (maintainer-reported); a game's own Play Games sign-in may still fail. Media decoding and many system services are partial or missing. |
+| Android is experimental | Google Play services come from microG. Google sign-in works in Zenless Zone Zero, Arknights and Azur Lane (maintainer-reported), and Hungry Shark World connects through Play Games; other games' Play Games sign-in may still fail. Media decoding and many system services are partial or missing. |
 | ARM64 only | An app that ships only 32-bit ARM or x86 code cannot start. |
 | x86_64 Linux only | Other distributions should work, but only Ubuntu 24.04 is tested in CI; see the [support matrix](Docs/SUPPORT.md). |
 
@@ -79,7 +82,7 @@ versions, frame rates and known problems, is [What has been run](Docs/COMPATIBIL
 | Run Linux programs that need libraries | [Rootfs guide](Docs/ROOTFS.md) |
 | See what is planned | [Roadmap](Docs/roadmap.md) and [changelog](Docs/CHANGELOG.md) |
 | Build it, change settings, report a bug or contribute | [Build, configure and contribute](Docs/BUILDING.md) |
-| Understand how it works | [Source layout](Docs/ARCHITECTURE.md), [JIT guide](Docs/JIT.md), [speed](Docs/PERFORMANCE.md) |
+| Understand how it works | [Source layout](Docs/ARCHITECTURE.md), [JIT guide](Docs/JIT.md), [profiling](Docs/PROFILING.md), [speed](Docs/PERFORMANCE.md) |
 | Use it from my own program | [Embedding](Docs/EMBEDDING.md) |
 | Run the tests | [Test guide](Docs/TESTS.md) |
 

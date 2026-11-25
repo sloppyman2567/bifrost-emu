@@ -291,7 +291,7 @@ exit fixture verifies that `exit_group` can terminate a thread blocked in a
 Binder ioctl. The syscall fixture checks 22 state, inheritance, validation and
 barrier behaviors on a host supporting the expedited commands. The pinned real
 Bionic fixture also opens/maps Binder and checks `prctl` through actual Bionic
-wrappers, in fixed/random ASLR and interpreter/JIT/Tier-2 configurations.
+wrappers, in fixed/random ASLR and interpreter/JIT configurations.
 
 The service-manager fixture checks 104 behaviors, including descriptor/name
 validation, registration, lookup, a real invocation through the discovered

@@ -34,6 +34,7 @@ struct Record {
     uint64_t cpu_base_ns = 0;          // the thread's CPU time when its record was made: lifetime starts there too
     std::atomic<uint64_t> ns[KINDS] = {};
     std::atomic<uint64_t> calls[KINDS] = {};
+    std::atomic<uint64_t> translate_ns{0}, translate_wait_ns{0}, translate_wait_max_ns{0};
 };
 
 struct State {
@@ -248,6 +249,18 @@ void wait_prof_set_describers(std::function<std::string(int)> thread_name, std::
     g_describers = {std::move(thread_name), std::move(describe_address), std::move(describe_fd)};
 }
 
+void wait_prof_note_translation(uint64_t translate_ns, uint64_t wait_ns) {
+    // A thread is counted from its first syscall, like the rest of its line; translations before it (the dynamic linker's
+    // first blocks) are not.
+    Record* r = local().record;
+    if (!r) return;
+    r->translate_ns.fetch_add(translate_ns, std::memory_order_relaxed);
+    r->translate_wait_ns.fetch_add(wait_ns, std::memory_order_relaxed);
+    // Only this thread writes its record's maximum.
+    if (wait_ns > r->translate_wait_max_ns.load(std::memory_order_relaxed))
+        r->translate_wait_max_ns.store(wait_ns, std::memory_order_relaxed);
+}
+
 std::vector<WaitThreadReport> wait_prof_collect() {
     State& s = state();
     std::vector<Record*> records;
@@ -271,6 +284,9 @@ std::vector<WaitThreadReport> wait_prof_collect() {
             t.kind_ns[k] = r->ns[k].load(std::memory_order_relaxed);
             t.kind_calls[k] = r->calls[k].load(std::memory_order_relaxed);
         }
+        t.translate_ns = r->translate_ns.load(std::memory_order_relaxed);
+        t.translate_wait_ns = r->translate_wait_ns.load(std::memory_order_relaxed);
+        t.translate_wait_max_ns = r->translate_wait_max_ns.load(std::memory_order_relaxed);
         out.push_back(t);
     }
     std::sort(out.begin(), out.end(), [](const WaitThreadReport& a, const WaitThreadReport& b) { return a.cpu_ns > b.cpu_ns; });
@@ -284,26 +300,31 @@ void wait_prof_print(std::FILE* out, const std::function<std::string(int)>& name
                      S = static_cast<size_t>(WaitKind::Sleep), I = static_cast<size_t>(WaitKind::Io),
                      C = static_cast<size_t>(WaitKind::Ioctl), T = static_cast<size_t>(WaitKind::Thunk),
                      O = static_cast<size_t>(WaitKind::Other);
-    uint64_t total[KINDS] = {}, cpu = 0, life = 0;
+    uint64_t total[KINDS] = {}, cpu = 0, life = 0, translate = 0, translate_wait = 0;
     for (const auto& t : threads) {
         cpu += t.cpu_ns;
         life += t.lifetime_ns;
+        translate += t.translate_ns;
+        translate_wait += t.translate_wait_ns;
         for (size_t k = 0; k < KINDS; ++k) total[k] += t.kind_ns[k];
     }
     std::fprintf(out, "[%s] waiting, %zu thread(s), %.1f thread-seconds alive, cpu %.1f s: blocked in futex %.1f s, poll %.1f s, "
-                 "sleep %.1f s; inside io %.1f s, ioctl %.1f s, gl/egl thunks %.1f s, other syscalls %.1f s\n",
+                 "sleep %.1f s; inside io %.1f s, ioctl %.1f s, gl/egl thunks %.1f s, other syscalls %.1f s; translating %.1f s, "
+                 "waiting to translate %.1f s\n",
                  CODENAME, threads.size(), seconds(life), seconds(cpu), seconds(total[F]), seconds(total[P]),
-                 seconds(total[S]), seconds(total[I]), seconds(total[C]), seconds(total[T]), seconds(total[O]));
+                 seconds(total[S]), seconds(total[I]), seconds(total[C]), seconds(total[T]), seconds(total[O]), seconds(translate), seconds(translate_wait));
     for (size_t i = 0; i < threads.size() && i < SHOWN; ++i) {
         const WaitThreadReport& t = threads[i];
         const std::string name = name_of ? name_of(t.guest_tid) : std::string();
         std::fprintf(out, "[%s]   tid %d%s%s%s: alive %.1f s, cpu %.1f%% | blocked: futex %.1f%% poll %.1f%% sleep %.1f%% | "
-                     "inside: io %.1f%% ioctl %.1f%% thunk %.1f%% other %.1f%%\n",
+                     "inside: io %.1f%% ioctl %.1f%% thunk %.1f%% other %.1f%% | jit: translating %.1f%% waiting %.1f%%, longest %.1f ms\n",
                      CODENAME, t.guest_tid, name.empty() ? "" : " \"", name.c_str(), name.empty() ? "" : "\"",
                      seconds(t.lifetime_ns), percent(t.cpu_ns, t.lifetime_ns), percent(t.kind_ns[F], t.lifetime_ns),
                      percent(t.kind_ns[P], t.lifetime_ns), percent(t.kind_ns[S], t.lifetime_ns),
                      percent(t.kind_ns[I], t.lifetime_ns), percent(t.kind_ns[C], t.lifetime_ns),
-                     percent(t.kind_ns[T], t.lifetime_ns), percent(t.kind_ns[O], t.lifetime_ns));
+                     percent(t.kind_ns[T], t.lifetime_ns), percent(t.kind_ns[O], t.lifetime_ns),
+                     percent(t.translate_ns, t.lifetime_ns), percent(t.translate_wait_ns, t.lifetime_ns),
+                     static_cast<double>(t.translate_wait_max_ns) / 1e6);
     }
     if (threads.size() > SHOWN) {
         uint64_t rest_cpu = 0, rest_futex = 0;

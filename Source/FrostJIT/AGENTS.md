@@ -3,31 +3,74 @@
 Read [the JIT guide](../../Docs/JIT.md) before implementation, debugging or review.
 The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
 Document a JIT change by updating the guide's section for that mechanism (no dated sections in the guide); put its dated
-write-up, measurements and rejected attempts at the top of [the JIT history](../../Docs/archive/JIT-history.md) and list
-it under the guide's Recorded changes.
+write-up, measurements and rejected attempts at the top of [the JIT history](../../Docs/archive/JIT-history.md).
 
 One place per kind of fact, so a later change has one place to correct:
 
-- The guide (`Docs/JIT.md`): how the mechanism works now, with at most one short measurement.
+- The guide (`Docs/JIT.md`): how the mechanism works now, in a few lines a mechanism. Keep it short: an encoding, an old bug or a number belongs in the history or a comment.
+- `Docs/PROFILING.md`: the profiler, the waiting and stall reports, Tracy and the trace switches.
 - The history: dated write-up, every number, rejected attempts, what was and was not tested.
 - This file: contracts, what must not break and which test covers it. A number only where it is the reason for the rule.
-- `Docs/roadmap.md`: open work in full; finished work as one line with the headline number and a link to the history section.
+- `Docs/roadmap.md`: open work in a plain line each. Details, numbers and finished work go to the history or a dated roadmap snapshot in the archive.
 - `Docs/CHANGELOG.md`: 2 to 6 lines for people. The commit message carries the evidence.
 
 A new history section can make an older "not measured" or "next section" line wrong: recheck them.
 
 - `Compiler/BlockAnalysis.*` owns fallback prediction, leaf eligibility and the
   dead-NZCV successor scan (`nzcv_dead_in`);
-  `BlockCompiler.cpp` orchestrates Tier-1 compilation; `VerificationStores.cpp`
+  `BlockCompiler.cpp` orchestrates Lean compilation; `VerificationStores.cpp`
   records differential replay footprints. Prediction must track actual fallback
   support, but final fallback counts come from optimized IR.
+- `Carry/` is the planned register-resident second JIT ([design](../../Docs/JIT.md#planned-codegen-retaining-guest-state-across-regions)).
+  Today it holds `HotSide.cpp` (the exit profile and flip, below) and `LoopReport.cpp`. The loop report's `note_carry_block` and `dump_carry_candidates` read sampled hotness, each block's static
+  chain targets and `carry_info_`, print the `[carry]` lines of the `BIFROST_PROF`/`BIFROST_PC_HIST` report and emit no code (`HotSide.cpp` does emit: the budget check and the trip stub). `carry_info_` is
+  written under the compile lock or the exclusive table lock, so the reader takes `compile_mutex_` (try-lock, as `dump_memory_stats` does) and then the table lock.
+  `carry_report` covers it.
+- A mid-block exit (`BRCOND_ZERO`, `BRCOND_BIT` or `BRCOND` with `aux = 1`, `Compiler/SideExit.cpp`; a `BRCOND` after an `FP_CMP` is never one) leaves through a tail emitted after the block from a captured layout: it
+  must store every mapped guest register, not only the dirty ones (a loop pin is statically clean and ahead of memory), and the optimizer's
+  branch barriers must stay (dead-store elimination clears at a branch). In ST code its chain slot lives in a stub `BlockEntry` under `side_exit_key`; anything
+  that enumerates `blocks_` must tolerate those entries (no guest pc, `fn` null), and anything that retires a block must retire its `side_stubs_`.
+  In MT code the slot is an edge of the block (`collect_edges` gives it the exit's layout). Such a block is `has_call` and unrecordable; `jit_side_exit` covers it.
+- Carry's profile and flip (`Carry/HotSide.cpp`, `BIFROST_NO_CARRY_FOLLOW`): a block with exits Carry formed runs a 1,024-entry budget check at its
+  common entry and counts each exit's taken tail; the trip stub leaves for the dispatcher before the block runs, so it may only sit where nothing is
+  dirty (after the entry loads, before the pc store). `carry_trip` runs in a generated frame with no lock held, takes the table lock, and must keep
+  `back_refs_[pc]` across `retire_blocks_locked` (the retire erases it, and a retranslation whose predecessors were forgotten is chained into by nobody).
+  A flipped exit's continuation is the branch target, not `pc + 4`: anything that reasons about what runs after a mid-block exit (the NZCV-dead check
+  in `SideExit.cpp`) asks `carry_continuation`. A flipped block is not contiguous: it takes the `has_inlined_leaf` path and records its ranges in
+  `inlined_ranges_`, so nothing may assume `start_pc + count * 4` for it, and a loop exit that leaves the block early (the two-call limit) must first move `cur_pc` to the
+  first untranslated instruction, because a non-contiguous block takes its next pc from it. The profile structs live until the JIT is released, because retired code still
+  addresses them. `jit_carry_follow` covers it.
+- `fold_ahead_kind_` 4 (a constant stored by the next eager `STORE_REG`) is decided by the pre-scan under the same guards the `STORE_REG` case re-checks
+  (not `keep_store_dest_`, GPR/SP destination, imm32 fit): a skipped `mov` whose consumer then stores a register leaves the vreg unmapped. Do not
+  defer stores into RAX/RCX/RDX/R8 for a block that is not a loop to save the eager store: it was tried and added instructions (a spill at each clobber).
+  Carry is on by default; only `BIFROST_CARRY=0` turns it off, so a test that needs Lean's blocks must set that, not unset the variable.
+  Carry formation stays off while the persistent cache records, as its blocks are unrecordable.
+- Register passing (`BIFROST_CARRY`, `Compiler/RegisterPassing.cpp`; off with `BIFROST_NO_REG_PASS`): a chain edge may enter its target past the loads
+  of the guest registers the predecessor already holds. The predecessor's copies are clean arch-vreg mappings (`vreg_home_[a]` clean, equal to
+  `cpu.regs[a]`) in `RP_HOSTS` (never RAX, which carries the next pc, or R11, the MT cell jump's scratch); `rp_release` makes one when a temporary
+  that still holds a guest register's value dies, and `rp_capture_layout` records them where a slot is emitted (the block's fall-through slot,
+  `emit_taken_path_epilogue` for the taken slot and for each deferred mid-block exit, which swaps in the state captured at its branch; the
+  emitter that writes `rp_taken_layout_` for an exit tail must not leave it set for the block's own taken slot, `flush_deferred_side_exits` restores it).
+  The successor's register entry follows its entry loads (`rp_emit_entry_loads`) and is published in `RegPass` (`reg_pass_`, indexed by
+  `BlockEntry::reg_pass`, with the layouts), never in `BlockEntry` itself. A slot is patched to the register entry only through
+  `chain_target_for`, which requires the slot's layout to cover the entry layout exactly (guest register and host register), at every patch
+  site (`try_chain_block`, `chain_back_references`, `refresh_mt_edges`). A copy must stay equal to memory: anything that writes a guest register's
+  memory without going through `STORE_REG`, `store_reg_to_vreg`, `set_vreg_reg` or `alloc_reg_for` on that register, or that may change one behind
+  the allocator (calls, SVC, `invalidate_all_vregs`), must call `rp_unbind`/`rp_unbind_all`; a block that is a loop (pins own R12-R15), compiles
+  for the persistent cache, runs under `BIFROST_JIT_VERIFY` or starts a native libc routine has no copies and no register entry, and the block
+  trace stays in front of an entry that would skip it. Everything after the entry loads (the pc store of a block that calls out, the statistics
+  count, the vector loads) runs on both entries. A partial-entry stub (`rp_emit_stubs`, compile time only: patch sites do not emit code) loads
+  entry registers from memory and jumps to the register entry, so the entry layout must list every register the block's exit layout may carry
+  that the block did not map itself. A register loaded only to be handed on (`BIFROST_REG_PASS_THROUGH=1`) must be one the block never touches
+  and a block that calls out gets none, because the call drops every copy. Verifying a change: a temporary compare of each layout entry with `cpu.regs[]` before every
+  slot (a `cmp reg, [rbx+disp]; je; ud2` per entry, not kept) over the JIT tests and CoreMark found a layout recorded for the wrong slot.
+  `jit_reg_pass` covers it.
 - `IR/` owns typed instructions, translation, scalar SSA, optimization and
   validation. Factories/readers are the parameter contract. SSA currently models
   scalar values; do not assume MemorySSA or complete vector/FP state coverage.
 - `CodeGen/` owns operation emission; `Backend/` owns host instruction encoding;
   `RegisterAlloc/` owns scalar mappings and spills; `Runtime/` owns dispatch,
-  caching, fault recovery and profiling. Tier-2 has separate planning/emission
-  and publication contracts; Tier-1 success alone does not validate it.
+  caching, fault recovery and profiling.
 - JIT lifetime across fork/exec: a fork child keeps the parent's JIT and translations (a Zygote child
   starts warm). `fork_guest` takes every live instance's locks with its own, all or none
   (`FrostJIT::try_lock_for_fork`), and the child re-creates them and restarts the preemption ticker
@@ -53,7 +96,7 @@ A new history section can make an older "not measured" or "next section" line wr
   generated test and expectations together. Inline bodies in
   `CodeGen/Native/NativeSIMDInline.cpp` must match their `run<K>` lane for
   lane, and `native_simd_inlinable` must accept exactly what the emitter
-  emits (Tier-2 relies on it to skip the call treatment). The JIT inlines most
+  emits. The JIT inlines most
   kinds, so the generated guest fixture rarely reaches a `run<K>` body: the helper
   host test (`make test-native-simd-helpers`, part of `make verify`) runs every
   body against the same QEMU hashes. `vec_inst_operands` lists each kind's
@@ -62,10 +105,10 @@ A new history section can make an older "not measured" or "next section" line wr
 - A block that starts a registered guest `memcpy`/`memmove`/`memset` (`NativeLibcRoutines`, `Emulator::native_libc()`) begins
   with `emit_native_libc_entry`, emitted at the chain entry before anything is cached. It leaves by the dynamic
   `CALL_INTERP` exit, so it must stay where no register, flag or vector state is live, and `jit_native_libc` must leave `cpu.pc`
-  at the routine's own entry when it declines. Keep it out of verify, slow-store and Tier-2 sampling compiles; a block
+  at the routine's own entry when it declines. Keep it out of verify and slow-store compiles; a block
   compiled with it must not be reusable from the disk cache (the shifted proof compile has to differ, which it does because
   the registry lookup misses at the shifted pc).
-- A Tier-1 access may skip its gate compare only when `scan_covered_guards` proves an earlier access of the block used the same
+- A Lean access may skip its gate compare only when `scan_covered_guards` proves an earlier access of the block used the same
   base value and offset at a width no smaller, with only straight-line scalar ops between and no `BRCOND_SKIP` in the block;
   `guard_checked_` records that the earlier access really emitted its compare. A covered access is still a registered fault site
   with its fault exit (`DeferredGuard::covered` drops only the compare and the page checks); an acquire load is never covered.
@@ -87,7 +130,7 @@ A new history section can make an older "not measured" or "next section" line wr
   whose stub releases the bucket first. `CLEAR_EXCLUSIVE` implements CLREX.
 - `flags_match_pstate_` (host flags loaded by a BRCOND, unchanged since) lets exits and
   `clobber_flags` skip the store; every flag setter must clear it, and only public
-  Tier-1 compiles use it (`host_flags_match_pstate()`). NZCV lives in `CPU::nzcv_host` as the
+  Lean compiles use it (`host_flags_match_pstate()`). NZCV lives in `CPU::nzcv_host` as the
   `lahf; seto al` image (N bit 15, Z bit 14, bit 8 = x86 CF = NOT ARM C, V bit 0):
   `emit_materialize_flags` adds a `cmc` for ADD-convention producers, stores all of EAX (a narrower
   store than a reader's load misses store forwarding) and clobbers RAX only, and
@@ -101,6 +144,10 @@ A new history section can make an older "not measured" or "next section" line wr
   skipped `mov` whose consumer then does not fold leaves the vreg unmapped. Kind 3 is the CSET
   form of CSEL (constants 0 and 1, read through `csel_const`). Pass 0b of
   `optimize_ir` relies on `LOAD_MEM` and the shared 32-bit `ADDS/SUBS` emitter zero-extending.
+- Scalar FMAX/FMIN/FMAXNM/FMINNM (`FP_BINOP` 4-7) take the cold step for NaN inputs only. Equal operands are exact
+  inline: the operation in both operand orders, ANDed for max and ORed for min (x86 returns the second operand on a tie,
+  Arm orders +0 above -0). Do not test the result for zero: `max(x, 0)` is zero for every negative input, and each such
+  result was an interpreter step (about 800 host instructions). `jit_fp_scalar_fminmax` covers every special pair.
 - Scalar FMUL/FMULX/FMLA/FMLS by element are `FP_BINOP`/`FMADD`/`FMSUB` with a source element
   (`lane`, IR `cond` = element + 1); `fp_decode::scalar_fp_by_element` decides for the translator
   and `BlockAnalysis` alike. The element comes from `fp_load_lane`: under the low-half FP cache an
@@ -113,13 +160,13 @@ A new history section can make an older "not measured" or "next section" line wr
   software checks and steps the guest instruction on any failure, and `compile_ir_inst` emits it before the vector cache is
   switched off (`struct_guard_emitted_`): the fault exit publishes dirty pinned vectors only while the cache is active.
   `compile_simd_structure_` uses XMM0-2 and XMM12-15 only; `vec_inst_effects` declares that clobber set (0xF007) and the
-  registers read or written, so change them together. Tier-2 stops at the op. A post-index `Rm` is any of X0-X30 and only 31
+  registers read or written, so change them together. A post-index `Rm` is any of X0-X30 and only 31
   selects the immediate: the interpreter, the helper and the translator agree, and `jit_neon_struct` checks X30.
 - `SMADDL`/`UMADDL`/`SMSUBL`/`UMSUBL` (and `smull`, `umull`, `smnegl`, `umnegl`) are not IR ops: the translator lowers them to `SEXT`/`ZEXT`
   32, `MUL` and `ADD`/`SUB`, so the allocator sees them. Do not bring back a fixed-register emitter for a multiply form. `IRInst::aux`
   carries SIMD element and lane numbers; no op keeps a vreg in it. `jit_maddl` compares against a multiply-free reference: a C
   widening multiply compiles into the instruction under test.
-- An `FP_CMP` directly followed by a `BRCOND` (Tier-1 only, any condition but AL/NV) leaves raw `ucomis` flags: the host
+- An `FP_CMP` directly followed by a `BRCOND` (Lean only, any condition but AL/NV) leaves raw `ucomis` flags: the host
   flags are in no convention then, only `fp_raw_flags_live()` (the op index of that BRCOND) says so, and the branch picks one jcc
   and swaps the compare's operands where `fp_raw_flags_cc` says. EQ/NE add a `jp` (unordered sets ZF): EQ hops over its `je`, NE
   takes the branch; `note_selfloop_jcc` records only the ZF jump, the `jp` keeps landing on the patchable slot. Nothing but
@@ -130,27 +177,38 @@ A new history section can make an older "not measured" or "next section" line wr
   consumer, found past constants, moves, register loads and adds, is a conditional branch or an integer select; `fcsel`, `mrs`
   and anything else keep the branchy pstate sequence (jumps on the compare's own PF/CF/ZF, never `pushfq`), which measured faster
   when the outcome is predictable. The choice reads
-  `cur_insts_`, the Tier-1 block being compiled (null elsewhere, so Tier-2 takes the pstate sequence); either path is correct.
+  `cur_insts_`, the Lean block being compiled (null elsewhere, where the pstate sequence is used); either path is correct.
 - `CCMP`/`CCMN` leave their result in the host flags on both paths (`flags_from_sub_` = CCMP) and store nothing. Every
   allocation happens before the condition's jcc so both paths end with one register state; the false path loads the
   immediate through `mov eax; add al, 0x7f; sahf`, saving RAX when it is mapped. Its `#imm` fold and the `fold_ahead_kind_`
   CCMP entry must agree (constant src2 read only by the CCMP, 64-bit needs an imm32 fit). AL and NV always compare.
-- A single LD16/ST16 in Tier-1 is `compile_guarded_vec16`. Its 16-byte page checks stay in its own
+- A single LD16/ST16 in Lean is `compile_guarded_vec16`. Its 16-byte page checks stay in its own
   tail: the shared cold stubs exist for widths up to 8 (`flush_deferred_guards` checks `g.width`).
 - Block growth past the cap is only for loops (`selfloop_extent`, at most twice the cap); its look-ahead
   reads mapped executable pages directly and must stay a hint that adds no code-word dependency.
+- `WIN_REG` (R10) holds the window base for a whole chain: the cold prologue loads it once, and a chain entry, an IBL probe hit or an MT cell
+  jump enters past that load, so nothing reloads it per block. Every path that calls C++ and then continues in generated code must save
+  and restore it around the call (`emit_push(WIN_REG)` / `emit_pop(WIN_REG)`, with `emit_call_aligned` told about the push); a path that
+  ends the frame need not. A new call site, or a new entry that skips the cold prologue, keeps that contract. A build with a compare-and-trap
+  of R10 at every chain entry (a temporary `cmp r10, imm64; je; ud2` after `chain_entry_off_`, not kept) caught `emit_native_libc_entry`,
+  which called its helper without saving R10; `native_libc` and `jit_native_libc` run it.
 - Android data TBI (`Memory::data_address`): every native data access untags its final address
   (base + offset) with `emit_untag_data_address` in a scratch copy before the bound and page checks;
-  the guest register keeps its tag. A new access path that skips it is correct but interprets every
+  the guest register keeps its tag. Where `WIN_REG` holds the window base (the Lean scalar and 16-byte
+  guards, whose bound compare reads the header page through it) the untag is one `and reg, [WIN_REG +
+  Memory::JIT_UNTAG_MASK_OFF]`; call it with `window_valid = true` only there. Elsewhere, where the limit
+  is an immediate and `WIN_REG` may not be loaded, it stays `shl reg, 8; shr reg, 8`. A new access path that skips it is correct but interprets every
   tagged (Scudo heap) access. `data_tbi()` is part of the disk-cache fingerprint.
 - A scalar FP load or store is `LOAD_MEM` + `FMOV_G2F` or `FMOV_F2G` + `STORE_MEM`,
   never `SIMD_LDST`: that op is not cache-compatible and would veto the XMM cache
   for the whole block. Vd is written only after the load, so a fault leaves it intact.
-  In Tier-1 a 4- or 8-byte `LOAD_MEM` read only by the next `FMOV_G2F` (`fp_load_`) loads straight into the
+  In Lean a 4- or 8-byte `LOAD_MEM` read only by the next `FMOV_G2F` (`fp_load_`) loads straight into the
   register's cached XMM with `movss`/`movsd` (a registered fault site, slot claimed before the guard captures
   the layout) and the `FMOV_G2F` emits nothing. A scalar result written to a cached XMM leaves every bit above it
   zero (`xorps; movss` or `movq`), so the vector cache's `fp_zero_hi` is free that op (`fp_hi_zeroed_vreg_`, reset
-  per op). Keep `v_hi` zero stores as `pxor; movsd`: an immediate `mov qword` made scalar loops ~30% slower.
+  per op). Keep a scalar result's `v_hi` zero store as `pxor; movsd`: an immediate `mov qword` made scalar loops ~30% slower.
+  A whole-vector result with Q=0 (`store_vec`) is different: zero it in the XMM (`movq xmm, xmm`) and store 16 bytes, so a later 16-byte
+  reload forwards; callers must not use the XMM's upper half afterwards.
 - Vn is `CPU::v[n]`, 16 contiguous bytes (`lo` bits 63:0, then `hi`), addressed as `vlo_off(n)`/`vhi_off(n)`; byte `b` of
   Vn is `vlo_off(n) + b`. Move a whole register with one 16-byte access (`load_v16`/`store_v16`), never a lo/hi pair, but the
   lo-only scalar FP cache stores 8 bytes: its XMM does not hold `v_hi`.
@@ -162,7 +220,7 @@ A new history section can make an older "not measured" or "next section" line wr
   (`emit_simd_qc_unless_equal`); differential verification does not compare
   FPSR, so check it against QEMU.
 - Translation cost counts: a pass that costs more translation time than the code it saves is not worth running on every block
-  (`[JIT] compile:` in `-v`; the Tier-1 SSA adapter was dropped for that, `BIFROST_TIER1_SSA=1` brings it back). Per-block state
+  (`[JIT] compile:` in `-v`; the Lean SSA adapter was dropped for that, `BIFROST_LEAN_SSA=1` brings it back). Per-block state
   that only a debug mode reads is built only in that mode: `record_verification_stores` runs under `BIFROST_JIT_VERIFY` alone, so
   anything new that replay needs from a block must be recorded there too. Clearing a 4096-entry table per block is a cost, and so is a hash
   node per vreg: `optimize_ir` keeps its per-block state in thread-local `EpochTable`s (O(1) clear, no allocation), so a new per-block map
@@ -176,9 +234,14 @@ A new history section can make an older "not measured" or "next section" line wr
 - Every op that writes an architectural GPR directly must update the optimizer's
   forwarding cache and `writes_arch_gpr_directly()` pin-selection predicate.
   Flags-only ops such as CCMP/CCMN do not write placeholder GPR destinations.
+- An IR op that reads or writes `cpu.regs[]` by index instead of through vregs must be a barrier in `optimize_ir`'s forwarding pass and its
+  dead-store pass (`SIMD_NATIVE_*`, `CALL_INTERP`, `SVC`, calls), or force the block-wide forwarding veto, which only an LSE `ATOMIC` does.
+  `LDXR/STXR/STLR_FAST` use vregs and need neither; `jit_llsc_native` covers registers across them in one block.
 - A pre-call pinned-vector writeback must include values written anywhere in a
   loop block, including writes after the call that carry into the next iteration.
-- An exit may omit its NZCV store only through `exit_flags_dead` (public Tier-1
+- A back edge may skip the NZCV store only when nothing in the loop can observe the previous iteration's flags before the first setter; a mid-block
+  `cbz`/`tbz` exit can (`flags_loop_carried_`). A new kind of mid-block exit belongs in that scan. `jit_side_exit` covers it.
+- An exit may omit its NZCV store only through `exit_flags_dead` (public Lean
   compiles): the successor's first words must overwrite all four flags
   (`ADDS`/`SUBS`/`ANDS`/`FCMP`) after nothing but flag-neutral, fault-free, non-branching
   integer or scalar FP data-processing instructions (`fcsel` and `fccmp` read the flags and end the scan as live;
@@ -195,7 +258,7 @@ A new history section can make an older "not measured" or "next section" line wr
   fallback counts, verification, pinning and region admission depend on it.
   The exception is the FP NaN cold step (`emit_fp_interp_step`), which runs
   only for exceptional values. It commits, single-steps and reloads, and an op that
-  uses it writes Vd only after its guard. Tier-1 and Tier-2 emit it after the block
+  uses it writes Vd only after its guard. Lean emits it after the block
   with the layout captured at `emit_fp_cold_tail` (as for vector guards), so the hot
   path falls through; at most two branch sites share one step.
   Changes of PC/stop state must return to the dispatcher through the proper exit.
@@ -214,61 +277,60 @@ A new history section can make an older "not measured" or "next section" line wr
   `Memory::software_check_page`): scalar guards read the gate table, which is 0
   while they are on, and their checked path compares with the real bound before the
   page flags; other emitters test the flag. Read either at every access, never hoist.
-- A region compile disables the counters of every trace block; if no trial starts, all of them are settled
-  (`tier2_settle_locked`), not only the head, or they keep their profiles and PC-storing chain entries. A constituent
-  that now translates to another length (Tier-1 splits at block starts compiled since) is instead refreshed with the
-  head (`tier2_refresh_queue_`, unsettled, bounded by `tier2_retrains_`).
-- Under chain-skip the trace walker follows a BL into its callee and a matching RET becomes a flag-neutral guard
-  (`XOR` with the return address, `BRCOND_ZERO`) whose taken edge is a dynamic exit; a RET ending the path keeps its `BR`.
-  Both are `Tier2Trace::kDynamicExit` side exits with `dynamic_exit_reg`: the exit commits all state, then reads the
-  register from `cpu.regs[]` and tries the indirect-branch probe. Only a final `BR` is exempt from the planner's call
-  check. Trace blocks end where the published Tier-1 block at their start ends (exact trial baselines).
-  `BIFROST_NO_CALLREGION=1` turns this reach off; single-head policy tests set it.
-- Trial policy constants are `kTier2TrialWindowNs` and `kTier2TrialPairs` (FrostJIT.hpp); `jit_tier2_measure` reads
-  them and calibrates its burn loops to one closed window per visit, so change them there, not in the test.
-- Every region exit gets a revocable cell (`create_chain_edge`) whether or not its target is translated yet; translating
-  the target fills it. An exit without one returns to the dispatcher for the region's life.
-- Phase feedback (`kTier2FeedbackWindowExits`, `kTier2FeedbackStrikes`, `kTier2ExitRateSlack`, `kTier2ExitRateFloor`):
-  the region's exit stub (`RegionCompiler.cpp`) and `tier2_region_feedback` implement one windowed exit-rate rule and
-  change together; the trial sets `min_window_iterations` from its sampling copy's counts. The completion credit is an
-  `add` that clobbers the host flags: emit it only where they are dead (back-edges, committed exits).
 - Published code/metadata outlive in-flight CPUs. MT publication/invalidation
   changes atomic target cells, not live instruction bytes; preserve compiler
-  locking, invalidation generations and target revocation for Tier-1/Tier-2.
+  locking, invalidation generations and target revocation.
 - `emit_mt_chain_slot` reads the CPU through its `cpu_reg`: after an exit pops the callee-saved registers
-  (ordinary frames, Tier-2 chain-outs) RBX is the caller's, so those pass RDI. Reading RBX there compares
+  (ordinary frames) RBX is the caller's, so those pass RDI. Reading RBX there compares
   whatever the C++ caller left in it, which only crashes when the compiler happens to leave it null.
+- `cpu.jit_stop_pc` is a callback boundary that may name real guest code (`jit_mt_publication` sets it to a loop's own head and expects one
+  iteration), so a published MT self-loop must honor it. It cannot change while the loop runs (only this thread sets it), so the loop
+  compares it once per entry (`emit_selfloop_stop_entry_check`, before `block_body_start_off_`); if it names the head, the entry moves
+  `cpu.jit_epoch_seen` 2^30 away from the epoch, so the first back edge's poll leaves, after one iteration as before. A block whose
+  prologue ran before the MT decision (`selfloop_stop_hoisted_` false) compares in the back edge instead. For a pc above imm32 the
+  compare covers the low 32 bits only (a false hit leaves early, never the reverse); do not load the pc into a register for it, and
+  do not drop the check for targets that look unreachable.
 - MT code stays bounded through `g_jit_preempt_epoch` (`Runtime/Preemption.hpp`), polled with loads only by
   backward edges and IBL probes; new native entries must call `jit_grant_lease(cpu)`, and before `bind_ibl`: MT
   probes have no generation check, so a lease taken after the table sync could accept a stale entry. Anything that retires or
-  replaces code advances the epoch (`invalidate_dispatch_cache`). Forward static edges carry no poll; ST code and timed
-  Tier-2 sampling code keep the 256-edge budget (`preempt_by_epoch()`). MT `BL` calls through a revocable cell.
-- MT Tier-1 compiles run under the shared table lock (`translate_entry`).
-  Codegen may read `blocks_` but must not change state that shared-lock
-  readers use; route publication through `publish_or_stage` /
-  `publish_translation`. Invalidation paths that skip the exclusive lock must
-  log their range for in-flight compiles.
-- Cache maintenance and mprotect keep a Tier-1 block whose recorded
+  replaces code advances the epoch (`invalidate_dispatch_cache`), which also makes every thread drop all of its dispatch caches and IBL.
+  Forward static edges carry no poll; ST code keeps the 256-edge budget. MT `BL` calls through a revocable cell.
+- Several threads compile at once in MT code ([guide](../../Docs/JIT.md#several-compilers-at-once)). Codegen reads the core's tables only through
+  `with_table`, keeps nothing that points into one, and changes none: what a compile creates goes into the compiler's own containers and
+  `adopt_staged` moves it (rebase a new kind of offset there, empty a new container in `discard_staged`, and copy a new member that codegen
+  reads in `FrostJIT(FrostJIT& core)`). Counters belong to the core (`core_->`), and so do addresses in generated code. Route publication
+  through `publish_or_stage` / `publish_translation`. Invalidation paths that skip the exclusive lock must log their range with every in-flight compile.
+- A compiler writes only inside its leased chunk: code, fault sites and rewinds. Sites and rewinds at exactly `code_lease_end_` belong to the next chunk, which
+  another thread writes. A compile that stops early must leave `prev_max_vreg_` at 4095. To test this, build with `kCodeChunk` at 32 KiB (leases
+  fill eight times as often) and loop `jit_mt_compile.elf` hundreds of times: one lost fault site shows as a host SIGSEGV in about 2% of runs.
+- Keep work under the exclusive table lock small, and never let one container grow by moving everything (`Sharded`, `SegmentedArray`). `Sharded` picks the
+  shard by guest page: keys of one page must stay together, or lookups of neighbours miss the cache (11% slower translation). Allocate and copy before the
+  lock (`prepare_publication`). Do not add a shared-lock read to the cold path of a compile: at eight threads one costs 1,300 to 4,200 cycles.
+- `PcFilter` bits (`block_starts_`, `carry_tripped_`) are set under the exclusive lock before the insertion (and, in `carry_trip`, before the invalidation is
+  logged) and never cleared: whoever inserts into `blocks_`, `carry_rounds_`, `carry_done_` or `carry_follow_taken_` adds the pc first. Side-exit stub keys are the exception (ST only,
+  never looked up through the filter).
+- `mt_targets_` records keep their address until `release_resources` (in-flight compiles hold pointers): empty them with `reset`, never `clear`, while the JIT runs. Whatever
+  removes an entry from `blocks_` must clear `EdgeTarget::block`. A shard lock is taken inside the table lock or alone, and nothing is locked inside it.
+- Cache maintenance and mprotect keep a Lean block whose recorded
   instruction words (`code_words_`) are unchanged. A translation must depend
   on no other guest bytes: a new compile-time guest read must be recorded or
   must leave `code_words_count` zero. Callers pass a `CodeInvalidation` reason.
 - Known-entry loop growth uses cached branch metadata only as a hint; actual
   translation retains all limits and records every absorbed instruction word.
-- Tier-1 deferred guard tails must restore the allocator/vector dirty state
+- Lean deferred guard tails must restore the allocator/vector dirty state
   captured before the access and finalize fault-site offsets before publication.
   Inline cold and slow paths that the hot path skips may reload XMMs at
   runtime but must leave compile-time vector validity and dirtiness unchanged.
-  Tier-2 keeps inline guards. W-form fusion (Tier-1 and regions, `scan_w32_and_sext_loads`) must scope its
+  W-form fusion (`scan_w32_and_sext_loads`) must scope its
   encoding width to the ALU operation, preserving operand setup and lazy NZCV.
 - Fault exits jump to a frame return already emitted in their compile unit
   (`emit_frame_return(true)`); block exits keep their own (a jump on the
-  dispatcher-return path cost 10%). Reset `frame_return_off_` wherever a block or
-  region compile starts (`rewind_codegen` drops it); never jump to another unit's.
-- Tier-1 cold tails (widths up to 8; a 16-byte access keeps its checks in its tail) call one
+  dispatcher-return path cost 10%). Reset `frame_return_off_` wherever a block compile starts (`rewind_codegen` drops it); never jump to another unit's.
+- Lean cold tails (widths up to 8; a 16-byte access keeps its checks in its tail) call one
   copy per JIT of the page checks and jump to one fault exit
   (`emit_cold_stubs`, `use_cold_stubs`). A page-check stub preserves every register and answers
   in ZF, and its failing path must clear ZF. A persistent-cache recording keeps full tails: a
-  reference out of the block cannot be reused in another process. Tier-2 keeps inline guards.
+  reference out of the block cannot be reused in another process.
 - `emit_call_aligned` with `preserve_flags` pads an odd push count with `lea rsp, [rsp-8]`, never `sub`/`add`: those
   write RFLAGS before `pushfq` saves them. The slow paths of `emit_load_mem`/`emit_store_mem` take any source register
   but R8/R9 (the store reloads its value from its own stack copy, since RDX and RCX are argument registers) and
@@ -279,8 +341,8 @@ A new history section can make an older "not measured" or "next section" line wr
   its unpatched form is `kSlotNop5`. MT revokes data cells, never instructions.
 - Per-block bookkeeping is the JIT's largest heap cost (~700k blocks per Android app;
   `[JIT] metadata MiB:` in `Runtime/MemoryStats.cpp`). Keep `BlockEntry` grouped by
-  field size, with 32-bit code offsets. MT keeps no `back_refs_` (its edges are reached
-  through `mt_edge_refs_`); an MT slot's cell is found with `mt_slot_edge(source_pc, slot)`.
+  field size, with 32-bit code offsets. MT keeps no `back_refs_`: a block's edges hang on its
+  `BlockEntry::edges`, the edges to a pc on its `mt_targets_` record, and only `link_mt_block`, `refresh_mt_edges` and the retire paths write their cells.
   Add a container to `dump_memory_stats` when you add per-block state, and to
   `release_resources` (`Runtime/Generations.cpp`) when it is per-block or generated code addresses it.
 - A full code cache is replaced as a whole: `Emulator::renew_jit` makes a fresh `FrostJIT` current and
@@ -290,15 +352,15 @@ A new history section can make an older "not measured" or "next section" line wr
   addresses its members. A helper that generated code calls finds its instance with
   `FrostJIT::running(emu)`, never `emu.jit()`, and a loop that dispatches blocks must follow the current
   instance (`jit_call_helper` retargets). Never block for long inside generated frames: that pins a generation.
-- Under chain-skip, Tier-1 exits leave RDI/RSI undefined: every chain target must enter past its
+- Under chain-skip, Lean exits leave RDI/RSI undefined: every chain target must enter past its
   prologue's `mov rbx, rdi` and emulator store (`chain_entry`), and code on the way (MT chain slot, IBL
-  probe, the Tier-2 trial chain wrapper) addresses the CPU through RBX. A new chain target or edge stub
-  that needs RDI/RSI must load them itself, as the trial wrapper's cold tail does before entering `fn`.
-- Generated code reads the `Emulator*` from `CPU::jit_emu` (`emit_load_emu`); every block and region
+  probe) addresses the CPU through RBX. A new chain target or edge stub
+  that needs RDI/RSI must load them itself.
+- Generated code reads the `Emulator*` from `CPU::jit_emu` (`emit_load_emu`); every block
   prologue stores it (`emit_store_emu`) and a chain edge keeps it because the CPU is the same. Do not
   put it back in a frame slot: the 32 KiB chain-skip frame made that a page away from the rest of
   each native call's stack.
-- The persistent cache (`Runtime/CacheRecording.cpp`) reuses Tier-1 bytes in later processes. An emitter
+- The persistent cache (`Runtime/CacheRecording.cpp`) reuses Lean bytes in later processes. An emitter
   that embeds a host address emits it as imm64 and calls `note_host_reloc` right after; a guest PC goes
   through the imm64 form when `wide_guest_pc` says so; compile-time guest reads use `fetch_address`
   (the proof compile shifts PCs). Undeclared host addresses make blocks unrecordable (they are caught,
@@ -311,22 +373,25 @@ A new history section can make an older "not measured" or "next section" line wr
   (`chain_entry_pc_off_`). `emit_call_abs` and `emit_call_rel32_placeholder` set `block_calls_out_`; a new way of
   calling out (a raw `call`, a tail jump to C++) must set it too. The op list at the chain entry only chooses between the
   inline store and the stub after the block. Anything emitted between an exit's `mov eax, pc` and its frame return must
-  keep RAX: it is the block function's return value. A new chain target that reads `cpu.pc` stores its own PC first, as the
-  Tier-2 trial wrapper's tails and a region's chain entry do.
+  keep RAX: it is the block function's return value. A new chain target that reads `cpu.pc` stores its own PC first.
 - A pinned register's update runs in its pin only for the exact adjacent shape `scan_pin_inplace` accepts (OP, an optional fused
   ZEXT 32, STORE_REG to the same register, the LOAD_REG's value not read after the OP). The compile loop compiles a patched
   `IRInst` with `dest = src1 = a`, so the emitters' `dest == src1` forms must keep the result in `src1`'s register: the `ADD`
   path's dead-`src2` reuse is skipped for `dest == src1`. Widen the shape (an op between, a later write) only with the fault and
   exit argument: the pin must not change before the end of the guest instruction. Never alias a vreg to a pin's register: the
   allocator keeps `reg_vreg_[vreg_home_[v]] == v`. `jit_pin_inplace` covers it; `BIFROST_NO_PIN_INPLACE=1` turns it off.
+- Readers name a pinned register instead of a copy (`scan_pin_reads`) only through `pin_readable`: add an op or operand there only if its emitter never
+  moves that operand to a fixed register and reuses its register only for a dead scratch vreg (`> 32`) or `dest == src1`. No write of the register may sit
+  between the `LOAD_REG` and the last reader. An op compiled with a pinned destination (`scan_pin_dests`, `pin_dest_active_`) may not fault after writing
+  it: a load's software-check tail keeps `page` as its scratch, never the pin. `dest == 0` means x0 there, so an emitter that takes `dest == 0` as "no
+  result" must check `pin_dest_active_`. A written-first register is pinned for its fault-visible old value: do not drop its preload.
 - No self-loop back-edge (`BRCOND` through `flush_all_vregs_but_pins`, `BRCOND_ZERO`, `BRCOND_BIT`) stores the loop pins
   (R12-R15), so inside the body a pin can be ahead of `cpu.regs[]` although it is mapped clean. The body must read a pin
   through its mapping: the preload raises `max_vreg_`, because `load_vreg_to_reg` and `store_reg_to_vreg` trust
   `vreg_home_[v]` only for `v <= max_vreg_`. Exits taken before a pin's rewrite store every mapped architectural
   register, not only dirty ones (`emit_memory_fault_exit`, `emit_fp_interp_step`); keep that for any new mid-block exit.
   `jit_selfloop_pins` and `jit_fp_ldst_cache` cover both.
-- `fp_load_`, `lazy_load_` and `scaled_add_` are Tier-1 pre-scan requests, cleared for Tier-2 (its compile loop has no
-  materializers); `zext32_fused_` and `sext_load_` come from `scan_w32_and_sext_loads` in both. The guarded load reports
+- `fp_load_`, `lazy_load_` and `scaled_add_` are Lean pre-scan requests; `zext32_fused_` and `sext_load_` come from `scan_w32_and_sext_loads`. The guarded load reports
   what it emitted in `sext_load_done_` (other load paths zero-extend, so the `SEXT` must not trust the request). A lazy
   `LOAD_REG` and an unshifted `SHL` result exist for one op only: `ensure_vreg` and the compile loop materialize a lazy
   load for any reader but the `SUBS` it was left for, and the loop and the ALU emitter materialize the shift for anything

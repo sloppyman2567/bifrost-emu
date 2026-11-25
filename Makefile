@@ -1,4 +1,4 @@
-# bifrost-emu Makefile (2.0.0-beta.3)
+# bifrost-emu Makefile (2.0.0-rc.1)
 #
 # Auto-discovers all .cpp files under Source/ and compiles them into the
 # final bifrost-emu binary. Library builds (libbifrost.a) compile the
@@ -21,7 +21,7 @@
 # Directory layout (see Docs/ARCHITECTURE.md):
 #
 #   Source/FrostJIT/     — JIT: IR, Compiler, CodeGen, RegisterAlloc,
-#                          Backend, Runtime, Tier2
+#                          Backend, Runtime
 #   Source/Interpreter/  — Decoder, Core (integer/branch), FloatSIMD
 #   Source/System/       — Core, Memory, Loader, Syscalls, VFS, Android,
 #                          Graphics, Audio, API

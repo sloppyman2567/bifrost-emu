@@ -168,8 +168,9 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 case 2: sse_op = 0x58; break;  // add (addsd)
                 case 3: sse_op = 0x5C; break;  // sub (subsd)
                 // FMAX/FMIN/FMAXNM/FMINNM: maxsd/minsd agree with Arm
-                // only for non-NaN operands and non-zero results; the
-                // other cases take the cold ARM-semantic step below.
+                // for non-NaN operands that differ. Equal operands (the
+                // signed zeros) are fixed inline below; a NaN input takes
+                // the cold ARM-semantic step.
                 case 4: case 6: sse_op = 0x5F; break;  // maxsd
                 case 5: case 7: sse_op = 0x5D; break;  // minsd
                 case 8: sse_op = 0x59; break;  // mul (mulsd) — FNMUL (negate after)
@@ -185,21 +186,30 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);  // ucomis xmm0, xmm1
                 unordered = emit_jcc_rel32_placeholder(0xA);         // JP: a NaN input
             }
-            // Execute SSE2 op: ADDSD/MULSD/etc xmm0, xmm1 → xmm0 = xmm0 OP xmm1
-            // Uses modrm(3, 0, 1) → reg=xmm0, rm=xmm1, so the result lands in xmm0 (which is what gets stored).
-            emit_byte(ld_prefix);
-            emit_byte(0x0F); emit_byte(sse_op);
-            emit_byte(modrm(3, 0, 1));  // xmm0, xmm1
-            // Arm NaN priority, +qNaN invalid results and FPCR.DN differ
-            // from x86; a NaN result (or a min/max zero, where x86 ignores
-            // the zero's sign) takes the interpreter step.
-            size_t special;
+            size_t special = 0;
             if (minmax) {
-                emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC9);  // xorps xmm1, xmm1
-                if (is_double) emit_byte(0x66);
-                emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);  // ucomis xmm0, xmm1
-                special = emit_jcc_rel32_placeholder(0x4);           // JE: zero result
+                // x86 MAX/MIN return the second operand when the inputs are equal, so a pair of zeros of
+                // either sign gives b's. Arm orders +0 above -0: FMAX of +0 and -0 is +0 (a AND b) and
+                // FMIN is -0 (a OR b). Run the operation in both orders and combine: for inputs that differ
+                // both give the same bits, equal non-zero inputs are bit-identical, and the zeros come out
+                // right. A clamp to zero (a zero result on every negative input) therefore stays native.
+                emit_byte(0x0F); emit_byte(0x28); emit_byte(0xD1);  // movaps xmm2, xmm1
+                emit_byte(ld_prefix);
+                emit_byte(0x0F); emit_byte(sse_op);
+                emit_byte(modrm(3, 2, 0));                          // xmm2 = op(b, a)
+                emit_byte(ld_prefix);
+                emit_byte(0x0F); emit_byte(sse_op);
+                emit_byte(modrm(3, 0, 1));                          // xmm0 = op(a, b)
+                emit_byte(0x0F); emit_byte(opc == 4 || opc == 6 ? 0x54 : 0x56);
+                emit_byte(modrm(3, 0, 2));                          // andps / orps xmm0, xmm2
             } else {
+                // Execute SSE2 op: ADDSD/MULSD/etc xmm0, xmm1 → xmm0 = xmm0 OP xmm1
+                // Uses modrm(3, 0, 1) → reg=xmm0, rm=xmm1, so the result lands in xmm0 (which is what gets stored).
+                emit_byte(ld_prefix);
+                emit_byte(0x0F); emit_byte(sse_op);
+                emit_byte(modrm(3, 0, 1));  // xmm0, xmm1
+                // Arm NaN priority, +qNaN invalid results and FPCR.DN differ
+                // from x86; a NaN result takes the interpreter step.
                 special = emit_fp_nan_check(is_double);
             }
             if (opc == 8) {  // FNMUL: negate the product
@@ -231,7 +241,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             fp_store_operand(0, inst.dest, is_double);
             // Zero v[dest].hi
             fp_zero_hi(inst.dest);
-            if (minmax) emit_fp_cold_tail(inst, {unordered, special});
+            if (minmax) emit_fp_cold_tail(inst, {unordered});
             else emit_fp_cold_tail(inst, {special});
             return true;
         }
@@ -905,7 +915,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // FCMP Dn, #0.0 — XORPS xmm1, xmm1 to get 0.0
                 emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC9); // xorps xmm1, xmm1
             }
-            // A compare that the next op, a BRCOND, consumes alone (Tier-1 only, like branch_follows below): leave the
+            // A compare that the next op, a BRCOND, consumes alone (Lean only, like branch_follows below): leave the
             // raw ucomis flags in the host and let the branch pick one jcc for its condition, swapping the operands where
             // that saves a second jump (fp_raw_flags_cc). The exits that still need NZCV convert the raw flags
             // themselves (materialize_fp_raw_flags_to_pstate), so the common exit whose successor rewrites the flags

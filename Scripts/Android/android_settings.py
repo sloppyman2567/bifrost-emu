@@ -19,6 +19,9 @@ JIT_DISK_CACHE_VALUES = {"on": "1", "off": "0", "verify": "verify"}
 # On-disk budget per app in MB (BIFROST_JIT_DISK_CACHE_MB); default follows [jit] disk_cache_mb, normally 512.
 JIT_DISK_CACHE_SIZES = (("default", "Default (512 MB)"), ("128", "128 MB"), ("256", "256 MB"), ("512", "512 MB"),
                         ("1024", "1 GB"), ("2048", "2 GB"), ("4096", "4 GB"))
+# Carry (BIFROST_CARRY, on unless it is 0): the JIT keeps guest registers in host registers across forward branches and block edges.
+JIT_CARRIES = (("default", "Default (on)"), ("on", "On"), ("off", "Off"))
+JIT_CARRY_VALUES = {"on": "1", "off": "0"}
 # What a gamepad does for an app that only takes touch: auto (the default) leaves the pad a pad and lets Start and Select
 # together turn on a touch cursor (BIFROST_ANDROID_CONTROLLER), gamepad never has a cursor and leaves Start and Select to the
 # game, cursor has the cursor on from the start.
@@ -34,6 +37,10 @@ WINDOW_MODES = (("resizable", "Resizable (default)"), ("keep", "Keep the app's s
 # draws at the size it started with when the window grows later (an app such as a Unity game keeps its first size).
 RESOLUTIONS = (("window", "Follow the window (default)"), ("720", "720p"), ("1080", "1080p"), ("1440", "1440p"),
                ("2160", "2160p (4K)"))
+# What a rotation does to the window of a fixed-size app (resizeableActivity=false, Window: keep, or a Resolution). keep (the
+# default) leaves the window alone and turns the app's panel inside it; reshape gives the window the panel's new shape each
+# time (BIFROST_ANDROID_ROTATION=reshape), which can reach past the screen: a Wayland client cannot place its window.
+ROTATIONS = (("keep", "Keep the window (default)"), ("reshape", "Reshape the window"))
 # auto follows the host's default route; offline blocks all non-loopback IP traffic (BIFROST_ANDROID_OFFLINE=1) and
 # reports no network to Android.
 NETWORKS = ("auto", "offline")
@@ -46,12 +53,14 @@ CHOICES = {"window_stats_mode": tuple(name for name, _ in STATS_MODES),
            "back_key": tuple(name for name, _ in BACK_KEYS),
            "enter_key": tuple(name for name, _ in ENTER_KEYS),
            "jit_disk_cache": tuple(name for name, _ in JIT_DISK_CACHES),
-           "jit_disk_cache_mb": tuple(name for name, _ in JIT_DISK_CACHE_SIZES), "network": NETWORKS,
+           "jit_disk_cache_mb": tuple(name for name, _ in JIT_DISK_CACHE_SIZES),
+           "jit_carry": tuple(name for name, _ in JIT_CARRIES), "network": NETWORKS,
            "window_mode": tuple(name for name, _ in WINDOW_MODES),
            "resolution": tuple(name for name, _ in RESOLUTIONS),
+           "rotation": tuple(name for name, _ in ROTATIONS),
            "controller": tuple(name for name, _ in CONTROLLERS)}
-KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "network",
-        "window_mode", "resolution", "controller", "menu_entry")
+KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "jit_carry",
+        "network", "window_mode", "resolution", "rotation", "controller", "menu_entry")
 BOOLEANS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False}
 PROPERTY_PREFIX = "property."
 
@@ -165,15 +174,24 @@ def launch_changes(settings):
         env["BIFROST_JIT_DISK_CACHE"] = JIT_DISK_CACHE_VALUES[settings["jit_disk_cache"]]
     if settings.get("jit_disk_cache_mb", "default") != "default":
         env["BIFROST_JIT_DISK_CACHE_MB"] = settings["jit_disk_cache_mb"]
+    if settings.get("jit_carry") in JIT_CARRY_VALUES:
+        env["BIFROST_CARRY"] = JIT_CARRY_VALUES[settings["jit_carry"]]
     if settings.get("network") == "offline":
         env["BIFROST_ANDROID_OFFLINE"] = "1"
     if "window_mode" in settings:
         env["BIFROST_ANDROID_WINDOW_MODE"] = settings["window_mode"]
     if settings.get("resolution", "window") != "window":
         env["BIFROST_ANDROID_RESOLUTION"] = settings["resolution"]
+    if settings.get("rotation", "keep") != "keep":
+        env["BIFROST_ANDROID_ROTATION"] = settings["rotation"]
     if "controller" in settings:
         env["BIFROST_ANDROID_CONTROLLER"] = settings["controller"]
     return flags, env
+
+
+# One app's window: never passed on to a window of another app that its session starts (a Google sign-in).
+WINDOW_ENVIRONMENT = ("BIFROST_ANDROID_WINDOW_STATE", "BIFROST_ANDROID_WINDOW_MODE", "BIFROST_ANDROID_RESOLUTION",
+                      "BIFROST_ANDROID_ROTATION")
 
 
 def apply_to_launch(app, options, environment):

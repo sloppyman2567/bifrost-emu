@@ -43,11 +43,9 @@ struct ProfTranslateGuard {
 extern thread_local bool bl_call_disabled_;
 extern thread_local bool blr_call_disabled_;
 // ── translate_block ───────────────────────────────────────────────
-uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntry* private_entry))(CPU*, Emulator*) {
+uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
     BIFROST_ZONE("translate block");
-    // Public Tier-1 compile time; private Tier-2 sampling copies count as
-    // Tier-2 compilation instead.
     struct CompileTimer {
         FrostJIT* jit;
         std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -55,22 +53,22 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
             if (!jit) return;
             const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - start).count());
-            jit->tier1_compile_ns.fetch_add(ns, std::memory_order_relaxed);
-            uint64_t max = jit->tier1_compile_max_ns.load(std::memory_order_relaxed);
-            while (ns > max && !jit->tier1_compile_max_ns.compare_exchange_weak(
+            jit->lean_compile_ns.fetch_add(ns, std::memory_order_relaxed);
+            uint64_t max = jit->lean_compile_max_ns.load(std::memory_order_relaxed);
+            while (ns > max && !jit->lean_compile_max_ns.compare_exchange_weak(
                        max, ns, std::memory_order_relaxed)) {}
         }
-    } compile_timer{private_entry ? nullptr : this};
+    } compile_timer{core_};
     block_words_.clear();
     if (!code_buf_) return nullptr;
-    if (code_budget_exhausted_) {
-        renewal_wanted_.store(true, std::memory_order_relaxed);  // retried: a renewal may have been refused
+    if (core_->code_budget_exhausted_.load(std::memory_order_relaxed)) {
+        core_->renewal_wanted_.store(true, std::memory_order_relaxed);  // retried: a renewal may have been refused
         BlockEntry fallback;
         fallback.interp_only = true;
         fallback.interp_only_count = fallback.instr_count = 1;
         fallback.verified_once = true;
-        if (!private_entry) publish_or_stage(start_pc, fallback);
-        code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        publish_or_stage(start_pc, fallback);
+        core_->code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
     // BL_CALL (native call-within-block) does NOT compose with chain-skip:
@@ -95,7 +93,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // caller's recording state, which every exit restores.
     struct RecordingScope { bool& flag; bool saved; ~RecordingScope() { flag = saved; } }
         recording_scope{recording_, recording_};
-    if (!private_entry && !record_oracle_ && disk_cache_ready(emu)) {
+    if (!record_oracle_ && disk_cache_ready(emu)) {
         if (auto cached = install_cached(emu, start_pc)) return cached;
         begin_recording(start_pc);
     }
@@ -103,6 +101,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     // (No-op if W^X is disabled or the buffer is already writable.)
     make_writable();
     current_start_pc_ = start_pc;
+    compile_edge_mark_ = mt_edges_.size();
     code_buf_overflow_ = false;
     // A guarded access exists only with fault sites and the window; a fault trace
     // needs each exit's block PC.
@@ -120,29 +119,40 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     unchainable_end_ = false;
     indirect_exit_ = false;
     has_selfloop_slot_ = false;
+    selfloop_stop_hoisted_ = false;
     selfloop_patch_off_ = 0;
     selfloop_jcc_off_ = 0;
     selfloop_target_off_ = 0;
     selfloop_reconcile_after_ = false;
-    tier2_counter_off_ = 0;
-    tier2_counter_len_ = 0;
-    tier2_branch_profile_ = nullptr;
+    block_has_side_exit_ = false;
+    carry_exits_.clear();
+    carry_profile_ = nullptr;
+    carry_trip_jcc_ = SIZE_MAX;
+    compiled_side_exits_.clear();
+    deferred_side_exits_.clear();
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
     inlined_ranges_.clear();
-    // Dead-NZCV exit predictions record guest words as dependencies; private
-    // Tier-2 sampling copies are not tracked by those, so they never predict.
     struct FlagScanScope {
         bool& active;
         ~FlagScanScope() { active = false; }
     } flag_scan_scope{flag_scan_active_};
-    flag_scan_active_ = private_entry == nullptr;
+    flag_scan_active_ = true;
     flag_deps_scratch_.clear();
     flag_store_skipped_ = false;
     chain_entry_off_ = 0;
     chain_entry_pc_off_ = 0;
     block_calls_out_ = false;
+    rp_mirrors_ = false;
+    rp_entry_ = false;
+    rp_entry_layout_ = 0;
+    rp_entry_n_ = 0;
+    rp_stub_n_ = 0;
+    regs_entry_off_ = 0;
+    regs_entry_pc_off_ = SIZE_MAX;
+    rp_taken_layout_ = 0;
+    rp_unbind_all();
     late_fall_pc_ = 0;
     frame_return_off_ = SIZE_MAX;
     num_stack_slots_ = 0;
@@ -170,6 +180,11 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     size_t block_start = code_buf_used_;
     // ── Translate ARM64 → IR ─────────────────────────────────────
     IRBlock ir_block;
+    struct ReuseInsts {  // a block's IR keeps the memory of the one before
+        std::vector<IRInst>& kept; std::vector<IRInst>& used;
+        ReuseInsts(std::vector<IRInst>& k, std::vector<IRInst>& u) : kept(k), used(u) { used.swap(kept); used.clear(); }
+        ~ReuseInsts() { used.swap(kept); }
+    } reuse_insts{ir_insts_scratch_, ir_block.insts};
     ir_block.start_pc = start_pc;
     ir_reset_vreg_alloc();
     // Grow simple blocks beyond the old fixed cap, but stop dense IR
@@ -220,6 +235,42 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     bool has_inlined_leaf = false;  // cannot use contiguous interpreter step counts
     bool has_brcond_skip = false;   // blocks with BRCOND_SKIP skip optimize_ir (op-count stability)
     uint64_t loop_tail_end = 0;
+    // A loop whose only inner branches are CBZ/CBNZ exits stays one block: the exits become mid-block exits (SideExit.cpp).
+    // Not while the persistent cache records (or checks a recording): a block with a mid-block exit is not recordable, so the cache would
+    // lose it, and the recording compile and its shifted proof compile must form blocks the same way.
+    const bool side_exits_allowed = !dbg().no_side_exit && !dbg().no_selfloop && !dbg().jit_verify && !leaf_inline_enabled_ &&
+                                    !(mt_active() && dbg().no_chain) && !recording_ && !record_oracle_;
+    bool side_exit_scanned = false;
+    std::vector<uint64_t> side_exit_pcs;
+    // Carry formation (on unless BIFROST_CARRY=0): past any forward conditional branch the block goes on along its fall-through, the taken side
+    // becomes a mid-block exit, and the guest registers stay in host registers across what used to be a block edge.
+    const bool carry_formation = dbg().carry && side_exits_allowed;
+    int carry_exits = 0;
+    // A block translated again after its profile (Carry/HotSide.cpp) goes on through code that has a block of its own by now, as it
+    // did the first time: otherwise the later translation, made when more of the code exists, comes out shorter than the one measured.
+    bool merge_known = false, profile_done = false;
+    if (carry_formation && core_->carry_tripped_.may_contain(start_pc)) with_table([&](const FrostJIT& t) {
+        merge_known = t.carry_rounds_.count(start_pc) != 0;
+        profile_done = t.carry_done_.count(start_pc) != 0;
+    });
+    // What the table says about a pc: no block starts there, or one does, and is a loop tail of this block with that many
+    // instructions (0: it is not).
+    enum { kNoBlock = -1 };
+    auto block_at = [&](uint64_t pc) -> int32_t {
+        const uint64_t at = fetch_address(pc);
+        if (!core_->block_starts_.may_contain(at)) return kNoBlock;
+        return with_table([&](const FrostJIT& t) -> int32_t {
+            const auto known = t.blocks_.find(at);
+            if (known == t.blocks_.end()) return kNoBlock;
+            const BlockEntry& tail = known->second;
+            const bool back_to_start = tail.chain_target_pc == start_pc ||
+                (tail.has_taken_chain_slot && tail.taken_chain_target_pc == start_pc);
+            return tail.fn && !tail.interp_only && !tail.has_call && !tail.has_svc && tail.ends_with_branch && back_to_start
+                ? static_cast<int32_t>(tail.instr_count) : 0;
+        });
+    };
+    uint64_t split_skip_pc = 0;  // a followed branch's target: its code is copied even when a block starts there
+    bool followed_run = false;
     // A loop body up to twice the cap stays one block (selfloop_extent).
     int block_cap = max_block_insts;
     bool loop_probed = false;
@@ -234,27 +285,19 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
     while (!block_ended && within_cap() &&
            !block_translation_budget_reached(ir_block, instr_count, g_alloc.next)) {
         // ── Block splitting at known entry points ──────────────────
-        if (instr_count > 0 && cur_pc >= loop_tail_end) {
-            const auto known = blocks_.find(fetch_address(cur_pc));
-            if (known != blocks_.end()) {
-                const BlockEntry& tail = known->second;
-                // A previously compiled tail can make a short loop depend
-                // on entry order: splitting here hides its back-edge from
-                // emit_selfloop_backedge. Use metadata only as a growth
-                // hint; translate the actual words normally, preserving
-                // code_words_, instruction counts and all complexity caps.
-                // No speculative guest reads become cache dependencies.
-                const bool back_to_start = tail.chain_target_pc == start_pc ||
-                    (tail.has_taken_chain_slot && tail.taken_chain_target_pc == start_pc);
-                // The loop may then reach twice the cap, as selfloop_extent allows.
-                if (tail.fn && !tail.interp_only && !tail.has_call && !tail.has_svc &&
-                    tail.ends_with_branch && back_to_start && tail.instr_count > 0 &&
-                    tail.instr_count <= 2 * max_block_insts - instr_count) {
-                    loop_tail_end = cur_pc + static_cast<uint64_t>(tail.instr_count) * 4;
-                    block_cap = std::max(block_cap, instr_count + static_cast<int>(tail.instr_count));
+        if (instr_count > 0 && cur_pc >= loop_tail_end && cur_pc != split_skip_pc && !merge_known) {
+            // A previously compiled tail can make a short loop depend on entry order: splitting here hides its back-edge from the loop
+            // optimizer. When that tail branches directly back to this block, recompile the bounded loop as one block (it may then
+            // reach twice the cap, as selfloop_extent allows). The table's facts are only a growth hint: the actual words are
+            // translated as usual, with contiguous code_words_, instruction counts and all complexity caps.
+            const int32_t tail_len = block_at(cur_pc);
+            if (tail_len != kNoBlock) {
+                if (tail_len > 0 && tail_len <= 2 * max_block_insts - instr_count) {
+                    loop_tail_end = cur_pc + static_cast<uint64_t>(tail_len) * 4;
+                    block_cap = std::max(block_cap, instr_count + tail_len);
                     loop_probed = true;
                 } else {
-                    block_profile.entry_point++;
+                    core_->block_profile.entry_point++;
                     chain_target_pc_ = cur_pc;
                     break;
                 }
@@ -263,9 +306,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
         uint32_t inst;
         try {
             inst = emu.mem().fetch_inst(fetch_address(cur_pc));
-        } catch (...) { block_profile.decode_fail++; break; }
+        } catch (...) { core_->block_profile.decode_fail++; break; }
         DecodedInst d;
-        if (!decode(d, inst)) { block_profile.decode_fail++; break; }
+        if (!decode(d, inst)) { core_->block_profile.decode_fail++; break; }
         // ── Leaf inlining (before the normal BL translation) ───────
         if (d.cls == InstClass::BL && leaf_inline_enabled_ && !bl_call_disabled_) {
             uint64_t target = cur_pc + static_cast<uint64_t>(d.imm);
@@ -341,7 +384,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
                     ir_block.count = instr_count;
                     has_inlined_leaf = true;
                     inlined_ranges_.emplace_back(target, leaf_count);
-                    block_profile.leaf_inlined++;
+                    core_->block_profile.leaf_inlined++;
                     if (dbg().debug_inline)
                         fprintf(stderr, "[leaf] INLINED bl@0x%llx -> 0x%llx (%d instrs)\n",
                                 (unsigned long long)cur_pc, (unsigned long long)target,
@@ -360,11 +403,66 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
         bool will_call_interp = jit_analysis::instr_will_call_interp(d);
         if (will_call_interp && call_interp_count >= MAX_CALL_INTERP_PER_BLOCK && instr_count > 0) {
             // Split here — the next instruction starts a new block.
-            block_profile.call_interp_cap++;
+            core_->block_profile.call_interp_cap++;
             chain_target_pc_ = cur_pc;
             break;
         }
+        bool side_exit_here = false;
+        bool carry_formed_here = false;
+        uint64_t follow_to = 0;
+        if (side_exits_allowed && (d.cls == InstClass::CBZ || d.cls == InstClass::CBNZ || d.cls == InstClass::TBZ ||
+                                   d.cls == InstClass::TBNZ || d.cls == InstClass::Bcond)) {
+            if (!side_exit_scanned) {
+                side_exit_scanned = true;
+                const int n = side_exit_loop_extent(start_pc, 2 * max_block_insts, side_exit_pcs);
+                if (n > 0) {
+                    block_cap = std::max(block_cap, n);
+                    loop_probed = true;
+                }
+            }
+            side_exit_here = std::find(side_exit_pcs.begin(), side_exit_pcs.end(), cur_pc) != side_exit_pcs.end();
+            if (!side_exit_here && carry_formation && d.imm > 0 && carry_exits < kCarryMaxExits && instr_count + 2 < max_block_insts) {
+                side_exit_here = true;
+                carry_formed_here = true;
+                ++carry_exits;
+            }
+        }
         bool ends = translate_to_ir(ir_block, d, cur_pc);
+        // A B.cond right after an FP_CMP reads raw ucomis flags with exits of its own: it stays a block end.
+        const IROp last_op = ir_block.insts.empty() ? IROp::NOP : ir_block.insts.back().op;
+        const bool after_fp_cmp = ir_block.insts.size() >= 2 && ir_block.insts[ir_block.insts.size() - 2].op == IROp::FP_CMP;
+        if (side_exit_here && ends && (last_op == IROp::BRCOND_ZERO || last_op == IROp::BRCOND_BIT ||
+                                       (last_op == IROp::BRCOND && !after_fp_cmp))) {
+            IRInst& branch = ir_block.insts.back();
+            CarryExit exit{cur_pc, cur_pc + 4, carry_formed_here, false};
+            // The profile said this branch is taken more often than not: the block goes on at its target, and the exit leaves on the other side.
+            if (carry_formed_here && !dbg().no_carry_follow && core_->carry_tripped_.may_contain(cur_pc) &&
+                with_table([&](const FrostJIT& t) { return t.carry_follow_taken_.count(cur_pc) != 0; })) {
+                const uint64_t taken_pc = cur_pc + static_cast<uint64_t>(d.imm);
+                bool flipped = false;
+                if (branch.op == IROp::BRCOND_ZERO) {
+                    BrCondZeroParams p = branch.brcond_zero_params();
+                    p.cond ^= 1; p.target = cur_pc + 4;
+                    branch = IRInst::make_brcond_zero(branch.src1, p, branch.arm_pc);
+                    flipped = true;
+                } else if (branch.op == IROp::BRCOND_BIT) {
+                    BrCondBitParams p = branch.brcond_bit_params();
+                    p.cond ^= 1; p.target = cur_pc + 4;
+                    branch = IRInst::make_brcond_bit(branch.src1, p, branch.arm_pc);
+                    flipped = true;
+                } else if (branch.op == IROp::BRCOND && branch.brcond_params().cond < 14) {
+                    BrCondParams p = branch.brcond_params();
+                    p.cond ^= 1; p.target = cur_pc + 4;
+                    branch = IRInst::make_brcond(p, branch.arm_pc);
+                    flipped = true;
+                }
+                if (flipped) { exit.cont = taken_pc; exit.flipped = true; follow_to = taken_pc; }
+            }
+            branch.aux = 1;  // a mid-block exit: the block goes on
+            carry_exits_.push_back(exit);
+            ends = false;
+            block_has_side_exit_ = true;
+        }
         if (will_call_interp) call_interp_count++;
         // Track BL_CALL count for block splitting (BLR_CALL too — both
         // keep the block alive past the call and grow register pressure).
@@ -372,22 +470,37 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
         block_words_.push_back(inst);
         instr_count++;
         ir_block.count = instr_count;
+        if (followed_run) ++inlined_ranges_.back().second;
         if (ends) {
-            block_profile.natural_branch++;
+            core_->block_profile.natural_branch++;
             block_ended = true;
         }
         else {
             if (bl_call_count >= MAX_BL_CALL_PER_BLOCK) {
-                block_profile.bl_call_cap++;
-                chain_target_pc_ = cur_pc + 4;
+                core_->block_profile.bl_call_cap++;
+                // The block's next pc is the first untranslated instruction: a block that is not contiguous (an inlined leaf
+                // or a followed branch) takes it from cur_pc, so move it past the call before leaving the loop.
+                cur_pc = follow_to ? follow_to : cur_pc + 4;
+                if (follow_to) has_inlined_leaf = true;
+                chain_target_pc_ = cur_pc;
                 break;
             }
-            cur_pc += 4;
+            if (follow_to) {
+                // The code from here is not contiguous with the block start: like an inlined leaf, it is a range of its own
+                // for invalidation, and the block's next pc is where the last instruction left cur_pc.
+                cur_pc = follow_to;
+                split_skip_pc = follow_to;
+                followed_run = true;
+                has_inlined_leaf = true;
+                inlined_ranges_.emplace_back(follow_to, 0);
+            } else {
+                cur_pc += 4;
+            }
         }
     }
     const bool size_limited = instr_count >= max_block_insts ||
         block_translation_budget_reached(ir_block, instr_count, g_alloc.next);
-    if (size_limited) block_profile.max_size++;
+    if (size_limited) core_->block_profile.max_size++;
     if (instr_count == 0) {
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
@@ -414,9 +527,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc, BlockEntr
                 entry.instr_count = instr_count;
                 entry.verified_once = true;  // interp-only: no verify
                 attach_code_words(entry, !has_inlined_leaf);
-                if (!private_entry) publish_or_stage(start_pc, entry);
-                blocks_translated++;
-                block_profile.interp_only++;
+                publish_or_stage(start_pc, entry);
+                core_->blocks_translated++;
+                core_->block_profile.interp_only++;
                 make_executable();  // W^X: balance the make_writable() at entry
                 return nullptr;
             }
@@ -502,12 +615,10 @@ if (demote_interp) {
         entry.chained = false;
         entry.instr_count = instr_count;
         entry.verified_once = true;  // skip verify for interp-only
-        if (!private_entry) {
-            attach_code_words(entry, !has_inlined_leaf);
-            publish_or_stage(start_pc, entry);
-        }
-        blocks_translated++;
-        block_profile.interp_only++;
+        attach_code_words(entry, !has_inlined_leaf);
+        publish_or_stage(start_pc, entry);
+        core_->blocks_translated++;
+        core_->block_profile.interp_only++;
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
     }
@@ -549,6 +660,7 @@ if (demote_interp) {
     // Per-op IR parameter contract check (only migrated ops; see IR.hpp).
     // Validates what codegen is about to consume, after the optimizer.
     if (dbg().ir_validate) validate_ir_block(ir_block);
+    if (profile_sections_active_ && dbg().pc_hist) note_carry_block(start_pc, ir_block);
     static bool dump_ir_ = dbg().jit_dump;
     // BIFROST_DUMP_PC=0x... restricts the IR dump to a single block pc
     // (useful when BIFROST_JIT_DUMP would flood with thousands of blocks).
@@ -592,6 +704,7 @@ if (demote_interp) {
         }
         max_vreg = 4095;
     }
+    prev_max_vreg_ = 4095;  // until this compile ends well: one that stops early leaves mappings the next must clear
     // Pre-assign stack slots: vreg 33 → slot -8, vreg 34 → slot -16, etc.
     for (int v = 33; v <= max_vreg; v++) {
         vreg_slot_[v] = -8 * (v - 32);
@@ -600,13 +713,33 @@ if (demote_interp) {
     if (num_stack_slots_ < 1) num_stack_slots_ = 1;
     uint32_t stack_bytes = static_cast<uint32_t>(num_stack_slots_ * 8 + 64) & ~15U;
     // ── Vector register cache pre-scan ─────────────────────────────
-    // Tier-1 allocates vectors on demand under pressure, with a stable hot
+    // Lean allocates vectors on demand under pressure, with a stable hot
     // loop core. Incompatible operations synchronize the vector file locally.
     vec_cache_may_enable(ir_block);
     // Scalar-FP cache (lo-only): only when the vec cache is NOT active for
     // this block — the two are exclusive (both pin into XMM3-15 and share
     // cpu.v_lo, so a block is either vector-cached or scalar-FP-cached).
     if (!vec_cache_active_) fp_cache_may_enable(ir_block);
+    // The profile of a block with exits Carry formed (Carry/HotSide.cpp), unless it had its rounds.
+    if (carry_formation && !dbg().no_carry_follow && block_has_side_exit_ && !profile_done) {
+        int n = 0;
+        bool fits = true;
+        for (const CarryExit& e : carry_exits_)
+            if (e.eligible) { ++n; fits &= e.pc >= start_pc && e.pc - start_pc < UINT32_MAX; }
+        if (n > 0 && n <= kCarryMaxExits && fits) {
+            carry_profiles_.emplace_back();
+            core_->carry_profiled.fetch_add(1, std::memory_order_relaxed);
+            carry_profile_ = &carry_profiles_.back();
+            carry_profile_->block_pc = start_pc;
+            carry_profile_->budget = kCarryProfileBudget;
+            for (const CarryExit& e : carry_exits_) {
+                if (!e.eligible) continue;
+                carry_profile_->branch_off[carry_profile_->exits] = static_cast<uint32_t>(e.pc - start_pc);
+                if (e.flipped) carry_profile_->flipped |= static_cast<uint8_t>(1u << carry_profile_->exits);
+                ++carry_profile_->exits;
+            }
+        }
+    }
     // ── Prologue ─────────────────────────────────────────────────
     emit_push(RBX); emit_push(RBP); emit_push(R12);
     emit_push(R13); emit_push(R14); emit_push(R15);
@@ -627,15 +760,18 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // load emu from there instead of R14. RSI still holds
     // emu at this point (entry arg), untouched since the prologue started.
     emit_store_emu(RSI);
+    // R10 holds the window base for the whole chain: loaded here, by the cold entry only. A chain edge enters past this
+    // point, so every path that continues in generated code after a call must leave R10 intact (the call sites push and pop it).
+    if (window_base_)
+        emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_)), note_host_reloc(HostReloc::Window);
     // Chain-skip entry (BIFROST_CHAIN_SKIP=1): recorded here, BEFORE the
-    // window load and the vector-cache prologue loads. Chain edges jump to
+    // vector-cache prologue loads. Chain edges jump to
     // this offset, skipping the predecessor's frame teardown and THIS
     // block's push/frame/reg-setup (~17 instructions) while still
-    // re-running the R10 window load and the vec loads. Both are required:
-    // R10 is only loaded by window-using blocks, so a chain into a window
-    // block from a non-window predecessor carries stale R10; and a chain
-    // successor must pin the CURRENT guest vectors (the predecessor's
-    // epilogue wrote its dirty vectors back to cpu.v_lo/v_hi). RBX needs no
+    // re-running the vec loads: a chain successor must pin the CURRENT
+    // guest vectors (the predecessor's epilogue wrote its dirty vectors
+    // back to cpu.v_lo/v_hi). R10 is not reloaded: it is the window base
+    // from the cold entry (loaded above). RBX needs no
     // setup — it holds cpu persistently across the chain edge (reserved
     // reg). R14 is allocatable, so emu does NOT flow through
     // a register: the predecessor's epilogue set RSI=emu from CPU::jit_emu,
@@ -652,6 +788,27 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // the contract: a block that calls out without the inline store gets the
     // same store in a stub after its code (see block_calls_out_ below).
     chain_entry_pc_off_ = SIZE_MAX;
+    // Register passing (BIFROST_CARRY, RegisterPassing.cpp): a block that is not a loop (its pins own R12-R15) and whose entry runs
+    // nothing a register entry would skip (the block trace, a native libc diversion) loads the guest registers it
+    // reads first at its entry, and a chain edge whose predecessor already holds them enters past those loads (statistics count past them).
+    bool rp_possible = false;
+    {
+        bool loop_block = false;
+        if (!ir_block.insts.empty()) {
+            const IRInst& last = ir_block.insts.back();
+            loop_block = (last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO || last.op == IROp::BRCOND_BIT) &&
+                         last.branch_target() == start_pc;
+        }
+        rp_possible = dbg().carry && !dbg().no_reg_pass && chain_skip_enabled() && !loop_block && !recording_ && !record_oracle_ &&
+                      !dbg().jit_verify && !dbg().jit_slow_stores &&
+                      !bifrost::DebugFlags::in_ranges(dbg().block_trace, start_pc) &&
+                      !(!dbg().no_native_libc && fault_sites_ && emu.native_libc().find(start_pc) != NativeLibcKind::None);
+        if (rp_possible) {
+            rp_prepare_hints(ir_block, start_pc);
+            rp_select_entry(ir_block, start_pc);
+            rp_entry_ = rp_entry_n_ > 0;
+        }
+    }
     if (defer_pc_store()) {
         bool may_call_out = false;
         for (const IRInst& inst : ir_block.insts) {
@@ -674,181 +831,67 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             }
             if (may_call_out) break;
         }
-        if (may_call_out) {
+        // A register-entry block stores the pc after its entry loads, so both entries run it once.
+        rp_pc_store_ = may_call_out && rp_entry_;
+        if (may_call_out && !rp_entry_) {
             chain_entry_pc_off_ = code_buf_used_;
             emit_mov_imm_to_rax(start_pc);
             emit_store(CPU_REG, PC_OFF, RAX);
         }
+    } else {
+        rp_pc_store_ = false;
     }
     chain_entry_off_ = code_buf_used_;
+    if (rp_pc_store_) chain_entry_pc_off_ = chain_entry_off_;
     current_block_instr_count_ = ir_block.count;
     // -v / BIFROST_STATS_PERIOD: count this entry's guest instructions, after chain_entry_off_ so chain-skip
-    // edges count too. Private entries are not blocks a guest runs (a leaf is inlined into its caller, a region trial
-    // runs its own copies), so they must not count.
-    if (!private_entry && !tier2_sampling_compile_) emit_guest_stat(static_cast<uint32_t>(ir_block.count));
-    // BIFROST_BLOCK_TRACE: log every cold and chained entry. Like the Tier-2
-    // counter below, it runs before anything is cached, so the caller-saved
-    // registers are free. Self-loop iterations re-enter past the prologue
-    // and are not logged.
+    // edges count too.
+    if (!rp_entry_) {  // a register-entry block counts past its entry loads
+        emit_carry_budget_check();
+        emit_guest_stat(static_cast<uint32_t>(ir_block.count));
+    }
+    // BIFROST_BLOCK_TRACE: log every cold and chained entry. It runs before anything is cached, so the
+    // caller-saved vreg registers are free; WIN_REG is not (the cold prologue loaded it above and a memory guard
+    // reads it), so the call saves it like every other call site that continues in generated code.
+    // Self-loop iterations re-enter past the prologue and are not logged.
     if (bifrost::DebugFlags::in_ranges(dbg().block_trace, start_pc)) {
         emit_mov_reg(RDI, CPU_REG);
         emit_mov_imm64(RSI, start_pc);
         emit_mov_imm64(RDX, ir_block.fwd_enabled ? 1 : 0);
-        emit_call_aligned(&jit_trace_block_entry, 0);
+        emit_push(WIN_REG);
+        emit_call_aligned(&jit_trace_block_entry, 1);
+        emit_pop(WIN_REG);
     }
     // A guest memcpy/memmove/memset (recorded by the loader, NativeLibc.hpp): large calls leave for the host's routine.
     // Not under differential replay (the replay would re-run the guest routine for one block and diverge), store
     // tracing, or a shifted proof compile (its pc is not the registered one, so the block is not cached).
     if (!dbg().no_native_libc && !dbg().jit_verify && !dbg().jit_slow_stores && !dbg().need_store_pc() &&
-        fault_sites_ && !private_entry && !record_oracle_ && !tier2_sampling_compile_) {
+        fault_sites_ && !record_oracle_) {
         const NativeLibcKind libc_kind = emu.native_libc().find(start_pc);
         if (libc_kind != NativeLibcKind::None) emit_native_libc_entry(start_pc, static_cast<uint32_t>(libc_kind));
-    }
-    // ── Tier-2 hot-head counter (opt-in; BIFROST_TIER2=1 enables) ──
-    // Emitted here (after chain_entry_off_, before the R10 window load and
-    // vec prologue loads) so BOTH cold entries (falling through the prologue)
-    // and chain-skip entries (jumping to chain_entry_off_) hit it — every
-    // execution of the block is counted. At this point RBX=cpu/RBP=frame are
-    // set and RDI/RSI are still the entry args (already stashed), so the fire
-    // path can clobber the caller-saved regs freely (the window load and vec
-    // loads that follow use no GPR scratch). The count itself is a HotCounter,
-    // outside the code buffer.
-    //
-    // Native conditional/direct-branch and capped straight-line heads can
-    // participate in a bounded loop region. Calls and fault boundaries are
-    // excluded from entry instrumentation; the collector validates the body.
-    bool tier2_head_eligible = false;
-    // Chain-skip composes with tier-2: the counter sits AFTER
-    // chain_entry_off_, so chain edges (bare jmps to chain_entry) count too.
-    // Regions entered via a chain edge use the region's own chain-skip entry
-    // (compile_tier2_region's chain_out); the unified 32 KB frame makes the
-    // vreg-slot layouts compatible.
-    if (tier2_enabled() && !wex_enabled_ && !private_entry && !tier2_settled_.count(start_pc)) {
-        if (!ir_block.insts.empty()) {
-            IROp last_op = ir_block.insts.back().op;
-            if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||
-                last_op == IROp::BRCOND_BIT || last_op == IROp::BRCOND_FALLTHRU ||
-                (!block_ended && size_limited)) {
-                tier2_head_eligible = true;
-                for (const auto& inst : ir_block.insts) {
-                    if (inst.op == IROp::SVC || inst.op == IROp::BR ||
-                        inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
-                        inst.op == IROp::CALL_INTERP || inst.op == IROp::SIMD_NATIVE_STRUCT ||
-                        inst.op == IROp::SIMD_STRUCT_MEM) {
-                        tier2_head_eligible = false;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if (tier2_head_eligible) {
-        const IRInst& terminal = ir_block.insts.back();
-        if (terminal.op == IROp::BRCOND || terminal.op == IROp::BRCOND_ZERO ||
-            terminal.op == IROp::BRCOND_BIT) {
-            auto profile = std::make_unique<Tier2BranchProfile>();
-            tier2_branch_profile_ = profile.get();
-            tier2_profiles_by_pc_[terminal.arm_pc] = profile.get();
-            tier2_branch_profiles_.push_back(std::move(profile));
-        }
-        size_t mt_counter_disabled_patch = 0;
-        tier2_counter_off_ = code_buf_used_;
-        // The prologue counts EVERY entry into the block (cold dispatch and
-        // chain edges both run it), so chained hot loops fire, which dispatch-
-        // side counters never see. Self-loops jump past it to
-        // block_body_start_off_, so only cold entries count. Disabling a
-        // single-thread counter patches this code, hence !wex_enabled_ above.
-        auto counter = std::make_unique<HotCounter>();
-        HotCounter* state = counter.get();
-        hot_counters_.push_back(std::move(counter));
-        hot_counter_sites_[tier2_counter_off_] = state;
-        emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(state));
-        if (mt_active()) {
-            // cmp dword [rax],0; je past counter/fire (patched below)
-            emit_byte(0x83); emit_byte(0x38); emit_byte(0);
-            size_t disabled = emit_jcc_rel32_placeholder(0x4);
-            emit_mov_imm64(RCX, 1);
-            // lock xadd dword [rax+4],ecx: each entry obtains a unique hit.
-            emit_byte(0xF0); emit_byte(0x0F); emit_byte(0xC1);
-            emit_byte(0x48); emit_byte(4);
-            emit_byte(0x81); emit_byte(0xF9);
-            emit_u32(std::max(uint32_t{1}, tier2_hits_threshold()) - 1);
-            // The disabled branch lands at the same skip as the JNE below.
-            // Keep the disabled-counter fixup local to this prologue.
-            mt_counter_disabled_patch = disabled;
-        } else {
-            state->patchable = true;
-            // One vCPU: no lock. inc dword [rax+4]; cmp dword [rax+4], imm32
-            emit_byte(0xFF); emit_byte(0x40); emit_byte(4);
-            emit_byte(0x81); emit_byte(0x78); emit_byte(4);
-            emit_u32(tier2_hits_threshold());
-        }
-        // jne short skip                (75 rel8 — patched after the call)
-        size_t jne_off = code_buf_used_;
-        emit_byte(0x75); emit_byte(0x00);
-        // Fire path: rdi = emu (frame slot), rsi = head pc, call the stub.
-        // emit_call_aligned(…, 0) wraps emit_call_abs (movabs+call, so the
-        // target is reachable regardless of the code_buf_ ↔ binary text
-        // distance) in pushfq/popfq, preserving RFLAGS AND restoring the
-        // ABI stack alignment for the stub (JIT body RSP%16==8 at this
-        // point; pushfq makes it 16-aligned for the `call`).
-        emit_load_emu(RDI);
-        emit_mov_imm64(RSI, start_pc);
-        emit_mov_imm64(RDX, tier2_counter_off_);
-        emit_call_aligned(reinterpret_cast<void*>(&tier2_fire_stub), 0);
-        // Patch the jne to skip the fire path (land right after the call).
-        const int8_t rel = static_cast<int8_t>(code_buf_used_ - (jne_off + 2));
-        patch_jcc_rel8(jne_off, rel);
-        if (mt_counter_disabled_patch)
-            patch_jcc_rel32(mt_counter_disabled_patch, static_cast<int32_t>(code_buf_used_ - (mt_counter_disabled_patch + 6)));
-        tier2_counter_len_ = code_buf_used_ - tier2_counter_off_;
-    }
-    // load the reservation base into R10 ONLY if the
-    // block actually touches guest memory inline.
-    // Previously every block paid a 10-byte movabs r10, imm64 in its
-    // prologue — pure overhead for the many tiny ALU/FP/vector blocks
-    // that never load or store guest memory (avg 3.5 guest instrs/block,
-    // ~20M block entries/sec). The window-using IR ops are exactly:
-    //   LOAD_MEM / STORE_MEM            (emit_load_mem / emit_store_mem)
-    //   ATOMIC                          (direct-window lock fast path)
-    //   SIMD_LD16 / SIMD_ST16           (16-byte vector memory access)
-    // Everything else either never reads guest memory or calls a C
-    // helper (which goes through Memory, not R10).
-    {
-        bool uses_window = false;
-        for (const auto& inst : ir_block.insts) {
-            switch (inst.op) {
-                case IROp::LOAD_MEM:
-                case IROp::STORE_MEM:
-                case IROp::ATOMIC:
-                case IROp::SIMD_LD16:
-                case IROp::SIMD_ST16:
-                case IROp::SIMD_STRUCT_MEM:
-                    uses_window = true;
-                    break;
-                case IROp::LDXR_FAST:
-                case IROp::STXR_FAST:
-                case IROp::STLR_FAST:
-                    uses_window = true;  // native LDAR and exclusive sequences
-                    break;
-                default:
-                    break;
-            }
-            if (uses_window) break;
-        }
-        if (window_base_ && uses_window)
-            emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_)), note_host_reloc(HostReloc::Window);
     }
     // Vector cache prologue loads MUST be emitted before block_body_start_off_
     // is recorded: self-loop re-entry jumps directly to the body start, so
     // these loads run only on cold entry (dispatcher / chain entry) and the
     // pinned XMM regs persist as loop-carried state across iterations.
+    if (rp_entry_) {
+        // The loads of the registers a predecessor may pass, then the register entry: the pc store (a block that calls out) and the
+        // vector loads run on both entries.
+        rp_emit_entry_loads();
+        regs_entry_off_ = code_buf_used_;
+        emit_carry_budget_check();
+        emit_guest_stat(static_cast<uint32_t>(ir_block.count));
+        if (rp_pc_store_) {
+            emit_mov_imm_to_rax(start_pc);
+            emit_store(CPU_REG, PC_OFF, RAX);
+        }
+    }
     vec_emit_prologue_loads();
     // ── Phase 2 loop-carried arch GPR pinning (self-loop blocks) ──────
     // For a self-loop block (last op BRCOND/BRCOND_ZERO/BRCOND_BIT taken to
-    // our own start_pc), the loop-carried arch GPRs — values READ before they
-    // are WRITTEN in each iteration — are PINNED to fixed callee-saved regs
-    // (R12-R15) for the whole loop. The prologue preloads them from
+    // our own start_pc), up to four arch GPRs — first of all the loop-carried
+    // ones, READ before they are WRITTEN in each iteration — are PINNED to fixed
+    // callee-saved regs (R12-R15) for the whole loop (select_arch_pins). The prologue preloads them from
     // cpu.regs[] once (cold/chain entry); STORE_REG refreshes the pin each
     // iteration; the self-loop back-edge jumps to block_body_start_off_ PAST
     // these preloads, so the pinned values survive in the registers —
@@ -868,8 +911,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     //   * the arch vreg is written ONLY via STORE_REG (FP_F2I_FIXED /
     //     FMOV_F2G write arch dests directly through store_reg_to_vreg,
     //     bypassing pin maintenance).
-    //   * the arch vreg is READ (LOAD_REG src1 or STORE_REG src1) before its
-    //     first write (loop-carried), or never written (loop-invariant).
+    //   * any register qualifies: READ (LOAD_REG src1 or STORE_REG src1) before
+    //     its first write (loop-carried), never written (loop-invariant), or
+    //     written first. The last needs no value across the back edge, but a
+    //     fault before the write must show the previous iteration's value, so
+    //     without a pin it costs a store per iteration. BIFROST_NO_PIN_INPLACE
+    //     leaves the written-first ones out.
     {
         for (int i = 0; i < 32; i++) arch_pin_[i] = -1;
         pinned_host_regs_ = 0;
@@ -906,6 +953,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             }
         }
     }
+    rp_mirrors_ = rp_possible && !keep_store_dest_;
+    if (!rp_mirrors_) rp_clear_hints();
     // Emit the pin preloads (cpu.regs[a] → pin reg) right after the vec
     // prologue loads — after chain_entry_off_ (so chain entries run them)
     // but before block_body_start_off_ (the self-loop back-edge jumps there,
@@ -925,10 +974,19 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             if (a > max_vreg_) max_vreg_ = a;
         }
     }
+    // A published MT self-loop checks the callback sentinel once per entry here, past the pin preloads and before
+    // the body start the back edge jumps to, so an iteration pays no compare for it.
+    if (!ir_block.insts.empty() && mt_active() && !dbg().no_selfloop && !dbg().no_chain) {
+        const IRInst& last = ir_block.insts.back();
+        if ((last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO || last.op == IROp::BRCOND_BIT) &&
+            last.branch_target() == start_pc) {
+            emit_selfloop_stop_entry_check(start_pc);
+            selfloop_stop_hoisted_ = true;
+        }
+    }
     // Record the block body start offset (after prologue). Used for
     // self-loop chaining: the selfloop slot is patched to jmp here.
     block_body_start_off_ = code_buf_used_;
-    emit_tier2_work_probe(ir_block.count);
     // ── Compute liveness: for each vreg, find the last op that uses it ──
     // This lets us free host regs of dead vregs immediately after their
     // last use, instead of keeping them cached until eviction. Without
@@ -952,7 +1010,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     //     dest), so we don't kill it (handled in the compile loop below).
     {
         size_t n = ir_block.insts.size();
-        vreg_last_use_op_.assign(4096, -1);
+        std::fill_n(vreg_last_use_op_.begin(), vreg_last_use_high_ + 1, -1);
         reset_vreg_uses();
         int highest_used = 31;  // highest vreg the scan below recorded
         for (size_t i = 0; i < n; i++) {
@@ -979,11 +1037,14 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 if (inst.aux > highest_used) highest_used = inst.aux;
             }
         }
+        vreg_last_use_high_ = highest_used;
         // Build kills_per_op_: for each op i, the list of scratch vregs
         // whose last use is i (dest is excluded at kill time in the loop).
         // Only slots up to highest_used were written: scanning all 4096 per
         // block was about half of this function's own time.
-        kills_per_op_.assign(n, {});
+        if (kills_per_op_.size() < n) kills_per_op_.resize(n);
+        for (size_t i = 0; i < n; i++) kills_per_op_[i].clear();
+        kill_ops_ = n;
         for (int v = 32; v <= highest_used; v++) {
             if (vreg_last_use_op_[v] >= 0) {
                 kills_per_op_[vreg_last_use_op_[v]].push_back(static_cast<uint16_t>(v));
@@ -1064,9 +1125,40 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 fold_ahead_kind_[i] = 3;
         }
     }
+    // A constant that only the next op reads, and that op is an eager STORE_REG of a guest register (every block but a loop that defers its
+    // stores): the store takes the immediate (`mov qword [reg slot], imm32`) and the constant is never put in a register. The guards mirror
+    // the STORE_REG case (Memory.cpp): not a deferred store, not an FP store, and the constant fits a sign-extended imm32.
+    if (!keep_store_dest_) {
+        const size_t count = ir_block.insts.size();
+        for (size_t i = 0; i + 1 < count && i < fold_ahead_kind_.size(); i++) {
+            const IRInst& im = ir_block.insts[i];
+            if (im.op != IROp::IMM || fold_ahead_kind_[i]) continue;
+            if (!(im.dest > 32 && im.dest < 4096) || wide_guest_pc(im.imm_value())) continue;
+            if (vreg_last_use_op_[im.dest] != static_cast<int>(i + 1)) continue;
+            const IRInst& nx = ir_block.insts[i + 1];
+            if (nx.op != IROp::STORE_REG || nx.is_fp_store() || nx.dest > 31 || nx.src1 != im.dest) continue;
+            const int64_t c = static_cast<int64_t>(im.imm_value());
+            if (static_cast<int64_t>(static_cast<int32_t>(c)) != c) continue;
+            fold_ahead_kind_[i] = 4;
+        }
+    }
     scan_w32_and_sext_loads(ir_block.insts);
     scan_covered_guards(ir_block.insts);
     scan_pin_inplace(ir_block.insts);
+    scan_pin_dests(ir_block.insts);
+    scan_pin_reads(ir_block.insts);
+    // A clean copy of a guest register is read at the LOAD_REGs of it: the allocator must see those uses, or it evicts the copy first.
+    // A register loaded only to be handed on is wanted until the exit, which keeps a result's hint from taking its host register.
+    if (rp_mirrors_) {
+        for (int e = 0; e < rp_entry_n_; e++)
+            if (rp_entry_pass_[e] && !ir_block.insts.empty())
+                note_vreg_use(static_cast<uint16_t>(rp_entry_guest_[e]), static_cast<uint16_t>(ir_block.insts.size() - 1));
+        for (size_t i = 0; i < ir_block.insts.size(); i++) {
+            const IRInst& inst = ir_block.insts[i];
+            if (inst.op == IROp::LOAD_REG && !inst.is_fp_load() && inst.src1 <= 30)
+                note_vreg_use(inst.src1, static_cast<uint16_t>(i));
+        }
+    }
     // Loads into cached XMMs and compares against a register's memory home
     // (see fp_load_ and lazy_load_). They read the last-use table as it
     // stands and change nothing; both need this compile loop's materializers.
@@ -1110,7 +1202,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Decides whether a self-loop back-edge may skip the taken-path
     // pstate materialization (Branch.cpp BRCOND case). A
     // block is "flag loop-carried" if any flag-CONSUMING op (one that
-    // reads guest NZCV) appears before the first flag-SETTING op. If a
+    // reads guest NZCV, or a mid-block exit whose target may) appears
+    // before the first flag-SETTING op. If a
     // consumer runs first, the flags it reads come from the PREVIOUS
     // iteration, so the loop-back edge must still materialize host flags
     // to pstate for the loop top to reload. Consumers are checked BEFORE
@@ -1129,6 +1222,10 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 case IROp::ADCS: case IROp::SBCS: case IROp::CCMP:
                 case IROp::FP_CSEL: case IROp::BRCOND: case IROp::BRCOND_SKIP:
                     consumer = true;
+                    break;
+                case IROp::BRCOND_ZERO: case IROp::BRCOND_BIT:
+                    // A mid-block exit leaves with NZCV visible to its target; the branch that ends the block is the loop's own edge.
+                    consumer = inst.aux == 1 && !flag_setter_seen && !exit_flags_dead(inst.branch_target());
                     break;
                 default:
                     break;
@@ -1185,11 +1282,37 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             in_place.dest = in_place.src1 = static_cast<uint16_t>(pin_inplace_[i] - 1);
             to_compile = &in_place;
         }
-        if (compile_ir_inst(*to_compile)) break;
-        if (pin_in_place && pin_result_[i]) {
+        const int pin_dest = !pin_in_place && i < pin_dest_.size() ? pin_dest_[i] - 1 : -1;
+        if (pin_dest >= 0) {
+            in_place = inst;
+            in_place.dest = static_cast<uint16_t>(pin_dest);
+            to_compile = &in_place;
+        }
+        if (!pin_alias_.empty() && inst.op != IROp::LOAD_REG) {
+            // Operands that are a pinned register's value read the pin (scan_pin_reads).
+            const auto alias = [&](uint16_t v) -> int { return v > 32 && v < 4096 ? pin_alias_[v] : 0; };
+            const int a1 = pin_in_place ? 0 : alias(to_compile->src1), a2 = alias(to_compile->src2);
+            if (a1 || a2) {
+                if (to_compile == &inst) in_place = inst;
+                if (a1) in_place.src1 = static_cast<uint16_t>(a1 - 1);
+                if (a2) in_place.src2 = static_cast<uint16_t>(a2 - 1);
+                to_compile = &in_place;
+            }
+        }
+        if (rp_mirrors_ && inst.dest > 32 && inst.dest < 4096) {
+            rp_unbind_temp(inst.dest);
+            rp_dest_hint_ = rp_pref_[inst.dest] ? rp_pref_[inst.dest] - 1 : -1;
+        }
+        pin_dest_active_ = pin_dest >= 0;
+        const bool compile_ended = compile_ir_inst(*to_compile);
+        pin_dest_active_ = false;
+        rp_dest_hint_ = -1;
+        if (compile_ended) break;
+        if (pin_dest >= 0) finish_pin_dest(pin_dest);
+        if ((pin_in_place || pin_dest >= 0) && pin_result_[i]) {
             // The new value is read after the STORE_REG: those readers get a copy, off the loop-carried chain.
             const int copy = alloc_reg();
-            emit_mov_reg(copy, arch_pin_[pin_inplace_[i] - 1]);
+            emit_mov_reg(copy, arch_pin_[pin_in_place ? pin_inplace_[i] - 1 : pin_dest]);
             set_vreg_reg(pin_result_[i], copy);
         }
         // A non-IMM op defining a vreg invalidates any const entry for it
@@ -1197,12 +1320,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         if (inst.op != IROp::IMM) jit_consts_.erase(inst.dest);
         // Free host regs of vregs whose last use was this op. Dead vregs
         // are freed immediately, making room for new vregs without eviction.
-        if (i < kills_per_op_.size()) {
+        if (i < kill_ops_) {
             for (uint16_t v : kills_per_op_[i]) {
                 // Don't kill the dest of this op — it's a new definition
                 // and still live (handles dest == src1 in-place modify).
                 if (v != inst.dest) {
-                    kill_vreg(v);
+                    rp_release(v);
                 }
             }
         }
@@ -1219,7 +1342,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             kill_vreg(inst.dest);
         }
     }
-    kills_per_op_.clear();
+    kill_ops_ = 0;
     fold_ahead_kind_.clear();
     zext32_fused_.clear();
     sext_load_.clear();
@@ -1232,10 +1355,11 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     pin_inplace_.clear();
     pin_skip_.clear();
     pin_result_.clear();
+    pin_dest_.clear();
+    pin_alias_.clear();
     sext_load_done_ = SIZE_MAX;
     lazy_load_vreg_ = -1;
     scaled_vreg_ = -1;
-    vreg_last_use_op_.clear();
     reset_vreg_uses();
     // ── Epilogue ─────────────────────────────────────────────────
     size_t epilogue_off = code_buf_used_;
@@ -1294,7 +1418,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                                 !(mt && chain_target_pc_ <= current_start_pc_);
     if (late_fall_pc_ && !imm_after_slot) emit_mov_imm_to_rax(late_fall_pc_);
     if (!pc_after_slot) emit_store(CPU_REG, PC_OFF, RAX);
-    emit_tier2_edge_profile(false);
     // ── Chain-capable epilogue ────────────────────────────────────
     // For block chaining we jump directly from one block's epilogue to
     // the next block's prologue. The next prologue reloads RBX from
@@ -1305,11 +1428,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // When the block returns (unchained `ret`), clobbering RDI/RSI is
     // fine — they're caller-saved and the dispatcher doesn't read them
     // after the call. Under chain-skip nothing reads them: every chain
-    // target (block, region, trial wrapper, IBL hit) enters past its
+    // target (block, IBL hit) enters past its
     // prologue's `mov rbx, rdi` and the emulator store, and the MT slot and
     // IBL probe address the CPU through RBX. Only the ordinary layout's
     // slots jump to fn, whose prologue reads RDI=cpu / RSI=emu.
     size_t chain_patch_off;
+    uint64_t rp_exit_layout = 0;
     if (chain_skip_enabled()) {
         // ── Chain-skip epilogue ─────────────────────────────────────
         // Chain edge layout: [slot] [cold exit]. The 5-byte slot is all
@@ -1323,6 +1447,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // for the successor's prologue-agnostic body (it reads cpu/emu
         // from RDI/RSI at chain_entry just like fn does).
         chain_patch_off = code_buf_used_;
+        rp_exit_layout = (unchainable_end_ || indirect_exit_) ? 0 : rp_capture_layout();
         if (mt) emit_mt_chain_slot(unchainable_end_ ? 0 : chain_target_pc_);
         else emit_slot_nop5();
         // A register branch's slot is never patched (dynamic target); try
@@ -1379,6 +1504,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     const size_t recovery_start = code_buf_used_;
     flush_deferred_guards();
     flush_deferred_fp_steps();
+    flush_deferred_side_exits();
+    emit_carry_trip_stub(start_pc);
     // The chain entry to publish (see chain_entry_pc_off_). A block that
     // called out without the inline PC store gets it here, ahead of a jump
     // to the plain entry.
@@ -1394,6 +1521,19 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
         chain_entry_publish = chain_entry_pc_off_;
     }
+    // The register entry of a block that calls out stores the pc too: inline when the call-out was predicted (rp_pc_store_), else
+    // through a stub like the plain entry's.
+    size_t regs_entry_publish = regs_entry_off_;
+    if (rp_entry_ && defer_pc_store() && block_calls_out_ && !rp_pc_store_) {
+        regs_entry_pc_off_ = code_buf_used_;
+        emit_mov_imm_to_rax(start_pc);
+        emit_store(CPU_REG, PC_OFF, RAX);
+        const size_t jump = emit_jmp_rel32_placeholder();
+        patch_jmp_rel32(jump, static_cast<int32_t>(static_cast<int64_t>(regs_entry_off_) - static_cast<int64_t>(jump + 5)));
+        regs_entry_publish = regs_entry_pc_off_;
+    }
+    rp_stub_first_ = static_cast<uint32_t>(reg_stubs_.size());
+    if (rp_entry_) rp_emit_stubs(regs_entry_publish);
     // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
     // Counts the spill/reload instruction density of THIS block. A high
     // reload:spill ratio for the same vreg within a block is the bloat
@@ -1415,10 +1555,16 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
 
     defer_guards_ = false;
-    write_allocation_profile(block_start, epilogue_off, recovery_start, false);
+    write_allocation_profile(block_start, epilogue_off, recovery_start);
     note_profile_sections(block_start, epilogue_off, recovery_start);
     if (code_buf_overflow_) {
         rewind_codegen(block_start);
+        // The chunk is full, not the buffer: once more in a fresh one. A block is far smaller than a chunk.
+        if (core_ != this && code_lease_end_ - block_start < kCodeChunk && take_code_lease()) {
+            discard_staged();
+            make_executable();
+            return translate_block(emu, start_pc);
+        }
         // The budget is fixed for this JIT. Cache the failure so every
         // subsequent call does not repeat decode/IR/codegen before stepping.
         BlockEntry fallback;
@@ -1426,10 +1572,10 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         fallback.interp_only_count = 1;
         fallback.instr_count = 1;
         fallback.verified_once = true;
-        if (!private_entry) publish_or_stage(start_pc, fallback);
-        code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
-        code_budget_exhausted_ = true;
-        renewal_wanted_.store(true, std::memory_order_relaxed);
+        publish_or_stage(start_pc, fallback);
+        core_->code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
+        core_->code_budget_exhausted_ = true;
+        core_->renewal_wanted_.store(true, std::memory_order_relaxed);
         // W^X: make the buffer executable again before returning (we may
         // have written partial code before the overflow was detected).
         make_executable();
@@ -1458,6 +1604,18 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // try_chain_block ignores this field.
     if (chain_skip_enabled())
         entry.chain_entry = (uint64_t(*)(CPU*, Emulator*))(code_buf_ + chain_entry_publish);
+    {
+        RegPass info;
+        if (rp_entry_ && chain_skip_enabled()) {
+            info.regs_entry_off = static_cast<uint32_t>(regs_entry_publish);
+            info.entry_layout = rp_entry_layout_;
+            info.stub_first = rp_stub_first_;
+            info.stub_count = static_cast<uint8_t>(rp_stub_n_);
+        }
+        info.exit_layout = rp_exit_layout;
+        info.taken_layout = has_taken_chain_slot_ ? rp_taken_layout_ : 0;
+        if (info.regs_entry_off || info.exit_layout || info.taken_layout) entry.reg_pass = add_reg_pass(info);
+    }
     entry.ends_with_branch = ir_block.ends_with_branch;
     entry.chain_patch_off = chain_patch_off;
     entry.chain_target_pc = chain_target_pc_;
@@ -1468,15 +1626,13 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     entry.taken_chain_patch_off = taken_chain_patch_off_;
     entry.taken_chain_target_pc = taken_chain_target_pc_;
     entry.taken_chained = false;
-    entry.tier2_counter_off = tier2_counter_off_;
-    entry.tier2_counter_len = tier2_counter_len_;
     entry.instr_count = instr_count;
     // Runtime hot-interp promotion uses the same post-optimization IR count
     // as the translate-time interp_only decision. The pre-translation
     // predictor is intentionally only a block-splitting heuristic and may
     // overestimate native FP/SIMD instructions.
     entry.call_interp_count = actual_call_interp;
-    entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf;
+    entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf || block_has_side_exit_;
     // SVC presence: the verify-mode interp re-run re-executes the syscall —
     // non-idempotent syscalls (read/poll/...) return different values the
     // second time, so verify quarantines SVC blocks (see run_block gate).
@@ -1484,7 +1640,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // Calls mid-block break the fixed-step re-run the same way (it steps
     // INTO the callee while the JIT called-and-continued), so they share
     // the quarantine.
-    entry.has_call = has_bl_call || has_call_interp;
+    // A block with a mid-block exit runs a different number of instructions per entry, so differential replay (a fixed count) skips it
+    // as it skips a block with a call; formation is off under BIFROST_JIT_VERIFY, so verify never meets one.
+    entry.has_call = has_bl_call || has_call_interp || block_has_side_exit_;
     // Local input analysis is used only to limit verification comparisons;
     // cross-block exits always preserve NZCV for transitive consumers.
     entry.reads_pstate_before_set = flags_loop_carried_;
@@ -1530,16 +1688,16 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         make_executable();
         return nullptr;
     }
-    if (private_entry) {
-        *private_entry = std::move(entry);
-        prev_max_vreg_ = max_vreg_;
-        make_executable();
-        return fn;
-    }
     // Store footprints serve differential replay alone (Dispatch.cpp, gated by the same flag); building them cost two
     // 4096-entry tables (36 KB cleared) per translated block.
     if (dbg().jit_verify) record_verification_stores(ir_block, start_pc, entry);
     attach_code_words(entry, !has_inlined_leaf);
+    collect_edges(entry);
+    if (!compiled_side_exits_.empty()) ++core_->side_exit_blocks;
+    if (!mt_active()) {
+        if (!compiled_side_exits_.empty()) side_exit_table_[start_pc] = compiled_side_exits_;
+        else side_exit_table_.erase(start_pc);
+    }
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
     // Verify dirty_host_regs_ invariant (active in debug or with
@@ -1557,12 +1715,13 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     make_executable();
     return fn;
 }
-// Publishes a native Tier-1 translation and links it with the table: back
+// Publishes a native Lean translation and links it with the table: back
 // references, chaining in both directions and pending direct calls. The
 // caller holds blocks_mutex_ exclusively.
 void FrostJIT::publish_translation(uint64_t start_pc, const BlockEntry& entry) {
     publish_block(start_pc, entry);
     blocks_translated++;
+    if (mt_active()) { link_mt_block(start_pc, mt_targets_.at(start_pc), blocks_[start_pc]); return; }
     // Maintain the back-reference index: this block's fall-through and
     // taken slots target T, so chain_back_references(T) finds it in O(k)
     // when T is translated later (e.g. a loop whose back-edge target is
@@ -1574,13 +1733,14 @@ void FrostJIT::publish_translation(uint64_t start_pc, const BlockEntry& entry) {
     // also patch any existing blocks whose chain target is this block.
     // BIFROST_NO_CHAIN disables chaining for debugging.
     if (!dbg().no_chain) {
-        try_chain_block(start_pc, blocks_[start_pc]);
+        try_chain_block(blocks_[start_pc]);
         chain_back_references(start_pc);
     }
     // Patch any direct BL call slots (from already-translated callers)
     // that target this block to call `fn` directly.
     if (direct_call_enabled())
         patch_pending_calls(start_pc, reinterpret_cast<const uint8_t*>(entry.fn));
+    register_side_exit_stubs(start_pc);
 }
 void FrostJIT::publish_or_stage(uint64_t pc, const BlockEntry& entry) {
     if (record_oracle_) return;
@@ -1589,7 +1749,7 @@ void FrostJIT::publish_or_stage(uint64_t pc, const BlockEntry& entry) {
     staged_ = true;
     staged_linked_ = false;
 }
-// W-form fusion and sign-extending loads, for Tier-1 blocks and Tier-2 regions
+// W-form fusion and sign-extending loads, for Lean blocks
 // alike: both are decided from op i and its only reader at i + 1, through the
 // last-use table of the unit being compiled, and need no materializer.
 void FrostJIT::scan_w32_and_sext_loads(const std::vector<IRInst>& insts) {
@@ -1693,10 +1853,130 @@ void FrostJIT::scan_pin_inplace(const std::vector<IRInst>& insts) {
         i = k;  // the chain's ops are consumed
     }
 }
+// An op whose result goes into a pinned register next: the exact adjacent shape OP, the SEXT and ZEXT 32 fused into it
+// (sext_load_, zext32_fused_), STORE_REG a <- result. The OP is compiled with dest = a, so a load that faults leaves the pin
+// alone (x86 writes a load's destination only when it succeeds) and nothing sits between the write and the end of the guest
+// instruction. An op the in-place pass took already writes its pin.
+void FrostJIT::scan_pin_dests(const std::vector<IRInst>& insts) {
+    pin_dest_.clear();
+    if (pin_inplace_.empty()) return;  // no pins, or BIFROST_NO_PIN_INPLACE
+    const size_t n = insts.size();
+    pin_dest_.assign(n, 0);
+    for (size_t i = 0; i + 1 < n; i++) {
+        const IRInst& op = insts[i];
+        if (pin_inplace_[i] || pin_skip_[i] || !(op.dest > 32 && op.dest < 4096)) continue;
+        switch (op.op) {
+            case IROp::ADD: case IROp::SUB: case IROp::AND: case IROp::OR: case IROp::XOR: case IROp::MUL:
+            case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
+            case IROp::NOT: case IROp::NEG: case IROp::SEXT: case IROp::ZEXT:
+            case IROp::UBFM: case IROp::SBFM: case IROp::ADDS: case IROp::SUBS:
+            case IROp::LOAD_MEM: break;
+            default: continue;
+        }
+        size_t k = i + 1;
+        uint16_t result = op.dest;
+        if (op.op == IROp::LOAD_MEM && sext_load_[i]) {
+            result = insts[k].dest;
+            if (++k >= n) continue;
+        }
+        if (insts[k].op == IROp::ZEXT && zext32_fused_[k - 1] && insts[k].src1 == result) {
+            result = insts[k].dest;
+            if (++k >= n) continue;
+        }
+        const IRInst& st = insts[k];
+        if (st.op != IROp::STORE_REG || st.is_fp_store() || st.dest > 30 || st.src1 != result) continue;
+        if (!(result > 32 && result < 4096) || arch_pin_[st.dest] < 0) continue;
+        pin_dest_[i] = static_cast<uint8_t>(st.dest + 1);
+        if (vreg_last_use_op_[result] > static_cast<int>(k)) pin_result_[i] = result;
+        for (size_t m = i + 1; m <= k; m++) pin_skip_[m] = 1;
+        i = k;
+    }
+}
+// Put the result of a pin_dest_ op in its pin, wherever the emitter left it.
+void FrostJIT::finish_pin_dest(int a) {
+    const int pin = arch_pin_[a], home = vreg_home_[a];
+    if (home != pin) {
+        if (home >= 0) {
+            emit_mov_reg(pin, home);
+            reg_vreg_[home] = -1;
+            dirty_host_regs_ &= ~(1u << home);
+        } else {
+            emit_load_arm(pin, a);  // the emitter committed it to cpu.regs[]
+        }
+        vreg_home_[a] = pin;
+        reg_vreg_[pin] = a;
+        if (a > max_vreg_) max_vreg_ = a;
+    }
+    vreg_dirty_[a] = true;
+    dirty_host_regs_ |= 1u << pin;
+    vreg_last_use_[a] = ++regalloc_lru_counter_;
+}
+// Whether `inst` takes vreg `v` as a plain operand that its emitter leaves where it is, so a pinned register can stand in for
+// it. Every emitter below reuses an operand's register only for a dead scratch vreg (> 32) or when dest == src1, and none moves
+// an operand to a fixed register; the count of a variable shift, which goes to RCX, is the exception and is left out.
+bool FrostJIT::pin_readable(const IRInst& inst, uint16_t v) {
+    if (inst.aux == v || inst.dest == v) return false;
+    switch (inst.op) {
+        case IROp::ADD: case IROp::SUB: case IROp::AND: case IROp::OR: case IROp::XOR: case IROp::MUL:
+        case IROp::ADDS: case IROp::SUBS: case IROp::TST:
+        case IROp::CSEL: case IROp::CCMP:
+        case IROp::STORE_MEM:
+            return true;
+        case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
+        case IROp::NOT: case IROp::NEG: case IROp::SEXT: case IROp::ZEXT:
+        case IROp::UBFM: case IROp::SBFM:
+        case IROp::LOAD_MEM: case IROp::BRCOND_ZERO: case IROp::BRCOND_BIT:
+            return inst.src2 != v;
+        case IROp::STORE_REG:
+            return !inst.is_fp_store() && inst.src2 != v;
+        default:
+            return false;
+    }
+}
+// Readers of a pinned register take the pin instead of a LOAD_REG copy, and readers of a value an op wrote into the pin
+// (scan_pin_inplace, scan_pin_dests) take it instead of the copy made after the op (pin_alias_). All readers of the value must qualify: one that does not needs the
+// copy anyway. Order is by op index, so a write inside a BRCOND_SKIP region counts as a write.
+void FrostJIT::scan_pin_reads(const std::vector<IRInst>& insts) {
+    pin_alias_.clear();
+    if (pin_inplace_.empty()) return;  // no pins, or BIFROST_NO_PIN_INPLACE
+    const size_t n = insts.size();
+    pin_alias_.assign(4096, 0);
+    // Every read of `v` after op `from` is a plain operand, and register `a` keeps its value until the last of them.
+    const auto can_alias = [&](uint16_t v, int a, size_t from) {
+        size_t last = from;
+        for (uint16_t u : vreg_uses_[v]) {
+            if (u <= from) continue;
+            // An in-place update of `a` reads its old value as the pin; as its other operand `v` is a plain one.
+            const bool updates = pin_inplace_[u] && insts[u].src1 == v;
+            if (!updates && !pin_readable(insts[u], v)) return false;
+            last = std::max<size_t>(last, u);
+        }
+        for (size_t k = from + 1; k < last; k++)
+            if (pin_inplace_[k] == a + 1 || pin_dest_[k] == a + 1 ||
+                (insts[k].op == IROp::STORE_REG && !insts[k].is_fp_store() && insts[k].dest == a)) return false;
+        return true;
+    };
+    for (size_t i = 0; i < n; i++) {
+        const IRInst& inst = insts[i];
+        if (inst.op == IROp::LOAD_REG && !inst.is_fp_load() && inst.src1 <= 30 && arch_pin_[inst.src1] >= 0 && !pin_skip_[i]) {
+            if (!(inst.dest > 32 && inst.dest < 4096) || !can_alias(inst.dest, inst.src1, i)) continue;
+            pin_alias_[inst.dest] = static_cast<uint8_t>(inst.src1 + 1);
+            pin_skip_[i] = 1;
+        } else if (pin_result_[i]) {
+            const uint8_t written = pin_inplace_[i] ? pin_inplace_[i] : pin_dest_[i];
+            size_t end = i + 1;  // the ops folded into this one: extensions, the STORE_REG
+            while (insts[end].op != IROp::STORE_REG) end++;
+            if (!can_alias(pin_result_[i], written - 1, end)) continue;
+            pin_alias_[pin_result_[i]] = written;
+            pin_result_[i] = 0;
+        }
+    }
+}
 // A guarded scalar access whose address an earlier access of the same block already checked (the same base value
 // and offset, a width no smaller) needs no gate compare of its own: `ldr x3, [x19]; str x4, [x19]`. Only
 // straight-line scalar ops may sit between the two, and none may redefine the base: the check compares the address
-// the earlier access used. A branch, call, fallback or barrier ends the search, and a block with BRCOND_SKIP is not
+// the earlier access used. A branch, call, fallback or barrier ends the search, except a mid-block exit (its taken side
+// leaves the block, so the path that reaches the second access has passed the first), and a block with BRCOND_SKIP is not
 // scanned because a skip can land between the two. The gate is raised without a handshake, so an access already
 // past its check can run after it closes; skipping the second compare lengthens that window by the straight-line
 // ops between the accesses and nothing else.
@@ -1728,6 +2008,7 @@ void FrostJIT::scan_covered_guards(const std::vector<IRInst>& insts) {
         for (size_t j = i; j-- > 0;) {
             const IRInst& prev = insts[j];
             const bool prev_mem = prev.op == IROp::LOAD_MEM || prev.op == IROp::STORE_MEM;
+            if (prev.aux == 1 && (prev.op == IROp::BRCOND_ZERO || prev.op == IROp::BRCOND_BIT || prev.op == IROp::BRCOND)) continue;
             if (!prev_mem && !straight_line(prev.op)) break;
             // A load into the base moves the address under every later access; so does any other write to it.
             if (prev.dest == base && prev.op != IROp::STORE_MEM) break;

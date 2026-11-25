@@ -37,8 +37,7 @@
 #include <mutex>
 #include <unistd.h>
 namespace arm64emu {
-void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin,
-                                       bool region) {
+void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t cold_begin) {
     if (!allocation_profile_active_ || code_buf_overflow_) return;
     static std::mutex output_mutex;
     static FILE* output = nullptr;
@@ -87,7 +86,7 @@ void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t col
             (unsigned long long)evictions, reason, counted ? "ir-delta" : "range-only");
     };
     for (const auto& e : allocation_events_)
-        emit(e.pc, e.begin, e.end, region ? "region-ir" : "tier1-ir", e.op, e.scalar,
+        emit(e.pc, e.begin, e.end, "lean-ir", e.op, e.scalar,
              e.vector_spills, e.vector_reloads, e.vector_evictions,
              e.boundary ? "synchronize" : "allocate");
     const size_t body = allocation_events_.empty() ? hot_end : allocation_events_.front().begin;
@@ -108,7 +107,7 @@ bool FrostJIT::rematerialize_vreg(int v, int reg) {
 }
 
 void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
-    std::array<int, 32> first_read, first_write, benefit{};
+    std::array<int, 32> first_read, first_write, benefit{}, stores{};
     std::array<bool, 32> direct{};
     std::array<int, 4096> last_use;
     first_read.fill(INT_MAX); first_write.fill(INT_MAX); last_use.fill(-1);
@@ -118,6 +117,7 @@ void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
             if (inst.dest < 31) {
                 first_write[inst.dest] = std::min(first_write[inst.dest], int(i));
                 ++benefit[inst.dest];
+                ++stores[inst.dest];
             }
             if (inst.src1 < 31) {
                 first_read[inst.src1] = std::min(first_read[inst.src1], int(i));
@@ -130,34 +130,56 @@ void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
         for (unsigned v : {inst.src1, inst.src2, inst.aux})
             if (v > 32 && v < 4096) last_use[v] = i;
     }
-    // Estimate simultaneous scalar temporaries, not the total number of
-    // definitions. At most four candidate prefixes are scored; no search
-    // through register permutations on Tier-1's compilation path.
-    std::array<bool, 4096> live{};
-    int live_count = 0, peak = 0;
-    for (size_t i = 0; i < instructions.size(); ++i) {
-        const auto& inst = instructions[i];
-        if (inst.dest > 32 && inst.dest < 4096 && last_use[inst.dest] >= int(i) && !live[inst.dest]) {
-            live[inst.dest] = true; ++live_count;
-        }
-        peak = std::max(peak, live_count);
-        for (unsigned v : {inst.src1, inst.src2, inst.aux})
-            if (v > 32 && v < 4096 && last_use[v] == int(i) && live[v]) {
-                live[v] = false; --live_count;
-            }
-    }
     std::vector<int> candidates;
     for (int a = 0; a < 31; ++a)
-        if (!direct[a] && first_read[a] != INT_MAX && first_read[a] <= first_write[a])
+        if (!direct[a] && (first_read[a] != INT_MAX || first_write[a] != INT_MAX) &&
+            (first_read[a] <= first_write[a] || !dbg().no_pin_inplace))
             candidates.push_back(a);
     std::sort(candidates.begin(), candidates.end(), [&](int a, int b) {
-        return benefit[a] != benefit[b] ? benefit[a] > benefit[b] : a < b;
+        if (benefit[a] != benefit[b]) return benefit[a] > benefit[b];
+        return stores[a] != stores[b] ? stores[a] > stores[b] : a < b;
     });
+    // Estimate simultaneous scalar temporaries, not the total number of
+    // definitions. A LOAD_REG of a chosen register is read from its pin
+    // (scan_pin_reads) and takes no register, unless `no_pin_inplace` keeps the
+    // copies; a constant takes none (it folds or is rematerialized); a result
+    // may take the register of an operand that dies in the op; a guarded access
+    // needs a scratch register besides its address and result, and one for the
+    // address when it has an offset. At most four candidate prefixes are scored;
+    // no search through register permutations on Lean's compilation path.
+    std::array<bool, 32> chosen{};
+    const auto peak_temporaries = [&]() {
+        std::array<bool, 4096> live{};
+        int live_count = 0, peak = 0;
+        for (size_t i = 0; i < instructions.size(); ++i) {
+            const auto& inst = instructions[i];
+            const bool from_pin = inst.op == IROp::LOAD_REG && !inst.is_fp_load() && inst.src1 < 31 &&
+                                  chosen[inst.src1] && !dbg().no_pin_inplace;
+            const bool load = inst.op == IROp::LOAD_MEM, store = inst.op == IROp::STORE_MEM;
+            const bool defines = inst.dest > 32 && inst.dest < 4096 && last_use[inst.dest] >= int(i) &&
+                                 !live[inst.dest] && !from_pin && inst.op != IROp::IMM;
+            if (load || store) {
+                const uint64_t offset = load ? inst.load_mem_params().offset : inst.store_mem_params().offset;
+                peak = std::max(peak, live_count + 2 + (offset || data_tbi() ? 1 : 0));
+            }
+            for (unsigned v : {inst.src1, inst.src2, inst.aux})
+                if (v > 32 && v < 4096 && last_use[v] == int(i) && live[v]) {
+                    live[v] = false; --live_count;
+                }
+            if (defines) {
+                live[inst.dest] = true; ++live_count;
+            }
+            peak = std::max(peak, live_count);
+        }
+        return peak;
+    };
+    const int peak_unpinned = peak_temporaries();
     int best = 0, score = 0, best_score = 0;
     for (int k = 1; k <= NUM_PIN_REGS && k <= int(candidates.size()); ++k) {
         score += benefit[candidates[k - 1]];
-        const int extra_pressure = std::max(0, peak - (NUM_ALLOC_REGS - k)) -
-                                   std::max(0, peak - NUM_ALLOC_REGS);
+        chosen[candidates[k - 1]] = true;
+        const int extra_pressure = std::max(0, peak_temporaries() - (NUM_ALLOC_REGS - k)) -
+                                   std::max(0, peak_unpinned - NUM_ALLOC_REGS);
         const int value = score - 2 * extra_pressure;
         if (value > best_score) { best = k; best_score = value; }
     }
@@ -333,6 +355,7 @@ void FrostJIT::clobber_host_reg(int host_reg) {
     dirty_host_regs_ &= ~(1u << host_reg);  // host_reg no longer holds dirty vreg
 }
 int FrostJIT::alloc_reg(int preferred) {
+    if (preferred < 0) preferred = rp_take_hint(-1, -1);  // register passing: the op's result should land in its canonical register
     // Try preferred first.
     if (preferred >= 0 && reg_vreg_[preferred] == -1 &&
         !(pinned_host_regs_ & (1u << preferred))) {
@@ -378,6 +401,7 @@ int FrostJIT::alloc_reg(int preferred) {
 // to place `dest` in a reg that doesn't collide with src1/src2's host regs,
 // so we can compute dest = src1 op src2 without spilling the operands.
 int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
+    if (const int h = rp_take_hint(excl1, excl2); h >= 0) return h;  // register passing: the result goes to its canonical register
     // First pass: look for a free reg (skipping excluded ones).
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
@@ -409,8 +433,8 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
         evict_vreg(reg_vreg_[best_r]);
         return best_r;
     }
-    // Every non-pinned alloc reg is excl1/excl2 (extreme pressure: e.g. a
-    // region preheader compiled with FLAGS3 + arch pins excluded leaves a
+    // Every non-pinned alloc reg is excl1/excl2 (extreme pressure: e.g.
+    // FLAGS3 + arch pins excluded leaves a
     // 2-reg pool, and a 2-operand op excludes both). Falling back to
     // `return alloc_reg()` would silently ignore the exclusions: alloc_reg
     // could hand back excl2's register, and the caller's canonical sequence
@@ -530,6 +554,7 @@ void FrostJIT::ensure_two_vregs(uint16_t v1, uint16_t v2, int* r1, int* r2) {
 // ensure dirty vregs are evicted BEFORE overwriting the register.
 void FrostJIT::set_vreg_reg(int v, int r) {
     if (v > max_vreg_) max_vreg_ = v;
+    if (v <= 30) rp_unbind(v);  // a guest register written straight into a host register: no temporary holds its value any more
     // If v was in a different reg, drop that mapping (v is moving).
     if (vreg_home_[v] >= 0 && vreg_home_[v] != r) {
         // Clear dirty bit for the old reg if v was dirty there.
@@ -558,6 +583,7 @@ void FrostJIT::set_vreg_reg(int v, int r) {
 // set_vreg_reg when you need to preserve the old occupant's value.
 int FrostJIT::alloc_reg_for(int v, int preferred) {
     if (v > max_vreg_) max_vreg_ = v;
+    if (v <= 30) rp_unbind(v);
     // If v is already in a reg, use it.
     if (vreg_home_[v] >= 0) return vreg_home_[v];
     // Allocate a reg, evicting if needed.
@@ -750,7 +776,7 @@ void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
 // the destination host reg needs neither a spill (no later reader) nor a
 // reload (the value is already there).
 bool FrostJIT::vreg_last_use_this_op(int v) const {
-    if (cur_op_index_ >= kills_per_op_.size()) return false;
+    if (cur_op_index_ >= kill_ops_) return false;
     const auto& kills = kills_per_op_[cur_op_index_];
     for (uint16_t k : kills) {
         if (k == v) return true;
@@ -898,6 +924,7 @@ void FrostJIT::load_vreg_to_reg(int dst, int v) {
     }
 }
 void FrostJIT::store_reg_to_vreg(int v, int src) {
+    if (v <= 30) rp_unbind(v);
     // Write to memory (cpu.regs[] or stack slot).
     if (v <= 31) {
         emit_store_arm(v, src);
@@ -922,6 +949,7 @@ void FrostJIT::store_reg_to_vreg(int v, int src) {
 // so all dirty values were already written back. This just drops the
 // stale reg→vreg associations.
 void FrostJIT::invalidate_all_vregs() {
+    rp_unbind_all();  // the call may have written any guest register
     for (int v = 0; v <= max_vreg_; v++) {
         int r = vreg_home_[v];
         if (r >= 0) {

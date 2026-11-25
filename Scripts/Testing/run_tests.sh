@@ -288,6 +288,7 @@ UNIT_TESTS=(
     "scalar_dup|Tests/Unit/jit_scalar_dup.elf||5|scalar_dup: ALL PASS"
     "vector_cold_step|Tests/Unit/jit_vector_cold_step.elf||5|vector_cold_step: ALL PASS"
     "simd_fminmax_zero|Tests/Unit/jit_simd_fminmax_zero.elf||10|ALL PASS"
+    "fp_scalar_fminmax|Tests/Unit/jit_fp_scalar_fminmax.elf||10|ALL PASS"
     "native_simd_alias|Tests/Unit/jit_native_simd_alias.elf||5|ALL PASS"
     "simd_unary_fp|Tests/Unit/jit_simd_unary_fp.elf||5|simd_unary_fp: ALL PASS"
     "simd_fp_indexed|Tests/Unit/jit_simd_fp_indexed.elf||5|simd_fp_indexed: ALL PASS"
@@ -325,6 +326,10 @@ UNIT_TESTS=(
     "wait_profile|Scripts/Testing/test_wait_profile.sh||60|wait_profile: ALL PASS|HOST_JIT"
     # BIFROST_PROF prints its report at exit without -v, and its guest-instruction count covers chained blocks and self-loops.
     "jit_instruction_count|Scripts/Testing/test_jit_instruction_count.sh||120|jit_instruction_count: ALL PASS|HOST_JIT"
+    "carry_report|Scripts/Testing/test_carry_report.sh||120|carry_report: ALL PASS|HOST_JIT"
+    "jit_side_exit|Scripts/Testing/test_jit_side_exit.sh||240|jit_side_exit: ALL PASS|HOST_JIT"
+    "jit_reg_pass|Scripts/Testing/test_jit_reg_pass.sh||240|jit_reg_pass: ALL PASS|HOST_JIT"
+    "jit_carry_follow|Scripts/Testing/test_jit_carry_follow.sh||240|jit_carry_follow: ALL PASS|HOST_JIT"
     # BIFROST_PROF prints a [stall] line for a second-long call on a busy thread (futex address, caller, time of day), not for idle ones.
     "wait_stall|Scripts/Testing/test_wait_stall.sh||90|wait_stall: ALL PASS|HOST_JIT"
     # The AArch64 syscall name table matches the kernel's header, and BIFROST_SYSCALL_TRACE names the socket calls by their real numbers.
@@ -338,11 +343,6 @@ UNIT_TESTS=(
     "sdl_surface_format|Scripts/Testing/test_sdl_surface_format.sh||60|ALL PASS: copied SDL surface formats and palettes|HOST_JIT"
     "window_stats|Scripts/Testing/test_window_stats.sh||150|window_stats regression: ALL PASS|HOST_JIT"
     "jit_emitter_slow_paths|Scripts/Testing/test_jit_emitter_slow_paths.sh||90|jit_emitter_slow_paths: ALL PASS|HOST_JIT"
-    "jit_tier2_mutex|Scripts/Testing/test_jit_tier2_mutex.sh||180|jit_tier2_mutex: 20 promotion-stress runs PASS|HOST_JIT"
-    "jit_tier2_discovery|Scripts/Testing/test_jit_tier2_discovery.sh||180|jit_tier2_discovery: direct edges, capped bodies, exits and invalidation PASS|HOST_JIT"
-    "jit_tier2_feedback|Scripts/Testing/test_jit_tier2_feedback.sh||180|jit_tier2_feedback: neighboring regions, recoveries, exit rates and concurrent phases PASS|HOST_JIT"
-    "jit_tier2_measure|Scripts/Testing/test_jit_tier2_measure.sh||180|jit_tier2_measure: real timing keeps faster code, rejects slower code, decides uneven visits PASS|HOST_JIT"
-    "jit_tier2_rate|Scripts/Testing/test_jit_tier2_rate.sh||90|jit_tier2_rate: a slow head settles, a fast one reaches a trial PASS|HOST_JIT"
     "jit_cache_invalidation|Tests/Unit/jit_cache_invalidation.elf||15|jit_cache_invalidation: ALL PASS"
     "jit_dispatch_cache_growth|Tests/Unit/jit_dispatch_cache_growth.elf||15|jit_dispatch_cache_growth: ALL PASS"
     "jit_unmap_reuse_race|Tests/Unit/jit_unmap_reuse_race.elf||30|jit_unmap_reuse_race: ALL PASS"
@@ -352,7 +352,9 @@ UNIT_TESTS=(
     "jit_dispatch_cache|Tests/Unit/jit_dispatch_cache.elf||15|jit_dispatch_cache: ALL PASS"
     "jit_call_helpers|Tests/Unit/jit_call_helpers.elf||15|jit_call_helpers: ALL PASS"
     "jit_call_depth|Tests/Unit/jit_call_helpers.elf 20000 deep||15|jit_call_helpers: ALL PASS deep calls"
-    "jit_mt_tier2|Tests/Unit/jit_mt_tier2.elf||30|jit_mt_tier2: ALL PASS"
+    "jit_mt_loops|Tests/Unit/jit_mt_loops.elf||30|jit_mt_loops: ALL PASS"
+    # Eight threads translating at once: faulting accesses, shared and rewritten code, a fork in the middle.
+    "jit_mt_compile|Tests/Unit/jit_mt_compile.elf||60|jit_mt_compile: ALL PASS"
     "shift_register|Tests/Unit/jit_shift_register.elf||5|checks passed"
     "neon_permute|Tests/Unit/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|Tests/Unit/jit_neon_fixups.elf||5|checks passed"
@@ -388,6 +390,8 @@ UNIT_TESTS=(
     "simd_pmull|Tests/Unit/jit_simd_pmull.elf||15|10240 checks passed"
     "crc32_instructions|Tests/Unit/jit_crc32.elf||5|checks passed"
     "simd_sat_narrow|Tests/Unit/jit_simd_sat_narrow.elf||5|672 checks passed"
+    # XTN/SQXTN/UQXTN/SQXTUN, base and *2, in blocks where the vector cache keeps the narrowed register in an XMM.
+    "neon_xtn|Tests/Unit/jit_neon_xtn.elf||5|13 checks, 0 failures"
     "jit_shrn_sat|Tests/Unit/jit_shrn_sat.elf||15|jit_shrn_sat: ALL PASS"
     "simd_sat|Tests/Unit/test_simd_sat.elf||5|ALL PASS"
     "fp_pw_elem|Tests/Unit/jit_fp_pw_elem.elf||5|ALL PASS"
@@ -397,8 +401,6 @@ UNIT_TESTS=(
     "test_jit_native|Tests/Unit/test_jit_native.elf||10|ALL PASS"
     "test_malloc|Tests/Unit/test_malloc.elf||5|malloc test done"
     "test_simd_arith|Tests/Unit/test_simd_arith.elf||10|ALL PASS"
-    "tier2_smov|Tests/Unit/jit_tier2_smov.elf||10|ALL PASS|JIT"
-    "tier2_calls|Tests/Unit/jit_tier2_calls.elf||60|jit_tier2_calls: ALL PASS|JIT"
     "memory_guard_address|Tests/Unit/jit_memory_guard_address.elf||15|ALL PASS"
     "guard_stubs|Tests/Unit/jit_guard_stubs.elf||20|ALL PASS"
     # Host-native memcpy/memmove/memset: results against byte loops, overlaps, mapping edges and denied access (which the
@@ -1200,8 +1202,6 @@ run_test() {
     local tmpout tmpin=""
     local -a test_runner=("$EMU" "${EMU_FLAGS[@]}" "${test_command[@]}")
     local -a test_env=("${RUN_ENV[@]}")
-    # These fixtures specifically check region codegen, which is opt-in.
-    [[ "$name" == tier2_smov || "$name" == tier2_calls ]] && test_env+=(BIFROST_TIER2=1)
     [[ "$name" == android_service_manager ]] && test_runner=("$EMU" "${EMU_FLAGS[@]}" --android-services "${test_command[@]}")
     # INTERP rows check interpreter semantics the JIT does not have yet
     # (see the row comment); they run under --no-jit in every mode.

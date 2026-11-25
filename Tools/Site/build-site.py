@@ -28,7 +28,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 REPO = "https://github.com/sloppyman2567/bifrost-emu"
 DESCRIPTION = ("Free, open-source emulator that runs Android games from an APK and ARM64 Linux apps on x86_64 Linux. "
-               "JIT, Android 15 and your own GPU. Experimental beta.")
+               "JIT, Android 15 and your own GPU. Release candidate.")
 
 
 def site_url():
@@ -134,29 +134,37 @@ def games(compat):
 
 
 def performance():
-    """The CoreMark and bench_* tables of Docs/PERFORMANCE.md for the JIT page; the build fails rather than show figures it misread."""
+    """The CoreMark (one and several threads) and bench_* tables of Docs/PERFORMANCE.md for the JIT page; the build fails rather than show figures it misread."""
     body = (ROOT / "Docs/PERFORMANCE.md").read_text()
     when = re.search(r"CoreMark \(([A-Z][a-z]+ \d{1,2}, \d{4})\), measured on (an? [^,]+?) with", body)
     def table(header):
         match = re.search(rf"^{re.escape(header)}\n\|[-|]+\|\n((?:\|.*\|\n)+)", body, re.M)
         return [[cell.strip() for cell in line.strip("|").split(" | ")] for line in match.group(1).splitlines()] if match else []
     coremark = table("| Build | Median iterations/s |")
+    threads = table("| Threads | Native | bifrost-emu | QEMU | bifrost-emu / native |")
     bench = table("| Benchmark | Interpreter | JIT | Speedup |")
-    if not when or len(coremark) < 2 or not bench or not all(re.fullmatch(r"[\d,]+", value) for _, value in coremark):
+    if not when or len(coremark) < 3 or not threads or not bench or not all(re.fullmatch(r"[\d,]+", value) for _, value in coremark):
         raise SystemExit("Docs/PERFORMANCE.md CoreMark or bench_* table not understood")
     values = [int(value.replace(",", "")) for _, value in coremark]
-    qemu = [value for (build, _), value in zip(coremark, values) if "QEMU" in build]
-    if len(qemu) != 1:
-        raise SystemExit("Docs/PERFORMANCE.md CoreMark table needs exactly one QEMU row")
+    def only(word):
+        found = [value for (build, _), value in zip(coremark, values) if word in build]
+        if len(found) != 1:
+            raise SystemExit(f"Docs/PERFORMANCE.md CoreMark table needs exactly one {word} row")
+        return found[0]
+    qemu, native = only("QEMU"), only("Native")
+    reference = lambda build: "QEMU" in build or "Native" in build
+    # The first row that is no reference is the current build.
+    current = next(value for (build, _), value in zip(coremark, values) if not reference(build))
     top = max(values)
-    # One series: Bifrost builds in the accent, the QEMU reference in neutral gray; every value is printed.
+    # One series: Bifrost builds in the accent, the references in neutral gray; every value is printed.
     rows = "\n".join(
-        f'        <tr class="{"ref" if "QEMU" in build else ""}"><th scope="row">{inline(build)}</th><td><span class="track">'
+        f'        <tr class="{"ref" if reference(build) else ""}"><th scope="row">{inline(build)}</th><td><span class="track">'
         f'<span class="bar" style="width: {value / top * 100:.1f}%"></span></span><span class="value">{shown}</span></td></tr>'
         for (build, shown), value in zip(coremark, values))
     bench_rows = "\n".join("      <tr>" + "".join(f"<td>{inline(cell)}</td>" for cell in row) + "</tr>" for row in bench)
-    return {"host": html.escape(when.group(2)), "measured": html.escape(when.group(1)),
-            "vs_qemu": f"{values[0] / qemu[0]:.1f}", "coremark_rows": rows, "bench_rows": bench_rows}
+    thread_rows = "\n".join("      <tr>" + "".join(f"<td>{inline(cell)}</td>" for cell in row) + "</tr>" for row in threads)
+    return {"host": html.escape(when.group(2)), "measured": html.escape(when.group(1)), "vs_qemu": f"{current / qemu:.1f}",
+            "vs_native": f"{100 * current / native:.0f}", "coremark_rows": rows, "thread_rows": thread_rows, "bench_rows": bench_rows}
 
 
 def screenshots(output, url):

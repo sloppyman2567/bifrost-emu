@@ -30,7 +30,8 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   (`wait_prof_set_describers`) are try-locked and retried for at most 50 ms, never waited for (a fork child may inherit a lock
   held); a busy or full site table prints a few lines and no more. A descriptor is named through the `FdTable` node
   (`describe_fd_node` in `Core/Emulator/ElfLoading.cpp`), never by treating a guest fd number as a host fd.
-  `test_wait_profile` and `test_wait_stall` cover it.
+  `compile_entry` adds each translation's time and its wait for the compiler (`wait_prof_note_translation`, timed only under
+  `BIFROST_PROF`). `test_wait_profile` and `test_wait_stall` cover it.
 - `Core/GuestIdentity.hpp` is the one definition of the kernel identity the guest sees (`uname` nodename, release, version):
   `uname` and the /proc files that repeat it use it, so they cannot disagree. The Android DNS service answers the nodename itself
   (`DnsProxy.GUEST_HOSTNAME`) and `Scripts/Setup/setup-rootfs.sh` writes it to `/etc/hostname`; a name change needs all three, and
@@ -40,7 +41,7 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   `USE_TRACY` the macros are empty. Tracy is built without its crash handler (`TRACY_NO_CRASH_HANDLER`), because guest fault
   recovery depends on the host SIGSEGV handler; it starts only through `tracy_consider_process`; and `fork_guest`'s child calls
   `tracy_fork_child`, since the profiler's threads exist only in the parent. The sources are fetched and pinned by
-  `Tools/Fetch/fetch-tracy.sh` (never committed); a new version needs the script, `Docs/JIT.md` and a re-check with Tracy's `capture`
+  `Tools/Fetch/fetch-tracy.sh` (never committed); a new version needs the script, `Docs/PROFILING.md` and a re-check with Tracy's `capture`
   and `csvexport`, and the viewer must match it. `test_tracy_profile` covers the option, not the timeline's content.
 - Private `*Internal.hpp` headers stay within their subsystem. Public embedding
   interfaces are under `Include/Bifrost/` and `Source/System/API/`.

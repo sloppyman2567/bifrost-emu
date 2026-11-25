@@ -101,7 +101,7 @@ bool instr_will_call_interp(const DecodedInst& d) {
             if (fp_decode::is_fcmp(op))
                 return fp_gate >= 0 && !(fp_gate & 0x02);
             // FP 2-source (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FNMUL).
-            // All native; NaN operands/results and min/max zeros take a
+            // All native; NaN operands/results (min/max: NaN operands) take a
             // cold interpreter step that is not a block fallback.
             if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10
                 && (op & 0xFF000000) == 0x1E000000 && ((op >> 12) & 0xF) <= 8)

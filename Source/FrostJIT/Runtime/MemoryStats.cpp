@@ -21,25 +21,23 @@ template <class Vector> size_t vector_bytes(const Vector& v) {
 }
 // A libstdc++ hash node is the next pointer plus the value (integer keys do
 // not cache their hash); the bucket array is one pointer per bucket.
-template <class Map> size_t hash_bytes(const Map& map) {
+template <class Map> size_t hash_bytes(Map& map) {
     return map.bucket_count() * sizeof(void*) +
            map.size() * chunk(sizeof(void*) + sizeof(typename Map::value_type));
 }
-// Hash or tree maps whose values are vectors also own each vector's buffer.
+// Hash maps whose values are vectors also own each vector's buffer.
 template <class Map> size_t vector_values_bytes(const Map& map) {
     size_t bytes = 0;
     for (const auto& kv : map) bytes += vector_bytes(kv.second);
     return bytes;
 }
-// A red-black tree node is a 32-byte header plus the value.
-template <class Map> size_t tree_bytes(const Map& map) {
-    return map.size() * chunk(32 + sizeof(typename Map::value_type));
-}
+// A red-black tree node of a uint64_t set: a 32-byte header plus the value.
+const size_t tree_node_bytes = chunk(32 + sizeof(uint64_t));
 double mib(size_t bytes) { return double(bytes) / (1024.0 * 1024.0); }
 } // namespace
 
 void FrostJIT::dump_memory_stats() {
-    // Compilers take compile_mutex_ before blocks_mutex_; MT compiles append
+    // A serialized MT compile takes compile_mutex_ before blocks_mutex_ and appends
     // edges under the shared table lock, so both are needed for a stable read.
     // At exit a stopped guest thread may still own the compiler: skip the line
     // rather than wait.
@@ -57,26 +55,22 @@ void FrostJIT::dump_memory_stats() {
         if (kv.second.store_infos) entry_vectors += vector_bytes(*kv.second.store_infos);
     }
     const size_t blocks = hash_bytes(blocks_) + entry_vectors;
-    const size_t index = tree_bytes(code_index_) + vector_values_bytes(code_index_);
+    size_t index = hash_bytes(code_index_.page_table()) + code_index_.pages() * tree_node_bytes;
+    code_index_.each_list([&](const auto& pcs) { index += vector_bytes(pcs); });
     const size_t back_refs = hash_bytes(back_refs_) + vector_values_bytes(back_refs_);
     const size_t calls = hash_bytes(pending_call_sites_) + vector_values_bytes(pending_call_sites_) +
                          hash_bytes(direct_call_sites_) + vector_values_bytes(direct_call_sites_);
     const size_t edges = vector_bytes(mt_edges_) + mt_edges_.size() * chunk(sizeof(MtEdge));
-    const size_t edge_maps = hash_bytes(mt_edge_refs_) + vector_values_bytes(mt_edge_refs_) +
-                             hash_bytes(mt_source_refs_) + vector_values_bytes(mt_source_refs_);
-    const size_t tier2 = vector_bytes(hot_counters_) + hot_counters_.size() * chunk(sizeof(HotCounter)) +
-                         hash_bytes(hot_counter_sites_) + vector_bytes(tier2_branch_profiles_) +
-                         tier2_branch_profiles_.size() * chunk(sizeof(Tier2BranchProfile)) +
-                         tree_bytes(tier2_profiles_by_pc_);
-    const size_t words = vector_bytes(code_words_) + vector_bytes(flag_dep_table_);
+    const size_t edge_maps = hash_bytes(mt_targets_);
+    const size_t words = vector_bytes(code_words_) + vector_bytes(flag_dep_table_) + vector_bytes(reg_pass_) + vector_bytes(reg_stubs_) + carry_profiled.load(std::memory_order_relaxed) * sizeof(CarryProfile) + hash_bytes(carry_follow_taken_) + hash_bytes(carry_done_);
     const size_t retired = hash_bytes(retired_pcs_);
-    const size_t total = blocks + index + back_refs + calls + edges + edge_maps + tier2 + words + retired;
-    fprintf(stderr, "[JIT] metadata MiB: total=%.1f per_block=%zuB blocks=%.1f(%zu) code_index=%.1f(%zu granules) "
-                    "back_refs=%.1f(%zu) calls=%.1f mt_edges=%.1f(%zu) mt_edge_maps=%.1f tier2=%.1f "
+    const size_t total = blocks + index + back_refs + calls + edges + edge_maps + words + retired;
+    fprintf(stderr, "[JIT] metadata MiB: total=%.1f per_block=%zuB blocks=%.1f(%zu) code_index=%.1f(%zu pages) "
+                    "back_refs=%.1f(%zu) calls=%.1f mt_edges=%.1f(%zu) mt_edge_maps=%.1f "
                     "code_words=%.1f retired=%.1f(%zu) thread_inline_caches=%.1f\n",
             mib(total), blocks_.empty() ? size_t{0} : total / blocks_.size(), mib(blocks), blocks_.size(),
-            mib(index), code_index_.size(), mib(back_refs), back_refs_.size(), mib(calls), mib(edges),
-            mt_edges_.size(), mib(edge_maps), mib(tier2), mib(words), mib(retired), retired_pcs_.size(),
+            mib(index), code_index_.pages(), mib(back_refs), back_refs_.size(), mib(calls), mib(edges),
+            mt_edges_.size(), mib(edge_maps), mib(words), mib(retired), retired_pcs_.size(),
             mib(inline_cache_bytes_.load(std::memory_order_relaxed)));
     if (disk_cache_) disk_cache_->dump_stats();
 }

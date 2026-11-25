@@ -44,6 +44,11 @@ void Clock::present(uint64_t now) {
     sample_ns = now;
     sample_frames = frames + 1;
     fps = 0;
+    history_count = 0;
+  } else {
+    history[history_next] = static_cast<float>((now - last_ns) / 1e6);
+    history_next = (history_next + 1) % kFrameHistory;
+    history_count = std::min(history_count + 1, kFrameHistory);
   }
   last_ns = now;
   ++frames;
@@ -59,6 +64,12 @@ void Clock::present(uint64_t now) {
 double Clock::active_fps(uint64_t now) const {
   return frames && now - last_ns <= 2000000000ULL ? fps : 0;
 }
+size_t Clock::recent_frames(float *out, size_t capacity) const {
+  const size_t count = std::min(history_count, capacity);
+  for (size_t i = 0; i < count; ++i)
+    out[i] = history[(history_next + kFrameHistory - count + i) % kFrameHistory];
+  return count;
+}
 struct Packet {
   uint64_t frames{}, last_ns{}, xwindow{};
   uint64_t ram{}, total_ram{}, vram{}, used_vram{}, used_ram{};
@@ -73,6 +84,8 @@ struct Packet {
   uint64_t panel_vram_used{}, panel_vram_total{};
   bool panel_vram_known{}, ram_known{};
   char app[160]{}, panel_gpu[160]{};
+  float frame_ms[kFrameHistory]{};  // the graph's frame times, oldest first
+  unsigned frame_count{};
 };
 
 static OverlayStats overlay_stats(const Packet &p, bool active) {
@@ -86,6 +99,7 @@ static OverlayStats overlay_stats(const Packet &p, bool active) {
   stats.sensors.ram_known = p.ram_known; stats.sensors.ram_used = p.used_ram; stats.sensors.ram_total = p.total_ram;
   stats.emulator_ram = p.ram;
   stats.vram_known = p.panel_vram_known; stats.vram_used = p.panel_vram_used; stats.vram_total = p.panel_vram_total;
+  if (active) stats.frame_ms.assign(p.frame_ms, p.frame_ms + p.frame_count);
   return stats;
 }
 
@@ -535,6 +549,7 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
   packet.frames = state.clock.frames;
   packet.last_ns = state.clock.last_ns;
   packet.fps = state.clock.active_fps(now);
+  packet.frame_count = static_cast<unsigned>(state.clock.recent_frames(packet.frame_ms, kFrameHistory));
   packet.x = info.x; packet.y = info.y;
   packet.w = info.w; packet.h = info.h;
   packet.visible = info.visible;
@@ -544,8 +559,8 @@ static std::string update(State &state, const WindowInfo &info, uint64_t now) {
     state.title = info.title;
   snprintf(packet.app, sizeof(packet.app), "%s", state.title.c_str());
   if (state.native && dbg().window_stats_overlay) {
-    state.overlay = render_overlay(overlay_lines(overlay_stats(packet, now - state.clock.last_ns <= 2000000000ULL)),
-                                   overlay_scale(info.h));
+    state.overlay = render_overlay(overlay_rows(overlay_stats(packet, now - state.clock.last_ns <= 2000000000ULL)),
+                                   overlay_font_px(info.h));
     ++state.overlay_seq;
   }
   std::string title;
@@ -999,7 +1014,7 @@ int ui_main(int fd) {
         else
           SDL_HideWindow(windows[i]);
         const bool active = now_ns() - p.last_ns <= 2000000000ULL;
-        draw_hud(windows[i], renderers[i], render_overlay(overlay_lines(overlay_stats(p, active)), overlay_scale(p.h)),
+        draw_hud(windows[i], renderers[i], render_overlay(overlay_rows(overlay_stats(p, active)), overlay_font_px(p.h)),
                  info.info.x11.display, info.info.x11.window, shape);
         // Mapping/reconfiguring a window can restore SDL's input shape.
         // Reassert the empty region after positioning, showing and resizing it.

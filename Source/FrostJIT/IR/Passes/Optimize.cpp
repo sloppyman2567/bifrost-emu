@@ -115,6 +115,8 @@ struct OptimizerTables {
     EpochTable<uint16_t, kVregKeys> arm_reg_cache;  // ARM register → vreg holding its value
     EpochTable<uint8_t, kVregKeys> live;            // dead-code pass: vregs read by a kept op
     EpochTable<size_t, kStoreKeys> last_store_to;   // dead-store pass: key → index of the pending STORE_REG
+    std::vector<uint8_t> fits;                      // zero-extension pass: bits a vreg's value fits in (0: unknown)
+    std::vector<uint8_t> used;                      // dead-code pass: ops to keep
 };
 // ── Bitwise helpers for constant folding ──────────────────────────────
 static uint64_t mask_for_width(uint8_t bits) {
@@ -263,44 +265,33 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
     }
 }
 // ── The main optimizer ────────────────────────────────────────────────
-void optimize_ir(IRBlock& block, bool force_fwd) {
+void optimize_ir(IRBlock& block) {
     if (block.insts.empty()) return;
-    // LDXR_FAST, STXR_FAST, or STLR_FAST ops. If so, disable the
-    // arm_reg_cache load-forwarding (FWD) for the ENTIRE block. These
-    // ops have complex memory + register side effects that the FWD
-    // optimizer can't model correctly:
-    //   - ATOMIC reads cpu.regs[imm] directly (bypassing vregs)
-    //   - ATOMIC writes memory (invalidates forwarded loads)
-    //   - LL/SC ops interact with the exclusive monitor
-    // Forwarding stale values across these ops causes LSE atomic
-    // correctness bugs (CAS writes wrong desired value, etc.).
-    // FWD is a ~5.6% speedup on compute loops — we skip it only for
-    // blocks with atomics, which are rare in compute workloads.
+    // Blocks with an ATOMIC (LSE) op skip the arm_reg_cache load-forwarding
+    // (FWD) for the ENTIRE block: CAS reads its expected value from
+    // cpu.regs[imm] directly (bypassing vregs) and writes the old value
+    // there, and the op writes memory, so the FWD optimizer cannot model
+    // it. FWD is a ~5.6% speedup on compute loops; atomics are rare there.
+    // LDXR/STXR/STLR_FAST take and return vregs, and SIMD_NATIVE_STRUCT /
+    // SIMD_NATIVE_EXTRA / CALL_INTERP / SVC are barriers inside the pass
+    // (they clear the caches and the pending dead stores), so those blocks
+    // keep forwarding on both sides of the op.
     static bool fwd_off_ = dbg().no_fwd;
     // (legacy BIFROST_ENABLE_FWD=1 is accepted and means on, which is now
     // the default — it only matters if some script still exports it.)
-    // The tier-2 walker forces FWD on for region blocks: without the
-    // STORE_REG→LOAD_REG forwarding, real guest invariant chains (threaded
-    // through a GPR) keep a memory round-trip on every step and LICM can
-    // never hoist them. FWD is verified correct (2026-08-15 fix + suites);
-    // forcing it here only affects region IR, never the standalone JIT.
-    bool fwd_requested = !fwd_off_ || force_fwd;
+    bool fwd_requested = !fwd_off_;
     // BIFROST_FWD_RANGES bisects FWD bugs by block start address.
     const auto& fwd_ranges = dbg().fwd_ranges;
     if (!fwd_ranges.empty() && !bifrost::DebugFlags::in_ranges(fwd_ranges, block.start_pc))
         fwd_requested = false;
-    // Tier-1 blocks keep the legacy scalar pipeline unless BIFROST_TIER1_SSA=1: the SSA adapter was a third of translation time
-    // for under 1% fewer instructions (Docs/JIT.md). Tier-2 still concatenates legacy blocks with globally allocated vregs;
-    // its region needs one SSA graph (RegionPlanner) rather than independently lowered blocks.
-    block.ssa_optimized = !force_fwd && fwd_requested && dbg().tier1_ssa && !dbg().no_ssa &&
+    // Lean blocks keep the legacy scalar pipeline unless BIFROST_LEAN_SSA=1: the SSA adapter was a third of translation time
+    // for under 1% fewer instructions (Docs/archive/JIT-history.md).
+    block.ssa_optimized = fwd_requested && dbg().lean_ssa && !dbg().no_ssa &&
         optimize_ir_ssa(block, dbg().ir_validate);
     bool block_has_atomics = false;
     if (fwd_requested) {
         for (const auto& inst : block.insts) {
-            if (inst.op == IROp::SIMD_NATIVE_STRUCT || inst.op == IROp::SIMD_NATIVE_EXTRA || inst.op == IROp::ATOMIC ||
-                inst.op == IROp::LDXR_FAST ||
-                inst.op == IROp::STXR_FAST ||
-                inst.op == IROp::STLR_FAST) {
+            if (inst.op == IROp::ATOMIC) {
                 block_has_atomics = true;
                 break;
             }
@@ -402,7 +393,8 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     // no ZEXT to N or more bits: it becomes a copy, which Pass 1 propagates
     // away. Only scratch vregs (>= 33) are tracked; they are defined once.
     {
-        std::vector<uint8_t> fits(block.insts.size() * 4 + 64, 0);  // 0 = unknown
+        auto& fits = tables.fits;
+        fits.assign(block.insts.size() * 4 + 64, 0);
         auto known = [&](uint16_t v) -> unsigned { return v >= 33 && v < fits.size() ? fits[v] : 0; };
         for (IRInst& inst : block.insts) {
             if (inst.dest < 33 || inst.dest >= fits.size()) continue;
@@ -505,7 +497,7 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // correctness bug that crashed `toybox ls /`.
                 //
                 // On by default (BIFROST_NO_FWD=1 opts out; bench_mips gets
-                // ~10% from it). Disabled for blocks containing ATOMIC/LL/SC ops (see
+                // ~10% from it). Disabled for blocks containing ATOMIC ops (see
                 // block_has_atomics above).
                 const uint16_t* cached_slot = fwd_enabled ? arm_reg_cache.find(ar) : nullptr;
                 if (cached_slot) {
@@ -911,7 +903,8 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     //
     // We compute liveness backward, then drop pure ops whose dest is
     // never used.
-    std::vector<bool> used(block.insts.size(), false);
+    auto& used = tables.used;
+    used.assign(block.insts.size(), false);
     size_t kept = 0;
     // We mark an instruction as "used" if it has a side effect, OR if
     // its dest is read by a later used instruction. Walk backward.
@@ -966,16 +959,17 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
             used[i - 1] = false;
         }
     }
-    // Build the new instruction list, dropping unused.
-    std::vector<IRInst> new_insts;
+    // Drop the unused instructions.
     // DSE marks NOPs before this pass; its statistics are not a capacity.
     // Count actual retained instructions, including on repeated optimization.
     block.dce_removed += static_cast<int>(block.insts.size() - kept);
-    new_insts.reserve(kept);
+    size_t out = 0;
     for (size_t i = 0; i < block.insts.size(); i++) {
-        if (used[i]) new_insts.push_back(block.insts[i]);
+        if (!used[i]) continue;
+        if (out != i) block.insts[out] = std::move(block.insts[i]);
+        ++out;
     }
-    block.insts = std::move(new_insts);
+    block.insts.resize(out);
     // Pass 3: peephole — (disabled for now).
     // The original idea was to drop redundant ZEXT after ALU ops in
     // 32-bit mode, since x86 32-bit ops zero-extend. But our codegen

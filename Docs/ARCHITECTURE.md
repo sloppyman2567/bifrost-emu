@@ -30,7 +30,7 @@ flowchart LR
 | Decode and reference execution | `Source/Interpreter/Decoder/`, `Core/`, `FloatSIMD/` |
 | Host-native `memcpy`/`memmove`/`memset` | `Source/System/Core/NativeLibc.*` (registry and host routines), `Source/System/Loader/DynamicLinker/Symbols.cpp` (symbols), `Source/FrostJIT/Compiler/CallHelpers.cpp` (`emit_native_libc_entry`); see the [JIT guide](JIT.md#host-native-memcpy-memmove-and-memset) |
 | LL/SC exclusive monitor | `Source/System/Core/ExclusiveMonitor.hpp` (shared by the interpreter, the JIT helpers and `Source/FrostJIT/CodeGen/Integer/Atomics.cpp`) |
-| JIT pipeline | `Source/FrostJIT/`: `IR/`, `Compiler/`, `CodeGen/`, `RegisterAlloc/`, `Backend/`, `Runtime/`, `Tier2/` |
+| JIT pipeline | `Source/FrostJIT/`: `IR/`, `Compiler/`, `CodeGen/`, `RegisterAlloc/`, `Backend/`, `Runtime/`, `Carry/` (the planned second JIT; today the loop report and the profile that makes a block follow the hot side of an exit); `Compiler/SideExit.cpp` is the mid-block CBZ/CBNZ exit, `Compiler/RegisterPassing.cpp` the guest registers handed along chain edges in host registers |
 | Guest address space and mappings | `Source/System/Memory/`: `Memory.cpp` (mapping index, access, file backing), `Allocation.cpp`, `Discard.cpp` (madvise, userfaultfd) |
 | ELF and dynamic linking | `Source/System/Loader/ElfLoader.cpp`, `DynamicLinker/` |
 | Linux syscall dispatch | `Source/System/Syscalls/Syscalls.cpp`; families in `Files/`, `Process/`, `Memory.cpp`, `Time.cpp`, `Compatibility.cpp`; Bifrost-private calls in `HostCalls/` |
@@ -52,7 +52,7 @@ for example `FrostJIT/Compiler/FrostJIT.hpp` and `Bifrost/Emulator.hpp`.
 
 Read [the JIT guide](JIT.md) before changing the compiler or JIT-facing decoder.
 `Compiler/BlockAnalysis.cpp` predicts fallback boundaries, scans candidate
-inline leaves and decides whether a successor overwrites NZCV first; `BlockCompiler.cpp` orchestrates Tier-1 translation, emission and
+inline leaves and decides whether a successor overwrites NZCV first; `BlockCompiler.cpp` orchestrates Lean translation, emission and
 publication. `VerificationStores.cpp` collects store footprints for differential
 replay (only under `BIFROST_JIT_VERIFY`). IR construction, scalar SSA and optimization are in `IR/Builder.*`,
 `IR/SSA/` and `IR/Passes/`; translation is in `IR/Translate/`. `IR/IR.hpp`
@@ -63,15 +63,16 @@ declares `IROp` and `IRInst` and includes the typed parameter structs
 the `FloatSIMD/SIMD/` subdirectory. `Backend/X86Emitter.cpp` encodes host
 instructions; `RegisterAlloc/RegisterAllocator.cpp` manages scalar homes and
 spills. Runtime dispatch, fault recovery, code caching, profiling and emulator
-bridges live in `Runtime/`; `Runtime/Generations.*` replaces a full code cache
+bridges live in `Runtime/`; `Runtime/Compilers.cpp` lets several threads
+translate at once, `Runtime/GrowingTables.hpp`, `Runtime/CodeIndex.hpp` and `Runtime/PcFilter.hpp`
+hold the containers of the block tables and `Runtime/SpinWait.hpp` the short
+waits, `Runtime/Generations.*` replaces a full code cache
 and releases the old one, and `Runtime/CacheRecording.cpp` (recording, proof
 compile, install) with `Runtime/PersistentCache.*` (on-disk store) form the
 experimental cross-launch translation cache. `Runtime/SampleProfile.*` is the `BIFROST_PROF` sampler's report:
 per-thread sample rings and a registry of each block's entry, body, exit and cold code. `System/Core/WaitProfile.*` is its
 other half: per-thread time inside guest syscalls by kind. `System/Core/TracyProfile.*` is the optional Tracy timeline
-(`make USE_TRACY=1`): zone macros that expand to nothing in a normal build, and the rule for when Tracy starts. Tier-2 separates trace collection, region planning,
-region compilation, promotion, feedback, profiling and trial measurement.
-`Tier2Internal.hpp` shares implementation helpers; it is not a public interface.
+(`make USE_TRACY=1`): zone macros that expand to nothing in a normal build, and the rule for when Tracy starts.
 
 ## Host adapters and the dynamic linker
 

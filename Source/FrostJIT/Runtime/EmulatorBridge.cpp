@@ -371,7 +371,12 @@ void Emulator::dump_prof_snapshot() {
     // Where the JIT samples fell: thread, and entry/body/exit/cold of the block. BIFROST_PC_HIST=1 also lists the hottest
     // guest blocks (map a pc to a function with aarch64 objdump). Gated separately so the default run stays short.
     static const bool pc_hist = dbg().pc_hist;
-    prof_print(stderr, prof_collect(pc_hist ? 20 : 0), pc_hist);
+    // The loop report wants more blocks than the listing shows: it joins their hotness with their static successors.
+    ProfReport report = prof_collect(pc_hist ? 200 : 0);
+    ProfReport listing = report;
+    if (listing.hottest.size() > 20) listing.hottest.resize(20);
+    prof_print(stderr, listing, pc_hist);
+    if (pc_hist && jit_) jit_->dump_carry_candidates(report);
 }
 // Periodic real-guest-throughput + block-structure reporter. The old
 // BIFROST_STATS_PERIOD "rolling MIPS" used the run-loop dispatch counter
@@ -402,8 +407,6 @@ void Emulator::dump_periodic_stats(double dt) {
     // and the per-thread JITs of BIFROST_NO_SHARED_JIT.
     uint64_t instr = 0, blocks = 0, blocks_tr = 0, chains = 0;
     uint64_t natural = 0, entry = 0, ci_cap = 0, bl_cap = 0, max_sz = 0, decfail = 0, ionly = 0;
-    uint64_t hot_heads = 0, t2_regions = 0, t2_rejections = 0, t2_retries = 0, t2_retired = 0;
-    uint64_t t2_ns = 0, t2_bytes = 0;
     auto add = [&](const FrostJIT& j) {
         constexpr auto r = std::memory_order_relaxed;
         instr     += j.instructions_executed.load(r);
@@ -417,13 +420,6 @@ void Emulator::dump_periodic_stats(double dt) {
         max_sz    += j.block_profile.max_size.load(r);
         decfail   += j.block_profile.decode_fail.load(r);
         ionly     += j.block_profile.interp_only.load(r);
-        hot_heads += j.tier2_hot_heads.load(r);
-        t2_regions += j.tier2_regions.load(r);
-        t2_rejections += j.tier2_profit_rejections.load(r);
-        t2_retries += j.tier2_profile_retries.load(r);
-        t2_retired += j.tier2_phase_retirements.load(r);
-        t2_ns += j.tier2_compile_ns.load(r);
-        t2_bytes += j.tier2_code_bytes.load(r);
     };
     for (FrostJIT* j : jit_.all()) add(*j);
     // Generated code counts into its own CPU, and a guest parked in chained blocks never reaches a dispatch boundary:
@@ -445,7 +441,6 @@ void Emulator::dump_periodic_stats(double dt) {
     static uint64_t last_instr_, last_blocks_, last_blocks_tr_, last_chains_;
     static uint64_t last_natural_, last_entry_, last_ci_cap_, last_bl_cap_,
                     last_max_sz_, last_decfail_, last_ionly_;
-    static uint64_t last_hot_heads_, last_t2_regions_, last_t2_rejections_, last_t2_retries_;
     uint64_t d_instr     = delta(instr, last_instr_);
     uint64_t d_blocks    = delta(blocks, last_blocks_);
     uint64_t d_blocks_tr = delta(blocks_tr, last_blocks_tr_);
@@ -472,27 +467,12 @@ void Emulator::dump_periodic_stats(double dt) {
             static_cast<unsigned long long>(delta(max_sz, last_max_sz_)),
             static_cast<unsigned long long>(delta(decfail, last_decfail_)),
             static_cast<unsigned long long>(delta(ionly, last_ionly_)));
-    if (t2_retired || t2_bytes)
-        fprintf(stderr, "[%s] tier2 lifetime: retired=%llu compile_ms=%.3f code_bytes=%llu\n",
-            CODENAME, (unsigned long long)t2_retired, t2_ns / 1e6,
-            (unsigned long long)t2_bytes);
-    // Tier-2 hot-head count (opt-in): blocks that crossed the
-    // BIFROST_TIER2_HITS threshold since the last dump. Inert (0) by default.
-    fprintf(stderr,
-            "[%s] tier2: hot_heads=%llu regions=%llu rejected=%llu retries=%llu\n", CODENAME,
-            static_cast<unsigned long long>(delta(hot_heads, last_hot_heads_)),
-            static_cast<unsigned long long>(delta(t2_regions, last_t2_regions_)),
-            static_cast<unsigned long long>(delta(t2_rejections, last_t2_rejections_)),
-            static_cast<unsigned long long>(delta(t2_retries, last_t2_retries_)));
     last_instr_     = instr;     last_blocks_     = blocks;
     last_blocks_tr_ = blocks_tr; last_chains_     = chains;
     last_natural_   = natural;   last_entry_      = entry;
     last_ci_cap_    = ci_cap;    last_bl_cap_     = bl_cap;
     last_max_sz_    = max_sz;    last_decfail_    = decfail;
     last_ionly_     = ionly;
-    last_t2_rejections_ = t2_rejections; last_t2_retries_ = t2_retries;
-    last_hot_heads_ = hot_heads;
-    last_t2_regions_ = t2_regions;
     // SIGPROF bucket snapshot too: games/loops that exit via exit_group
     // (or are killed by a timeout) never reach print_jit_stats's exit-time
     // dump, so the jit/dispatch/translate/interp split was unobservable

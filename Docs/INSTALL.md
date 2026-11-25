@@ -65,7 +65,7 @@ Ubuntu 25.10 or newer is needed for Android windows.
 ```bash
 sudo apt install build-essential debhelper pkg-config libavcodec-dev libavutil-dev libswscale-dev \
      libegl-dev libffi-dev libgl-dev libsdl3-dev libsdl2-dev libwayland-dev libx11-dev
-make deb                                  # writes ../bifrost-emu_2.0.0~beta.3_amd64.deb
+make deb                                  # writes ../bifrost-emu_2.0.0~rc.1_amd64.deb
 sudo apt install ../bifrost-emu_*.deb     # the emulator
 bifrost-emu --setup-rootfs                # once, for Linux programs: downloads the toolchains and builds the guest rootfs
 ```

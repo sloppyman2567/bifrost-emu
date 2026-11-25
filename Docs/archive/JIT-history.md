@@ -2,6 +2,670 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Several threads translate at once (2026-11-25)
+
+MT compiles no longer wait for each other ([guide](../JIT.md#several-compilers-at-once)). Ryzen 5800X3D; a Debian VM and browsers were open.
+
+- **Translate-only guest test** (throwaway: N threads, each calling 200,000/N distinct generated functions once, about 500,000 blocks). Wall time, median of seven alternating
+  runs, governor on `performance`, same checksums. *Before* is `62007bdf`, *parallel* the first working version of the same day, *now* the committed one:
+
+  | Threads | Before | Parallel | Now |
+  |---|---|---|---|
+  | 1 | 2.488 s | 2.421 s | 2.088 s |
+  | 2 | 3.533 s | 1.348 s | 1.093 s |
+  | 4 | 3.711 s | 0.862 s | 0.594 s |
+  | 8 | 3.994 s | 0.723 s | 0.392 s |
+  | 16 | 4.139 s | 0.968 s | 0.406 s |
+
+- **What the second half did**, at eight threads (cycles per published block from a lap build; each step alternated with the one before it):
+  a compile took the shared lock 6.6 times at 1,300 to 3,300 cycles each, waited 10,800 for the exclusive lock and held it for about 2,700. `PcFilter`
+  (no lock for a pc that has no block) and a thread keeping its compiler: 0.69 to 0.50 s. `CodeIndex`, the map node and the caller's copy made before the lock: 4%. Edge-target
+  records found under a shard lock before the table lock (the last shared read, 4,200 cycles, gone; the lock is now held for about 1,470): 0.50 to 0.40 s. Scratch that keeps its
+  memory (about 30 heap allocations and a 16 KB clear per block before): 10% on one thread. Lock functions went from about 41% of the CPU cycles at eight threads to about 11%.
+- **Sixteen threads** waited for the default eight compilers (0.65 s); with the cap at 16 they take 0.38 s. A compiler costs 86 KB and its scratch, with no
+  visible change in peak memory. **Rejected:** spinning for a free compiler (four compilers for eight threads 0.98 to 0.88 s, but 16 for 32 threads 0.57 to 0.65 s).
+- **ART start-up** (`bifrost-art Bootstrap`, seven alternating runs, all pass): 5.06 to 4.56 G cycles (-9.9%), 8.29 to 7.72 G instructions, 674 to 590 ms translating
+  (10.3 to 9.0 us a block; with Carry off 4.8 us), 43 to 0.25 ms of contended lock wait. The first parallel version alone changed none of these but the lock wait.
+- **Memory.** The JIT's metadata for the translate-only test is 247 MiB instead of 369 MiB, mostly because MT side exits need no stub entries.
+- **Why eight threads waited.** Per publication at eight threads: 113,553 cycles waiting for the exclusive lock and about 7,600 holding it (edge index 2,608, side-exit
+  stubs 1,874, code granules 1,110, block entry 680); 10 of about 30 thread-seconds were CPU. A compile also took the shared lock once per guest
+  instruction, and every MT dispatch of a block without a chain target tried the exclusive one. The spin was tried and dropped earlier that day when
+  one compile ran at a time (the lock was then held for a whole compile).
+- **Growth pauses.** Publications over 0.5 ms with the old containers: 26 ms at 351k blocks (`blocks_` rehash), pairs of 12 ms at 259k and 24 to 28 ms at 527k (the two edge
+  maps), 6 ms at 192k (a `std::vector` copy), 262 ms at 2.9M. With `Sharded` and `SegmentedArray` the worst at 351k is under 1 ms; in a standalone
+  model with staggered growth the worst insert is 1.2 ms (50 ms) and the worst 2,000 inserts 3.5 ms (50 ms). Sharding by address instead of by page
+  cost 11% of translation time (cache misses).
+- **Crashes found.** Built with 32 KiB chunks. (1) A compile that overflowed its chunk left register mappings the retry trusted: guest SIGSEGV at exit, 28 of 400
+  runs, 24 of 400 with only the rewind fix, 0 of 400 with the mappings cleared. (2) A fault site registered at exactly the lease's end went into
+  the next chunk's table: host SIGSEGV 3 of 150 runs, 0 of 300 after. (3) By reading: a rewind could drop the next chunk's sites, an exactly full chunk counted as a full cache, and
+  threads could take the serialized path while the first was still setting up the compilers.
+- **CoreMark** of the first parallel version (Carry on, alternating, CRCs equal): one pinned thread, five runs, median 18,579 old and 18,503 new (ranges overlap).
+  Two, four and eight threads, three runs: no difference.
+
+Checks: `jit_mt_compile` built with 32 KiB chunks, about 1,700 runs: 2, 8, 16 and 32 threads, 1 to 3 compilers, Carry off, no chaining, ordinary frames, no register passing, and 1, 4 and
+16 MiB code caches, all without a failure. One of 40 runs with per-thread JITs (`BIFROST_NO_SHARED_JIT=1`) timed out after 60 s and left no evidence; 620 runs
+each of that mode on the old and on the new build did not repeat it, so its cause is unknown. `make verify` (112 differential fixtures, 16 threaded oracles) and 64 JIT tests pass.
+`test_fork_lock_contention` times out on the old build too. Traced: the fork cannot get the guest memory index lock while two threads map and unmap memory (43,978 and
+43,644 failed tries on the old and new build, 3 and 0 on the JIT's locks), which is not the JIT's. Not measured: a game, other CPUs.
+
+## CoreMark, native and multithreaded (2026-11-25)
+
+The figures of [PERFORMANCE.md](../PERFORMANCE.md). CoreMark v1.01, `-O2 -DPERFORMANCE_RUN=1 -DUSE_PTHREAD -DMULTITHREAD=N`, seeds `0x0 0x0 0x66`: native with gcc 16.2.1
+(no `-march`), the guest with gcc 11.2.1 (musl, static). The compilers differ by several versions, so part of the gap to native is theirs. 400,000 iterations native, 200,000
+for bifrost-emu, 100,000 for QEMU 11.1.3, at least ten seconds each, three interleaved rounds. "Correct operation validated" every time, and one `crcfinal` per count (0x65c5, 0x4983, 0xd340). Ryzen 7 5800X3D,
+governor and energy preference on `performance`; one thread pinned to core 5, the others not pinned. The shipped SDL/GL build for rc.1 (its sources before the version bump), a headless build of the tag for beta.3.
+
+| | 1 | 2 | 4 | 8 | 16 threads |
+|---|---|---|---|---|---|
+| Native | 38,414 / 38,677 / 38,647 | 77,213 / 75,923 / 76,967 | 152,135 / 149,017 / 151,774 | 293,902 / 297,122 / 298,842 | 405,860 / 398,878 / 404,756 |
+| rc.1 | 18,699 / 19,133 / 19,194 | 34,916 / 34,011 / 34,971 | 65,237 / 68,476 / 68,021 | 128,020 / 130,007 / 130,018 | 135,438 / 138,642 / 136,246 |
+| QEMU | 7,571 / 7,648 / 7,784 | 16,145 / 15,586 / 16,071 | 31,713 / 31,969 / 31,479 | 60,487 / 61,553 / 61,101 | 63,748 / 67,542 / 67,004 |
+| beta.3 | 14,543 / 14,898 / 15,277 | | | 99,881 / 102,531 / 102,191 | |
+
+The first round was the slowest for nearly every emulated row (documents were being edited meanwhile); medians are used. QEMU's one-thread row is below half of its two-thread row, which is
+not explained. `bench_*`: four rounds, the first discarded: fib 6.806 s and 0.064 s, memcpy 201 and 12,071 MiB/s, qsort 4.305 s and 0.071 s, matrix 13.2 and 1,091 MFLOPS, `bench_mips`
+15.013 s and 0.180 s of wall time. The page used to say the JIT uses AVX-512, SHA-NI and BMI; its code generators emit none of them, so the sentence is corrected.
+
+## Translation in several threads, measured (2026-11-25)
+
+Question: is translation time worth hunting? Nothing in the JIT's code generation changed; the waiting report of `BIFROST_PROF` gained
+translating and waiting per thread (`wait_prof_note_translation`).
+
+- **Repeats.** ART JNI bootstrap (window-free, Carry on): 65,334 blocks translated, 33,929 alive at the end. The guest's own code
+  changes retire 285; the table purge in `enter_multithreaded` drops the rest (45,364 blocks). 11,617 of those are translated again
+  and 2,470 others are (Carry's flips, unmaps): 14,087 recompiles, the others never run again. A throwaway build that starts an Android
+  process in MT mode (no purge) has 2,551 recompiles, 552 ms of compile time against 684 and 16% less code, but the same wall time (1.289 s against
+  1.294 s, six alternating runs) and 4% less user time, so it was not kept.
+- **Games recompile almost nothing.** Counters from saved logs, first report interval: SpongeBob loading (2026-11-24, two sessions)
+  774,150 and 1,014,199 blocks, 1.6% and 1.9% recompiles, 8.0 and 8.3 s compile, **13.5 and 16.4 s of lock wait**, longest compile 77 and 74 ms; Battle
+  Cats (2026-10-24, older code, three sessions) 590k to 675k blocks, about 3%, 9.6 to 10.0 s, 11.8 to 13.2 s of wait. Both are sums over threads, and
+  the wait is wall time, not CPU.
+- **Why threads wait.** MT compiles are serialized by `compile_mutex_`. A guest test (throwaway: N threads, each calling 80,000/N distinct
+  generated functions once, about 200k blocks) takes 1.0 s with one thread (ST) and 1.37, 1.46 and 1.52 s with 2, 4 and 8, for 1.0 to 1.1 s of
+  compiling. With 8 threads: compiling 1.19 s, publishing 0.19 s, mutex wait 10.8 s, shared and exclusive table waits 6 ms each. Only 700 to
+  5,900 acquisitions are contended, about 2 ms each: `std::mutex` is not fair and the thread that releases it takes it again.
+  Spinning before sleeping gave 6 to 15% at 2 and 4 threads, 4 to 8% at 8, for more CPU, and was not kept. 8 to 10 compiles or publications take over 2 ms (74 to 91 ms
+  together); growth of the `unordered_map` tables is the suspect, not shown.
+- **Ceiling of compiling in parallel.** The same guest test under `BIFROST_NO_SHARED_JIT=1` (a JIT per thread, no sharing), three runs each, same checksums:
+  2, 4 and 8 threads take 0.54-0.57, 0.26-0.27 and 0.14 s against 1.31-1.39, 1.41-1.48 and 1.51-1.61 s shared (Carry on; off is alike). The test is the best case: every
+  thread runs its own code and nothing else. One thread takes 1.86-1.92 s against 0.95-1.00 in that mode, which is not explained.
+- **Not known:** which threads of a game wait. A UnityMain that translates its own code gains nothing from compiling in parallel; one that
+  waits behind ART's verifier does. Dispatch in the SIGPROF split also holds syscalls, helpers and thunks, so it is not the dispatcher's cost.
+
+Checks: `test_wait_profile.sh` (JIT and `--no-jit`), the guest test's report, and its wall time with and without the change (no difference).
+
+## Carry on by default (2026-11-25)
+
+The maintainer decided it. `BIFROST_CARRY` unset or anything but `0` is on (before, any value turned it on and unset was off), an app's
+`jit_carry` setting has `off`, and the tests that meant "Lean" by leaving the variable unset now set it to 0. No emitter changed.
+
+On against off at the same build, Ryzen 5800X3D, one pinned core. CoreMark at 16 placements: cycles median -10.3% (better at 16 of 16), instructions
+-4.9%. Programs, median of three at one placement (see the placement warning below): md5sum -10.3% cycles, grep -9.5%, gzip -5.7%, awk and bzip2 -2.1%,
+sha256sum -0.4%, sort 0, zstd +1.4%, outputs identical. ART JNI bootstrap (four runs each): 5.48-5.65 G cycles against 4.47-4.69 (+21% median),
+8.28 G instructions against 7.27 (+14%), translation 722-859 ms against 558-674 (about +28%), generated code 34.8 MB against 28.0 (+24%).
+
+Not measured: a game, several threads translating, memory at a 512 MiB cache limit, other CPUs, the persistent cache (code it stores is
+translated without Carry). `make verify`, 144 JIT-related tests (one, `jit_mt_publication`, timed out while it rebuilt the library and passes
+alone) and the settings test pass. The random-loop comparison with QEMU had run with Carry on, one and two threads, before this.
+
+## Pins read and written without copies (2026-11-25)
+
+Found by joining IBS op samples of CoreMark to the live translations: 57% of the executed generated-code ops are in single-block self-loops, and in those
+loops 47.6k ops per iteration copied a pin to a scratch register to read it, 18.9k moved a result into a pin, 46.8k stored a guest register and 31.4k
+loaded one (of 743k in all). Read-only analysis first, no change to the pass order.
+
+Changes (guide: [Loop pins](../JIT.md#loop-pins)): `scan_pin_reads` (readers name the pinned register), `scan_pin_dests` (results and loads go straight
+into the pin, `finish_pin_dest` corrects an emitter that chose another register), written-first registers may be pinned, and the pressure estimate in
+`select_arch_pins` no longer counts pin copies, constants or operands that die in the op, and counts a guarded access's scratch registers instead.
+The fourth pin (R15) had stayed empty in the hot matrix loops. A loop head `ldr x0, [x0]` is now `mov r12, [r10+r12]`.
+
+The figures compare the build before both changes of this day with the one after, so they include the NZCV fix below (+1.3% instructions on its own). CoreMark, one pinned core, governor `performance`, no
+other load, identical CRC. Instructions: -6.7% default, -7.6% `BIFROST_CARRY=1`. Cycles at 16 placements of the generated code (a throwaway `int3` pad
+ahead of the cold stubs, not committed): median -2.0% default (better at 11 of 16), -3.5% Carry (16 of 16). 200,000 iterations, alternating, native
+37.9-38.4k it/s: Carry 19.1-19.7k before, 19.6-20.3k after. Other programs, instructions: busybox gzip -1.5%, sha256sum -2.0%, bzip2 -2.0%, sort -2.1%,
+zstd -1.7%, md5sum 0, ART bootstrap -0.5% (translation time no worse), `bench_mips` -28% (cycles -0.1%). Same output everywhere.
+
+Placement is the bigger effect: a bzip2 slice spans 7.08-8.29 G cycles on the old build by placement alone, and one run per build showed +6% on the new one.
+At 16 placements the medians are 7.296 and 7.294 G. A native loop whose body crosses a 64-byte line takes one more cycle per iteration on this Zen 3
+(1.2 against 2.0), and nothing aligns loop bodies here. Do not judge a JIT change by cycles at one placement.
+
+Checked: a throwaway generator of random self-loops (ALU, bitfield, flags, conditional select, every load and store width, pairs, post-index, early exits,
+faults in the middle) against QEMU in default, Carry, ordinary frames, pin passes off, forwarding on and with a second thread: 600 seeds of 400 loops, no
+mismatch. The generator was first blind to old values read after a rewrite (0 of 1,200 loops on a build without the write check); with more moves and
+fewer registers it found 69 of 1,600 on that build. `make verify`, 136 JIT-related tests, ART bootstrap 12 runs. Deliberate breaks caught by
+`jit_pin_inplace`: no write check, variable shift count from a pin, `subs` into x0 taken as a compare, no `finish_pin_dest`.
+
+Not done or not tested: RSI and RDI as more pins (the matrix loop still reloads three invariants and stores one temporary), games, other CPUs, AVX-512
+hosts. Two bugs were found and not fixed: a fault in a `subs; b.cond` loop shows stale NZCV in the signal frame (known, guide), and a guest process hangs in
+`exit_group` while another thread is in `pause()` (interpreter too, not a JIT matter; [roadmap](../roadmap.md#linux-games-linker-rootfs-and-performance)).
+
+## NZCV at a cbz/tbz exit that precedes the loop's first flag setter (2026-11-25)
+
+A self-loop whose only flag use is its own compare skips the NZCV store on the back edge, because the next iteration sets the flags before it reads
+them. Since loops with `cbz`/`tbz` exits became one block, such an exit can come before that first setter, and the code it goes to saw the flags of some
+earlier store instead of the last iteration's compare (`ldr; cbz out; eor; cmp; b.ne`, then `mrs nzcv` at `out`). Found by the random-loop comparison with
+QEMU (5 of 16,000 loops, every mode, also on the build before); the interpreter was right. `flags_loop_carried_` now counts a mid-block exit that
+precedes the first flag setter as a reader unless `exit_flags_dead` proves its target overwrites the flags. CoreMark: +1.3% host instructions, cycles
+inside run noise. `jit_side_exit` (`carried_flags`, `carried_flags_bit`) covers it: 30 failures on the build before, and it passes with
+`BIFROST_NO_SIDE_EXIT=1` there.
+
+## Narrowing in the vector cache, one-store half results and forwarding across LL/SC (2026-11-24)
+
+Found by reading the hottest generated code of a 4 minute SpongeBob run (loading and ad start-up only, `BIFROST_PROF=1 BIFROST_PC_HIST=1 BIFROST_CARRY=1`,
+`perf record -F 1999` for host pcs, gdb attached through ptrace to disassemble the hottest 256-byte regions; the profile was flat, the hottest guest block
+2.3% of JIT samples). Three patterns in the hottest blocks:
+
+1. **Two 8-byte stores, one 16-byte reload.** A narrowing op (`XTN` family) wrote `movsd [lo]` and, for the zero upper half, `pxor; movsd [hi]`; the
+   next vector read of that register was a 16-byte `movups`, which cannot be forwarded from two stores. `SIMD_XTN` was also not in
+   `vec_inst_operands`, so any block holding one had that op as a cache boundary (everything written back, the cache dropped).
+2. **`sp` reloaded after every access.** In a frame prologue every `stp` re-read `[rbx+0x100]` although the previous instruction had just stored it.
+   Cause: `optimize_ir` switched register forwarding off for the whole block if it held an `ATOMIC`, `LDXR/STXR/STLR_FAST` (an `ldar` is
+   `LDXR_FAST`), `SIMD_NATIVE_STRUCT` or any `SIMD_NATIVE_EXTRA`. Reproduced with a guest fixture: the same prologue forwards `sp` without an `ldar`
+   and reloads it with one.
+3. Not changed: the `lock not [cpu+0x10d8]` that an acquire load costs in that block (a memory-ordering choice), a NaN check after every scalar FP
+   divide (relaxing NaN semantics is the maintainer's decision), and one bounds guard per spilled register (31% of body time is memory with guards).
+
+Changes. `SIMD_XTN` reads Vn (and Vd for the `*2` forms), writes Vd and uses `load_vec`/`store_vec`, so the cache keeps the result in an XMM; the forms
+the emitter sends to the interpreter (64-bit-source saturating forms, the SSE4.1 forms without SSE4.1) stay boundaries (`simd_xtn_inline`). `store_vec`
+with Q=0 on the uncached path is `movq xmm, xmm` (zeroes bits 127:64) and one `movups` store instead of `movsd; pxor; movsd` (every caller ends its
+handler after the store, so the XMM's upper half is dead). The `*2` forms update a pinned register in place with one `punpcklqdq`. The block-wide
+forwarding veto is now only for `ATOMIC` (LSE: CAS reads its expected value from `cpu.regs` directly); LL/SC and native SIMD ops are already
+barriers inside the pass (caches cleared, pending dead stores flushed).
+
+Measured, `perf stat` user events, one pinned core, 5 alternating runs each way, a micro workload that is the two patterns (two `xtn`, `str s`, and a
+five-`stp` frame around an `ldar`, 6 M iterations): host instructions 1.5435 G -> 1.4293 G (-7.4%), cycles median 792 M -> 516 M (-35%; individual runs 477-527 M
+new, 772-811 M old). With `BIFROST_CARRY=1`: instructions 1.5422 G -> 1.4400 G (-6.6%); cycles scatter widely (476-995 M new, 766-996 M old) so no cycle
+figure is claimed. Controls: CoreMark 369.362 G instructions in both builds (cycles inside run noise, CRC validated), `bench_matrix` and
+`bench_doom_vector_fp` within noise. The micro workload is built from the patterns, so the cycle gain is an upper bound for real code.
+
+Checked: `make verify` (112 differential fixtures, 15 threaded oracle runs), 260 tests of `run_tests.sh --filter 'jit|atomic|llsc|ldxr|ldaxr|stxr|lse|cas|mutex|thread|futex|simd|neon|fp_|vec|signal|sig'`,
+a 48-form XTN/SQXTN/UQXTN/SQXTUN differential against `qemu-aarch64` (identical output, FPSR.QC included), and the `jit_neon_xtn` all-forms test (now in
+`run_tests.sh`; it was built but never run). `jit_llsc_native` gained the registers-across-exclusives check; its existing ABA-stack check fails under QEMU
+(also on the unmodified file), so QEMU is the oracle only for the new check. A cached `XTN` was confirmed by reading the generated code of a loop
+(`pand; packuswb; punpcklqdq`, no state-slot access).
+
+Not measured: any game (this run only loaded), and the `fp_zero_hi` pair for scalar FP results, which also leaves two 8-byte stores in front of a
+possible 16-byte reload (`mov qword [hi], 0` was slower there in [an earlier test](#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10); not retried).
+
+## CoreMark with Carry on: the bottleneck is still guest state traffic (2026-11-24)
+
+Where CoreMark's time goes with `BIFROST_CARRY=1` (register passing and the exit work in), and what the guest state moves touch. Method: 200,000
+iterations, one pinned core, governor `performance`, `BIFROST_PROF=1` alone (no instruction counters), three alternating runs each way; `perf stat`
+and `-v` on separate runs. Sampling is 100 Hz, about 1,000 samples per 10 s run.
+
+Rates: 19,644 iterations/s with Carry on (19,644, 19,631, 19,658) against 17,817 off (18,008, 17,754, 17,688), +10.3%. `perf stat`: 45.12 G cycles
+against 50.55 G (-10.7%), 172.65 G host instructions against 179.82 G (-4.0%), 29.10 G branches against 34.52 G (-15.7%); IPC 3.83 against 3.56.
+62.08 G guest instructions (310k per iteration), 1,004 blocks, 8.0 guest instructions per block execution.
+
+Sections with Carry on: entry 5.8%, body 88.6%, exit 3.9%, cold 1.6%. Body by operation, Carry on / off:
+
+| body operation | on | off |
+|---|---|---|
+| guest state moves | 42.2% | 37.0% |
+| memory (with guards) | 20.0% | 15.9% |
+| integer ALU | 18.0% | 17.2% |
+| branches | 12.6% | 17.8% |
+| flag setting | 6.7% | 11.7% |
+| in code with spills or reloads | 1.4% | 0.8% |
+
+As a share of all JIT samples with Carry on: guest state moves 37%, memory 18%, ALU 16%, branches 11%, flags 6%. Carry cuts branches and flag stores
+(the exit work in the next section) but leaves the state traffic; the smaller parts' shares rise because the rest shrank. Set against the
+40.6/17.2/10.8/4.3 profile that prompted that section, the shares match within sampling noise apart from flag setting, which fell from 10.8% to
+6.7%, the change that section made.
+
+Entry is register passing, not the follow profile: with `BIFROST_NO_REG_PASS=1` entry is 1.4%, with `BIFROST_NO_CARRY_FOLLOW=1` it is 4.8 to 5.0%.
+Small blocks pay most: three hot blocks (39, 32 and 31 samples) are 25.0 to 41.9% entry.
+
+The moves are not a cache problem: `perf stat` counts 67.2 G L1 loads and 29.7 M L1 load misses (0.04%), 5.3 M last-level misses (1.9% of 279 M
+references), IPC 3.83. It is the count of load/store uops, one host load or store per guest register read or write at a block edge (the earlier
+simulation's 0.93 per guest instruction, not re-measured), not misses on the 808 bytes they touch.
+
+That memory: a `CPU` is 4,352 bytes; the architectural state generated code addresses is the first 808 — `regs[32]` at 0 (`regs[31]`, XZR, stays
+zero), `sp` 256, `pc` 264, `nzcv_host` 272, `v[32]` 288, `fpcr`/`fpsr` 800/804, `tpidr_el0` at 808. RBX is `CPU*` and every access is
+`mov r64,[rbx+disp32]` or `mov [rbx+disp32],r64` (`emit_load_arm`/`emit_store_arm`, `REGS_OFF = 0`). CoreMark runs one vCPU: 13 cache lines of
+state; the rest of the struct is host bookkeeping.
+
+Loop split (`BIFROST_PC_HIST=1`; that run overlapped another job, so its rate is invalid but its CPU-time shares are not): 38.6% of samples in
+single-block loops already pinned, 11.3% in loops of several blocks, 50.1% elsewhere. More loop residency reaches 11%; the other half is the
+block-edge traffic register passing does not remove.
+
+Not checked: a game, threads, other hosts, the persistent cache. Sampling puts ±1 to 2 points on the smaller buckets, and the `perf` figures are
+one run each. `-v` adds about 15%, so its rate (8,524) is not one.
+
+## Carry: flag stores at exits, covered guards across exits, the hot side of an exit (2026-11-24)
+
+Three changes to Carry's mid-block exits (design in `Docs/JIT.md`, "Following the hot side of an exit"), asked for after a profile of CoreMark under
+`BIFROST_CARRY=1` put guest state moves at 40.6% of body time, memory with guards at 17.2%, flag setting at 10.8% and the entry code at 4.3%.
+
+CoreMark, 20,000 iterations, one pinned core, host instructions (deterministic to four digits), `BIFROST_CARRY=1`:
+
+- Skipping the NZCV commit at `cbz`/`tbz` exits when the exit and the code after the branch both overwrite the flags first (the `BRCOND` path did;
+  the mid-block forms always committed) and at `b.cond` exit tails when their own target does: 17.585 G to 17.453 G (-0.75%).
+- The guard-cover scan stepping over mid-block exits: 17.453 G to 17.442 G (-0.06%).
+- Following the hot side: 17.442 G to 17.415 G (-0.15%) on CoreMark, and -21.9% (232.5 M to 181.7 M) with identical results on a loop whose forward
+  `cbnz` is always taken, 0.0% when it never is. 33 branches are flipped on CoreMark.
+
+Why following gains so little on CoreMark is not established. A counting build (temporary, not kept) said exits are taken in 35.5% of their evaluations there,
+and 75% of the taken ones sit on exits taken more than half the time (the ART bootstrap: 21.3% and 85%), which is room for a few percent. Nearly every
+block with exits has a flip candidate (333 blocks profiled, against 320 blocks with exits in the counting build) and 33 branches flipped, so it is not that
+the candidates are missing. Untested guesses: the flipped branches' targets are often the heads of pinned loops or joins that still end in an exit of
+their own, and a retranslated block disturbs the register-passing layouts around it (below).
+
+Things that went wrong on the way, each of which would have been invisible in a benchmark that only counted instructions:
+
+- Retiring a block erases `back_refs_[pc]`, so after its retranslation no predecessor was chained into it again and every edge went through the
+  dispatcher (CoreMark at a third of its speed, 30% of samples in the dispatcher). The trip keeps the list across the retire.
+- The same retranslation, with no flip at all, cost 1.1% more host instructions: translated later, a block stops at the blocks that exist by then
+  (formation splits at known entries), so it comes out shorter than the first translation. A block translated again after its profile now goes on through
+  known blocks (`merge_known`); with that the profile alone is 0.2% better than without, and the flips on top of it are the figure above.
+- Register passing's layouts depend on the order blocks are translated in; a retranslated block leaves a predecessor's layout stale, so more edges
+  enter the plain entry. It eats into the 0.15% and is not solved.
+- The new fixture failed one run in two with Carry off as well: its four threads refilled one static pattern array. It is a per-thread array now.
+
+- A flipped block that reached the two-call limit returned to the address of its own last call: the loop left before `cur_pc` moved past the call,
+  and a non-contiguous block takes its next pc from `cur_pc`, so the call ran twice. It showed only in the ordinary frame layout (chain-skip
+  frames do not run calls inline), and in `jit_side_exit` only with threads (probably because which blocks have flipped by then depends on the threads; not
+  checked). Found by forcing every flip on the first translation (temporary switch, not kept), bisecting by flip count (the 29th flip
+  broke a single-threaded program that walks `__init_array`), and reading the block's code: its end set `pc = 0x4004f0`, the `blr`, where
+  `0x4004f4` belonged. `jit_carry_follow` has a loop with a call before the branch and one at its target; without the fix its `bias_calls` checks fail for patterns 0, 2, 3 and 4.
+
+Profile cost: a 1,024-entry window of `movabs; sub; jle` at the entry of a block that has Carry exits, a 64-byte profile for each such block, and one
+more translation for each that reaches the window (82 blocks of 322 on CoreMark; 88 trips and 33 flips in the final CoreMark run). The Android runtime's
+start-up (`test_android_jni.py`, JIT compile line, three runs each): 62.5k blocks and 11.8k recompiles in 609 to 624 ms with `BIFROST_NO_CARRY_FOLLOW=1`, 65.3k and
+14.1k in 680 to 687 ms with it on (about +11%, 24.3k blocks profiled, 2,470 trips, 920 flips); with Carry off, 92.4k blocks in 512 ms. CoreMark, five alternating
+pairs: 17.442 G to 17.415 G host instructions, cycles 4.723 G to 4.611 G on average (noisy: the best of five was 4.542 G and 4.503 G). Not measured: a game.
+
+Checked: `jit_carry_follow` (new: three branch kinds, a flag shape and a call shape over patterns that flip a branch and flip it back, on one thread and four) and
+`jit_side_exit` (new `flag_live`, `flag_dead`, `cover_exit`) pass with and without the feature; the 58 tests of `run_tests.sh --filter 'jit|reg_pass|carry_follow|side_exit' --strict --quick`
+pass with and without `BIFROST_CARRY=1`, and `verify_jit.sh` (112 differential fixtures, 15 threaded oracle runs) passes both ways. The toybox, real-world
+and dynamic-link tests pass with Carry on (88 of 89 in the default frame layout; the failure is `test_dyn_thunk_stub`, which needs GL, in the headless side
+build). In the ordinary frame layout `test_dyn_system` fails with Carry off as well, and on the root build; not investigated. The compare-and-trap build ran the
+JIT tests, toybox, real-world and integration tests before the hot-side change, not after it.
+
+## Register passing: partial entries and pass-through (2026-11-24)
+
+The two things the first register-passing write-up (below) left undone: an edge that covers only some of a successor's entry registers, and a
+register that neither block of an edge touches. Both are in; partial entries are on, pass-through is opt-in (`BIFROST_REG_PASS_THROUGH=1`) because it
+measured as a loss.
+
+Partial entries: the successor emits, at compile time, one stub for each different set of entry registers its translated predecessors lack (at most four).
+A stub loads those from `cpu.regs[]` and jumps into the register entry; an edge takes the stub that loads the fewest registers and covers what it lacks.
+Stubs at compile time, not at patch time, so no patch site (single-thread slots, MT cells, the dispatcher's back-reference patch) has to append to the
+code buffer under whichever lock it holds. On CoreMark 12 to 21 edges use one (of about 430), so the instruction count does not move: 17.5846 G with and without.
+
+Pass-through: up to two registers the block never touches are loaded at its entry and kept to the exit, taken first from what its translated successors
+read first and then from what its predecessors hold. CoreMark, 20,000 iterations, one pinned core, five alternating rounds of four variants, host
+instructions: registers only (the previous commit) 17.5846 G; with partial entries 17.5846 G; with pass-through 17.6611 G (+0.43%); the loose form
+(any register one predecessor holds) was 17.7637 G (+1.0%) and the successor-driven form alone +0.06%. Cycles best of five: off 4.698 G, registers
+only 4.479 G, partial 4.554 G, pass-through 4.533 G (the spread between runs of one variant is about 0.15 G, so only the instruction counts are
+trusted). A guess pays on every edge that lacks the register (a stub or plain entry loads something the block never reads) and widens the entry
+layout so later predecessors miss it; it wins only when a later block reads the register on every path.
+
+Why there is little left to win here: `BIFROST_PROF` on CoreMark puts the entry code at 2 to 6% of the JIT samples with register passing, against a body
+whose "guest state moves" are 46% of its time, and CoreMark's hot code is loops, whose pins preload once per loop entry and which register passing does
+not touch. The loads at block entry were never the largest part; the stores after each guest write are, and deferring them was tried (see the Carry
+formation entry) and lost.
+
+Other workloads, host instructions including start-up, `BIFROST_NO_REG_PASS=1` against the default: `bench_fib` -1.5%, `bench_sort` +0.1%, `bench_mips`
++0.05%, `bench_memcpy` +0.1%, `bench_matrix` +0.4%, and +0.9% to +1.7% for the 130 to 170 million instruction runs (`json_test`, `jpegdec_t`, `bst_test`,
+`hashtable_test`, `heap_stress`, `inflate_static`). Those are mostly translation: `jpegdec_t` compiles 247 blocks in 2.75 ms without register passing and
+3.1 to 3.3 ms with it (about 1.5 us more per block). Pass-through adds about 0.1% more on each.
+
+Checked with the compare-and-trap build (a layout entry against `cpu.regs[]` before every slot): the 57 JIT tests, `jit_reg_pass` (two new shapes: a register
+handed over three blocks that do not touch it, and a block whose predecessors hold different parts of its entry registers) and 143 toybox, real-world and
+integration tests, with and without `BIFROST_REG_PASS_THROUGH=1`. Not checked: a game, where pass-through might behave differently from the
+benchmarks above.
+
+## Register passing between chained blocks (2026-11-24)
+
+The piece the Carry formation write-up below left open: a successor that receives the registers its predecessor holds in host registers skips the
+loads of them (design and rules in `Docs/JIT.md`, "Register passing"). Behind `BIFROST_CARRY=1`; `BIFROST_NO_REG_PASS=1` turns it off.
+
+CoreMark, 20,000 iterations, one pinned core, five alternating pairs of the same binary with `BIFROST_CARRY=1` and with `BIFROST_CARRY=1
+BIFROST_NO_REG_PASS=1`: host instructions 17.777 G to 17.585 G (-1.08%, the same to five digits in every run); cycles 4.716 G to 4.486 G
+best of five (-4.9%), median 4.733 G to 4.528 G (-4.3%); iterations per second best of five 18,975 to 19,960 (+5.2%). CRCs unchanged. The cycles fall
+by more than the instructions because the removed loads sat after stores to the same slot (store forwarding on the dependency chain), and the kept
+values are register moves or nothing. Against Carry off, best of three alternating runs: 18.138 G to 17.585 G instructions (-3.05%), cycles 4.962 G to
+4.475 G (-9.8%), 17,544 to 19,157 iterations per second (+9.2%). With `-v` on 2,000 iterations 262 chain edges enter a register entry and 163 enter
+the plain entry of a block that has one. One benchmark; no game was run.
+
+How it got there, in the order the numbers moved:
+
+- First version, one canonical host register per guest register, a successor loading its first four reads, patching only on an exact match: 35 of
+  932 edges entered the register entry (-0.3% instructions). A histogram of the edges said why: across 887 edges the successors read 1,784 registers
+  first, the predecessor touched 742 of them (42%) and still held 312 (17%) at its exit. That 42% is the ceiling of this scheme, since it passes a
+  register only when the predecessor read or wrote it; a register neither block touches would have to be kept alive across both.
+- Copies in any `RP_HOSTS` register, an entry layout taken from the already translated predecessors (and result registers from the successors):
+  94 edges, -0.55%.
+- Entry set limited to registers the predecessors hold, so a register no predecessor holds loads lazily as before instead of making every
+  edge from them miss: 62% of edges, -1.08%. Before that, CoreMark hung at 100 iterations. Bisecting by the number of register-passing compiles
+  (the 254th block) and reading its code showed a taken edge that claimed `x0` in R12 although the block had just overwritten `x0`: the layout of the
+  last deferred mid-block exit, emitted after the block, overwrote the member the block's own taken slot was read from at publication
+  (`flush_deferred_side_exits` now restores it). A temporary build that compares every layout entry with `cpu.regs[]` before each slot
+  (`cmp reg, [rbx+disp]; je; ud2`, not kept) is what makes this class of bug visible without a hang; it ran clean afterwards.
+- Tried and dropped: six entry registers and a wider scan (CSEL family and CCMP admitted): 17.585 G instructions, the same as four.
+
+Checked: `Scripts/Testing/verify_jit.sh` (112 differential fixtures, 14 threaded oracle runs, `jit_reg_pass` among them) passes with and without `BIFROST_CARRY=1` (differential replay itself runs without the feature); `jit_reg_pass` (new) and the 57 JIT tests of `run_tests.sh --filter 'jit|reg_pass' --strict --quick` pass with `BIFROST_CARRY=1`, and with the
+compare-and-trap build; with that build the toybox, real-world and integration tests pass (143) apart from the four SDL/GL tests that also fail on a
+headless baseline build, and the ART bootstrap (`test_android_jni.py`) creates its VM. Not checked: a game, the persistent cache with the feature on
+(blocks with a register entry are not recorded), other hosts. Per block: `BlockEntry` keeps its size (144 bytes); a `RegPass` side-table entry is 32 bytes
+for each block that has a register entry or a layout. Not done here (see [the follow-up](#register-passing-partial-entries-and-pass-through-2026-11-24)):
+partial coverage and passing a register across a block that does not touch it. Still not done: loops (their pins preload at entry).
+
+## Carry formation behind BIFROST_CARRY, and what did not help (2026-11-24)
+
+With every conditional kind a mid-block exit, `translate_block` can go on past a forward conditional branch (design in `Docs/JIT.md`, "Carry
+formation"). CoreMark, 40,000 iterations, one pinned core, five alternating runs of the same binary with and without `BIFROST_CARRY=1`, loops with exits
+already on: host instructions 36.555 G to 35.828 G (-2.0%); cycles best-of-five 9.841 G to 9.402 G (-4.5%); iterations per second best-of-five 18,265
+to 19,130 (+4.7%). The validated 200,000-iteration run keeps all CRCs. With `-v` it forms 320 blocks with exits on CoreMark (28 without).
+
+SpongeBob, 100 s from launch through loading into the lobby, one run each with `BIFROST_PROF=1 BIFROST_STATS_PERIOD=40`: no crash either way; total
+process CPU 103.3 s with Carry and 115.3 s without; JIT samples 66.1% against 70.5%; 294,000 of 1.23 million blocks formed with exits; code cache
+339 MB against 345 MB; guest instructions per block 8.7 against 5.3. One pair, loading work differs between runs, and the cold share of JIT samples
+rose from 0.3% to 2.9%, which is the exit tails running: the fall-through is often not the hot side. Not repeated; the maintainer judged more
+pairs not worth it.
+
+Changes while tuning it: an exit tail now stores only registers that are dirty or pinned (a clean mapped register already matches `cpu.regs[]`; a loop
+pin is clean in the allocator and ahead of memory); the formation is off while the persistent cache records (a Carry block is unrecordable and
+`jit_disk_cache` failed with Carry on until then). A constant stored by the next `STORE_REG` is a `mov qword [slot], imm32` (`fold_ahead_kind_` 4):
+-0.93% host instructions without Carry (36.555 G to 36.215 G) and -0.95% with it (35.829 G to 35.489 G), deterministic.
+
+Tried and dropped: deferring the register writes of a non-loop block with exits (`keep_store_dest_`) changed nothing at first, because the deferral only
+targets registers other than RAX, RCX, RDX and R8 and most values land there; allowing those registers made it worse (35.907 G against 35.829 G
+instructions, best cycles 9.50 G against 9.36 G), since each clobber then spills the deferred value. Reverted.
+
+Also tried and reverted: pinning guest registers in R12-R15 for a Carry block that is not a loop (the existing loop-pin selection with any register touched
+at least N times, writes deferred, exits storing the dirty pins, every pin preloaded at entry). Carry on CoreMark, host instructions: 35.489 G without
+these pins, 35.532 G with N = 4, 36.021 G with N = 3, 36.859 G with N = 2. The preload at every entry and the stores at exits cost more than the
+eager stores they replace; the optimizer's forwarding has already removed most reads, so a register shows only two or three touches in a block.
+
+What the remaining guest-register traffic could still give, from the CoreMark block trace (Lean blocks, same method as the ceiling above): 53% of the
+register moves are loads at block entry, and a successor that received the registers its predecessor holds in host registers would skip 56% of those
+loads, 30% of all moves, which is at most about 9% of host instructions before Carry merges some of those edges. It needs a second entry per block that
+expects a register layout, a predecessor compiled knowing the successor's layout, and a patch-time check that the layouts still agree (the
+predecessor still stores what it wrote, so the successor's registers are clean mirrors and recovery stays as it is). Built the same day: [register passing](#register-passing-between-chained-blocks-2026-11-24).
+
+The generated code of a Carry block still shows, on CoreMark's state machine (`core_state_transition`): a store of each guest register at every
+definition (the dead-store pass clears at each branch and memory op), the flag pack at both exits, one `lea` per guarded access with an offset, and a
+`jmp` hop on the fall-through exit of the block's own final branch.
+
+## Loops with CBZ/CBNZ exits become one block (2026-11-24)
+
+First piece of the Carry plan that changes code: the primitive every merge needs, a conditional exit out of the middle of a block (design in
+`Docs/JIT.md`, "Loops with CBZ/CBNZ exits"). CoreMark's list loop (`0x400f58`: `ldr x2,[x2]; cbz x2,exit; ldr x3,[x2,#8]; ldrsh w5,[x3,#2];
+cmp w5,w28; b.ne 400f58`) used to be two blocks, so its pointer and key were stored and reloaded each iteration; it is now one block with `x2` and
+`x28` in R12 and R13. A first version skipped `optimize_ir` for such blocks (it assumes a branch ends the block) and came out 1.8% worse in
+instructions, because every `STORE_REG` was followed by a reload of the same register; the optimizer's dead-store pass already clears its pending
+stores at a branch and its forwarding keeps its cache across one, so it now runs. Another slip along the way: `compile_ir_branch` did not route the
+marked op to the new compile function at first, so the block ended at the first exit with the normal fall-through chain, which was still correct
+and is why CoreMark validated; the dump of the generated code (a block that stopped after the first test) is what showed it.
+
+CoreMark, 40,000 iterations, one pinned core, five alternating runs with `BIFROST_NO_SIDE_EXIT=1` and without: host instructions 37.368 G to
+36.695 G (-1.8%); cycles best-of-five 10.679 G to 10.379 G (-2.8%), but the machine was busy and the cycle counts swing by 10% between runs, so
+only the instruction count is trusted. The full 200,000-iteration run validates all CRCs. Not measured in a game. The two stores of `x3` and `x5`
+per iteration remain: they are live-out as far as the block knows.
+
+Checked: `jit_side_exit` (the fixture and its script, six loop shapes against C, a fault inside a loop, five threads, in the default mode, with
+exits off, `BIFROST_NO_CHAIN=1`, `BIFROST_NO_CHAIN_SKIP=1` and `BIFROST_IR_VALIDATE=1`), `make verify` and the strict quick suite (results in the
+commit). Only CBZ/CBNZ exits were handled in this first step; `tbz`, `tbnz` and `b.cond` exits followed the same day (below). A loop with an inner branch that stays inside it, a `b.cond` after an `FP_CMP`, and exits through calls are not handled.
+
+`b.cond` and `tbz`/`tbnz` exits (same day): `compile_bit_side_exit` is the `bt` of `BRCOND_BIT` with the block going on; `compile_cond_side_exit` repeats
+`BRCOND`'s choice (a single-flag test of `cpu.nzcv_host`, or host flags loaded from pstate, with `resolve_arm_cond_with_carry`'s CF inversion undone
+right after the `jcc`) and records `flags_in_host_`, `flags_from_sub_`, `flags_match_pstate_` and the inversion at the branch, so the tail can commit NZCV
+(`materialize_flags_to_pstate`, which clobbers RAX, after the register stores) and unmap RAX before the chain slot. The fixture gained one loop for each of
+the 14 ARM conditions, each run on ten edge values (zero, one, `INT64_MIN`, `INT64_MAX`, all ones) against a C model of the flags of `cmp`, and `tbz`/`tbnz`
+loops on bits 0 and 63; 55 blocks form with exits on, 0 with `BIFROST_NO_SIDE_EXIT=1`. `make verify` passes (112 fixtures, 13 threaded runs). The strict
+quick suite passed 413 of 415 on the final run: `test_fork_lock_contention` (the known flake) and `xwayland_wire`, which opens a window on the real X
+display. `xwayland_wire` failed the same way on every build tried afterwards, including the 09:35 binary that had passed it in the earlier suite run
+(guest SIGSEGV with a core dump on older builds, a hang on this one), so the cause is the desktop session, not the JIT; it was not traced further.
+
+## Window register loaded once per chain (2026-11-24)
+
+Found by reading the generated code of CoreMark's list loop (`BIFROST_JIT_DUMP=1`, bytes through `objdump -D -b binary -mi386:x86-64`): every block
+that touches memory began its chained entry with `movabs r10, <window>`, a 10-byte instruction, because a chain into a memory block from a block
+that never loaded R10 could carry a stale value. The cold prologue now always loads R10 (before the chain entry) and the per-block load is gone, so
+the rule is that R10 stays the window base along a whole chain; the call sites already pushed and popped it around helpers.
+
+Verification used a temporary build that compares R10 with the window base at every chain entry and traps (`ud2`) on a mismatch, run over the strict
+quick suite: it caught `emit_native_libc_entry`, which called `jit_native_libc` without saving R10 (the old per-block load had hidden it). With
+that fixed, `native_libc`, `native_libc_mt`, `jit_native_libc` and `jit_native_libc_glibc` pass under the checking build. The check was removed from
+the source afterwards. Two other failures under that build were artifacts of the copied binary: `fork_stuck_report` counts host stack lines named
+`bifrost-emu(`, and `jit_disk_cache` also differs under the checking build; both pass on the installed build and on the final binary.
+The full strict quick suite on the final binary passed everything except `test_fork_lock_contention` (the fork quiesce flake recorded in the
+Tier-2 removal entry, which fails on the older build too).
+
+CoreMark, 40,000 iterations, pinned to one core, five alternating runs of the installed build and this one: host instructions 38.44 G to 37.37 G
+(-2.8%), cycles best-of-five 10.59 G to 10.34 G (-2.4%), iterations per second best-of-five 16,828 to 17,219 (+2.3%). One benchmark; no game was
+timed. The rest of the code on that path, read the same way and not changed: the flag pack (`lahf; seto; mov`, needed for a precise fault in
+the successor), the effective-address `lea` before each guarded access with an offset, and the `jmp` the fall-through exit of a conditional
+branch takes to the shared epilogue.
+
+## SpongeBob host profile with perf: dispatch and translation after loading (2026-11-24)
+
+`perf record -F 997 -p <app pid>` for 45 s starting 33 s after launch (the game was loading into the lobby by itself; nobody interacted; the repo build,
+`asgard --emu`), 56,345 samples, one run. By library: generated code 82.4%, the emulator binary 7.0%, the GPU driver (`libgallium`) 5.5%, kernel and
+unresolved 2.5%, libc 1.4%, libm 0.7%. The named emulator symbols are small: `FrostJIT::run_block` 1.16%, `native_structure` 0.33%, `translate_block`
+0.32%, `optimize_ir` 0.17%, `bind_ibl` 0.11%, `try_chain_block` 0.09%; the dispatcher and translator together come to about 3% of the samples. The
+12.2% dispatch and 7.0% translate in the `BIFROST_PROF` exit report of the same game cover the whole run, so they belong to the first half minute of
+loading (about a million blocks translated), which the persistent JIT cache is for, not to steady state. No cheap win is left in dispatch or
+translation once the game is past loading; the time is in generated code, where entry plus exit are about 22% of the JIT samples and guest state moves
+39.5% of the body (previous section).
+
+## Carry loop report on a game, and chain-edge carrying (2026-11-24)
+
+`BIFROST_PROF=1 BIFROST_PC_HIST=1 asgard --emu <repo build> start com.tiltingpoint.spongebob`, 100 s through loading into the lobby, which the game reaches by itself (the maintainer
+skipped some dialogue; no level was played, so not gameplay), one run: JIT 68.8% of samples, dispatch 12.2%, translate 7.0%; body state moves 39.5% of the body (entry 11.0%,
+exit 11.0% of JIT samples). The loop report: **the 200 hottest blocks cover only 27.4% of the JIT samples**; of that, loops of several blocks hold
+1.4%, single-block loops 4.6% and everything else in the top 200 (calls, returns, straight-line code) 21.5%. The other 72.6% is in blocks outside the
+top 200. The three multi-block loops found hold 0.5%, 0.4% and 0.4%. So at start-up the time is spread thinly over a very large number of blocks,
+and a Carry that promotes hot loop regions would reach about 1% of it. A cooking level may look different (Unity update loops, the renderer); it was not
+measured.
+
+What the flat profile does suggest is carrying registers across chain edges everywhere, not only in loops. A simulation on the CoreMark trace used for
+the ceiling above (same method and limits): merge a block into its predecessor when it has exactly one observed predecessor, so the pair is one
+unit that loads each live-in once and stores each written register once. Moves removed: 15% with at most 2 blocks per unit, 26% with 4, 30% with 8,
+31% with 16 (986 of 1,156 blocks have a single observed predecessor; units average 2.2 blocks). That needs no profile, so it works on a flat
+profile, but it is far below the 63-84% an oracle gets by pinning the busiest registers of a loop, and it ignores the stores that side exits still
+need. Both numbers are CoreMark-only upper bounds.
+
+Two checks on that simulation, same trace. It built each unit from the path that actually ran, which is perfect branch prediction. With a fixed plan
+instead (follow each block's most frequent successor, only when that successor has no other predecessor; the plan is right 92% of the time and covers
+775 of 1,155 blocks) the numbers hold: -15% (2 blocks), -25% (4), -28% (8). But the plan needs to know the likely successor, and a game's branches may
+be less biased than CoreMark's. And 87% of CoreMark's block entries end in a conditional branch, 5% in an unconditional `b`, 3% in `ret`, 3% in `bl`:
+following only unconditional jumps reaches about 5% of the edges, so a merge has to continue past conditional branches, and those need a side exit.
+Lean's `BlockEntry` has exactly two chain slots (`chain_patch_off`, `taken_chain_patch_off`) and the chaining, unpatching, MT cell, persistent-cache,
+replay and invalidation code all assume at most two static exits per block, so a block with a mid-block side exit means generalizing all of them first.
+
+What a merge that needs no profile would reach: continue a block past a forward conditional branch along its fall-through (contiguous code, so
+`code_words_` stays simple; the taken side becomes a deferred exit). On the same trace the block entries split as: forward branch falling through
+33.1%, backward branch taken 29.3% (loop edges), forward branch taken 13.8%, backward branch falling through 11.2%, unconditional `b` 5.0%, `ret` 3.0%,
+`bl` 2.9%. The policy merges 23% of entries with 2-block units and removes 6.9% of the register moves (9.8% with 4 blocks, 11.2% with 8), about 2-3% of
+host instructions at 3.5 per guest instruction. The profile-guided plan above reaches 25-28% because it also follows loop and taken edges. So the
+side-exit machinery (a new mid-block branch form, deferred exit tails with state capture, stub bookkeeping for the chain slots, and replay disabled for
+such blocks) would buy a few percent on CoreMark; it was not built.
+
+
+## Carry loop report: first numbers (2026-11-24)
+
+The report (`Carry/LoopReport.cpp`, printed with `BIFROST_PROF=1 BIFROST_PC_HIST=1`) on CoreMark at 100,000 iterations (one run,
+`Tests/Unit/coremark.elf`): 112 hot blocks cover all the JIT samples; 41.0% of them sit in cycles of several blocks, 16.9% in single-block loops (Lean
+already pins their registers) and 42.2% elsewhere (calls, returns and straight-line code, which have no static cycle). The ten hottest multi-block loops
+are 2 to 5 blocks and 6 to 34 guest instructions; four of them touch 2 to 4 registers, the biggest touch 9 to 13, so a cap of
+eight carried registers does not hold the largest loops whole. The loop of five blocks (head 0x401f84, 9.9% of the samples) moves 36 registers per pass
+now and uses 13 distinct ones.
+
+What this does not say: the "elsewhere" 42% includes loops that run through a call or a return, which the static successors miss; one benchmark, not a
+game; blocks are counted once per pass, not weighted by which arm of a branch runs; the register counts come from the IR after optimization (loads
+and stores of guest registers, not host moves). A game run with the same switches is the next measurement (the maintainer plays it; nothing here
+launches one).
+
+## SpongeBob profile with the stats counters off (2026-11-24)
+
+`BIFROST_PROF=1 asgard start com.tiltingpoint.spongebob`, the installed build, stopped with `asgard stop` after about 83 s (exit 143); the
+maintainer played it, and I did not check which screen it ended on (the log shows loading and ad-SDK start-up, with futex stalls of up to
+16 s on `HeapTaskDaemon`, so treat it as start-up, not steady gameplay). One run; the sampler counts CPU time at 100 Hz and lost 69 samples.
+
+| Where | Share |
+|---|---|
+| Samples | JIT 69.4%, dispatch 12.2%, translate 7.2%, interpreter 2.3%, other 8.9% |
+| JIT samples | entry 10.6%, body 75.7%, exit 11.5%, cold 0.2%, shared stubs 2.1% |
+| Body by operation | guest state moves 40.9%, memory with guards 21.9%, integer ALU 14.4%, branches 14.1%, FP and SIMD 6.0%, flags 2.7% |
+| Code with spills or reloads | 11.7% of body |
+
+Against the first run the same day, which also set `BIFROST_STATS_PERIOD=30`: entry was 24.6% there and 10.6% here. That switch adds two
+read-modify-write instructions to every block entry, so the earlier entry and exit figures were inflated and are not used.
+
+In shares of all samples: body state moves 0.694 x 0.757 x 0.409 = 21.5%; entry plus exit 0.694 x 0.221 = 15.3%; memory with guards
+(the access itself included, not only the bounds compare) 11.5%. If all of entry and exit is register traffic, which was not separated,
+guest register moves are about 37% of the samples. The carry ceiling above (63-84% of moves on CoreMark) would then bound a gain near
+23-31% of CPU time, optimistic for the reasons listed there; this run does not say how much is reachable.
+
+## Carry ceiling: guest register moves in CoreMark (2026-11-24)
+
+Question: how much of the register traffic at block edges could a second JIT that keeps registers across blocks remove? Method, a simulation
+and not emitted code: `BIFROST_BLOCK_TRACE=0-0xffffffffffffffff` on `Tests/Unit/coremark.elf` (30 iterations; arguments `0x0 0x0 0x66 30`)
+logs every cold and chained block entry (self-loop iterations are not logged, and those loops are already pinned). Each logged pc was
+turned into a block from `aarch64-linux-gnu-objdump -d` (it ends at the first branch, call, return or `svc`, at most 32 instructions), with
+guest registers read and written taken from a mnemonic table. Cost per block entry: one load for each register read before it is written, one
+store for each register written (what Lean does at exit). Carry was modelled by choosing, for each window of consecutive block entries, the
+K busiest registers (with foresight) and charging them one load and one store per window. The throwaway script is not in the repository.
+
+Result: 1,451,564 block entries, 6,133,370 guest instructions, 1,156 distinct blocks; 5,679,769 moves, 0.93 per guest instruction and 3.91 per
+block entry. Moves removed:
+
+| Window (blocks) | K=4 | K=6 | K=8 |
+|---|---|---|---|
+| 32 | 63% | 71% | 76% |
+| 128 | 66% | 77% | 83% |
+| 512 | 66% | 77% | 84% |
+| 2048 | 64% | 75% | 82% |
+
+The busiest registers by share of all moves: x2 27%, x3 13%, x0 10%, x4 8%, x5 6%, x1 5%. If a move is one host instruction and CoreMark runs
+about 3.5 host instructions per guest instruction (an earlier profile in this file, an older build, not re-measured), moves are about a quarter of host instructions
+and the table is worth up to about 17-20% of them.
+
+Limits: one workload with a small hot set (1,156 blocks), where a game has far more; foresight in choosing the registers; the register
+sets come from a mnemonic table (atomics and SIMD-to-GPR moves are rough); Lean's forwarding inside a block is not modelled beyond "one load
+per live-in"; flags, PC stores and FP/vector state are not counted; calls, helpers, fault stubs and the spills caused by reserving K host
+registers are not charged beyond two moves per pinned register per window; nothing was checked against emitted host code. Read it as an upper
+bound for CoreMark, probably optimistic for games.
+
+## Tier-2 regions removed (2026-11-24)
+
+The maintainer decided to remove Tier-2: it was written before the JIT had MT chaining, it was not designed for MT, and it was not cheap
+to profile. The guide's Tier-2 sections (loop discovery, trials, phase feedback, region publication, calls and returns) are in git
+history before this change; the dated write-ups below ("Tier-2 exits that chain", "Tier-2 through calls and returns", "Tier-2 without
+a Tier-1 tax") stay as the record of what it did.
+
+What the numbers said at the end (all from earlier sections, not re-measured): CoreMark +4.7% at 200,000 iterations and +2.1% at 40,000
+over Tier-1 (2026-11-24 roadmap), a particle loop 7.7% fewer cycles, no game run with it on, and its instrumentation had cost CoreMark
+18-29% before a decided block was retranslated clean (about 3.4% after). In MT mode every candidate head carried a `lock xadd` counter.
+A 60 s SpongeBob loading run on 2026-11-24 had Tier-2 off (`tier2: hot_heads=0 regions=0`), so it is not in that profile.
+
+Removed: `Source/FrostJIT/Tier2/` (trace collector, planner, region compiler, promotion, trials, feedback, profiling), the hot-head counter
+at block entry, branch-profile counters, the work probe, `BlockEntry`'s Tier-2 fields and `is_region`, the CPU's trial and feedback
+slots, the stale-pc ring (`invalidate_dispatch_pcs`) that only Tier-2 redirects used, the `private_entry` and `force_fwd` parameters, the
+timed-sampling branch of the MT self-loop back edge, and the switches `BIFROST_TIER2`, `_HITS`, `_TRACE`, `_TRACE_VERBOSE`, `_GRAPH`,
+`BIFROST_T2_REGIONDUMP`, `BIFROST_JIT_SUPERBLOCK_LIMIT` and `BIFROST_NO_CALLREGION/DESTSRC/RDCE/LICM/KEEPRES/EXITCHAIN`. The `tier2:`,
+`tier2 lifetime`, `block-runs` and `Tier-2 measured payoff` stats lines and the `regions=` count of `MT publication` are gone. Tests
+removed: `jit_tier2_discovery`, `_feedback`, `_measure`, `_rate`, `_mutex`, `tier2_smov`, `tier2_calls`; the Android bionic and package
+tests lost their `tier2` mode. `jit_mt_tier2` became `jit_mt_loops` (no Tier-2 modes); `jit_mt_publication` lost its promotion and
+targeted-invalidation checks.
+
+Coverage that went with it: loop-carried SMOV through a region (`tier2_smov`), region calls and returns, and the region result oracles.
+Tier-1 self-loop pinning keeps `jit_selfloop_pins` and `jit_pin_inplace`. The multi-block SSA graph in `IR/SSA/` has no user now; it stays
+under `make test-ir-ssa`. Some inline-guard paths (`defer_guards_` false) were Tier-2's and may now be unreachable; they were not removed.
+
+Checked: full build with no warnings (root binary 5.88 to 5.73 MB), `make verify` (112 differential fixtures, 12 threaded oracle runs),
+`test_jit_mt.sh` (default, no-chain, no-chain-skip), `test_jit_mt_publication.sh` and the suite's JIT, fork, memory and SIMD tests (all passed
+except `test_fork_lock_contention`). That test also fails on the installed pre-removal build: 6 of 7 runs on the new build and 5 of 6 on the old
+one, each with `fork N: child did not exit within 8 s`, most after `[fork] could not quiesce all locks within 3 s; forking without them`
+(`Threads.cpp`). The fork loop try-locks every lock and gives up after 3 s against seven hammering threads, and the child then inherits locked
+state; it is independent of Tier-2 (no trial locks exist with Tier-2 off) and not fixed here. Not run: games, the window tests, the interpreter
+(`--no-jit`) category of the suite.
+
+## Hotspots from IBS and the allocation profile: tag untag and scalar FMAX/FMIN zeros (2026-11-24)
+
+Method: one run of the headless ART bootstrap (the translation yardstick's root, `BIFROST_NO_ASLR=1`, pinned to one core) under
+`perf record -e 'ibs_op/cnt_ctl=1,swfilt=1/u' -c 50021` with `BIFROST_REGALLOC_PROFILE` set. The profile's rows give the host byte range of
+every emitted IR op (`host_begin`, `host_end`, `ir_op`), so each sampled ip attributes to an IR op kind without disassembly, and
+`BIFROST_JIT_DUMP=1` plus `objdump` in the same run gives the instruction under each ip. IBS counts dispatched ops, so the counts are
+valid on a loaded machine (a game was running). Only 17% of the samples were in generated code (the rest is translation); the
+generated-code samples were 43% `LOAD_MEM`/`STORE_MEM`, and `shl r,8` plus `shr r,8` were 13.6% of all of them.
+
+**Tag untag in one instruction.** Android data accesses untag their address (`Memory::data_address`) with `shl 8; shr 8`, after a `lea`
+or copy: six host instructions per access. The Tier-1 scalar and 16-byte guards now clear the tag with `and reg, [window_base - 16]`
+against a mask word in the header page (`Memory::JIT_UNTAG_MASK_OFF`, next to the software-check flag, so it is a 4-byte instruction;
+the two bound tables moved down by 8), and an access with no offset copies with `mov` instead of `lea`. Elsewhere (helpers whose limit is
+an immediate, where `WIN_REG` may not be loaded) the shift pair stays. Same workload, same sampling, base against new: generated-code
+samples 37,683 to 35,741 (-5.2%); `LOAD_MEM` 10,022 to 8,442 (-15.8%), `STORE_MEM` 4,119 to 3,538 (-14.1%), bytes per row 30.2 to 26.2 and
+29.5 to 25.5; `STORE_REG` and `LOAD_REG` moved by 1.5% (noise). Cycles were not compared.
+
+**Scalar FMAX/FMIN with a zero result stay native.** The vector forms had been fixed for this on 2026-10-16 (see below); the scalar
+emitter still sent every zero result to the interpreter step (`xorps; ucomis; je`), so `fmax(x, 0)` stepped the interpreter for every
+negative `x`. It now runs the operation in both operand orders and ANDs (max) or ORs (min) the results: six instructions in either
+version, no zero case, NaN inputs still take the cold step. A throwaway loop (`fmax s, x, 0` then `fmin s, y, 5`, half the inputs
+negative, 5.12 million iterations, base against new): 864 to 44 host instructions and 254 to 11.2 cycles per iteration; the result equals
+QEMU's. Not measured in a game; the 2026-10-16 SpongeBob profile that found the vector case listed scalar FMAX/FMIN as the same
+pattern.
+
+Checked: `jit_fp_scalar_fminmax` (new: every pair of 12 special values, S and D, all four operations, upper bits of the result; passes
+on the interpreter, QEMU and the old JIT before the change; a mutant that ORs for max fails it), `android_loader_host`'s tagged-access
+check (tags 0, 2, 0xb4 and 0xff against the interpreter, with no interpreter steps; a mutant that clears bit 20 of the mask word fails it),
+`verify_jit.sh` (114 differential fixtures, 12 threaded oracle runs) and the unit, Toybox and real-world sets except the window-opening
+stats test: 286 of 287 pass. The failure, `test_fork_lock_contention`, is load-sensitive and fails on the old build too (alone, base 5 of 5
+passes and new 7 of 8 pass, the one failure while the machine was compiling). Not tested: a game with these changes, Tier-2 with tagged
+pointers beyond that check, a disk cache written by an older build (the cache key includes the build id, so none is reused).
+
+**A live game, before these two changes.** SpongeBob (installed build) under IBS for 60 s on all its threads (`perf record -p`, with
+`ptrace_scope` 0 so the code bytes under each sampled ip could be read from `/proc/PID/mem` and classified by instruction shape):
+84.1% of the samples were generated code, 7.6% the Mesa driver and 6.4% the emulator's C++. Of the generated-code ops: `shl`+`shr` (the
+untag above) 11.9%, guest state loads 11.7% and stores 11.0%, bound compares `cmp r,[r10-N]` 9.8%, `lea` 7.0%, FP and SIMD 7.2%, flag pack
+2.8%. The hottest loops are byte-wise pixel and copy loops, and each iteration of an MT self-loop pays its back edge: the preemption poll
+(`movabs rax,&epoch; mov eax,[rax]; cmp eax,[rbx+seen]; jne`) is about 6.3% of all generated-code ops and the callback-sentinel check
+(`movabs rax,<pc>; cmp rax,[rbx+jit_stop_pc]; je`, three ops because an Android pc does not fit the imm32 form) about 4.7%. A chain exit
+(`movabs r11,<cell>; jmp [r11]`) is 4.4% on the jump alone. `BIFROST_PROF` on the same game: entry 11.8%, body 75.4%, exit 11.9% of JIT
+time; body by operation: state moves 37.8%, memory with guards 26.1%, branches 13.1%, integer ALU 11.1%, FP and SIMD 9.9%. Candidates not
+done: an epoch word reachable from a live register instead of a 64-bit constant; chain cells inside the code buffer's reach
+(`jmp [rip+disp32]`).
+
+**Tier-2 and the dispatcher (same day).** A controlled run of SpongeBob (same launch, same switches, 60 s from 40 s after launch)
+sampled 12.7% more with Tier-2 than without, while the generated code itself was only 1.5% more: the rest was the C++ dispatcher
+(`run_block` 0.70% to 2.81% of all samples, `bind_ibl` 0.15% to 1.71%, plus `flush_stat_tls` and `tier2_measure`). A throwaway census of
+dispatches (per thread, target pc, and which cache resolved it) showed 35 threads dispatching heavily instead of 5, the slow shared-table
+lookup resolving 39% of dispatches instead of 6.7%, and half of all dispatches landing right after a call. The cause is in the code: every
+decided trial ran `invalidate_dispatch_cache()` twice (the head redirect, then the settle's retirement), and that bumps one global
+generation, so each of the game's threads emptied its last-block cache and inline cache and refilled its whole IBL table at its next
+dispatch (an Android game has about 300 threads and 483 decided trials in 4.5 minutes). The old entries stay valid: a finished trial's
+wrapper forwards to the decision, and a settled block is replaced by a clean translation of the same code. MT Tier-2 head redirects, settles
+and region retirements now queue just the affected pcs in a ring (`invalidate_dispatch_pcs`, 1024 slots) that each thread applies at its next
+dispatch, and a thread more than a ring behind wipes its own caches; real invalidations (guest code or mappings changed) keep the full wipe,
+and so does ST. `jit_mt_publication` checks that a targeted invalidation leaves the generation alone, drops exactly the named pcs from another
+thread's inline cache and IBL, and that a lapped thread wipes; a mutant that skips the drop fails it. The existing Tier-2, MT and chain unit
+tests (27) and `verify_jit.sh` pass. Not measured: the game with the change (the run was cut short when its window closed), so it is not yet
+known how much of the +12.7% this removes. Trials still run the head through a C++ wrapper (`tier2_measure`) with the IBL unbound while they
+last, which this does not touch.
+
+**Back-edge sentinel compare, same day.** The self-loop back edge of published MT code compares the next pc with
+`cpu.jit_stop_pc` on every iteration. For a pc that fits imm32 that is one `cmp qword [rbx+off], imm32`; an Android pc does not, so it
+loaded the pc with a 10-byte `movabs` first. It now compares the sentinel's low 32 bits with `cmp dword [rbx+off], imm32`: an equal
+sentinel always matches, and a different one sharing those bits only leaves early, where the dispatcher compares the whole pc. A wide
+self-loop (head at 0x7360000000, `add; add; subs; b.ne`, 5000 iterations per run): 15.1 to 14.1 host instructions per iteration; cycles
+did not move measurably (the loop is bound by the poll's load chain). The compare then moved off the iteration altogether: the sentinel cannot change while the loop runs, so it is checked once per entry
+(`emit_selfloop_stop_entry_check`, before the body start the back edge jumps to). If it names the head, the entry sets
+`cpu.jit_epoch_seen` to the epoch plus 2^30, which the first back edge's poll cannot match, so the loop still runs one iteration and
+leaves through the same exit. The same wide loop: 15.2 host instructions per iteration with the `movabs` compare, 14.1 with the low-32
+compare, 12.2 hoisted (-20% against the first). Cycles were not a usable measure: the same code ran from 69 M to 110 M cycles
+across 20 alignments of the loop body (a throwaway pad switch, not committed), and most alignments gave 88-92 M against 87 M for the
+old code at its one alignment. A mutant that adds 0 instead of 2^30 fails `jit_mt_publication` (mode 2 loops all 5000 iterations).
+`verify_jit.sh` and 74 JIT, MT and Tier-2 unit tests pass. Not measured in a game.
+Dropping the compare was considered and rejected: tests set the
+sentinel to a loop's own head (`jit_mt_publication` mode 2 needs exactly one iteration) and this history says a host runner returning to
+real guest code must be able to set it to a real address, so the compare is part of the contract. `jit_mt_publication` now runs its
+self-loop checks at a low and at a wide head; a mutant that compares `target_pc + 1` fails the wide one. `verify_jit.sh` (114 fixtures, 12
+threaded oracle runs) and 122 of 123 JIT, MT and Tier-2 unit tests pass; the one failure is the load-sensitive `test_fork_lock_contention`.
+Not measured in a game.
+
 ## FP equality compare and branch on the raw ucomis flags (2026-11-23)
 
 The scalar `fcmp` + `BRCOND` fusion (the section two down) left EQ and NE on the old sequence: `ucomis` sets ZF for an unordered compare as
@@ -74,7 +738,7 @@ Unordered sets CF, ZF and PF, so GE, LT, GT, LE, VS and VC read them directly (`
 PL, CS and CC do after swapping the compare's operands (`jb`, `jae`, `ja`, `jbe`, `jbe`, `ja`); EQ and NE need ZF without PF, two jumps,
 so they keep the old sequence. An exit that must store NZCV converts the raw flags first (the old sequence, one `mov`/`cmovp` more in the
 swapped order, then the pack), so a live exit costs about what it did and a dead one nothing. Mechanism:
-[the guide](../JIT.md#scalar-fp-in-the-xmm-caches).
+[the guide](JIT-guide-2.0.0-beta.3.md#scalar-fp-in-the-xmm-caches).
 
 The first version regressed `cull` by 2.4% and `particles` by 0.9%: their exits are all live, because the dead-NZCV scan stopped at any
 scalar FP instruction other than `fcmp` and these blocks begin with `fmul`/`fmadd`, and the swapped conversion costs two more
@@ -106,7 +770,7 @@ multiplied, then loaded the accumulator into RDX and added it, which for `umull`
 
 Now the translator lowers the four instructions like `MADD`: `SEXT`/`ZEXT` 32 of both operands, a 64-bit `MUL`, then `ADD`/`SUB`
 against Xa (XZR reads as a constant 0 and folds). The emitter, the four IR ops and `emit_aux` are gone; `aux` stays, as the SIMD
-element and lane carrier. Mechanism: [the guide](../JIT.md#widening-multiply-accumulate).
+element and lane carrier. Mechanism: [the guide](JIT-guide-2.0.0-beta.3.md#widening-multiply-accumulate).
 
 Measured (host instructions per frame, the difference of two repetition counts, one pinned core, nine kernels reconstructed in one
 source; every checksum equal to the old build's): `collide` 204,949 to 176,287 (-14.0%), `skinning` 2,388,156 to 2,326,568 (-2.6%);
@@ -180,7 +844,7 @@ function in that C++ was `Emulator::exec_simd_imm` at 7.0% of all samples, with 
 entry points bringing the fallback total to about 11%. `BIFROST_CLASS_PROF` named the instruction: `sqrshrun v.8b, v.8h,
 #7` and its `2` form, about 20 million executions in the sampled windows (the pixel conversion of the game's CRI Mana video
 decoder). The translator sent the whole family to `CALL_INTERP`, with a comment that native lowering was "disabled until
-rounding overflow and FPSR.QC are implemented correctly". Mechanism: [the guide](../JIT.md#saturating-narrowing-shifts).
+rounding overflow and FPSR.QC are implemented correctly". Mechanism: [the guide](JIT-guide-2.0.0-beta.3.md#saturating-narrowing-shifts).
 
 Measured: a loop of `sqrshrun`, `sqrshrun2` and two `add`s (20,000,000 iterations, one pinned core, checksum and QC equal to QEMU's):
 4.22 s with the interpreter fallback, 0.09 s native, about 47 times faster on that loop. `jit_shrn_sat` runs 32,257 checks
@@ -1991,7 +2655,7 @@ are resolved with an equal-lane mask and AND/OR (see the native vector FP
 special cases below). The uncached path reloads the first input from
 `cpu.v`, which is current there. A loop of zero-heavy FMAX/FMIN/FMINNM
 clamps drops from about 302 ms to 5.4 ms with the same result as QEMU.
-Scalar FMAX/FMIN still take the cold step for zero results.
+Scalar FMAX/FMIN still took the cold step for zero results then; that was fixed on 2026-11-24 (see the first section).
 
 The same profile also lists UMIN/UMAX `.8h`, FCVTNU, four-register TBL,
 URSHR, FRECPS/FRECPE and plain stores (`stp q`, `stur x`) as interpreted.

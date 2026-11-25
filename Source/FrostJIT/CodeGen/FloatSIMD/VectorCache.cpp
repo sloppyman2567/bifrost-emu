@@ -4,7 +4,7 @@
 #include <vector>
 #include <stdexcept>
 //
-// XMM0-2 are instruction scratch. Tier-1 keeps a stable hot loop core
+// XMM0-2 are instruction scratch. Lean keeps a stable hot loop core
 // in XMM3-15 and allocates the remaining slots by next use under pressure.
 // Unsupported operations synchronize locally. Retained loop edges reconcile
 // demand values with the entry layout, including parallel-copy cycles.
@@ -59,7 +59,7 @@ static bool vec_cache_compatible_op(IROp op) {
     }
 }
 
-// Vector operands/effects used both by admission and Tier-1's allocator.
+// Vector operands/effects used both by admission and Lean's allocator.
 // Unknown operations are synchronization boundaries; no guessed effects.
 bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& writes) const {
     reads = writes = 0;
@@ -114,6 +114,14 @@ bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& 
             read(inst.src1); read(inst.src2); write(inst.dest); return true;
         case IROp::SIMD_FP_UNARY:
             read(inst.src1); write(inst.dest); return true;
+        case IROp::SIMD_XTN: {
+            const auto p = inst.xtn_params();
+            // The interpreter forms stay boundaries: they run with the cache off.
+            if (!simd_xtn_inline(p.subop, p.esize)) return false;
+            read(inst.src1);
+            if (p.q) read(inst.dest);  // XTN2 keeps the low half of Vd
+            write(inst.dest); return true;
+        }
         case IROp::SIMD_DUP:
         case IROp::SIMD_MOVI:
             write(inst.dest); return true;
@@ -216,8 +224,10 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
     if (no_vec_cache || !has_fma3()) return false;
     uint32_t used = 0, written = 0;
     unsigned uses[32] = {};
-    std::vector<uint32_t> operand_sets;
-    std::vector<VectorEffects> effects_by_op;
+    auto& operand_sets = vec_operand_sets_;
+    auto& effects_by_op = vec_effects_by_op_;
+    operand_sets.clear();
+    effects_by_op.clear();
     bool boundary = false, skip = false, has_vector = false;
     for (size_t i = 0; i < block.insts.size(); ++i) {
         const auto& inst = block.insts[i];

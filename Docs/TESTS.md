@@ -43,7 +43,7 @@ SQRSHRN, UQRSHRN, SQSHRUN and SQRSHRUN at every shift for 16-, 32- and 64-bit so
 `Vd == Vn`, runs each on lanes at the rounding, saturation and sign boundaries plus pseudo-random ones, and compares the
 result and FPSR.QC with an exact `__int128` model (32,257 checks); a last loop keeps the source in a vector register. The
 model and the encodings pass under QEMU, the interpreter and both JITs, and the fixture fails on a JIT without the QC update
-or without the rounding add. It does not run Tier-2 regions or a host without SSE4.1.
+or without the rounding add. It does not run a host without SSE4.1.
 
 ### In-place pin updates (2026-11-23)
 
@@ -52,7 +52,10 @@ shapes the optimisation takes: a counter in `x0` with a later reader of the new 
 add/sub/eor/mul, the old value read before the update, a `madd`, each checked against plain C for several trip counts, and a
 faulting load on either side of the update (the registers in the signal frame must show the update done or not). It passes
 under the interpreter and the JIT, with and without `BIFROST_NO_PIN_INPLACE`, and it fails (7 `madd_shape` checks) with the
-`ADD` guard in `Arithmetic.cpp` removed. It does not run Tier-2 regions, threads or a game.
+`ADD` guard in `Arithmetic.cpp` removed. Since 2026-11-25 it also covers pins read without a copy (an old value read after the register is
+rewritten, operands equal to the result, a shift count, `subs` into x0) and results written straight into a pin (every load width, a list walk
+`ldr x0, [x0]`, two written-first registers, each faulting at several iterations); it fails with the write check of `scan_pin_reads`, the shift
+count rule, the x0 rule or `finish_pin_dest` removed. It does not run threads or a game.
 
 ### Stall lines (2026-11-19)
 
@@ -86,6 +89,50 @@ program that forks 40 times with the profiler started (a smoke check: short-live
 It does not check the timeline. That was checked by hand with Tracy's `capture` and `csvexport` (built from the 0.15.0 release): zone and
 thread names, GL symbol zones, frames, and the fork program with a viewer connected.
 
+### Mid-block conditional exits (2026-11-24)
+
+`Tests/Unit/jit_side_exit.c` and `Scripts/Testing/test_jit_side_exit.sh` (`run_tests.sh` entry `jit_side_exit`, also a threaded oracle in
+`make verify`) run hand-written loops (a list walk, a byte scan with four carried registers, two exits in one loop, a loop faulting
+mid-iteration, one loop per ARM condition for `b.cond` on edge values, and `tbz`/`tbnz` on bits 0 and 63) against C, check that a fault shows the finished iterations' registers in the signal frame, and repeat the loops on five threads, with
+exits on and off, chaining off, the ordinary frame layout and IR validation. With exits on, `-v` must report at least forty blocks formed with a
+mid-block exit. `carried_flags` and `carried_flags_bit` read NZCV after an exit that comes before the loop's first flag setter (30 failures on the build before the fix of 2026-11-25). It does not cover a `b.cond` after an `FP_CMP`, loops with an inner branch, a game, or the persistent cache (such blocks are not recorded).
+
+### Several threads translating at once (2026-11-25)
+
+`Tests/Unit/jit_mt_compile.c` (`run_tests.sh` entry `jit_mt_compile`, also a threaded oracle in `make verify`) has eight threads run 1,200 generated
+functions each, once, and 400 shared ones. Every seventh function loads from and stores to an unmapped page, with the faults counted exactly; one thread
+keeps rewriting a function the others call, and one forks three times. A model in C gives every result. `jit_mt_compile.elf THREADS FUNCTIONS FORKS`
+sets the sizes. One run rarely shows a race: loop it, with a small `kCodeChunk` ([contract](../Source/FrostJIT/AGENTS.md)). It does not cover
+signals other than its own faults, code-cache renewal (`jit_generations`) or a game.
+
+### Carry follows the hot side of an exit (2026-11-24)
+
+`Tests/Unit/jit_carry_follow.c` and `Scripts/Testing/test_jit_carry_follow.sh` (`run_tests.sh` entry `jit_carry_follow`, also a threaded oracle in
+`make verify`) run loops with a forward `cbnz`, `tbnz` or `b.ne` whose direction comes from a pattern array (always taken, never, taken for bit 1
+only, alternating, mostly), in phases so a branch is flipped and flipped back, and a loop that reads a flag set before the branch on both sides of
+it, and a loop with a call before the branch and one at its target (the flipped block reaches the two-call limit at that call), against C, then repeat them on four threads (each with its own pattern array: a shared one made the fixture fail with Carry off). They run with
+`BIFROST_CARRY=1`, with `BIFROST_NO_CARRY_FOLLOW=1`, with Carry off, with chaining off, in the ordinary frame layout, with IR validation and with
+register passing off; with the feature on, `-v` must report at least one flipped branch. `jit_side_exit` gained `flag_live`, `flag_dead`,
+`flag_live_bit` and `cover_exit` for the exit flag store and the guard cover. They do not cover a game or the persistent cache (blocks with mid-block
+exits are not recorded).
+
+### Register passing (2026-11-24)
+
+`Tests/Unit/jit_reg_pass.c` and `Scripts/Testing/test_jit_reg_pass.sh` (`run_tests.sh` entry `jit_reg_pass`, also a threaded oracle in `make verify`) run
+hand-written block chains (unconditional branches, a diamond, registers moved between each other across edges, a call in the middle of a chain,
+a block reading registers three predecessors write, a register handed over blocks that do not touch it, a block whose predecessors hold different
+parts of its entry registers, and a loop faulting mid-iteration) against C, check that the signal frame shows the finished
+iterations' registers, and repeat them on four threads. They run with `BIFROST_CARRY=1`, with `BIFROST_NO_REG_PASS=1`, with `BIFROST_REG_PASS_THROUGH=1`, with `BIFROST_NO_REG_PASS_PARTIAL=1`, with Carry off, with
+chaining off, in the ordinary frame layout, with IR validation and with mid-block exits off; with the feature on, `-v` must report at least
+twenty chain edges into a register entry and at least one into a partial-entry stub. It does not cover the persistent cache (blocks with register entries are not recorded) or a game.
+
+### Carry loop report (2026-11-24)
+
+`Tests/Unit/carry_loop.c` and `Scripts/Testing/test_carry_report.sh` (`run_tests.sh` entry `carry_report`) run a hand-written four-block loop over five
+registers with `BIFROST_PROF=1 BIFROST_PC_HIST=1` and check that the first `[carry] loop` line has at least two blocks, at least 50% of the JIT
+samples and five to eight registers, and that nothing prints without `BIFROST_PC_HIST`. It fails on a build without the report. It does not
+check the exit counts, loops through calls or any real program.
+
 ### Guest instruction counts (2026-11-23)
 
 `Tests/Unit/jit_stats_count.c` and `Scripts/Testing/test_jit_instruction_count.sh` (`run_tests.sh` entry
@@ -94,7 +141,7 @@ and with `--no-jit`, the JIT sample report with the JIT), that nothing prints wi
 guest-instruction count for a self-loop-and-call workload matches the interpreter's count for the same program (it is
 exactly equal on this build; the check allows 2 %). It fails on the build before the fix (a report only under `-v`, and a
 count around a thousandth of the interpreter's). It does not check that `BIFROST_PROF` alone leaves the counters out
-(that is timing, not output), and it does not cover blocks served from the persistent JIT cache or Tier-2 regions, which
+(that is timing, not output), and it does not cover blocks served from the persistent JIT cache, which
 are not counted.
 
 ### Waiting report (2026-11-19)
@@ -167,12 +214,8 @@ every result is checked. The default layout must release each retired generation
 expects renewals at a 1 MiB budget.
 
 Run on the final build: the 333 unit, integration, toybox and real-world runs (`--quick`) passed at the default
-budget. With `BIFROST_JIT_CACHE_MB=1`, 332 of those 333 passed, and the 22 dynamic-linking runs selected with
-`--filter 'test_dyn|hello_dyn|dlopen|dladdr'` passed. The one failure, `jit_tier2_discovery`, passes at the
-default budget. It fails at 1 or 2 MiB with no renewal at all (a gdb breakpoint on `Emulator::renew_jit` never
-fires): the test drives `lookup_or_translate` and `compile_tier2_region` directly, which do not go through
-`translate_entry`, so it meets the plain budget limit as it did before; that the budget is simply too small for
-its compiles is likely but was not checked. The generations fixture also passed 20 of 20 repeated runs
+budget. With `BIFROST_JIT_CACHE_MB=1`, 332 of those 333 passed (the one failure was a Tier-2 test, removed since), and the 22 dynamic-linking runs selected with
+`--filter 'test_dyn|hello_dyn|dlopen|dladdr'` passed. The generations fixture also passed 20 of 20 repeated runs
 pinned to different CPU sets, three at a time. `make verify` reported two failures, both present before this
 change: `jit_bfm_extract` times out (exit 124; the 95 s against the 30 s limit recorded on 2026-10-23, not
 re-measured on the old tree), and `jit_dispatch_cache_growth` is a threaded fixture that `verify_jit.sh` runs

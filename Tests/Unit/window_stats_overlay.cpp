@@ -17,19 +17,32 @@ static void put(const fs::path &path, const std::string &text) {
   std::ofstream(path) << text;
 }
 static bool near(double a, double b) { return std::fabs(a - b) < 0.01; }
-// One text line per panel line; a tab marks where the runs flush with the right edge begin.
-static std::string flat(const std::vector<OverlayLine> &lines) {
+// One text line per row: the cells of a table row joined by `|` (figure then unit), a note's right-hand text after a
+// tab, a gap as an empty line and the graph as its sample count.
+static std::string flat(const std::vector<OverlayRow> &rows) {
   std::string text;
-  for (const auto &line : lines) {
-    bool right = false;
-    for (const auto &run : line) {
-      if (run.right && !right) text += '\t';
-      right |= run.right;
-      text += run.text;
+  for (const auto &row : rows) {
+    if (row.kind == OverlayRow::Graph) {
+      text += "[graph " + std::to_string(row.samples.size()) + "]\n";
+      continue;
+    }
+    for (size_t c = 0; c < row.cells.size(); ++c) {
+      if (c) text += row.kind == OverlayRow::Note ? "\t" : "|";
+      text += row.cells[c].text + row.cells[c].unit;
     }
     text += '\n';
   }
   return text;
+}
+static const OverlayRow *find_row(const std::vector<OverlayRow> &rows, const char *label) {
+  for (const auto &row : rows)
+    if (row.kind == OverlayRow::Table && !row.cells.empty() && row.cells[0].text == label) return &row;
+  return nullptr;
+}
+static bool has_pixel(const OverlayImage &image, bool (*test)(uint32_t)) {
+  for (auto pixel : image.argb)
+    if (test(pixel)) return true;
+  return false;
 }
 
 int main() {
@@ -210,7 +223,7 @@ int main() {
   assert(detail::overlay_text("Pok\xC3\xA9mon \xC2\xB0 \xE2\x82\xAC x\x01") == "Pokemon \xC2\xB0 ? x ");
   assert(detail::overlay_text("A \xE2\x80\x94 \xE2\x80\x9C" "b\xE2\x80\x9D \xC2\xB7 \xE2\x80\xA6 \xE3\x82\xA6") ==
          "A - \"b\" \xC2\xB7 \xE2\x80\xA6 ?");
-  assert(detail::glyph_columns('g')[0] & 0x100 && !(detail::glyph_columns('G')[0] & 0x180));  // descenders
+  assert(detail::glyph_columns('g')[0] & 0x100 && !(detail::glyph_columns('G')[0] & 0x180));  // the 5x7 font's descenders
   OverlayStats stats;
   stats.version = "2.0.0-beta.1"; stats.app = "Subway Surfers"; stats.backend = "Android EGL";
   stats.fps = 60; stats.active = true; stats.width = 1440; stats.height = 1384; stats.frames = 123456;
@@ -221,71 +234,95 @@ int main() {
   stats.vram_known = true;
   stats.cpu_name = "AMD Ryzen 7 5800X3D 8-Core Processor";
   stats.gpu_name = "AMD Radeon RX 7600 (radeonsi, navi33)";
-  // A row is a 4-character label, a 4-character percentage, a space, an 8-cell meter and a detail at the right edge.
-  const auto row = [](const char *label, const char *percent, const std::string &detail) {
-    return std::string("\n") + label + percent + std::string(9, ' ') + "\t" + detail + "\n";
-  };
+  stats.frame_ms = {16.0f, 20.0f, 12.5f};
   const std::string deg = "\xC2\xB0" "C";
-  const auto text = flat(overlay_lines(stats));
-  assert(text.find("BIFROST-EMU\t2.0.0-beta.1\nSubway Surfers\n60 FPS  16.7 ms\tAndroid EGL\n\n") == 0);
-  assert(overlay_lines(stats)[2][0].size == 2);  // the frame rate is the big figure
-  assert(text.find(row("CPU ", " 34%", "72" + deg)) != std::string::npos);
-  assert(text.find(row("GPU ", " 58%", "64" + deg)) != std::string::npos);
-  assert(text.find(row("VRAM", " 15%", "1.2/8.2 GB")) != std::string::npos);
-  assert(text.find(row("RAM ", " 39%", "12.3/31.3 GB")) != std::string::npos);
-  assert(text.find("\n\nEmulator 13% CPU \xC2\xB7 2.1 GB\nAMD Radeon RX 7600\n") != std::string::npos);
+  const auto text = flat(overlay_rows(stats));
+  assert(text ==
+         "Android EGL|60FPS|16.7ms\n"
+         "GPU|58%|64" + deg + "\n"
+         "CPU|34%|72" + deg + "\n"
+         "VRAM|1.2GB|/8.2GB\n"
+         "RAM|12.3GB|/31.3GB\n"
+         "\n"
+         "Frametime\tmin 12.5 \xC2\xB7 max 20.0 ms\n"
+         "[graph 3]\n"
+         "\n"
+         "Subway Surfers\n"
+         "Emulator 13% CPU \xC2\xB7 2.1 GB\n"
+         "AMD Radeon RX 7600\t2.0.0-beta.1\n");
   {
-    // A long title is cut to the panel's 31 characters with an ellipsis; one with nothing printable is left out.
+    // MangoHud's colours: a label per metric, white figures that turn amber from 80 percent and red from 95
+    // (temperatures at 80 and 90 degrees).
+    const auto rows = overlay_rows(stats);
+    assert(find_row(rows, "GPU")->cells[0].color == 0xFF2E9762 && find_row(rows, "CPU")->cells[0].color == 0xFF2E97CB);
+    assert(find_row(rows, "VRAM")->cells[0].color == 0xFFAD64C1 && find_row(rows, "RAM")->cells[0].color == 0xFFC26693);
+    assert(find_row(rows, "GPU")->cells[1].color == 0xFFFFFFFF);
+    OverlayStats hot = stats;
+    hot.sensors.gpu_percent = 97; hot.sensors.gpu_temp = 85; hot.sensors.cpu_percent = 85; hot.sensors.cpu_temp = 91;
+    const auto loaded = overlay_rows(hot);
+    assert(find_row(loaded, "GPU")->cells[1].color == 0xFFFF4D4D && find_row(loaded, "GPU")->cells[2].color == 0xFFFDFD09);
+    assert(find_row(loaded, "CPU")->cells[1].color == 0xFFFDFD09 && find_row(loaded, "CPU")->cells[2].color == 0xFFFF4D4D);
+  }
+  {
+    // The title comes from the app and is cut to the panel's width when drawn; one with nothing printable is left out.
     OverlayStats named = stats;
-    named.app = "The Quite Unreasonably Long Game Title Of Doom";
-    assert(flat(overlay_lines(named)).find("\nThe Quite Unreasonably Long Ga\xE2\x80\xA6\n") != std::string::npos);
     named.app = "\xE3\x82\xA6\xE3\x83\x9E\xE5\xA8\x98";
-    assert(overlay_lines(named).size() == overlay_lines(stats).size() - 1);
+    assert(flat(overlay_rows(named)).find("\n\nEmulator") != std::string::npos);
+    assert(overlay_rows(named).size() == overlay_rows(stats).size() - 1);
   }
-  stats.active = false; stats.sensors = SensorReading{}; stats.vram_known = false; stats.app.clear();
-  stats.emulator_ram = 0; stats.gpu_name = "llvmpipe (LLVM 20.1.2, 256 bits)";
-  const auto idle = flat(overlay_lines(stats));
-  assert(idle.find("\nIDLE\tAndroid EGL\n") != std::string::npos);
-  assert(idle.find(row("CPU ", " --%", "--" + deg)) != std::string::npos);
-  assert(idle.find(row("VRAM", " --%", "--")) != std::string::npos);
-  assert(idle.find(row("RAM ", " --%", "--")) != std::string::npos);
-  assert(idle.find("\n\nEmulator --% CPU \xC2\xB7 --\nllvmpipe\n") != std::string::npos);
-  // A meter row draws a bar (the track plus a fill in the colour for its load), not glyphs.
-  {
-    stats.sensors.cpu_percent = 50; stats.sensors.gpu_percent = 96;
-    const auto rows = overlay_lines(stats);
-    const OverlayLine *cpu = nullptr, *gpu = nullptr;
-    for (const auto &line : rows) {
-      if (line.size() > 1 && line[0].text.rfind("CPU", 0) == 0) cpu = &line;
-      if (line.size() > 1 && line[0].text.rfind("GPU", 0) == 0) gpu = &line;
-    }
-    assert(cpu && gpu && cpu->at(3).meter > 0.49 && cpu->at(3).meter < 0.51 && gpu->at(3).color != cpu->at(3).color);
-    assert(cpu->at(3).text.size() == 8 && cpu->at(3).meter <= 1);
-  }
+  OverlayStats idle = stats;
+  idle.active = false; idle.sensors = SensorReading{}; idle.vram_known = false; idle.app.clear();
+  idle.emulator_ram = 0; idle.gpu_name = "llvmpipe (LLVM 20.1.2, 256 bits)"; idle.frame_ms.clear();
+  assert(flat(overlay_rows(idle)) ==
+         "Android EGL|idle|\n"
+         "GPU|--|--\n"
+         "CPU|--|--\n"
+         "VRAM|--|\n"
+         "RAM|--|\n"
+         "\n"
+         "Frametime\t--\n"
+         "[graph 0]\n"
+         "\n"
+         "Emulator --% CPU \xC2\xB7 --\n"
+         "llvmpipe\t2.0.0-beta.1\n");
 
-  // Rendering: small, translucent, rounded, text opaque.
-  assert(overlay_scale(720) == 2 && overlay_scale(1384) == 2 && overlay_scale(2160) == 3 && overlay_scale(99999) == 5);
-  const std::vector<OverlayLine> lines = {{{"AB", 0xFFFFFFFF}}, {{"C", 0xFF00FF00}}};
-  const auto image = render_overlay(lines, 2);
-  assert(image.w == 2 * 12 - 2 + 20 && image.h == 2 * 20 - 6 + 16 && image.argb.size() == size_t(image.w) * image.h);
+  // Text measures per glyph: digits share one width (so figures align), and a wider letter is wider.
+  assert(near(detail::text_width("0", 20), detail::text_width("7", 20)));
+  assert(detail::text_width("WWW", 20) > detail::text_width("iii", 20) * 2);
+  assert(near(detail::text_width("ab", 40), 2 * detail::text_width("ab", 20)));
+
+  // Rendering: translucent rounded panel, outlined text, a green frame-time line.
+  assert(overlay_font_px(720) == 16 && overlay_font_px(1384) == 25 && overlay_font_px(2160) == 39 &&
+         overlay_font_px(99999) == 40 && overlay_font_px(100) == 16);
+  const auto image = render_overlay(overlay_rows(stats), 24);
+  assert(image.w > 200 && image.h > 200 && image.argb.size() == size_t(image.w) * image.h);
   assert(image.argb[0] == 0 && image.argb[image.w - 1] == 0 && image.argb.back() == 0);  // rounded corners
-  const uint32_t panel = image.argb[size_t(image.h / 2) * image.w + image.w - 2];
-  assert((panel >> 24) > 0x40 && (panel >> 24) < 0xE0);  // translucent, not clear and not solid
-  bool white = false, green = false;
-  for (auto pixel : image.argb) { white |= pixel == 0xFFFFFFFF; green |= pixel == 0xFF00FF00; }
-  assert(white && green);
-  // Unknown characters still draw: no out-of-range glyph access.
-  assert(render_overlay({{{"a~\xC3\xA9\x01", 0xFFFFFFFF}}}, 1).w == 4 * 6 - 1 + 10);
+  const uint32_t panel = image.argb[size_t(image.h / 2) * image.w + 1];
+  assert((panel >> 24) >= 0x70 && (panel >> 24) <= 0x90);  // MangoHud's 50% background
+  assert(has_pixel(image, [](uint32_t p) { return p == 0xFFFFFFFF; }));                                  // white text
+  assert(has_pixel(image, [](uint32_t p) { return (p >> 24) == 0xFF && (p & 0xFF) < 0x40 && ((p >> 8) & 0xFF) > 0xC0; }));  // frame line
+  assert(!has_pixel(render_overlay(overlay_rows(idle), 24),
+                    [](uint32_t p) { return (p >> 24) == 0xFF && (p & 0xFF) < 0x40 && ((p >> 8) & 0xFF) > 0xC0 && ((p >> 16) & 0xFF) < 0x40; }));
+  // A larger font makes a larger panel in proportion.
+  assert(render_overlay(overlay_rows(stats), 48).w > 18 * image.w / 10 && render_overlay(overlay_rows(stats), 48).w < 22 * image.w / 10);
   {
-    // A right run ends at the right padding; a double-size run makes its line taller by one capital height.
-    OverlayRun b{"B", 0xFF00FF00};
-    b.right = true;
-    const auto split = render_overlay({{{"A", 0xFFFFFFFF}, b}}, 1);
-    assert(split.w == 6 + 12 + 6 - 1 + 10);
-    for (int y = 4; y < 4 + 7; ++y) assert(split.argb[size_t(y) * split.w + split.w - 5 - 5] == 0xFF00FF00);
-    OverlayRun big{"8", 0xFFFFFFFF};
-    big.size = 2;
-    assert(render_overlay({{big}}, 1).h == render_overlay({{{"8", 0xFFFFFFFF}}}, 1).h + 7);
+    // The panel keeps its width as the figures change, and a long title is cut instead of widening it.
+    OverlayStats slow = stats, fast = stats, long_title = stats;
+    slow.fps = 9; fast.fps = 144; long_title.app = "The Quite Unreasonably Long Game Title Of Doom";
+    assert(render_overlay(overlay_rows(slow), 24).w == image.w && render_overlay(overlay_rows(fast), 24).w == image.w);
+    assert(render_overlay(overlay_rows(long_title), 24).w == image.w);
+    assert(render_overlay(overlay_rows(idle), 24).w == image.w);
+  }
+  // Unknown characters still draw ('?'), and a graph with no room or a single sample draws nothing and does not fault.
+  {
+    OverlayRow row;
+    row.cells = {{"a~\xC3\xA9\x01", "", 0xFFFFFFFF, "", ""}, {"1", "ms", 0xFFFFFFFF, "", ""}};
+    OverlayRow graph;
+    graph.kind = OverlayRow::Graph;
+    graph.samples = {5.0f};
+    assert(render_overlay({row, graph}, 20).w > 0);
+    graph.samples.assign(1000, 99999.0f);  // more than the history, far above the top
+    assert(render_overlay({row, graph}, 20).h > 0);
   }
   return 0;
 }

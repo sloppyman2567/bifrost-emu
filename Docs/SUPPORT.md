@@ -42,15 +42,16 @@ resize path); it now opens with Window set to "Keep the app's shape", which avoi
 ASTC-to-BC7 path (the overlay read 29 to 30 FPS at 3440x1384); the models are still very low resolution, which the
 maintainer says they always were, and a session ended on a guest null dereference once (not reproduced in the next
 7-minute session). Hungry Shark Evolution 14.5.0 and Hungry Shark World 8.2.6 have stable
-gameplay on the maintainer's report (2026-11-06), with no capture. YouTube shows its home screen. Firefox reaches its onboarding and
+gameplay on the maintainer's report (2026-11-06). On 2026-11-25 the maintainer played eight games on 2.0.0-beta.3 without a crash, with Melon Sandbox
+now on the list ([games and frame rates](COMPATIBILITY.md)). YouTube shows its home screen. Firefox reaches its onboarding and
 browser screens, but pages do not load. Uptodown starts and runs a bounded session. Subway Surfers was run on a Steam Deck in Desktop mode (2026-11-08) at 20 to 40 FPS. Oddmar's first level plays very well on the maintainer's report
-(2026-11-08, no stutter noticed; a recording frame shows gameplay); later levels are not confirmed. Roblox, TrickCal
-and Umamusume JP are blocked by the app itself (Umamusume JP at a device
-integrity check when it connects). These are single checks, not compatibility
+(2026-11-08, no stutter noticed; a recording frame shows gameplay) and a later session is very stable (2026-11-25). Roblox gets disconnected
+about 170 seconds after joining a game, with error 304, and the cause isn't known ([what has been run](COMPATIBILITY.md)). TrickCal is stopped by its anti-cheat, and
+Umamusume JP by a device integrity check when it connects. These are single checks, not compatibility
 guarantees, and gameplay is confirmed only where the file says `playable`.
 
 Google account support is experimental. Play services come from microG, so behaviour that needs real Google services
-(device attestation, a Play Games profile, an adult-age check) is unavailable.
+(device attestation, a Play Games profile) can be unavailable; Hungry Shark World's Play Games sign-in worked on 2026-11-25.
 Settings screens, host mDNS, HDR and arbitrary APK compatibility are not provided or
 claimed. The Android Vulkan HAL copies each presented frame through a host staging buffer (no zero-copy swapchain): a GPU
 read-back, a wait for the GPU and a CPU copy into the app's buffer on release, then another copy into the window; the

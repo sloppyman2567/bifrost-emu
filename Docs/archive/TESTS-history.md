@@ -2300,7 +2300,7 @@ established by these checks.
 ## Planned codegen and CoreMark acceptance
 
 The [state-retention codegen plan](../JIT.md#planned-codegen-retaining-guest-state-across-regions)
-and [roadmap milestones](../roadmap.md#jit-codegen-retain-guest-state-across-hot-regions)
+and [roadmap milestones](roadmap-2026-11-25.md#jit-codegen-retain-guest-state-across-hot-regions)
 are future work. Use these acceptance gates as each stage is implemented:
 
 - Add focused result/reference checks for mixed scalar/vector aliases,

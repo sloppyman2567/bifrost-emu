@@ -59,64 +59,57 @@ bool FrostJIT::emit_selfloop_backedge(uint64_t target_pc) {
     // its old mapping before the guard and writing the next PC on cold exit.
     clobber_host_reg(RAX);
     selfloop_patch_off_ = code_buf_used_;
-    if (!preempt_by_epoch()) {
-        // Timed Tier-2 trials keep the bounded edge budget: a window counts
-        // dispatcher resumptions, so its loops must expire on a short count.
-        MtEdge* edge = create_chain_edge(target_pc, false, selfloop_patch_off_);
-        edge->internal_loop = true;
-        edge->target.store(reinterpret_cast<uint64_t>(code_buf_ + block_body_start_off_),
-                           std::memory_order_relaxed);
-        mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
-        emit_mov_imm_to_rax(target_pc);
-        // cmp rax,[rbx+jit_stop_pc]; je cold exit
-        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
-        emit_u32(offsetof(CPU, jit_stop_pc));
-        size_t stop = emit_jcc_rel32_placeholder(0x4);
-        // Same 256-edge lease as ordinary ST chains (zero also expires).
-        emit_byte(0x83); emit_byte(0xAB);
-        emit_u32(offsetof(CPU, jit_chain_budget)); emit_byte(1);
-        size_t budget = emit_jcc_rel32_placeholder(0x6);
-        emit_mov_imm_to_rax(reinterpret_cast<uint64_t>(&edge->target));
-        emit_load(RAX, RAX, 0);
-        emit_test_reg(RAX, RAX);
-        size_t empty = emit_jcc_rel32_placeholder(0x4);
-        // Only reconcile the loop layout after every revocation/lease check.
-        // A cold exit below still observes the original branch-point layout.
-        vec_writeback_dynamic();
-        emit_byte(0xFF); emit_byte(0xE0); // jmp rax (body entry, same frame)
-        for (size_t p : {stop, budget, empty})
-            patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
-        // The caller emits the taken cold exit, committing GPRs and vectors.
-        return true;
-    }
     // Published MT code is immutable, so the body is a direct jump. It leaves
     // on the callback sentinel or when the preemption epoch moves (a tick or
     // any invalidation); both checks only read. The epoch exit rebuilds RAX
     // for the caller's cold exit out of line.
     size_t expired = emit_preempt_poll(CPU_REG, RAX);
-    size_t stop;
-    if (target_pc <= INT32_MAX && !wide_guest_pc(target_pc)) {
-        // cmp qword [rbx+jit_stop_pc],imm32; je cold exit
-        emit_byte(0x48); emit_byte(0x81); emit_byte(0xBB);
-        emit_u32(offsetof(CPU, jit_stop_pc));
-        emit_u32(static_cast<uint32_t>(target_pc));
-    } else {
-        emit_mov_imm_to_rax(target_pc);
-        // cmp rax,[rbx+jit_stop_pc]
-        emit_byte(0x48); emit_byte(0x3B); emit_byte(0x83);
-        emit_u32(offsetof(CPU, jit_stop_pc));
+    size_t stop = 0;
+    if (!selfloop_stop_hoisted_) {
+        // No entry check was emitted for this block (its prologue ran before the MT decision): compare here.
+        stop = emit_selfloop_stop_compare(target_pc, 0x4);
     }
-    stop = emit_jcc_rel32_placeholder(0x4);
     // Reconcile the loop layout only after every exit check: a cold exit
     // below still observes the original branch-point layout.
     vec_writeback_dynamic();
     emit_byte(0xE9);
     emit_u32(static_cast<uint32_t>(static_cast<int32_t>(block_body_start_off_ - (code_buf_used_ + 4))));
-    for (size_t p : {expired, stop})
-        patch_jcc_rel32(p, static_cast<int32_t>(code_buf_used_ - (p + 6)));
+    patch_jcc_rel32(expired, static_cast<int32_t>(code_buf_used_ - (expired + 6)));
+    if (stop) patch_jcc_rel32(stop, static_cast<int32_t>(code_buf_used_ - (stop + 6)));
     emit_mov_imm_to_rax(target_pc);
     // The caller emits the taken cold exit, committing GPRs and vectors.
     return true;
+}
+// Compares cpu.jit_stop_pc with a self-loop's own head and returns the jcc (je = 0x4: leave on a match). A pc that fits
+// imm32 compares exactly; above that (Android code lives above 2 GiB) there is no imm32 form and loading the pc
+// costs a 10-byte movabs, so the sentinel's low 32 bits are compared: an equal sentinel always matches, and a
+// different one that shares them only leaves early, where the dispatcher compares the whole pc.
+size_t FrostJIT::emit_selfloop_stop_compare(uint64_t target_pc, uint8_t condition) {
+    if (target_pc <= INT32_MAX && !wide_guest_pc(target_pc)) {
+        // cmp qword [rbx+jit_stop_pc],imm32
+        emit_byte(0x48); emit_byte(0x81); emit_byte(0xBB);
+    } else {
+        // cmp dword [rbx+jit_stop_pc],imm32
+        emit_byte(0x81); emit_byte(0xBB);
+    }
+    emit_u32(offsetof(CPU, jit_stop_pc));
+    emit_u32(static_cast<uint32_t>(target_pc));
+    return emit_jcc_rel32_placeholder(condition);
+}
+// Once per entry of a published MT self-loop, instead of once per iteration: the sentinel cannot change while the
+// loop runs (only this thread sets it), so a sentinel naming the loop's head only has to be noticed on entry. The
+// first iteration still runs and the first back edge leaves, as the per-iteration compare did: the entry moves this
+// CPU's lease half the epoch range away, so that back edge's poll fails and takes the same exit.
+void FrostJIT::emit_selfloop_stop_entry_check(uint64_t start_pc) {
+    // Not equal (the common case) jumps over the poisoning, so an entry costs a compare and a taken jump.
+    const size_t differs = emit_selfloop_stop_compare(start_pc, 0x5);
+    // RAX is free here, as at every entry: seen = epoch + 2^30 (a tick cannot make them equal within a loop run).
+    emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(&g_jit_preempt_epoch));
+    note_host_reloc(HostReloc::Image);
+    emit_byte(0x8B); emit_byte(0x00);                                  // mov eax,[rax]
+    emit_byte(0x05); emit_u32(0x40000000u);                            // add eax,0x40000000
+    emit_byte(0x89); emit_byte(0x83); emit_u32(offsetof(CPU, jit_epoch_seen));  // mov [rbx+seen],eax
+    patch_jcc_rel32(differs, static_cast<int32_t>(code_buf_used_ - (differs + 6)));
 }
 // The conditional jump of a single-thread self-loop back-edge normally lands on the patchable slot, which then
 // jumps to the body: two taken jumps per iteration. When nothing was emitted between the jump's target and the
@@ -228,7 +221,6 @@ void FrostJIT::emit_taken_path_epilogue() {
     // stack slot.
     flush_arch_vregs_keep();
     if (!pc_after_slot) emit_store(CPU_REG, PC_OFF, RAX);
-    emit_tier2_edge_profile(true);
     // RDI/RSI only for the ordinary layout's fn targets (see the block epilogue).
     if (!chain_skip_enabled()) {
         emit_mov_reg(RDI, CPU_REG);
@@ -257,6 +249,7 @@ void FrostJIT::emit_taken_path_epilogue() {
     if (chain_skip_enabled()) {
         taken_chain_patch_off_ = code_buf_used_;
         has_taken_chain_slot_ = true;
+        rp_taken_layout_ = rp_capture_layout();
         if (mt) emit_mt_chain_slot(taken_chain_target_pc_);
         else emit_slot_nop5();
         // Cold exit (only reached when the slot above is unpatched).
@@ -288,6 +281,7 @@ void FrostJIT::emit_taken_path_epilogue() {
 int FrostJIT::compile_ir_branch(const IRInst& inst) {
     switch (inst.op) {
         case IROp::BRCOND_ZERO: {
+            if (inst.aux == 1) return compile_cbz_side_exit(inst);  // a mid-block exit (SideExit.cpp)
             const BrCondZeroParams bp = inst.brcond_zero_params();
             // NZCV is authoritative in pstate after clobber_flags(). TEST
             // may overwrite host flags; neither edge needs PUSHFQ/POPFQ.
@@ -353,6 +347,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             return 1;
         }
         case IROp::BRCOND_BIT: {
+            if (inst.aux == 1) return compile_bit_side_exit(inst);  // a mid-block exit (SideExit.cpp)
             const BrCondBitParams bp = inst.brcond_bit_params();
             // As with CBZ, guest NZCV has been committed before BT.
             // Use the operand in place and let BT overwrite dead host CF.
@@ -409,6 +404,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             return 1;
         }
         case IROp::BRCOND: {
+            if (inst.aux == 1) return compile_cond_side_exit(inst);  // a mid-block exit (SideExit.cpp)
             const BrCondParams bp = inst.brcond_params();
             // A condition on a single flag (EQ/NE: Z, CS/CC: C, MI/PL: N, VS/VC: V)
             // needs no host flags when they are still in cpu.nzcv_host: test that
@@ -600,8 +596,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
         }
         case IROp::BRCOND_FALLTHRU: {
             const BrCondFallthruParams bp = inst.fallthru_params();
-            // Ends a Tier-1 block (regions lay their direct edges out
-            // themselves): scratch values are dead at the exit.
+            // Ends the block: scratch values are dead at the exit.
             flush_all_vregs_exit();
             emit_mov_imm_to_rax(bp.target);
             rax_holds_next_pc_ = true;

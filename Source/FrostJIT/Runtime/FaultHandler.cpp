@@ -150,7 +150,7 @@ void FrostJIT::init_fault_recovery() {
     // Even a two-byte native instruction can have at most one site. This
     // reserves metadata VA, not physical memory; records are constructed only
     // as code is appended. The table never moves while guest CPUs run.
-    const size_t bytes = (code_buf_limit_ / 2) * sizeof(*fault_sites_);
+    const size_t bytes = fault_table_bytes();
     void* p = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED) return; // allocation failure keeps software guards
@@ -168,32 +168,28 @@ void FrostJIT::init_fault_recovery() {
     });
     if (!handlers_installed) { ::munmap(p, bytes); return; }
     fault_sites_ = static_cast<std::atomic<uint64_t>*>(p);
+    fault_chunks_ = reinterpret_cast<FaultChunk*>(fault_sites_ + fault_chunk_count() * kFaultSitesPerChunk);
+    for (size_t i = 0; i < fault_chunk_count(); ++i) new (fault_chunks_ + i) FaultChunk{};
 }
 
 void FrostJIT::destroy_fault_recovery() {
     // The owner joins its CPUs before destroying the JIT, just as for code.
     if (fault_sites_)
-        ::munmap(fault_sites_, (code_buf_limit_ / 2) * sizeof(*fault_sites_));
+        ::munmap(fault_sites_, fault_table_bytes());
 }
 
 void FrostJIT::register_memory_fault_site() {
-    if (!memory_fault_stub_ || code_buf_overflow_) return;
-    const size_t n = fault_site_count_.load(std::memory_order_relaxed);
-    if (n >= code_buf_limit_ / 2) { code_buf_overflow_ = true; return; }
-    const uint64_t entry = (uint64_t(code_buf_used_) << 32) | memory_fault_stub_;
-    if (n == fault_site_constructed_) {
-        new (fault_sites_ + n) std::atomic<uint64_t>(entry);
-        ++fault_site_constructed_;
-    } else {
-        fault_sites_[n].store(entry, std::memory_order_relaxed);
-    }
-    fault_site_count_.store(n + 1, std::memory_order_release);
+    if (memory_fault_stub_ && !code_buf_overflow_) append_fault_site(code_buf_used_, memory_fault_stub_);
 }
 
 void FrostJIT::rewind_codegen(size_t offset) {
-    size_t n = fault_site_count_.load(std::memory_order_relaxed);
-    while (n && (fault_sites_[n - 1].load(std::memory_order_relaxed) >> 32) >= offset) --n;
-    fault_site_count_.store(n, std::memory_order_release);
+    if (fault_sites_)
+        for (size_t c = offset / kCodeChunk; c * kCodeChunk < code_buf_used_; ++c) {  // never the next chunk, which may be another compiler's
+            uint32_t n = fault_chunks_[c].count.load(std::memory_order_relaxed);
+            const std::atomic<uint64_t>* sites = fault_sites_ + c * kFaultSitesPerChunk;
+            while (n && (sites[n - 1].load(std::memory_order_relaxed) >> 32) >= offset) --n;
+            fault_chunks_[c].count.store(n, std::memory_order_release);
+        }
     // Only an unpublished tail is reused. Readers with an older count can
     // see old/new atomic tail entries, all above every executable prefix site.
     // Direct-call records in the tail would later rewrite reused bytes.
@@ -228,10 +224,12 @@ bool FrostJIT::redirect_memory_fault(int signo, void* raw_info, void* context) {
         static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_R10]) != win ||
         addr < win || addr - win >= jit->guest_memory_->window_size()) return false;
     const uint32_t offset = static_cast<uint32_t>(rip - base);
-    size_t lo = 0, hi = jit->fault_site_count_.load(std::memory_order_acquire);
+    const size_t chunk = offset / kCodeChunk;
+    const std::atomic<uint64_t>* sites = jit->fault_sites_ + chunk * kFaultSitesPerChunk;
+    size_t lo = 0, hi = jit->fault_chunks_[chunk].count.load(std::memory_order_acquire);
     while (lo < hi) {
         const size_t mid = lo + (hi - lo) / 2;
-        const uint64_t entry = jit->fault_sites_[mid].load(std::memory_order_relaxed);
+        const uint64_t entry = sites[mid].load(std::memory_order_relaxed);
         const uint32_t site = static_cast<uint32_t>(entry >> 32);
         if (site < offset) lo = mid + 1;
         else if (site > offset) hi = mid;

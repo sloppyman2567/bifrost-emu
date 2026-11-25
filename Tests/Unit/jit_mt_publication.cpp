@@ -6,12 +6,32 @@
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <shared_mutex>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <thread>
 #include <vector>
 using namespace arm64emu;
+// The bytes of every block published so far.
+struct PublishedCode {
+    FrostJIT* jit;
+    std::vector<std::pair<size_t, size_t>> ranges;
+    std::vector<uint8_t> bytes;
+    explicit PublishedCode(FrostJIT* j) : jit(j), ranges(j->published_code()) {
+        for (const auto& r : ranges) bytes.insert(bytes.end(), j->code_buf() + r.first, j->code_buf() + r.first + r.second);
+    }
+    bool unchanged() const {
+        size_t at = 0;
+        for (const auto& r : ranges) {
+            if (std::memcmp(bytes.data() + at, jit->code_buf() + r.first, r.second)) return false;
+            at += r.second;
+        }
+        return true;
+    }
+};
 static bool check_entry_order_loops(bool mt) {
     constexpr uint64_t head = 0x90000, stop = 0xa0000;
     // Warm the interior entry first, as CoreMark's list walk does. Every
@@ -178,9 +198,11 @@ static bool check_ibl_revocation() {
     std::puts("jit_mt_publication: invalidation revokes a leased IBL entry PASS");
     return true;
 }
-static bool check_selfloops() {
+// `head` below 2 GiB compares the callback sentinel with one imm32 compare; above it (Android code lives there) the
+// back edge compares the sentinel's low 32 bits, so a head near 0x7360000000 covers that form too.
+static bool check_selfloops(uint64_t head) {
     auto e = std::make_unique<Emulator>();
-    constexpr uint64_t head = 0x30000, stop = 0x40000;
+    const uint64_t stop = head + 0x10000;
     e->mem().map_range(head, 4096);
     e->mem().mprotect_guest(head, 4096, 7);
     e->enable_jit();
@@ -224,8 +246,7 @@ static bool check_selfloops() {
             }
         };
         run(); // compile before the instruction-byte snapshot
-        const size_t prefix = j->code_buf_used();
-        std::vector<uint8_t> before(j->code_buf(), j->code_buf() + prefix);
+        const PublishedCode before(j);
         std::atomic<bool> start{false};
         std::vector<std::thread> workers;
         for (unsigned k = 0; k < 8; ++k) workers.emplace_back([&] {
@@ -235,7 +256,7 @@ static bool check_selfloops() {
         start.store(true, std::memory_order_release);
         for (unsigned repeat = 0; repeat < 100; ++repeat) j->invalidate_range(head, 4);
         for (auto& t : workers) t.join();
-        if (std::memcmp(before.data(), j->code_buf(), prefix)) { std::fprintf(stderr, "selfloop kind %u: published bytes changed\n", kind); ++failures; }
+        if (!before.unchanged()) { std::fprintf(stderr, "selfloop kind %u: published bytes changed\n", kind); ++failures; }
         // Expiry and callback sentinels must commit all carried state,
         // including the final comparison flags and dirty vector accumulators.
         // 0: fresh lease, runs to the end. 1: stale epoch, leaves at the first
@@ -365,8 +386,7 @@ int main() {
     if (!j) return 2;
     j->enter_multithreaded();
     for (uint64_t pc : {entry, head, body, body + 16}) j->lookup_or_translate(*e, pc);
-    const size_t prefix = j->code_buf_used();
-    std::vector<uint8_t> before(j->code_buf(), j->code_buf() + prefix);
+    const PublishedCode before(j);
     std::atomic<unsigned> failures{0};
     auto run = [&] {
         CPU cpu;
@@ -382,23 +402,15 @@ int main() {
         }
     };
     auto unchanged = [&](const char* when) {
-        if (!std::memcmp(before.data(), j->code_buf(), prefix)) return;
+        if (before.unchanged()) return;
         std::fprintf(stderr, "published bytes changed %s\n", when);
         ++failures;
     };
     std::vector<std::thread> threads;
     for (unsigned k = 0; k < 8; ++k) threads.emplace_back(run);
     for (auto& t : threads) t.join();
-    if (!j->tier2_regions.load()) {
-        // Which stage lost it: no loop got hot, no trace was taken, the trace was declined or sent back to profile again.
-        std::fprintf(stderr, "no Tier-2 region was published by the workers (hot heads %llu, traces %llu, declined %llu, "
-                     "profile retries %llu)\n", (unsigned long long)j->tier2_hot_heads.load(),
-                     (unsigned long long)j->tier2_traces.load(), (unsigned long long)j->tier2_profit_rejections.load(),
-                     (unsigned long long)j->tier2_profile_retries.load());
-        ++failures;
-    }
     unchanged("after the workers");
-    j->invalidate_range(body, 24); // must revoke a region whose head is on another page
+    j->invalidate_range(body, 24);
     unchanged("after invalidate_range");
     run();
     unchanged("after the rerun");
@@ -416,7 +428,7 @@ int main() {
     j->invalidate_all();
     unchanged("after invalidate_all");
     if (failures) { std::fprintf(stderr, "MT publication: %u failures\n", failures.load()); return 1; }
-    if (!check_signal_return(false) || !check_signal_return(true) || !check_ibl_revocation() || !check_selfloops() ||
+    if (!check_signal_return(false) || !check_signal_return(true) || !check_ibl_revocation() || !check_selfloops(0x30000) || !check_selfloops(0x7360000000ULL) ||
         !check_entry_order_loops(false) || !check_entry_order_loops(true) || !check_forward_chains()) {
         std::fputs("jit_mt_publication: FAILED after the checks that passed above\n", stderr);
         return 1;

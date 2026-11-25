@@ -51,8 +51,8 @@ void AudioThunk::start_pump() {
         impl_->pump_enabled) return;
     // Do not create a second guest CPU just because the thunk was wired at
     // process startup. Creating that CPU switches the shared JIT into
-    // multithread-safe mode, which disables runtime block chaining and
-    // tier-2 compilation even for guests that never use audio. Start the
+    // multithread-safe mode, which disables runtime block chaining
+    // even for guests that never use audio. Start the
     // worker only after a callback stream has actually been opened.
     bool has_callback_stream = false;
     for (const auto& [handle, stream] : impl_->sdl_devs_) {

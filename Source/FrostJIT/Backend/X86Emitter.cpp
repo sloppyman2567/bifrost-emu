@@ -32,9 +32,9 @@
 #include <cstring>
 namespace arm64emu {
 bool FrostJIT::ensure_code_space(size_t bytes) {
-    if (bytes > code_buf_limit_ - code_buf_used_) return false;
+    if (bytes > code_lease_end_ - code_buf_used_) return false;
     const size_t needed = code_buf_used_ + bytes;
-    if (needed > code_capacity_) {
+    if (needed > code_capacity_ && core_ == this) {
         code_capacity_ = std::min(code_buf_limit_, std::max(needed, code_capacity_ * 2));
         code_cache_growths.fetch_add(1, std::memory_order_relaxed);
     }
@@ -475,6 +475,15 @@ void FrostJIT::emit_store_arm(int ar, int xr) {
     else if (ar == 31)       emit_store(CPU_REG, SP_OFF, xr);
     // XZR — discard
 }
+void FrostJIT::emit_store_arm_imm32(int ar, int32_t imm) {
+    int32_t off;
+    if (ar >= 0 && ar <= 30) off = REGS_OFF + 8 * ar;
+    else if (ar == 31)       off = SP_OFF;
+    else                     return;  // XZR — discard
+    emit_byte(rex(true, false, false, CPU_REG >= 8));
+    emit_byte(0xC7); emit_modrm_disp(0, CPU_REG, off);
+    emit_u32(static_cast<uint32_t>(imm));
+}
 // ── NZCV materialization to cpu.nzcv_host ─────────────────────────────
 // Scratch: clobbers RAX unless keep_rax saves it (epilogues with
 // rax_holds_next_pc_ commit flags after RAX already holds the next PC).
@@ -744,8 +753,15 @@ void FrostJIT::emit_window_limit(int dst, uint64_t width) {
     if (limit <= 0xFFFFFFFFULL) emit_mov_imm32_zext(dst, static_cast<uint32_t>(limit));
     else emit_mov_imm64(dst, limit);
 }
-void FrostJIT::emit_untag_data_address(int reg) {
+void FrostJIT::emit_untag_data_address(int reg, bool window_valid) {
     if (!data_tbi()) return;
+    if (window_valid) {
+        // and r64, r/m64 (REX.W 23 /r): one op instead of two, and a dependency of one cycle instead of two.
+        emit_byte(rex(true, reg >= 8, false, WIN_REG >= 8));
+        emit_byte(0x23);
+        emit_modrm_disp(reg, WIN_REG, Memory::JIT_UNTAG_MASK_OFF);
+        return;
+    }
     emit_shift_imm8(reg, 4, 8);  // shl reg, 8
     emit_shift_imm8(reg, 5, 8);  // shr reg, 8
 }

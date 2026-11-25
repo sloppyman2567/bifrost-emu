@@ -52,7 +52,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             FrostJIT* current = emu.jit();
             if (current && current != this) return current->run_block(cpu, emu);
         }
-        if (__builtin_expect(tier2_settle_pending_.load(std::memory_order_acquire), 0)) tier2_settle_queued(emu);
     }
     bool debug_step = emu.debugger_poll(cpu);
     if (!cpu.running || (cpu.jit_call_depth && cpu.jit_dispatch_requested)) return cpu.pc;
@@ -61,7 +60,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // A block that reached a (non-thunk) SVC left it unrun: run it here, with no generated frame
     // on this thread's stack (see emit_call_native_svc).
     if (__builtin_expect(cpu.jit_svc_pc != 0, 0) && run_pending_svc(cpu, emu)) return cpu.pc;
-    cpu.jit_tier2_trial = nullptr; // clear an interrupted native timing window
     jit_grant_lease(cpu);
     // Hoisted once — the runtime hot-block -> interp_only demotion is disabled
     // by default (measured ~8-10% SLOWER on the minecraft game). getenv() on
@@ -202,16 +200,15 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // needed.
     // Use a SHARED lock for block lookup (concurrent reads OK). Release
     // before execution — entry is a local copy, no lock needed to run it.
-    lock_table_shared();
+    // A pc that no block starts at needs no lookup, and no lock.
+    const bool known = block_starts_.may_contain(pc);
+    if (known) lock_table_shared();
     note_table_lookup();
-    auto it = blocks_.find(pc);
+    auto it = known ? blocks_.find(pc) : blocks_.end();
     BlockEntry entry;
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
-        // Tier-2 hotness is counted at generated entries, including chained
-        // entries. Publication has one exclusive-lock path in tier2_fire_region;
-        // this shared table lookup must not mutate counters or publish code.
         // Per-PC hotness tracking (thread-local, no lock needed for the
         // counter, but promoting to interp_only needs exclusive lock).
         // Runtime promotion to interp_only is DISABLED by default: the
@@ -268,18 +265,18 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
         // Lazy block chaining — release shared, try exclusive (non-blocking).
         // If we can't get exclusive, skip chaining (optimization, not correctness).
-        if (!entry.chained) {
+        // Multithreaded edges are linked when either end is published.
+        if (!entry.chained && !mt_active()) {
             static bool no_chain_hit_ = dbg().no_chain;
             blocks_mutex_.unlock_shared();
             if (!no_chain_hit_ && blocks_mutex_.try_lock()) {
                 if (entry.chain_target_pc != 0) {
                     auto chain_it = blocks_.find(pc);
                     if (chain_it != blocks_.end()) {
-                        try_chain_block(pc, chain_it->second);
+                        try_chain_block(chain_it->second);
                     }
                 }
-                // MT keeps no back references; its edges are refreshed by target.
-                if (mt_active() || back_refs_.count(pc)) chain_back_references(pc);
+                if (back_refs_.count(pc)) chain_back_references(pc);
                 blocks_mutex_.unlock();
             }
         } else {
@@ -289,7 +286,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // Cache miss — translate_entry compiles and publishes, returning
         // with no table lock held (MT compiles hold it only shared).
         cache_misses++;
-        blocks_mutex_.unlock_shared();
+        if (known) blocks_mutex_.unlock_shared();
         const bool found = translate_entry(emu, pc, entry);
         if (!found || !entry.fn) {
             if (found && entry.interp_only) {
@@ -415,10 +412,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // store blocks; their ref re-run can double-apply stores, so only
     // trust divergences that reproduce and make sense (register splits).
     static const bool verify_untracked_ = dbg().verify_untracked;
-    // Regions have internal loops and no Tier-1 chain/self-loop slots.
-    // Replaying them with a fixed block count (or unpatching offset zero)
-    // is invalid; use their independent result oracles instead.
-    if (verify_ && !mt_active_.load(std::memory_order_acquire) && !entry.is_region &&
+    if (verify_ && !mt_active_.load(std::memory_order_acquire) &&
         entry.verify_count < verify_every_ &&
         !entry.has_svc && !entry.has_call &&
         (!entry.has_unresolved_store || verify_untracked_)) {

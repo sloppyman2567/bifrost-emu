@@ -8,6 +8,52 @@ with pre-release version labels (`-alpha.N`, `-beta.N`, `-rc.N`).
 
 Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-2.0.0-alpha.2.md), [2.0.0-alpha.1](archive/CHANGELOG-2.0.0-alpha.1.md) and [1.x and earlier](archive/CHANGELOG-1.x.md).
 
+## [2.0.0-rc.1] — faster translation on several threads, faster code, and windows that keep their shape (2026-11-25)
+
+This is a release candidate. Most games tried so far play well, but it isn't production grade yet; see [what's missing](roadmap.md#whats-missing).
+CoreMark now runs at about half of native speed, 28% faster than beta.3 ([numbers](PERFORMANCE.md)). No game has been timed with these changes yet.
+
+Speed:
+
+- Several threads can translate code at the same time. Before, one did it and the others waited. With eight threads a translation test takes 0.39 s instead of
+  3.99 s. Short pauses while the JIT's tables grew are gone too. `BIFROST_JIT_COMPILERS=1` goes back to one at a time.
+- The same change makes the Android runtime's start-up about 10% cheaper in CPU cycles. Carry (below) makes it heavier, and nobody has compared the two together
+  with beta.3 yet.
+- Carry is on by default. It lets translated code run past a branch, and into the next block, without putting registers back in memory. CoreMark uses about
+  10% fewer CPU cycles. Translating takes longer with it, so big Android apps use more CPU and memory while they start. You can turn it off for an app with
+  "JIT Carry" in its settings (`asgard config APP jit_carry off`), or everywhere with `BIFROST_CARRY=0`.
+- Tight loops and loops that search for something run with fewer instructions.
+- Code that reads and writes a lot of memory runs a bit faster, most of all in Android apps.
+- `fmax(x, 0)` and `fmin` no longer fall back to the slow interpreter when the result is zero.
+- NEON narrowing instructions are cheaper, and code with `ldar`, `stlr`, `ldxr` or `stxr` reloads fewer registers.
+
+Windows and games:
+
+- A game you close maximised opens maximised next time. The first start after this update still opens small, so maximise it and close it once. This was
+  confirmed in Hungry Shark World only.
+- Geometry Dash Lite and Family Island keep the shape they opened at and scale when you resize the window.
+- A game that rotates now turns inside its window instead of resizing it off the screen. `asgard config APP rotation reshape` brings the old behaviour back.
+- SpongeBob: Krusty Cook-Off gets past the age question with an adult age.
+- Melon Sandbox is playable (slow to load), and Hungry Shark World connects to Play Games. 18 of 21 games are playable ([list](COMPATIBILITY.md)).
+- The stats overlay has a new look, modelled on MangoHud.
+
+Fixed:
+
+- Maximising a window, or moving it to another display, could be ignored on Wayland.
+- A game's Google sign-in window overwrote the size saved for the game.
+- A loop left through `cbz`, `cbnz`, `tbz` or `tbnz` could pass on wrong condition flags.
+
+Other changes:
+
+- Profiling has its own page, [PROFILING.md](PROFILING.md), and the [JIT guide](JIT.md) is much shorter. The old guide is
+  [in the archive](archive/JIT-guide-2.0.0-beta.3.md).
+- `BIFROST_PROF` also shows how long each thread translated or waited for it and, with `BIFROST_PC_HIST=1`, the hottest loops.
+- The JIT's "Tier-1" is now called Lean, and `BIFROST_TIER1_SSA` is now `BIFROST_LEAN_SSA`.
+- Tier-2 regions are gone. They were off by default and gained little. `BIFROST_TIER2`, `BIFROST_TIER2_*`, `BIFROST_T2_REGIONDUMP` and their
+  `BIFROST_NO_*` switches (`CALLREGION`, `DESTSRC`, `RDCE`, `LICM`, `KEEPRES`, `EXITCHAIN`) do nothing now.
+- New switches for comparing: `BIFROST_NO_SIDE_EXIT`, `BIFROST_NO_REG_PASS`, `BIFROST_NO_CARRY_FOLLOW`, `BIFROST_NO_PIN_INPLACE`, and the experimental
+  `BIFROST_REG_PASS_THROUGH`.
+
 ## [2.0.0-beta.3] — games spend much less CPU in graphics calls, the JIT translates twice as fast and runs cheaper float and multiply code, profile reports with a Tracy timeline, a Resolution setting, a launcher log and uninstall hints (2026-11-24)
 
 A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagnostics.
@@ -1276,7 +1322,7 @@ still about 30% slower than Tier-1 in Arknights, and keeps about 1% of the regio
   per-thread rings and the block lookup are replaced by `Runtime/SampleProfile.cpp`: a ring per thread that survives the thread, and
   a registry of where each translated block's entry, body, exit and cold code are. The report now gives the JIT samples split into
   those parts and the shared stubs, per thread and for the hottest guest blocks, and counts lost samples instead of hiding them
-  (details in [JIT.md](JIT.md#where-host-time-goes-bifrost_prof)). On `bench_dispatch` 56.5% of the samples fell in block
+  (details in [JIT.md](PROFILING.md#where-host-time-goes-bifrost_prof)). On `bench_dispatch` 56.5% of the samples fell in block
   exits and 43.5% in bodies (85 samples, one run): a first reading, not a measurement of a game.
 - **`BIFROST_REGALLOC_PROFILE` is capped** at `BIFROST_REGALLOC_PROFILE_MB` (default 256 MiB). An Android game had written 3.3 GB to
   it in 15 seconds, enough to fill a tmpfs `/tmp` before it reached steady state.

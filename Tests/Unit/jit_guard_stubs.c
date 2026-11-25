@@ -1,6 +1,6 @@
 // jit_guard_stubs.c — software page checks and fault exits with the gate closed.
 //
-// Tier-1 keeps one copy per JIT of the page checks and the recoverable fault
+// Lean keeps one copy per JIT of the page checks and the recoverable fault
 // exit. They run only while the bounds gate is closed, which a registered,
 // missing userfaultfd page does for every access in the process. This drives
 // each width and direction, in and out of a page crossing, with the address in

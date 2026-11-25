@@ -49,11 +49,6 @@ struct DebugFlags {
     bool ld2  = false;  // BIFROST_LD2_DBG  — second-run dynamic-linker
     // ── JIT codegen diagnostics ──────────────────────────────────────
     bool regalloc_stats = false;  // BIFROST_REGALLOC_STATS — per-block spill/reload density
-    bool tier2 = false; // BIFROST_TIER2=1 — opt in to experimental region promotion
-    bool tier2_trace = false; // BIFROST_TIER2_TRACE — compiled candidates and timing decisions
-    bool tier2_graph = false; // BIFROST_TIER2_GRAPH — report the natural loop around each hot head
-    bool tier2_trace_verbose = false; // BIFROST_TIER2_TRACE_VERBOSE — discovery and compiler details
-    unsigned jit_superblock_limit = 8; // BIFROST_JIT_SUPERBLOCK_LIMIT=2..8
     bool no_chain = false; // BIFROST_NO_CHAIN — disable block/region edges
     bool jit_verify = false;  // BIFROST_JIT_VERIFY: presence enables differential replay
     // Differential-replay options (they only act with BIFROST_JIT_VERIFY):
@@ -65,19 +60,25 @@ struct DebugFlags {
     bool verify_untracked = false;  // BIFROST_VERIFY_UNTRACKED: also verify blocks with unresolved stores
     bool verify_trace = false;  // BIFROST_VERIFY_TRACE: print each verified block's entry state
     // ── JIT toggles and diagnostics (presence of the variable turns each on) ──
+    bool carry = true;  // Carry, on unless BIFROST_CARRY=0: a block continues past a forward conditional branch along its fall-through (the taken side is a mid-block exit)
+    bool no_reg_pass = false;  // BIFROST_NO_REG_PASS: with Carry, chain edges enter the successor through its normal entry (no guest registers passed in host registers)
+    bool reg_pass_through = false;  // BIFROST_REG_PASS_THROUGH=1: with Carry, a block also loads registers it does not touch when every predecessor holds them, to hand them on (a loss on CoreMark and the small benchmarks)
+    bool no_carry_follow = false;  // BIFROST_NO_CARRY_FOLLOW: with Carry, a block never profiles its exits or follows the taken side of one
+    bool no_reg_pass_partial = false;  // BIFROST_NO_REG_PASS_PARTIAL: an edge that covers only some entry registers enters the plain entry
+    bool no_side_exit = false;  // BIFROST_NO_SIDE_EXIT: a loop whose only inner branches are CBZ/CBNZ exits stays split into blocks
     bool no_selfloop = false;  // BIFROST_NO_SELFLOOP: keep self-loop blocks as ordinary blocks (no pinned loop body)
     bool no_native_libc = false;  // BIFROST_NO_NATIVE_LIBC: run the guest's own memcpy/memmove/memset (no host-native path)
     bool no_vec_cache = false;  // BIFROST_NO_VEC_CACHE: no cached vector registers across instructions (A/B control)
     bool no_fp_cache = false;  // BIFROST_NO_FP_CACHE: no cached scalar FP registers across instructions (A/B control)
     bool step_trace = false;  // BIFROST_STEP_TRACE: trace the interpreter steps the JIT bridge takes
     bool no_shared_jit = false;  // BIFROST_NO_SHARED_JIT: one JIT per thread instead of one shared instance
+    int jit_compilers = 0;       // BIFROST_JIT_COMPILERS: threads that may translate at once (1 to 16); 0 is one per host CPU, at most 16
     bool block_prof = false;  // BIFROST_BLOCK_PROF: print the block-end reason counters at exit
     bool pc_hist = false;  // BIFROST_PC_HIST: histogram of the guest pcs the JIT bridge runs
     bool interp_bl_call = false;  // BIFROST_INTERP_BL_CALL: run BL through the interpreter bridge
     bool hot_interp = false;  // BIFROST_HOT_INTERP: demote hot blocks that mostly call the interpreter
     bool jit_trace = false;  // BIFROST_JIT_TRACE: trace each block dispatch
-    bool no_callregion = false;  // BIFROST_NO_CALLREGION: Tier-2 regions do not run through calls
-    bool no_opt = false;  // BIFROST_NO_OPT: skip the IR optimizer (Tier-1 and Tier-2)
+    bool no_opt = false;  // BIFROST_NO_OPT: skip the IR optimizer
     bool no_fma3 = false;  // BIFROST_NO_FMA3: decomposed FMA codegen even on FMA3 CPUs
     bool no_avx2 = false;  // BIFROST_NO_AVX2: no AVX2 codegen even on AVX2 CPUs
     bool trace_simdst16 = false;  // BIFROST_TRACE_SIMDST16: trace 16-byte vector stores recorded for replay
@@ -92,13 +93,7 @@ struct DebugFlags {
     bool class_prof = false;  // BIFROST_CLASS_PROF: instruction-class counts for blocks that fall back to the interpreter
     bool jit_dump = false;  // BIFROST_JIT_DUMP: dump the IR of every compiled block
     bool no_pin = false;  // BIFROST_NO_PIN: no pinned host registers in loops
-    bool no_pin_inplace = false;  // BIFROST_NO_PIN_INPLACE: pinned registers update through a scratch copy, not in place
-    bool no_rdce = false;  // BIFROST_NO_RDCE: Tier-2 planner: no redundant-store elimination
-    bool no_licm = false;  // BIFROST_NO_LICM: Tier-2 planner: no loop-invariant hoisting
-    bool no_destsrc = false;  // BIFROST_NO_DESTSRC: Tier-2 planner: no destination-as-source reuse
-    bool no_keepres = false;  // BIFROST_NO_KEEPRES: Tier-2: no resident registers across the loop back-edge
-    bool no_exitchain = false;  // BIFROST_NO_EXITCHAIN: Tier-2: region exits do not chain
-    bool t2_regiondump = false;  // BIFROST_T2_REGIONDUMP: hexdump each published Tier-2 region
+    bool no_pin_inplace = false;  // BIFROST_NO_PIN_INPLACE: pinned registers are read and updated through scratch copies
     bool no_chain_skip = false;  // BIFROST_NO_CHAIN_SKIP: chain edges do not skip the frame teardown and prologue
     bool no_direct_call = false;  // BIFROST_NO_DIRECT_CALL: BL sites call through the helper, not a patched direct call
     bool no_fwd = false;  // BIFROST_NO_FWD: skip load/store forwarding in the optimizer
@@ -107,11 +102,9 @@ struct DebugFlags {
     bool dbg_pc_set = false;  // BIFROST_DBG_PC=addr: print the entry and exit state of the block at addr
     uint64_t dbg_pc = 0;
     uint64_t dump_pc = 0;  // BIFROST_DUMP_PC=addr: BIFROST_JIT_DUMP only dumps the block at addr (0 = all)
-    bool tier2_hits_fixed = false;  // BIFROST_TIER2_HITS=N: Tier-2 candidates need N entries and skip the rate gate
-    uint32_t tier2_hits = 1000;
     int fp_native_gate = -1;  // BIFROST_FP_NATIVE_GATE=mask: FP op classes the translator handles natively (-1 = all)
-    bool no_ssa = false; // BIFROST_NO_SSA — Tier-2 regions skip the scalar SSA pipeline (and BIFROST_TIER1_SSA has no effect)
-    bool tier1_ssa = false; // BIFROST_TIER1_SSA=1 — run the scalar SSA adapter on Tier-1 blocks (slower to translate, see Docs/JIT.md)
+    bool no_ssa = false; // BIFROST_NO_SSA — skip the scalar SSA pipeline (BIFROST_LEAN_SSA has no effect)
+    bool lean_ssa = false; // BIFROST_LEAN_SSA=1 — run the scalar SSA adapter on Lean blocks (slower to translate, see Docs/archive/JIT-history.md)
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;  // [lo, hi) guest pcs
     Ranges fwd_ranges;   // BIFROST_FWD_RANGES=lo-hi,...  — FWD only for blocks starting here
@@ -286,7 +279,7 @@ struct DebugFlags {
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.no_ssa = env("BIFROST_NO_SSA");
-        f.tier1_ssa = env("BIFROST_TIER1_SSA");
+        f.lean_ssa = env("BIFROST_LEAN_SSA");
         f.ir_validate = all || env("BIFROST_IR_VALIDATE");
         f.fwd_ranges = parse_ranges(std::getenv("BIFROST_FWD_RANGES"));
         f.block_trace = parse_ranges(std::getenv("BIFROST_BLOCK_TRACE"));
@@ -303,18 +296,24 @@ struct DebugFlags {
         if (const char* end = std::getenv("BIFROST_MEMFULL_END")) f.jit_memfull_end = std::strtoull(end, nullptr, 0);
         f.verify_untracked = env("BIFROST_VERIFY_UNTRACKED");
         f.verify_trace = env("BIFROST_VERIFY_TRACE");
+        if (const char* carry = std::getenv("BIFROST_CARRY")) f.carry = std::strcmp(carry, "0") != 0;
+        f.no_reg_pass = env("BIFROST_NO_REG_PASS");
+        f.reg_pass_through = env("BIFROST_REG_PASS_THROUGH");
+        f.no_reg_pass_partial = env("BIFROST_NO_REG_PASS_PARTIAL");
+        f.no_carry_follow = env("BIFROST_NO_CARRY_FOLLOW");
+        f.no_side_exit = env("BIFROST_NO_SIDE_EXIT");
         f.no_selfloop = env("BIFROST_NO_SELFLOOP");
         f.no_native_libc = env("BIFROST_NO_NATIVE_LIBC");
         f.no_vec_cache = env("BIFROST_NO_VEC_CACHE");
         f.no_fp_cache = env("BIFROST_NO_FP_CACHE");
         f.step_trace = env("BIFROST_STEP_TRACE");
         f.no_shared_jit = env("BIFROST_NO_SHARED_JIT");
+        if (const char* n = std::getenv("BIFROST_JIT_COMPILERS")) f.jit_compilers = std::max(1, std::min(16, static_cast<int>(std::strtol(n, nullptr, 10))));
         f.block_prof = env("BIFROST_BLOCK_PROF");
         f.pc_hist = env("BIFROST_PC_HIST");
         f.interp_bl_call = env("BIFROST_INTERP_BL_CALL");
         f.hot_interp = env("BIFROST_HOT_INTERP");
         f.jit_trace = env("BIFROST_JIT_TRACE");
-        f.no_callregion = env("BIFROST_NO_CALLREGION");
         f.no_opt = env("BIFROST_NO_OPT");
         f.no_fma3 = env("BIFROST_NO_FMA3");
         f.no_avx2 = env("BIFROST_NO_AVX2");
@@ -331,12 +330,6 @@ struct DebugFlags {
         f.jit_dump = env("BIFROST_JIT_DUMP");
         f.no_pin = env("BIFROST_NO_PIN");
         f.no_pin_inplace = env("BIFROST_NO_PIN_INPLACE");
-        f.no_rdce = env("BIFROST_NO_RDCE");
-        f.no_licm = env("BIFROST_NO_LICM");
-        f.no_destsrc = env("BIFROST_NO_DESTSRC");
-        f.no_keepres = env("BIFROST_NO_KEEPRES");
-        f.no_exitchain = env("BIFROST_NO_EXITCHAIN");
-        f.t2_regiondump = env("BIFROST_T2_REGIONDUMP");
         f.no_chain_skip = env("BIFROST_NO_CHAIN_SKIP");
         f.no_direct_call = env("BIFROST_NO_DIRECT_CALL");
         f.no_fwd = env("BIFROST_NO_FWD");
@@ -344,10 +337,6 @@ struct DebugFlags {
         f.no_wex = env("BIFROST_NO_WEX");
         if (const char* pc = std::getenv("BIFROST_DBG_PC")) { f.dbg_pc_set = true; f.dbg_pc = std::strtoull(pc, nullptr, 0); }
         if (const char* pc = std::getenv("BIFROST_DUMP_PC")) f.dump_pc = std::strtoull(pc, nullptr, 0);
-        if (const char* hits = std::getenv("BIFROST_TIER2_HITS")) {
-            f.tier2_hits_fixed = true;
-            f.tier2_hits = static_cast<uint32_t>(std::strtoul(hits, nullptr, 10));
-        }
         if (const char* gate = std::getenv("BIFROST_FP_NATIVE_GATE")) f.fp_native_gate = static_cast<int>(std::strtol(gate, nullptr, 0));
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.audio_trace = all || env("BIFROST_AUDIO_TRACE");
@@ -384,12 +373,6 @@ struct DebugFlags {
             const char* v = std::getenv(key);
             return v ? std::string(v) != "0" && std::string(v) != "false" : fallback;
         };
-        f.tier2 = toggle("BIFROST_TIER2", false);
-        f.tier2_trace_verbose = env("BIFROST_TIER2_TRACE_VERBOSE");
-        f.tier2_graph = env("BIFROST_TIER2_GRAPH");
-        f.tier2_trace = env("BIFROST_TIER2_TRACE") || f.tier2_trace_verbose;
-        if (const char* value = std::getenv("BIFROST_JIT_SUPERBLOCK_LIMIT"))
-            f.jit_superblock_limit = std::clamp(std::strtoul(value, nullptr, 10), 2UL, 8UL);
         // Window stats are opt-in (BIFROST_WINDOW_STATS=1). BIFROST_WINDOW_STATS_MODE picks the layout:
         // 1 or minimal (title statistics), 2 or normal (title and overlay, the default), 3 or overlay
         // (overlay only). The per-display switches below override what the mode implies.

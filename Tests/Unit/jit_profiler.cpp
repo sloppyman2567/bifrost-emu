@@ -112,17 +112,17 @@ int main() {
         constexpr uint64_t head = 0x40000, stop = head + 4096;
         auto emu = std::make_unique<Emulator>();
         emu->mem().map_range(head, 4096); emu->mem().mprotect_guest(head, 4096, 7);
-        const uint32_t code[] = {0xd28000a0, 0x91000c00, 0xd65f03c0}; // mov 5; add 3; ret
+        const uint32_t code[] = {0xd28000a0, 0x8b010000, 0xd65f03c0}; // mov x0, #5; add x0, x0, x1; ret
         emu->mem().write(head, code, sizeof(code)); emu->enable_jit();
         auto fn = emu->jit()->lookup_or_translate(*emu, head);
         check(fn != nullptr);
         if (fn) {
-            CPU cpu; cpu.pc = head; cpu.regs[30] = stop;
+            CPU cpu; cpu.pc = head; cpu.regs[30] = stop; cpu.regs[1] = 3;
             check(fn(&cpu, emu.get()) == stop && cpu.regs[0] == 8);
         }
         // With BIFROST_PROF the translator registers the block and its operations: sampling every byte of it puts the body's
-        // samples into operation kinds that account for all of them (mov and add are ALU, the result is a guest-state
-        // move; the indirect branch of ret is in the exit section, not in the body).
+        // samples into operation kinds that account for all of them (the add of a register is ALU, the result is a guest-state
+        // move; a constant is folded and stored as an immediate, so x1 keeps the add from folding away; the indirect branch of ret is in the exit section, not in the body).
         {
             const auto before = prof_collect(0);
             const auto start = reinterpret_cast<uint64_t>(reinterpret_cast<const void*>(fn));
@@ -144,7 +144,7 @@ int main() {
             std::string block, pc, begin, end, kind;
             if (!(fields >> block >> pc >> begin >> end >> kind)) { check(false); continue; }
             check(std::stoull(begin, nullptr, 0) < std::stoull(end, nullptr, 0));
-            if (kind == "tier1-ir") {
+            if (kind == "lean-ir") {
                 const auto guest = std::stoull(pc, nullptr, 0);
                 check(guest >= head && guest < head + sizeof(code) && !(guest & 3));
                 ++rows;

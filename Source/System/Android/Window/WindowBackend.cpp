@@ -54,7 +54,7 @@ PadCursorMode current_pad_cursor_mode() {
   X(CreateWindowWithProperties) X(CreateProperties) X(DestroyProperties) \
   X(SetStringProperty) X(SetNumberProperty) X(SetBooleanProperty) \
   X(DestroyWindow) X(GetWindowProperties) X(HideWindow) X(ShowWindow) X(RaiseWindow) X(RestoreWindow) \
-  X(GetPointerProperty) X(GetNumberProperty) X(SetWindowSize) \
+  X(GetPointerProperty) X(GetNumberProperty) X(SetWindowSize) X(MaximizeWindow) \
   X(GetWindowSize) X(GetWindowSizeInPixels) X(SyncWindow) X(GetWindowID) X(PollEvent) \
   X(GetWindowTitle) X(SetWindowTitle) X(GetWindowPosition) X(GetWindowFlags) \
   X(CreateSurfaceFrom) X(SetWindowIcon) X(DestroySurface) \
@@ -436,6 +436,12 @@ public:
     return true;
   }
   bool active() const { return buffer_ != nullptr; }
+  // The same picture again: what the surface's acknowledged state waits for (commit_window_state).
+  void commit() {
+    if (!surface_) return;
+    wl_surface_commit(surface_);
+    wl_display_flush(display_);
+  }
   // The SDL window, and so its wl_surface, outlives this backdrop.
   void reset() {
     if (buffer_) wl_buffer_destroy(buffer_);
@@ -713,7 +719,7 @@ public:
 #if defined(BIFROST_USE_SDL3)
     if (!window_) return -ENODEV;
     if (w <= 0 || h <= 0) return -EINVAL;
-    fixed_w_ = w; fixed_h_ = h;
+    fixed_w_ = open_panel_w_ = w; fixed_h_ = open_panel_h_ = h;
     panel_resolution::scale(fixed_w_, fixed_h_, resolution_);  // the Resolution setting: the panel's own pixel size
     // The window is free to take any shape: a compositor tiles it to a half or a corner, and a locked aspect ratio forbids
     // those sizes (a game could then only be maximized or left at its opening size). Nothing is stretched: every layer is
@@ -736,10 +742,14 @@ public:
     int32_t h = fixed_h_ ? fixed_h_ : height_;
     const float previous = !fixed_w_ && orientation_axis_ ? float(w) / float(h) : 0.0f;   // the lock now in force
     if (axis && ((axis == 2) != (w > h))) std::swap(w, h);
-    // A fixed-size app is the virtual panel: rotated, it has the panel's own shape (the size it opened at, in desktop
-    // units) limited by the work area the open clamp revealed, not the current pixels swapped (which shrink with
-    // every rotation) and not whatever size the user gave the window (the fit letterboxes the panel into that).
-    if (axis && fixed_w_ && panel_long_ > 0) {
+    // A fixed-size app is the virtual panel. Turned to the shape it opened in, it has exactly that size again (a window
+    // that opened maximised has the desktop's shape, not the phone's). Turned the other way, it has the phone panel's
+    // shape (the size asked for at open, in desktop units) limited by the work area the open revealed, not the current
+    // pixels swapped (which shrink with every rotation) and not whatever size the user gave the window (the fit
+    // letterboxes the panel into that).
+    if (axis && fixed_w_ && (open_panel_w_ > open_panel_h_) == (axis == 2)) {
+      w = open_panel_w_; h = open_panel_h_;
+    } else if (axis && fixed_w_ && panel_long_ > 0) {
       const double ratio = ratio_->load();
       const double panel_w = axis == 2 ? panel_long_ : panel_short_, panel_h = axis == 2 ? panel_short_ : panel_long_;
       const double shrink = std::min({1.0, area_w_ / panel_w, area_h_ / panel_h});
@@ -752,7 +762,18 @@ public:
     const float aspect = axis && !fixed_w_ ? float(w) / float(h) : 0.0f;
     if (!sdl_.SetWindowAspectRatio(window_, aspect, aspect) && aspect > 0.0f) return fail("window orientation");
     if (!axis) { orientation_axis_ = 0; return 0; }
-    int error = resize(w, h, true);
+    // The host window belongs to the user: a client cannot place it on Wayland, so one that grows on a rotation can reach
+    // past the screen. A fixed-size app's panel turns inside the window as it is. The first request is part of opening
+    // (a splash with no orientation of its own opens landscape), and the Rotation setting asks for a reshape each time.
+    const bool held = sdl_.GetWindowFlags(window_) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED);
+    if (held && !fixed_w_) {
+      // Nothing can turn such a window, and its display is the window: the app keeps the size it has, and the shape it asked
+      // for holds once the user takes the window out of that state.
+      orientation_axis_ = axis;
+      oriented_ = true;
+      return 0;
+    }
+    int error = resize(w, h, !fixed_w_ || ((reshape_on_rotation_ || !oriented_) && !held));
     if (error) {
       sdl_.SetWindowAspectRatio(window_, previous, previous);
       return error;
@@ -764,6 +785,7 @@ public:
       update_ratio(pixel_w, pixel_h);  // refit the layers to the new panel
     }
     orientation_axis_ = axis;
+    oriented_ = true;
     return 0;
 #else
     (void)axis;
@@ -843,12 +865,26 @@ public:
     if (!sdl_.load()) return -ENOSYS;
     sdl_.SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     if (!sdl_.InitSubSystem(SDL_INIT_VIDEO)) return fail("video initialization");
+    // How this app's window was when it last closed. A maximised one opens maximised, before the app starts, so the app's
+    // first size is the one it keeps: a game that lays out its first screen once (Cocos2d-x) or is not resizable (its panel
+    // is the opening size) is never told a second one. A portrait window opens in its own shape and is maximised afterwards
+    // (restore_size), so its panel stays a phone's. Any other remembered size is applied there too.
+    size_path_.clear();
+    size_pending_ = saved_maximized_ = false;
+    saved_w_ = width; saved_h_ = height;
+    if (const char *state = std::getenv("BIFROST_ANDROID_WINDOW_STATE")) {
+      size_path_ = state;
+      size_pending_ = remembered_size::load(size_path_, saved_w_, saved_h_, saved_maximized_);
+    }
+    const bool maximize = saved_maximized_ && width > height;
     auto props = sdl_.CreateProperties();
     if (!props) { sdl_.QuitSubSystem(SDL_INIT_VIDEO); return fail("window properties"); }
     bool configured = sdl_.SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title) &&
-        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width) &&
-        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height) &&
+        // A maximised window's own size is the one it returns to.
+        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, maximize ? saved_w_ : width) &&
+        sdl_.SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, maximize ? saved_h_ : height) &&
         sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true) &&
+        sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_MAXIMIZED_BOOLEAN, maximize) &&
         sdl_.SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, true) &&
         // Buffers at the display's native pixel density; SDL scales the
         // surface back to the requested desktop size (Wayland viewport or
@@ -860,14 +896,17 @@ public:
     if (!window_) { sdl_.QuitSubSystem(SDL_INIT_VIDEO); return fail("window creation"); }
     if (!update_ratio(width_, height_)) { close(); return fail("window size query"); }
     panel_long_ = std::max(width, height); panel_short_ = std::min(width, height);
-    if (fit_new_window(width, height)) update_ratio(width_, height_);
-    // The size this app's window had when it last closed, applied once the app has set the window up (restore_size).
-    size_path_.clear();
-    size_pending_ = false;
-    if (const char *state = std::getenv("BIFROST_ANDROID_WINDOW_STATE")) {
-      size_path_ = state;
-      size_pending_ = remembered_size::load(size_path_, saved_w_, saved_h_);
+    open_panel_w_ = open_panel_h_ = 0;
+    area_w_ = area_h_ = INT32_MAX;
+    oriented_ = false;
+    if (maximize && opened_maximized()) {
+      size_pending_ = false;  // nothing left to restore
+    } else {
+      if (maximize) { sdl_.SetWindowSize(window_, width, height); sdl_.SyncWindow(window_); update_ratio(width_, height_); }
+      if (fit_new_window(width, height)) update_ratio(width_, height_);
     }
+    const char *rotation = std::getenv("BIFROST_ANDROID_ROTATION");
+    reshape_on_rotation_ = rotation && !std::strcmp(rotation, "reshape");
     resolution_ = panel_resolution::parse(std::getenv("BIFROST_ANDROID_RESOLUTION"));
     // Gamepads are optional: SDL reports the connected ones as added events.
     gamepads_ready_ = sdl_.InitSubSystem(SDL_INIT_GAMEPAD);
@@ -1140,8 +1179,11 @@ private:
                      static_cast<long long>(out.time_ms), id, name,
                      static_cast<unsigned>(e.type), e.window.data1, e.window.data2);
       }
+      if (e.type >= SDL_EVENT_WINDOW_FIRST && e.type <= SDL_EVENT_WINDOW_LAST && e.window.windowID == id)
+        commit_window_state();
       if (e.type == SDL_EVENT_QUIT) { out.type = BIFROST_WINDOW_CLOSE; return 1; }
       if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == id) {
+        save_size();  // now: a game may kill its own process while it closes, and close() then never runs
         out.type = BIFROST_WINDOW_CLOSE; return 1;
       }
       if (gamepad_event(e, id, out.time_ms)) {
@@ -1158,7 +1200,8 @@ private:
       if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && e.window.windowID == id) {
         if (e.window.data1 <= 0 || e.window.data2 <= 0) continue;
         int32_t pixel_w, pixel_h;
-        update_ratio(pixel_w, pixel_h);
+        // A size the window has left again (one step of opening maximised) is no news: its last event follows.
+        if (update_ratio(pixel_w, pixel_h) && (e.window.data1 != pixel_w || e.window.data2 != pixel_h)) continue;
         out.type = BIFROST_WINDOW_RESIZE;
         out.width = fixed_w_ ? fixed_w_ : e.window.data1;
         out.height = fixed_w_ ? fixed_h_ : e.window.data2; return 1;
@@ -1641,15 +1684,26 @@ private:
     sdl_.SyncWindow(window_);
     return true;
   }
+  // A window created maximised: its size is the work area, which the app's display takes as it is. False when the
+  // compositor did not maximise it (a tiling desktop), and it then opens like any other.
+  bool opened_maximized() {
+    sdl_.SyncWindow(window_);
+    int logical_w = 0, logical_h = 0;
+    if (!(sdl_.GetWindowFlags(window_) & SDL_WINDOW_MAXIMIZED) || !sdl_.GetWindowSize(window_, &logical_w, &logical_h) ||
+        logical_w <= logical_h || !update_ratio(width_, height_))
+      return false;
+    area_w_ = logical_w; area_h_ = logical_h;
+    return true;
+  }
   void toggle_fullscreen() {
     const bool on = !(sdl_.GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN);
     // The compositor answers with the new size, which reaches the app like any resize; leaving fullscreen brings the
     // windowed size back.
     if (!sdl_.SetWindowFullscreen(window_, on)) fail("fullscreen");
   }
-  // Open the window in the size it had when it last closed. The app has already fixed its shape by now: a fixed-size
-  // app's panel (fit into any window), an orientation (a window of that shape). So this is an ordinary resize, as if the
-  // user had dragged the window, never a different size to open at (which would change a fixed-size app's panel).
+  // Give the window the size it had when it last closed, or maximise it when it was and could not open that way. The app
+  // has already fixed its shape by now: a fixed-size app's panel (fit into any window), an orientation (a window of that
+  // shape). So this is an ordinary resize, as if the user had dragged the window, never a different size to open at.
   void restore_size() {
     if (!size_pending_) return;
     size_pending_ = false;
@@ -1661,6 +1715,10 @@ private:
     if (!sdl_.GetWindowSize(window_, &current_w, &current_h) || current_w <= 0 || current_h <= 0 ||
         (sdl_.GetWindowFlags(window_) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED)))
       return;
+    if (saved_maximized_) {
+      if (!sdl_.MaximizeWindow(window_)) fail("remembered window state");
+      return;
+    }
     if (display && sdl_.GetDisplayBounds(display, &bounds)) remembered_size::fit(w, h, bounds.w, bounds.h);
     remembered_size::fit(w, h, area_w_, area_h_);  // the work area the first window was clamped to, once learned
     // An app that asked for an orientation keeps that shape: the remembered size is the room it may take.
@@ -1671,16 +1729,16 @@ private:
     }
     if ((w != current_w || h != current_h) && !sdl_.SetWindowSize(window_, w, h)) fail("remembered window size");
   }
-  // Remember the window's size for the next launch. A fullscreen, maximised, minimised or hidden window has no size of
-  // its own to keep, so the earlier one stays.
+  // Remember the window's size, and whether it is maximised, for the next launch. A maximised window has no size of its own
+  // to keep, so the earlier one stays; a fullscreen, minimised or hidden one leaves everything as it was.
   void save_size() {
     if (size_path_.empty()) return;
-    int w = 0, h = 0;
-    if ((sdl_.GetWindowFlags(window_) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED |
-                                         SDL_WINDOW_HIDDEN)) ||
-        !sdl_.GetWindowSize(window_, &w, &h))
-      return;
-    remembered_size::store(size_path_, w, h);
+    const SDL_WindowFlags flags = sdl_.GetWindowFlags(window_);
+    if (flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) return;
+    int w = saved_w_, h = saved_h_;
+    const bool maximized = flags & SDL_WINDOW_MAXIMIZED;
+    if (!maximized && !sdl_.GetWindowSize(window_, &w, &h)) return;
+    if (remembered_size::store(size_path_, w, h, maximized)) { saved_w_ = w; saved_h_ = h; }
   }
   bool update_ratio(int32_t &pixel_w, int32_t &pixel_h) {
     int logical_w = 0, logical_h = 0;
@@ -1709,6 +1767,15 @@ private:
   // Managed SurfaceView layers are subsurfaces; nothing else draws into the
   // SDL window's own surface then (its wl_egl_window may exist but stays
   // unused), and Wayland maps the window only once that surface has a buffer.
+  // SDL acknowledges a new window state (maximised, tiled, on another display) and leaves the commit that applies it to the
+  // window's next frame; during an interactive resize even the acknowledgement waits for a frame callback. The app draws in
+  // child surfaces, so nothing else commits the window's own one, and without this a change that keeps its pixel size is
+  // never applied: the window stays as it was. SDL reports every such change as a window event.
+  void commit_window_state() {
+    if (!backdrop_.active()) return;
+    refresh_backdrop();
+    backdrop_.commit();
+  }
   void refresh_backdrop() {
     auto props = sdl_.GetWindowProperties(window_);
     auto display = static_cast<wl_display*>(sdl_.GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr));
@@ -1868,11 +1935,15 @@ private:
   int32_t fixed_w_ = 0, fixed_h_ = 0;  // set_fixed_size
   int32_t resolution_ = 0;  // BIFROST_ANDROID_RESOLUTION: the fixed panel's short side in pixels, 0 follows the window
   int32_t panel_long_ = 0, panel_short_ = 0;  // open()'s size in desktop units
-  int32_t area_w_ = INT32_MAX, area_h_ = INT32_MAX;  // work area limits learned from the open clamp
+  int32_t open_panel_w_ = 0, open_panel_h_ = 0;  // the panel set_fixed_size gave, before the Resolution setting
+  int32_t area_w_ = INT32_MAX, area_h_ = INT32_MAX;  // work area limits learned from the open clamp or maximised size
   int32_t orientation_axis_ = 0;
+  bool oriented_ = false;             // the app has asked for an orientation since open()
+  bool reshape_on_rotation_ = false;  // BIFROST_ANDROID_ROTATION=reshape
   std::string size_path_;                 // BIFROST_ANDROID_WINDOW_STATE: where this app's window size is kept
-  int32_t saved_w_ = 0, saved_h_ = 0;     // the size read from it at open, desktop units
-  bool size_pending_ = false;             // saved_w_ x saved_h_ not applied yet
+  int32_t saved_w_ = 0, saved_h_ = 0;     // the size read from it at open (open()'s own without one), desktop units
+  bool saved_maximized_ = false;          // and whether the window was maximised
+  bool size_pending_ = false;             // not applied yet
   int32_t width_ = 800, height_ = 600;
   int64_t last_pump_log_ms_ = 0;
   // The gamepad's pointer for touch-only apps (PadCursor), its picture in a popup layer, and what it queued this poll.

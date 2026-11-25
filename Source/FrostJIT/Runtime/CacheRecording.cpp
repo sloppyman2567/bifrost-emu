@@ -1,7 +1,7 @@
-// CacheRecording.cpp — Tier-1 translations that later processes reuse
+// CacheRecording.cpp — Lean translations that later processes reuse
 // (BIFROST_JIT_DISK_CACHE; storage in PersistentCache.cpp).
 //
-// A recording compile (recording_) is an ordinary public Tier-1 compile of
+// A recording compile (recording_) is an ordinary public Lean compile of
 // code mapped from a file. Its 64-bit immediates are logged, the sites that
 // embed host addresses name them (note_host_reloc) and every constant a
 // 32-bit form could hold takes its imm64 form (wide_guest_pc). Before publication the block is compiled a second
@@ -164,7 +164,7 @@ bool FrostJIT::disk_cache_ready(Emulator& emu) {
     // Translations these switches shape carry state no record describes.
     static const bool leaf_inline = dbg().enable_leaf_inline;
     static const bool malloc_interp = dbg().malloc_interp;
-    const char* why = tier2_enabled() ? "Tier-2 is enabled" : dbg().jit_verify ? "BIFROST_JIT_VERIFY is set"
+    const char* why = dbg().jit_verify ? "BIFROST_JIT_VERIFY is set"
         : leaf_inline ? "leaf inlining is enabled" : malloc_interp ? "BIFROST_MALLOC_INTERP is set"
         : !dbg().block_trace.empty() ? "BIFROST_BLOCK_TRACE is set" : !guest_memory_ || !window_base_
         ? "no guest window" : own_image().hi == 0 ? "the JIT's own image is unknown" : nullptr;
@@ -196,7 +196,6 @@ bool FrostJIT::disk_cache_ready(Emulator& emu) {
 void FrostJIT::start_record_compile() {
     imm64_fields_.clear();
     record_edge_mark_ = mt_edges_.size();
-    record_fault_mark_ = fault_site_count_.load(std::memory_order_relaxed);
     record_flagdep_mark_ = flag_dep_table_.size();
     record_call_end_ = call_site_end_;
     record_unrecordable_ = false;
@@ -221,8 +220,8 @@ bool FrostJIT::begin_recording(uint64_t start_pc) {
 
 void FrostJIT::capture_compile(CompileCapture& c, uint64_t start_pc, size_t block_start,
                                const BlockEntry& entry, bool inlined_leaf) {
-    c.ok = !record_unrecordable_ && !inlined_leaf && !code_buf_overflow_ && call_site_end_ == record_call_end_ &&
-           entry.fn && !entry.interp_only && entry.inlined_ranges_.empty() && entry.tier2_counter_len == 0;
+    c.ok = !record_unrecordable_ && !inlined_leaf && !block_has_side_exit_ && !code_buf_overflow_ && call_site_end_ == record_call_end_ &&
+           entry.fn && !entry.interp_only && entry.inlined_ranges_.empty();
     c.start_pc = start_pc;
     c.block_start = block_start;
     c.code.assign(code_buf_ + block_start, code_buf_ + code_buf_used_);
@@ -242,20 +241,24 @@ void FrostJIT::capture_compile(CompileCapture& c, uint64_t start_pc, size_t bloc
         const uint64_t base = reinterpret_cast<uint64_t>(code_buf_) + block_start;
         // Only the block's own chain slots: self-loop and call cells keep
         // state (a body address, a callee) that a record does not carry.
-        if (e.internal_loop || e.sampling_private || (e.slot != entry.chain_patch_off &&
-            !(entry.has_taken_chain_slot && e.slot == entry.taken_chain_patch_off)) ||
+        if ((e.slot != entry.chain_patch_off &&
+             !(entry.has_taken_chain_slot && e.slot == entry.taken_chain_patch_off)) ||
             cold < base || cold - base > c.code.size())
             c.ok = false;
         c.edges.push_back({static_cast<uint32_t>(e.slot - block_start), static_cast<uint32_t>(cold - base),
                            e.target_pc, e.cold_entry});
     }
     c.faults.clear();
-    const size_t faults = fault_site_count_.load(std::memory_order_relaxed);
-    for (size_t i = record_fault_mark_; i < faults; ++i) {
-        const uint64_t v = fault_sites_[i].load(std::memory_order_relaxed);
-        const uint64_t site = v >> 32, stub = v & 0xffffffffu;
-        if (site < block_start || stub < block_start) c.ok = false;
-        c.faults.push_back({static_cast<uint32_t>(site - block_start), static_cast<uint32_t>(stub - block_start)});
+    for (size_t chunk = block_start / kCodeChunk; fault_sites_ && chunk <= code_buf_used_ / kCodeChunk && chunk < fault_chunk_count(); ++chunk) {
+        const std::atomic<uint64_t>* sites = fault_sites_ + chunk * kFaultSitesPerChunk;
+        const uint32_t count = fault_chunks_[chunk].count.load(std::memory_order_relaxed);
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint64_t v = sites[i].load(std::memory_order_relaxed);
+            const uint64_t site = v >> 32, stub = v & 0xffffffffu;
+            if (site < block_start) continue;
+            if (stub < block_start) c.ok = false;
+            c.faults.push_back({static_cast<uint32_t>(site - block_start), static_cast<uint32_t>(stub - block_start)});
+        }
     }
     c.words = block_words_;
     c.deps.clear();
@@ -266,18 +269,8 @@ void FrostJIT::capture_compile(CompileCapture& c, uint64_t start_pc, size_t bloc
 
 // Removes what the proof compile appended; its code is rewound by the caller.
 void FrostJIT::discard_oracle_effects(size_t edge_mark, size_t flagdep_mark) {
-    for (size_t i = edge_mark; i < mt_edges_.size(); ++i) {
-        MtEdge* edge = mt_edges_[i].get();
-        for (auto* refs : {&mt_edge_refs_, &mt_source_refs_}) {
-            auto it = refs->find(refs == &mt_edge_refs_ ? edge->target_pc : edge->source_pc);
-            if (it == refs->end()) continue;
-            auto& v = it->second;
-            v.erase(std::remove(v.begin(), v.end(), edge), v.end());
-            if (v.empty()) refs->erase(it);
-        }
-    }
-    mt_edges_.resize(edge_mark);
-    flag_dep_table_.resize(flagdep_mark);
+    mt_edges_.truncate(edge_mark);
+    flag_dep_table_.truncate(flagdep_mark);
 }
 
 // Compares the two compiles and, if every difference is explained, builds the record.
@@ -574,9 +567,7 @@ uint64_t (*FrostJIT::install_cached(Emulator& emu, uint64_t start_pc))(CPU*, Emu
         disk_cache_->rejected.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
-    if (!ensure_code_space(body.code_bytes) ||
-        fault_site_count_.load(std::memory_order_relaxed) + body.fault_count >= code_buf_limit_ / 2)
-        return nullptr;
+    if (!ensure_code_space(body.code_bytes)) return nullptr;
     make_writable();
     const size_t block_start = code_buf_used_;
     uint8_t* dst = code_buf_ + block_start;
@@ -584,6 +575,8 @@ uint64_t (*FrostJIT::install_cached(Emulator& emu, uint64_t start_pc))(CPU*, Emu
     code_buf_used_ += body.code_bytes;
     // Chain edges first: their cells are relocation targets.
     current_start_pc_ = start_pc;
+    compile_edge_mark_ = mt_edges_.size();
+    compiled_side_exits_.clear();
     std::vector<MtEdge*> created;
     for (uint32_t i = 0; i < body.edge_count; ++i) {
         EdgeRecord e; memcpy(&e, edges + i * sizeof e, sizeof e);
@@ -646,19 +639,17 @@ uint64_t (*FrostJIT::install_cached(Emulator& emu, uint64_t start_pc))(CPU*, Emu
     entry.reads_pstate_before_set = body.flags & kReadsPstate;
     entry.skips_dead_flag_store = body.flags & kSkipsFlagStore;
     // Instruction words and dead-flag dependencies, laid out as attach_code_words does.
-    if (code_words_.size() <= UINT32_MAX - body.word_count - body.dep_words) {
-        entry.code_words_off = uint32_t(code_words_.size());
+    const size_t all_words = size_t(body.word_count) + body.dep_words;
+    if (all_words <= code_words_.kMaxRun && code_words_.size() <= UINT32_MAX - 2 * code_words_.kMaxRun) {
+        entry.code_words_off = uint32_t(code_words_.append_run(words, body.word_count));
         entry.code_words_count = body.word_count;
-        const auto* w = reinterpret_cast<const uint32_t*>(words);
-        for (uint32_t i = 0; i < body.word_count; ++i) { uint32_t v; memcpy(&v, w + i, 4); code_words_.push_back(v); }
         if (body.dep_count) {
             entry.flag_deps_off = uint32_t(flag_dep_table_.size());
             entry.flag_deps_count = uint16_t(body.dep_count);
             const uint8_t* dwp = dep_words;
             for (uint32_t i = 0; i < body.dep_count; ++i) {
                 DepRecord d; memcpy(&d, deps + i * sizeof d, sizeof d);
-                flag_dep_table_.push_back({start_pc + uint64_t(d.pc_rel), d.count, uint32_t(code_words_.size())});
-                for (uint32_t k = 0; k < d.count; ++k) { uint32_t v; memcpy(&v, dwp + k * 4, 4); code_words_.push_back(v); }
+                flag_dep_table_.push_back({start_pc + uint64_t(d.pc_rel), d.count, uint32_t(code_words_.append_run(dwp, d.count))});
                 dwp += size_t(d.count) * 4;
             }
         }
@@ -671,6 +662,7 @@ uint64_t (*FrostJIT::install_cached(Emulator& emu, uint64_t start_pc))(CPU*, Emu
     }
     disk_cache_->hits.fetch_add(1, std::memory_order_relaxed);
     disk_cache_->note_use(h);
+    collect_edges(entry);
     if (staging_) {
         staged_entry_ = entry;
         staged_ = staged_linked_ = true;
@@ -682,15 +674,22 @@ uint64_t (*FrostJIT::install_cached(Emulator& emu, uint64_t start_pc))(CPU*, Emu
 }
 
 void FrostJIT::append_fault_site(size_t site, size_t stub) {
-    const size_t n = fault_site_count_.load(std::memory_order_relaxed);
+    if (site >= code_lease_end_) { code_buf_overflow_ = true; return; }  // the next chunk's run is another compiler's
+    const size_t c = site / kCodeChunk;
+    FaultChunk& chunk = fault_chunks_[c];
+    const uint32_t n = chunk.count.load(std::memory_order_relaxed);
+    if (n >= kFaultSitesPerChunk) { code_buf_overflow_ = true; return; }
+    const size_t index = c * kFaultSitesPerChunk + n;
     const uint64_t entry = (uint64_t(site) << 32) | stub;
-    if (n == fault_site_constructed_) {
-        new (fault_sites_ + n) std::atomic<uint64_t>(entry);
-        ++fault_site_constructed_;
+    if (n == chunk.constructed) {
+        new (fault_sites_ + index) std::atomic<uint64_t>(entry);
+        ++chunk.constructed;
     } else {
-        fault_sites_[n].store(entry, std::memory_order_relaxed);
+        fault_sites_[index].store(entry, std::memory_order_relaxed);
     }
-    fault_site_count_.store(n + 1, std::memory_order_release);
+    chunk.count.store(n + 1, std::memory_order_release);
+    ++fault_sites_added_;
+    fault_last_site_ = index;
 }
 
 FrostJIT::BlockProfileCounts FrostJIT::block_profile_snapshot() const {

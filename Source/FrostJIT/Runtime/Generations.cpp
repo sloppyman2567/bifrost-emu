@@ -193,7 +193,7 @@ void FrostJIT::retire() {
 
 // The reaper found every thread past this instance. Frees what only its own generated code
 // referenced: the code mapping, the fault table and the per-block metadata (including the
-// heap objects the code addressed directly: MT edge cells, counters, Tier-2 monitors). The
+// heap objects the code addressed directly: MT edge cells). The
 // object itself stays, because generated code embeds the address of members such as
 // cache_generation_ and a parked thread may still return through run_block on it.
 void FrostJIT::release_resources() {
@@ -205,37 +205,40 @@ void FrostJIT::release_resources() {
     // The fault handler tests fault_sites_ before it reads anything else.
     destroy_fault_recovery();
     fault_sites_ = nullptr;
-    fault_site_count_.store(0, std::memory_order_relaxed);
-    fault_site_constructed_ = 0;
+    fault_chunks_ = nullptr;
+    compilers_count_.store(0, std::memory_order_release);
+    for (auto& compiler : compilers_) compiler.reset();
+    free_compilers_.clear();
     if (code_buf_) {
         munmap(code_buf_, code_buf_limit_);
         code_buf_ = nullptr;
         code_buf_used_ = 0;
+        code_next_lease_ = 0;
         code_capacity_ = 0;
     }
     auto clear = [](auto& container) { std::remove_reference_t<decltype(container)>().swap(container); };
-    // Blocks first: their entries point at the monitors and edges below.
+    // Blocks first: their entries point at the edges below.
     clear(blocks_);
+    block_starts_.release();
+    carry_tripped_.release();
     clear(code_index_);
     clear(back_refs_);
     clear(pending_call_sites_);
     clear(direct_call_sites_);
-    clear(mt_edge_refs_);
-    clear(mt_source_refs_);
+    mt_targets_.clear();
     clear(mt_edges_);
-    clear(hot_counter_sites_);
-    clear(hot_counters_);
-    clear(tier2_trials_);
-    clear(tier2_region_monitors_);
-    clear(tier2_profiles_by_pc_);
-    clear(tier2_settled_);
-    clear(tier2_settle_queue_);
-    clear(tier2_refresh_queue_);
-    clear(tier2_branch_profiles_);
-    clear(tier2_retrains_);
-    clear(tier2_block_limits_);
     clear(code_words_);
+    clear(carry_info_);
+    clear(side_stubs_);
+    clear(side_exit_table_);
     clear(flag_dep_table_);
+    clear(reg_pass_);
+    clear(reg_stubs_);
+    clear(carry_profiles_);
+    clear(carry_follow_taken_);
+    clear(carry_done_);
+    clear(carry_toggles_);
+    clear(carry_rounds_);
     clear(retired_pcs_);
     clear(compile_invalidations_);
     clear(allocation_events_);

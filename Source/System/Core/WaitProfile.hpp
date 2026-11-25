@@ -3,7 +3,8 @@
 // BIFROST_PROF's sampler counts host CPU time, so a thread that waits shows nothing. This adds, per guest thread, the time
 // spent inside guest syscalls by kind, next to the thread's lifetime and CPU time. The futex, poll and sleep kinds are
 // time spent blocked; io, ioctl, thunk (the GL/EGL/SDL thunks, where a swap waits for the display) and other are time
-// inside the call, work and waiting together. Only the outermost call on a thread is counted.
+// inside the call, work and waiting together. Only the outermost call on a thread is counted. Next to them stands what the
+// JIT's translation cost the thread: its own translating, and its wait for the compiler another thread holds.
 //
 // A thread is counted from its first counted call. Everything is inert unless BIFROST_PROF is set: a timer that is not armed
 // costs one flag test.
@@ -41,6 +42,10 @@ private:
     uint64_t number_ = 0, arg0_ = 0, arg1_ = 0, caller_ = 0;
 };
 
+// Adds one translation to the calling thread: the time it translated (and published) and the time it waited for its turn.
+// Call only under BIFROST_PROF (dbg().cpu_profile).
+void wait_prof_note_translation(uint64_t translate_ns, uint64_t wait_ns);
+
 // How a `[stall]` line names a guest thread, describes a code address (`library+0xoffset`) and says what a guest descriptor is
 // (a path, a pipe, a socket and its addresses). Set once the emulator can answer; `describe_fd` may be empty.
 void wait_prof_set_describers(std::function<std::string(int)> thread_name, std::function<std::string(uint64_t)> describe_address,
@@ -54,6 +59,7 @@ struct WaitThreadReport {
     uint64_t cpu_ns = 0;
     uint64_t kind_ns[static_cast<size_t>(WaitKind::Count)] = {};
     uint64_t kind_calls[static_cast<size_t>(WaitKind::Count)] = {};
+    uint64_t translate_ns = 0, translate_wait_ns = 0, translate_wait_max_ns = 0;
 };
 
 // Every thread that has made a counted call, most CPU time first.

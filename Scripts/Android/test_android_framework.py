@@ -99,7 +99,6 @@ def run(emu, runtime, art_root, probe, mode, output, timeout, art_options=(), pr
             arguments += [str(root / "system/bin/app_process64")] + program
         else:
             environment["BIFROST_GUEST_ENV"] = ";".join(f"{k}={v}" for k, v in guest_env.items())
-            environment["BIFROST_TIER2"] = "0"
             if "--play" in probe_args:
                 environment["BIFROST_FRAME_TRACE"] = "1"
             arguments = [str(emu)] + (["--no-jit"] if mode == "interp" else [])

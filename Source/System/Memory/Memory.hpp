@@ -110,8 +110,11 @@ public:
     // Linux places them top-down, high; ART and Bionic then expect low
     // hints (the boot image near 0x70000000, low-4GB heap) to be free.
     void set_low_hints_reserved(bool enabled) { low_hints_reserved_ = enabled; }
+    // The address bits a data access uses under top-byte-ignore; the JIT reads this word from the window's
+    // header page (JIT_UNTAG_MASK_OFF) to untag an address with one `and`.
+    static constexpr uint64_t DATA_ADDRESS_MASK = 0x00FFFFFFFFFFFFFFULL;
     uint64_t data_address(uint64_t addr) const {
-        return data_top_byte_ignore_ ? addr & 0x00FFFFFFFFFFFFFFULL : addr;
+        return data_top_byte_ignore_ ? addr & DATA_ADDRESS_MASK : addr;
     }
     // ── Mapping ───────────────────────────────────────────────────────
     // Map [addr, addr+size) read/write (ELF segments, brk, stacks).
@@ -254,7 +257,10 @@ public:
     // header page in front of the reservation), so generated code tests it
     // with one `cmp byte [window_base + off], 0` through its window register.
     static constexpr int32_t JIT_SOFTWARE_CHECKS_OFF = -8;
-    // Two tables for access widths 1..64 sit below the flag in the same header
+    // DATA_ADDRESS_MASK, written once for every window whether or not TBI is on. It sits within a byte
+    // displacement of the window register, so `and reg, [window_base - 16]` is a 4-byte instruction.
+    static constexpr int32_t JIT_UNTAG_MASK_OFF = -16;
+    // Two tables for access widths 1..64 sit below that in the same header
     // page, so generated code bounds-checks an address with one
     // `cmp reg, [window_base + off]` instead of loading a 64-bit immediate.
     // A bound is the first address an access of that width must not start at
@@ -264,7 +270,7 @@ public:
     // checked path, which compares with the real bound (jit_window_bound_off).
     static constexpr uint64_t JIT_WINDOW_LIMIT_MAX_WIDTH = 64;
     static constexpr int32_t JIT_WINDOW_LIMITS_OFF =
-        JIT_SOFTWARE_CHECKS_OFF - 8 * static_cast<int32_t>(JIT_WINDOW_LIMIT_MAX_WIDTH);
+        JIT_UNTAG_MASK_OFF - 8 * static_cast<int32_t>(JIT_WINDOW_LIMIT_MAX_WIDTH);
     static constexpr int32_t JIT_WINDOW_BOUNDS_OFF =
         JIT_WINDOW_LIMITS_OFF - 8 * static_cast<int32_t>(JIT_WINDOW_LIMIT_MAX_WIDTH);
     // The address of direct_page_flags_, for the checked path's flag loads.

@@ -1,34 +1,63 @@
 # Performance
 
-How fast the JIT is, measured on one machine: CoreMark against QEMU and an earlier release, then five small benchmark programs
-against the reference interpreter. These figures compare builds on the same host. They do not predict how fast a game runs.
+How fast the JIT is on one PC. These numbers are for comparing builds on the same machine. They don't tell you how fast a game will run.
 
-CoreMark (November 23, 2026), measured on a Ryzen 7 5800X3D with the CPU governor on `performance` (boost on), every run pinned to
-one core: 200,000 iterations, one warmup and three interleaved measured runs per binary, every CRC validated. The method and its
-limits are in [the JIT history](archive/JIT-history.md#coremark-and-benchmark-re-measurement-2026-11-23).
+## CoreMark, one thread
+
+CoreMark (November 25, 2026), measured on a Ryzen 7 5800X3D with the CPU governor on `performance`. Each number is the median of three runs of at least ten
+seconds, pinned to one core. [How it was measured](archive/JIT-history.md#coremark-native-and-multithreaded-2026-11-25).
 
 | Build | Median iterations/s |
 |---|---|
-| bifrost-emu at `68a384ca` (JIT, shipped SDL/GL build) | 16,880 |
-| same code, headless build | 16,889 |
-| bifrost-emu 2.0.0-alpha.2 (JIT, headless build) | 12,635 |
-| QEMU 11.1.3 user mode (TCG) | 8,024 |
+| Native x86_64 (gcc 16.2.1, `-O2`) | 38,647 |
+| bifrost-emu 2.0.0-rc.1 (JIT) | 19,133 |
+| bifrost-emu 2.0.0-beta.3 (JIT, headless build) | 14,898 |
+| QEMU 11.1.3 user mode (TCG) | 7,648 |
 
-On this integer and control-flow benchmark the shipped build runs about 2.1 times as many iterations per second as QEMU, and the
-headless build of the same code is about 34% faster than the alpha.2 release built the same way. Neither predicts game FPS. The runs
-spread 0.3% to 0.6%, so differences of about 1% are noise: compare numbers within one table, not across dates.
+That's about half of native speed, 2.5 times QEMU, and 28% faster than beta.3. Runs differ by a few percent, and older versions of this page used a different build of
+CoreMark, so only compare numbers from the same table.
 
-The `bench_*` programs (shipped build, pinned to one core, median of three runs, each program's own timer except `bench_mips`, which
-is process wall time; JIT compilation is included, so the millisecond-scale times are coarse):
+## CoreMark, several threads
+
+Iterations per second for all threads together.
+
+| Threads | Native | bifrost-emu | QEMU | bifrost-emu / native |
+|---|---|---|---|---|
+| 1 | 38,647 | 19,133 | 7,648 | 50% |
+| 2 | 76,967 | 34,916 | 16,071 | 45% |
+| 4 | 151,774 | 68,021 | 31,713 | 45% |
+| 8 | 297,122 | 130,007 | 61,101 | 44% |
+| 16 | 404,756 | 136,246 | 67,004 | 34% |
+
+This CPU has eight cores with two threads each. Going from eight threads to sixteen helps native code but hardly helps Bifrost or QEMU. Beta.3 reached
+102,191 with eight threads, so rc.1 is 27% faster there.
+
+## Translating code
+
+How long it takes to translate about 500,000 blocks of code, before and after several threads could do it at once (median of seven runs):
+
+| Threads | Before | 2.0.0-rc.1 |
+|---|---|---|
+| 1 | 2.49 s | 2.09 s |
+| 2 | 3.53 s | 1.09 s |
+| 4 | 3.71 s | 0.59 s |
+| 8 | 3.99 s | 0.39 s |
+| 16 | 4.14 s | 0.41 s |
+
+"Before" is the version just before this change, with Carry already on, not beta.3. Compared with it, starting the Android runtime spends 12% less time translating
+and uses 10% fewer CPU cycles. Game loading times haven't been measured yet.
+
+## Small programs
+
+Each benchmark with the interpreter and with the JIT, pinned to one core (median of three runs). The JIT times include translating.
 
 | Benchmark | Interpreter | JIT | Speedup |
 |---|---|---|---|
-| fib(35) | 7.22 s | 0.065 s | ~111x |
-| memcpy 256 MiB | 185 MiB/s | ~13,956 MiB/s | ~75x |
-| qsort 100K ints | 4.35 s | 0.071 s | ~61x |
-| matrix 256×256 | 12.7 MFLOPS | ~1,086 MFLOPS | ~86x |
-| bench_mips (800M instructions) | ~52 MIPS | ~4,482 MIPS | ~86x |
+| fib(35) | 6.81 s | 0.064 s | ~106x |
+| memcpy 256 MiB | 201 MiB/s | ~12,071 MiB/s | ~60x |
+| qsort 100K ints | 4.31 s | 0.071 s | ~61x |
+| matrix 256×256 | 13.2 MFLOPS | ~1,091 MFLOPS | ~83x |
+| bench_mips (800M instructions) | ~53 MIPS | ~4,450 MIPS | ~83x |
 
-Repeatable runs with checksums and host metadata: `Scripts/Bench/run_benchmarks.py`. The JIT uses AVX-512, AVX2, SSE4.2,
-AES-NI/PCLMULQDQ/SHA-NI, BMI1/BMI2 and FMA3 where the host has them, with fallbacks. Game profiling notes live on each app page, for
-example [Doom 3](Apps/doom3.md).
+You can run them yourself with `Scripts/Bench/run_benchmarks.py`. The JIT needs SSE4.1 and FMA3, and uses AVX2, SSE4.2, F16C, LZCNT and PCLMULQDQ when the CPU
+has them. It doesn't use AVX-512. Notes on single games are on their pages, for example [Doom 3](Apps/doom3.md).
