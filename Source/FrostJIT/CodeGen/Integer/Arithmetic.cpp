@@ -118,7 +118,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // and emits them as imm64, the only form a relocation can patch.
                 const bool wide = wide_guest_pc(inst.imm_value());
                 if (inst.dest > 32 && inst.dest < 4096 && !wide)
-                    jit_consts_[inst.dest] = inst.imm_value();
+                    jit_consts_.set(inst.dest, inst.imm_value());
                 // Fold lookahead: when the immediately-following op folds
                 // this constant into an x86 immediate form (dead src2), the
                 // mov we'd emit here is dead code — skip it. The pre-scan

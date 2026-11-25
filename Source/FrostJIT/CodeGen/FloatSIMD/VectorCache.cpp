@@ -224,8 +224,10 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
     if (no_vec_cache || !has_fma3()) return false;
     uint32_t used = 0, written = 0;
     unsigned uses[32] = {};
-    std::vector<uint32_t> operand_sets;
-    std::vector<VectorEffects> effects_by_op;
+    auto& operand_sets = vec_operand_sets_;
+    auto& effects_by_op = vec_effects_by_op_;
+    operand_sets.clear();
+    effects_by_op.clear();
     bool boundary = false, skip = false, has_vector = false;
     for (size_t i = 0; i < block.insts.size(); ++i) {
         const auto& inst = block.insts[i];

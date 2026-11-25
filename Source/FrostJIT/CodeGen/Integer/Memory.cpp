@@ -137,7 +137,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         // Placeholder recovery offset: flush_deferred_guards patches the
         // registered site with the real stub offset before publication.
         memory_fault_stub_ = 1;
-        guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
+        const uint64_t sites_before = fault_sites_added_;
         if (load && fp_xmm >= 0) {
             // movss/movsd xmm, [WIN_REG + effective]: zeroes the bits above, as
             // the MOVQ of the FMOV_G2F did. A fault leaves the XMM untouched.
@@ -160,7 +160,8 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
         } else {
             emit_store_mem(effective, 0, value, mp.width, true);
         }
-        guard.has_site = fault_site_count_.load(std::memory_order_relaxed) == guard.site_index + 1;
+        guard.has_site = fault_sites_added_ == sites_before + 1;
+        guard.site_index = fault_last_site_;
         memory_fault_stub_ = 0;
         deferred_guards_.push_back(std::move(guard));
         pinned_host_regs_ = saved_pins;
@@ -259,7 +260,7 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
                         0, checked, 0, false, gated, std::move(cold), capture_guard_state()};
     guard.access = code_buf_used_;
     memory_fault_stub_ = 1;  // placeholder; flush_deferred_guards patches the site
-    guard.site_index = fault_site_count_.load(std::memory_order_relaxed);
+    const uint64_t sites_before = fault_sites_added_;
     const int pinned = vec_xmm(reg);
     // movupd xmm, [WIN_REG + effective]: 66 REX(R=xmm, X=index, B=1) 0F 10/11.
     auto access = [&](int xmm, uint8_t opcode) {
@@ -282,7 +283,8 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
         }
         access(pinned >= 0 ? pinned : 0, 0x11);
     }
-    guard.has_site = fault_site_count_.load(std::memory_order_relaxed) == guard.site_index + 1;
+    guard.has_site = fault_sites_added_ == sites_before + 1;
+    guard.site_index = fault_last_site_;
     memory_fault_stub_ = 0;
     deferred_guards_.push_back(std::move(guard));
     pinned_host_regs_ = saved_pins;

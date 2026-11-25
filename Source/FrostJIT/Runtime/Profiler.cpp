@@ -44,6 +44,7 @@ FrostJIT::FrostJIT() {
     dispatch_stats_enabled_ = dbg().jit_dispatch_stats;
     block_stats_ = g_block_stats_requested.load(std::memory_order_relaxed) || dbg().stats_period > 0.0;
     code_buf_limit_ = dbg().jit_cache_mb * 1024 * 1024;
+    code_lease_end_ = code_buf_limit_;
     code_capacity_ = std::min<size_t>(dbg().jit_cache_initial_mb * 1024 * 1024, code_buf_limit_);
     // W^X (Write XOR Execute) protection: allocate the code buffer as
     // PROT_READ|PROT_WRITE first (for codegen), then toggle to
@@ -91,15 +92,9 @@ FrostJIT::FrostJIT() {
     // the first translate_block() clears all 4096 entries. Without this,
     // uninitialized vreg_home_[] garbage causes load_vreg_to_reg to think
     // vregs are cached in random host regs, producing mov-from-garbage.
-    prev_max_vreg_ = 4095;
-    for (int i = 0; i < 4096; i++) {
-        vreg_home_[i] = -1;
-        vreg_dirty_[i] = false;
-        vreg_slot_[i] = 0;
-        vreg_last_use_[i] = 0;  // reset LRU timestamps
-    }
-    for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
-    max_vreg_ = 0;
+    init_compiler_state();
+    block_starts_.reserve();
+    carry_tripped_.reserve();
     // ── FMV: detect CPU features once at construction ──────────────
     // The result is cached for the JIT's lifetime — CPU features don't
     // change at runtime. Polled by compile_ir_inst() when emitting code
@@ -116,6 +111,7 @@ FrostJIT::FrostJIT() {
     init_fault_recovery();
 }
 FrostJIT::~FrostJIT() {
+    if (core_ != this) return;  // a compiler borrows everything below
     destroy_fault_recovery();
     if (code_buf_ && dbg().cpu_profile) prof_release_code(code_buf_, code_buf_limit_);
     if (code_buf_) munmap(code_buf_, code_buf_limit_);
@@ -249,6 +245,7 @@ void FrostJIT::flush_cache() {
     // the next translation: W^X violated during execution).
     std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
     blocks_.clear();
+    mt_targets_.reset();
     reg_pass_.clear();
     reg_stubs_.clear();
     side_stubs_.clear();

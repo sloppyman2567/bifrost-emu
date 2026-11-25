@@ -776,7 +776,7 @@ void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
 // the destination host reg needs neither a spill (no later reader) nor a
 // reload (the value is already there).
 bool FrostJIT::vreg_last_use_this_op(int v) const {
-    if (cur_op_index_ >= kills_per_op_.size()) return false;
+    if (cur_op_index_ >= kill_ops_) return false;
     const auto& kills = kills_per_op_[cur_op_index_];
     for (uint16_t k : kills) {
         if (k == v) return true;

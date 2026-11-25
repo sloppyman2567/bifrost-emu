@@ -3,12 +3,12 @@
 Read [the JIT guide](../../Docs/JIT.md) before implementation, debugging or review.
 The [source map](../../Docs/ARCHITECTURE.md) describes subsystem boundaries.
 Document a JIT change by updating the guide's section for that mechanism (no dated sections in the guide); put its dated
-write-up, measurements and rejected attempts at the top of [the JIT history](../../Docs/archive/JIT-history.md) and list
-it under the guide's Recorded changes.
+write-up, measurements and rejected attempts at the top of [the JIT history](../../Docs/archive/JIT-history.md).
 
 One place per kind of fact, so a later change has one place to correct:
 
-- The guide (`Docs/JIT.md`): how the mechanism works now, with at most one short measurement.
+- The guide (`Docs/JIT.md`): how the mechanism works now, in a few lines a mechanism. Keep it short: an encoding, an old bug or a number belongs in the history or a comment.
+- `Docs/PROFILING.md`: the profiler, the waiting and stall reports, Tracy and the trace switches.
 - The history: dated write-up, every number, rejected attempts, what was and was not tested.
 - This file: contracts, what must not break and which test covers it. A number only where it is the reason for the rule.
 - `Docs/roadmap.md`: open work in full; finished work as one line with the headline number and a link to the history section.
@@ -24,13 +24,13 @@ A new history section can make an older "not measured" or "next section" line wr
 - `Carry/` is the planned register-resident second JIT ([design](../../Docs/JIT.md#planned-codegen-retaining-guest-state-across-regions)).
   Today it holds `HotSide.cpp` (the exit profile and flip, below) and `LoopReport.cpp`. The loop report's `note_carry_block` and `dump_carry_candidates` read sampled hotness, each block's static
   chain targets and `carry_info_`, print the `[carry]` lines of the `BIFROST_PROF`/`BIFROST_PC_HIST` report and emit no code (`HotSide.cpp` does emit: the budget check and the trip stub). `carry_info_` is
-  written under the compile lock, so the reader takes `compile_mutex_` (try-lock, as `dump_memory_stats` does) and then the table lock.
+  written under the compile lock or the exclusive table lock, so the reader takes `compile_mutex_` (try-lock, as `dump_memory_stats` does) and then the table lock.
   `carry_report` covers it.
 - A mid-block exit (`BRCOND_ZERO`, `BRCOND_BIT` or `BRCOND` with `aux = 1`, `Compiler/SideExit.cpp`; a `BRCOND` after an `FP_CMP` is never one) leaves through a tail emitted after the block from a captured layout: it
   must store every mapped guest register, not only the dirty ones (a loop pin is statically clean and ahead of memory), and the optimizer's
-  branch barriers must stay (dead-store elimination clears at a branch). Its chain slot lives in a stub `BlockEntry` under `side_exit_key`; anything
-  that enumerates `blocks_` must tolerate those entries (no guest pc, `fn` null), anything that retires a block must retire its `side_stubs_`, and
-  a new place that creates MT edges for a tail sets `edge_source_override_`. Such a block is `has_call` and unrecordable; `jit_side_exit` covers it.
+  branch barriers must stay (dead-store elimination clears at a branch). In ST code its chain slot lives in a stub `BlockEntry` under `side_exit_key`; anything
+  that enumerates `blocks_` must tolerate those entries (no guest pc, `fn` null), and anything that retires a block must retire its `side_stubs_`.
+  In MT code the slot is an edge of the block (`collect_edges` gives it the exit's layout). Such a block is `has_call` and unrecordable; `jit_side_exit` covers it.
 - Carry's profile and flip (`Carry/HotSide.cpp`, `BIFROST_NO_CARRY_FOLLOW`): a block with exits Carry formed runs a 1,024-entry budget check at its
   common entry and counts each exit's taken tail; the trip stub leaves for the dispatcher before the block runs, so it may only sit where nothing is
   dirty (after the entry loads, before the pc store). `carry_trip` runs in a generated frame with no lock held, takes the table lock, and must keep
@@ -295,11 +295,22 @@ A new history section can make an older "not measured" or "next section" line wr
   probes have no generation check, so a lease taken after the table sync could accept a stale entry. Anything that retires or
   replaces code advances the epoch (`invalidate_dispatch_cache`), which also makes every thread drop all of its dispatch caches and IBL.
   Forward static edges carry no poll; ST code keeps the 256-edge budget. MT `BL` calls through a revocable cell.
-- MT Lean compiles run under the shared table lock (`translate_entry`).
-  Codegen may read `blocks_` but must not change state that shared-lock
-  readers use; route publication through `publish_or_stage` /
-  `publish_translation`. Invalidation paths that skip the exclusive lock must
-  log their range for in-flight compiles.
+- Several threads compile at once in MT code ([guide](../../Docs/JIT.md#several-compilers-at-once)). Codegen reads the core's tables only through
+  `with_table`, keeps nothing that points into one, and changes none: what a compile creates goes into the compiler's own containers and
+  `adopt_staged` moves it (rebase a new kind of offset there, empty a new container in `discard_staged`, and copy a new member that codegen
+  reads in `FrostJIT(FrostJIT& core)`). Counters belong to the core (`core_->`), and so do addresses in generated code. Route publication
+  through `publish_or_stage` / `publish_translation`. Invalidation paths that skip the exclusive lock must log their range with every in-flight compile.
+- A compiler writes only inside its leased chunk: code, fault sites and rewinds. Sites and rewinds at exactly `code_lease_end_` belong to the next chunk, which
+  another thread writes. A compile that stops early must leave `prev_max_vreg_` at 4095. To test this, build with `kCodeChunk` at 32 KiB (leases
+  fill eight times as often) and loop `jit_mt_compile.elf` hundreds of times: one lost fault site shows as a host SIGSEGV in about 2% of runs.
+- Keep work under the exclusive table lock small, and never let one container grow by moving everything (`Sharded`, `SegmentedArray`). `Sharded` picks the
+  shard by guest page: keys of one page must stay together, or lookups of neighbours miss the cache (11% slower translation). Allocate and copy before the
+  lock (`prepare_publication`). Do not add a shared-lock read to the cold path of a compile: at eight threads one costs 1,300 to 4,200 cycles.
+- `PcFilter` bits (`block_starts_`, `carry_tripped_`) are set under the exclusive lock before the insertion (and, in `carry_trip`, before the invalidation is
+  logged) and never cleared: whoever inserts into `blocks_`, `carry_rounds_`, `carry_done_` or `carry_follow_taken_` adds the pc first. Side-exit stub keys are the exception (ST only,
+  never looked up through the filter).
+- `mt_targets_` records keep their address until `release_resources` (in-flight compiles hold pointers): empty them with `reset`, never `clear`, while the JIT runs. Whatever
+  removes an entry from `blocks_` must clear `EdgeTarget::block`. A shard lock is taken inside the table lock or alone, and nothing is locked inside it.
 - Cache maintenance and mprotect keep a Lean block whose recorded
   instruction words (`code_words_`) are unchanged. A translation must depend
   on no other guest bytes: a new compile-time guest read must be recorded or
@@ -330,8 +341,8 @@ A new history section can make an older "not measured" or "next section" line wr
   its unpatched form is `kSlotNop5`. MT revokes data cells, never instructions.
 - Per-block bookkeeping is the JIT's largest heap cost (~700k blocks per Android app;
   `[JIT] metadata MiB:` in `Runtime/MemoryStats.cpp`). Keep `BlockEntry` grouped by
-  field size, with 32-bit code offsets. MT keeps no `back_refs_` (its edges are reached
-  through `mt_edge_refs_`); an MT slot's cell is found with `mt_slot_edge(source_pc, slot)`.
+  field size, with 32-bit code offsets. MT keeps no `back_refs_`: a block's edges hang on its
+  `BlockEntry::edges`, the edges to a pc on its `mt_targets_` record, and only `link_mt_block`, `refresh_mt_edges` and the retire paths write their cells.
   Add a container to `dump_memory_stats` when you add per-block state, and to
   `release_resources` (`Runtime/Generations.cpp`) when it is per-block or generated code addresses it.
 - A full code cache is replaced as a whole: `Emulator::renew_jit` makes a fresh `FrostJIT` current and

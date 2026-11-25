@@ -200,9 +200,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // needed.
     // Use a SHARED lock for block lookup (concurrent reads OK). Release
     // before execution — entry is a local copy, no lock needed to run it.
-    lock_table_shared();
+    // A pc that no block starts at needs no lookup, and no lock.
+    const bool known = block_starts_.may_contain(pc);
+    if (known) lock_table_shared();
     note_table_lookup();
-    auto it = blocks_.find(pc);
+    auto it = known ? blocks_.find(pc) : blocks_.end();
     BlockEntry entry;
     if (it != blocks_.end()) {
         entry = it->second;
@@ -263,18 +265,18 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
         // Lazy block chaining — release shared, try exclusive (non-blocking).
         // If we can't get exclusive, skip chaining (optimization, not correctness).
-        if (!entry.chained) {
+        // Multithreaded edges are linked when either end is published.
+        if (!entry.chained && !mt_active()) {
             static bool no_chain_hit_ = dbg().no_chain;
             blocks_mutex_.unlock_shared();
             if (!no_chain_hit_ && blocks_mutex_.try_lock()) {
                 if (entry.chain_target_pc != 0) {
                     auto chain_it = blocks_.find(pc);
                     if (chain_it != blocks_.end()) {
-                        try_chain_block(pc, chain_it->second);
+                        try_chain_block(chain_it->second);
                     }
                 }
-                // MT keeps no back references; its edges are refreshed by target.
-                if (mt_active() || back_refs_.count(pc)) chain_back_references(pc);
+                if (back_refs_.count(pc)) chain_back_references(pc);
                 blocks_mutex_.unlock();
             }
         } else {
@@ -284,7 +286,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // Cache miss — translate_entry compiles and publishes, returning
         // with no table lock held (MT compiles hold it only shared).
         cache_misses++;
-        blocks_mutex_.unlock_shared();
+        if (known) blocks_mutex_.unlock_shared();
         const bool found = translate_entry(emu, pc, entry);
         if (!found || !entry.fn) {
             if (found && entry.interp_only) {

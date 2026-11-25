@@ -39,16 +39,20 @@
 #include "FrostJIT/IR/IR.hpp"
 #include "FrostJIT/Backend/CpuFeatures.hpp"
 #include "FrostJIT/Runtime/CodeInvalidation.hpp"
+#include "FrostJIT/Runtime/CodeIndex.hpp"
+#include "FrostJIT/Runtime/GrowingTables.hpp"
+#include "FrostJIT/Runtime/PcFilter.hpp"
 #include "FrostJIT/Runtime/Preemption.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <map>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -520,7 +524,7 @@ public:
     // modify published instructions (patch_chain / chain_back_references /
     // patch_pending_calls bail). MT chaining and promotion use atomic data
     // cells; only single-thread mode retains legacy instruction patches.
-    // New code is appended under the compiler lock. Published instructions
+    // New code is appended in the compiler's own lease. Published instructions
     // remain immutable without cross-core serialization. Sticky for the JIT's
     // lifetime (re-enabling would reopen a spawn-vs-patch race).
     std::atomic<bool>     mt_active_{false};
@@ -542,19 +546,30 @@ public:
         }
     };
     static_assert(offsetof(MtCell, word) == 0);
+    struct EdgeTarget;
     struct MtEdge {
         MtCell target;
         uint64_t source_pc = 0, target_pc = 0;
-        uint32_t slot = 0;  // code offset the edge was emitted for (fits the padding)
-        bool live = true; // compiler lock only
+        uint64_t layout = 0;         // RegLayout its slot leaves (register passing)
+        EdgeTarget* to = nullptr;    // the record of target_pc
+        MtEdge* next_out = nullptr;  // the source's next edge (BlockEntry::edges)
+        MtEdge* next_in = nullptr;   // the next edge to the same target (EdgeTarget::in)
+        uint32_t slot = 0;  // code offset the edge was emitted for
+        std::atomic<bool> live{true};  // written under the table lock
         bool cold_entry = false;
-        bool internal_loop = false; // body entry retains this block's register state
     };
     void retire_blocks_locked(const std::vector<uint64_t>& victims);
-    std::vector<std::unique_ptr<MtEdge>> mt_edges_;
-    std::unordered_map<uint64_t, std::vector<MtEdge*>> mt_edge_refs_, mt_source_refs_;
-    // The edge source_pc emitted at code offset `slot`; its 1-3 edges are scanned.
-    MtEdge* mt_slot_edge(uint64_t source_pc, size_t slot);
+    SegmentedArray<std::unique_ptr<MtEdge>> mt_edges_;
+    // A guest pc as a target of multithreaded edges: the edges of published blocks to it, and its translation in blocks_. A
+    // compile finds the records it needs (or makes them) before it locks the table, so that publication follows pointers.
+    // Written under the table lock and the record's own (mt_targets_.mutex_of): either is enough to read. Records are never
+    // removed while the JIT runs, and whatever removes an entry from blocks_ clears `block`.
+    struct EdgeTarget { MtEdge* in = nullptr; const BlockEntry* block = nullptr; };
+    LockedMap<EdgeTarget> mt_targets_;
+    size_t compile_edge_mark_ = 0;  // mt_edges_ size when this compile began
+    void collect_edges(BlockEntry& entry);
+    void link_mt_edge(MtEdge& edge, const BlockEntry* target);
+    void link_mt_block(uint64_t pc, EdgeTarget& self, const BlockEntry& entry);
     std::atomic<uint64_t> mt_edges_published_{0};
     MtEdge* create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off);
     // cpu_reg holds the CPU at the slot: RDI after an exit that restored the
@@ -569,17 +584,17 @@ public:
     void emit_selfloop_stop_entry_check(uint64_t start_pc);
     size_t emit_selfloop_stop_compare(uint64_t target_pc, uint8_t condition);
     void emit_selfloop_reconcile_stub();
-    void refresh_mt_edges(uint64_t target_pc);
-    void retire_mt_source(uint64_t source_pc);
+    void refresh_mt_edges(EdgeTarget& target);  // the caller holds both locks
+    static void retire_mt_source(const BlockEntry& entry);
 
     // ── Shared-JIT mode (default) ───────────────────────────────────
     // Spawned threads share the main thread's FrostJIT instance, saving
     // 64 MiB of code-cache per thread. blocks_mutex_ protects the block
-    // table and code-buffer writes. It is held ONLY for table mutations
+    // table and, in single-thread code, code-buffer writes. It is held ONLY for table mutations
     // (translate, chain, hotness, watchdog) and RELEASED before block
     // execution (entry.fn) so threads can block in syscalls without
     // deadlocking. Per-thread state (watchdog, hotness) is thread-local.
-    std::shared_mutex blocks_mutex_;  // protects blocks_, back_refs_, code_buf_ writes
+    std::shared_mutex blocks_mutex_;  // protects blocks_, the edges and the tables beside them (ST: also code_buf_ writes)
     void flush_cache();
     std::atomic<uint64_t> code_cache_growths{0};
     std::atomic<uint64_t> code_cache_overflows{0};
@@ -655,10 +670,12 @@ public:
     bool try_lock_for_fork();
     void unlock_after_fork();
     void reset_after_fork_child();
-    size_t code_buf_used()  const { return code_buf_used_; }
+    size_t code_buf_used()  const { const size_t leased = code_next_lease_.load(std::memory_order_relaxed); return leased ? leased : code_buf_used_; }
     size_t code_buf_size()  const { return code_buf_limit_; }
     size_t cache_entries()  const { return blocks_.size(); }
     const uint8_t* code_buf() const { return code_buf_; }
+    // Published code as {offset in code_buf(), bytes}; the rest of the used part is leased to compilers and not written yet.
+    std::vector<std::pair<size_t, size_t>> published_code();
     // x8 value of the host-call trampolines (GraphicThunk/AudioThunk/DisplayThunk
     // SYSCALL_NUMBER; InterpreterBridge.cpp asserts they agree). Such SVCs stay
     // inline in generated code; every other SVC leaves it first (see
@@ -736,19 +753,34 @@ private:
     size_t code_capacity_ = 64 * 1024 * 1024;
     bool ensure_code_space(size_t bytes);
     uint8_t* code_buf_ = nullptr;
-    size_t   code_buf_used_ = 0;
+    size_t   code_buf_used_ = 0;                // where this compiler emits next
+    size_t   code_lease_end_ = CODE_BUF_SIZE;   // and where it must stop: the buffer's end, or its lease's
     bool     code_buf_overflow_ = false;
-    bool     code_budget_exhausted_ = false;
+    std::atomic<bool> code_budget_exhausted_{false};
+    // Several compilers emit into one buffer: each leases a chunk at a time (Runtime/Compilers.cpp). 0 until the first lease.
+    static constexpr size_t kCodeChunk = 256 * 1024;
+    std::atomic<size_t> code_next_lease_{0};
+    std::mutex lease_mutex_;
+    bool lease_code_chunk(size_t& start);   // on the core
+    bool take_code_lease();                 // this compiler's next chunk
     bool renewable_ = false;
     std::atomic<bool> renewal_wanted_{false}, retired_{false}, released_{false};
     uint64_t retired_epoch_ = 0;
     uint8_t* window_base_ = nullptr;
     const Memory* guest_memory_ = nullptr;
-    // Address-sorted fault sites, packed as {code offset, recovery offset}.
-    // mmap reserves a worst-case bound; only appended records acquire backing.
+    // Fault sites, packed as {code offset, recovery offset}: one address-sorted run per code chunk, at the chunk's own
+    // place in the reservation, so a chunk's one writer appends in code order and the handler searches one run. mmap
+    // reserves a worst-case bound (a site per two bytes of code); only appended records acquire backing.
+    struct FaultChunk { std::atomic<uint32_t> count; uint32_t constructed; };
+    static constexpr size_t kFaultSitesPerChunk = kCodeChunk / 2;
     std::atomic<uint64_t>* fault_sites_ = nullptr;
-    std::atomic<size_t> fault_site_count_{0};
-    size_t fault_site_constructed_ = 0;
+    FaultChunk* fault_chunks_ = nullptr;
+    size_t fault_chunk_count() const { return (code_buf_limit_ + kCodeChunk - 1) / kCodeChunk; }
+    size_t fault_table_bytes() const {
+        return fault_chunk_count() * (kFaultSitesPerChunk * sizeof(*fault_sites_) + sizeof(FaultChunk));
+    }
+    uint64_t fault_sites_added_ = 0;  // by this compiler: did the last access register one?
+    size_t fault_last_site_ = 0;      // its index
     size_t memory_fault_stub_ = 0; // current IR op, zero when software-only
     bool struct_guard_emitted_ = false; // SIMD_STRUCT_MEM's guard was emitted ahead of the cache switch-off
     bool compile_guarded_mem(const IRInst& inst);
@@ -792,6 +824,43 @@ private:
     void emit_cold_stubs();
     bool use_cold_stubs() const { return cold_stubs_ready_ && defer_guards_ && !recording_; }
     static constexpr bool cold_stub_register(int r);
+    // ── Compilers (Runtime/Compilers.cpp) ───────────────────────────
+    // The core is the JIT everything else knows: it owns the code buffer and the tables. A compiler is another object of this
+    // class that borrows them, so several threads translate at once: what a compile scribbles on and what it creates stay in
+    // the compiler until the core adopts the result under the exclusive table lock. The core is its own compiler for
+    // single-thread code and wherever compiles are serialized.
+    FrostJIT* core_ = this;
+    class TranslationClock;    // Runtime/TranslationClock.hpp
+    static constexpr size_t kMaxCompilers = 16;
+    explicit FrostJIT(FrostJIT& core);        // a compiler of `core`
+    void init_compiler_state();
+    std::mutex pool_mutex_;                   // the members below; never held while compiling or waiting for a lock
+    std::condition_variable pool_free_, pool_done_;
+    std::unique_ptr<FrostJIT> compilers_[kMaxCompilers];
+    std::atomic<size_t> compilers_count_{0};  // compilers_ only grows
+    std::vector<FrostJIT*> free_compilers_;
+    static thread_local const FrostJIT* tls_last_compiler_;  // only compared: the one this thread used last has its state in this CPU's cache
+    std::vector<uint64_t> compiling_pcs_;     // what the busy ones are translating
+    size_t pool_waiters_ = 0, done_waiters_ = 0;
+    std::atomic<int> parallel_compiles_{-1};  // decided at the first multithreaded compile: 0 serialized, else how many compilers
+    std::chrono::steady_clock::time_point compiles_paused_until_{};  // a fork is waiting for the compilers to drain
+    bool parallel_compiles(Emulator& emu);
+    int set_up_compilers(Emulator& emu);
+    bool compile_entry_parallel(Emulator& emu, uint64_t pc, BlockEntry& out, TranslationClock& clock);
+    FrostJIT* claim_compiler(uint64_t pc);    // null: another thread translated pc meanwhile
+    void release_compiler(FrostJIT* compiler, uint64_t pc);
+    void adopt_staged(FrostJIT& compiler, uint64_t pc, BlockEntry& out);  // on the core, under the exclusive table lock
+    void discard_staged();                    // what an unpublished compile created
+    size_t staged_start_ = 0;                 // the cursor when this compile began
+    bool table_held_ = false;  // this compiler runs under the exclusive table lock (a retry)
+    // Reads the core's tables from a compile. A compiler holds no lock while it works, so it takes the lock for the read and
+    // keeps nothing that points into a table; the core's callers hold the lock already.
+    template <class Read> auto with_table(Read&& read) const {
+        if (core_ == this || table_held_) return read(static_cast<const FrostJIT&>(*core_));
+        core_->lock_table_shared();
+        std::shared_lock<std::shared_mutex> lock(core_->blocks_mutex_, std::adopt_lock);
+        return read(static_cast<const FrostJIT&>(*core_));
+    }
     struct SimdFpGuard {
         size_t site = 0;
         bool deferred = false;
@@ -857,13 +926,14 @@ public:
 private:
     std::deque<CarryProfile> carry_profiles_;  // addressed by generated code: never freed before the JIT
     CarryProfile* carry_profile_ = nullptr;    // this compile
+    std::atomic<uint64_t> carry_profiled{0};   // profiles made, on the core
     size_t carry_trip_jcc_ = SIZE_MAX;
     std::unordered_set<uint64_t> carry_follow_taken_, carry_done_;  // under blocks_mutex_
     std::unordered_map<uint64_t, uint8_t> carry_toggles_, carry_rounds_;
+    PcFilter<11> carry_tripped_;  // the blocks in carry_rounds_ (and so carry_done_) and the branches in carry_follow_taken_
     void emit_carry_budget_check();
     void emit_carry_trip_stub(uint64_t start_pc);
     std::atomic<uint64_t> side_exit_blocks{0};  // blocks translated with a mid-block exit (-v)
-    uint64_t edge_source_override_ = 0;  // create_chain_edge's source while a side-exit tail is emitted
     static constexpr uint64_t kSideExitKeyBit = 1ull << 63;
     static uint64_t side_exit_key(uint64_t pc, size_t index) { return kSideExitKeyBit | (pc << 8) | index; }
     // Scan from the block start for a loop whose only inner branches are CBZ/CBNZ exits (see translate_block).
@@ -988,6 +1058,7 @@ private:
         // caller). invalidate_range checks these too — an SMC on an
         // inlined leaf must drop its inliner.
         std::vector<std::pair<uint64_t, int>> inlined_ranges_;
+        MtEdge* edges = nullptr;        // the multithreaded edges it leaves through, linked by next_out
         uint32_t reg_pass = 0;          // 1 + index into reg_pass_ (register passing, RegisterPassing.cpp); 0: none
         uint32_t chain_patch_off = 0;   // offset of the 5-byte chain slot in code_buf_
         uint32_t taken_chain_patch_off = 0;   // offset of the taken-path slot
@@ -1068,17 +1139,15 @@ private:
         bool skips_dead_flag_store = false;
     };
     static_assert(CODE_BUF_SIZE <= UINT32_MAX, "BlockEntry code offsets are 32-bit");
-    std::unordered_map<uint64_t, BlockEntry> blocks_;
-    // Conservative 256-byte guest granule -> block PC index, protected by
-    // blocks_mutex_. A block is listed on every granule of its own and
-    // inlined ranges. Lists may hold retired or non-overlapping PCs;
-    // range invalidation checks each candidate exactly and prunes absent ones
-    // from the granules it visits. A granule smaller than a page keeps a
-    // cache-line publish from scanning every live block on its page. Whole-
-    // cache clears reset it.
-    static constexpr uint64_t CODE_INDEX_GRANULE = 256;
-    std::map<uint64_t, std::vector<uint64_t>> code_index_;
+    using BlockMap = std::unordered_map<uint64_t, BlockEntry>;
+    Sharded<BlockMap> blocks_;
+    // Lock-free "no" for blocks_ lookups: most of what a compile asks about, and every first run of a block, is not there.
+    PcFilter<14> block_starts_;
+    // Which blocks depend on which guest code (own range, inlined ranges, flag dependencies), under blocks_mutex_. Range
+    // invalidation checks each candidate exactly. Whole-cache clears reset it.
+    CodeIndex code_index_;
     void remember_code_granules(uint64_t pc, const BlockEntry& entry);
+    void note_published(uint64_t pc, const BlockEntry& entry);  // what every publication records beside blocks_
     void publish_block(uint64_t pc, const BlockEntry& entry);
     void write_perf_map(uint64_t pc, const BlockEntry& entry);  // BIFROST_PERF_MAP
     // Back-reference index: maps target_pc → list of source_pcs whose
@@ -1104,12 +1173,12 @@ private:
     void unpatch_direct_calls(uint64_t target_pc);
     // Instruction words recorded per translation (BlockEntry::code_words_off).
     // Append-only like code_buf_. The compiler writes and invalidation reads
-    // it under the compiler lock; block_words_ collects the current compile.
-    std::vector<uint32_t> code_words_;
+    // it under the table lock; block_words_ collects the current compile.
+    SegmentedArray<uint32_t, 16384> code_words_;
     std::vector<uint32_t> block_words_;
     // Append-only like code_words_ (BlockEntry::flag_deps_off).
     struct FlagDep { uint64_t pc; uint32_t count; uint32_t words_off; };
-    std::vector<FlagDep> flag_dep_table_;
+    SegmentedArray<FlagDep> flag_dep_table_;
     // Dead-NZCV successor scans of the current compile (see exit_flags_dead).
     struct FlagDepScratch { uint64_t pc; std::vector<uint32_t> words; };
     std::vector<FlagDepScratch> flag_deps_scratch_;
@@ -1128,10 +1197,11 @@ private:
     // in a discarded tail only when this lies beyond the rewind point.
     size_t call_site_end_ = 0;
     // Retired Lean PCs, so a later publication counts as a recompile.
-    std::unordered_set<uint64_t> retired_pcs_;
-    // MT Lean compiles run under the shared table lock, serialized by
-    // compile_mutex_, and publish under the exclusive lock. Invalidations
-    // in that window are logged and checked before publication.
+    Sharded<std::unordered_set<uint64_t>> retired_pcs_;
+    // MT Lean compiles publish under the exclusive lock. Where they are
+    // serialized (compile_mutex_) they run under the shared one, otherwise
+    // under none. Invalidations meanwhile are logged and checked before
+    // publication.
     std::mutex compile_mutex_;
     std::atomic<bool> shared_compile_active_{false};
     std::mutex compile_invalidations_mu_;
@@ -1143,6 +1213,11 @@ private:
     // code) over a plain publish_block (interpreter decisions).
     bool staging_ = false, staged_ = false, staged_linked_ = false;
     BlockEntry staged_entry_;
+    // A copy of it as a node of blocks_, made before the table is locked.
+    BlockMap staged_nodes_;         // empty between compiles; keeps its bucket array
+    BlockMap::node_type staged_node_;
+    EdgeTarget* staged_self_ = nullptr;
+    void prepare_publication(uint64_t pc);
     void publish_translation(uint64_t start_pc, const BlockEntry& entry);
     void publish_or_stage(uint64_t pc, const BlockEntry& entry);
     bool staged_entry_invalidated(uint64_t pc);
@@ -1157,14 +1232,14 @@ private:
     void lock_table();
     // Patch a block's chain slot to jump directly to `target_fn`.
     // Returns true if the patch was applied.
-    // MT stores the target in source_pc's edge cell emitted at that offset.
-    bool patch_chain(uint64_t source_pc, size_t chain_patch_off, const uint8_t* target_fn);
+    // Single-thread code only: multithreaded edges are data cells (link_mt_block).
+    bool patch_chain(size_t chain_patch_off, const uint8_t* target_fn);
     // Patch every recorded direct BL call slot targeting `target_pc` so the
     // `call rel32` lands on `target_fn`. Mirrors patch_chain's W^X pattern.
     void patch_pending_calls(uint64_t target_pc, const uint8_t* target_fn);
     // Try to chain `entry` to its already-translated target (if any),
     // and try to chain any existing blocks whose target is `pc`.
-    void try_chain_block(uint64_t pc, BlockEntry& entry);
+    void try_chain_block(BlockEntry& entry);
     // Chain every cached block whose chain slot targets `target_pc`,
     // found through back_refs_ in O(k). No entry means no block targets it.
     void chain_back_references(uint64_t target_pc);
@@ -1214,7 +1289,7 @@ private:
     PersistentCache* disk_cache_ = nullptr;
     bool disk_cache_checked_ = false;
     struct { uint64_t file_key = 0, file_offset = 0; } record_origin_;
-    size_t record_fault_mark_ = 0, record_flagdep_mark_ = 0, record_call_end_ = 0;
+    size_t record_flagdep_mark_ = 0, record_call_end_ = 0;
     bool record_unrecordable_ = false;
     CompileCapture* oracle_out_ = nullptr;
     bool disk_cache_ready(Emulator& emu);
@@ -1535,7 +1610,7 @@ private:
     int rp_dest_hint_ = -1;
     void rp_prepare_hints(const IRBlock& block, uint64_t start_pc);
     int rp_take_hint(int excl1, int excl2);
-    int rp_pred_hosts(uint64_t pc, int8_t host_of[31]) const;
+    int rp_pred_hosts(uint64_t pc, int8_t host_of[31]);
     void rp_clear_hints();
     void rp_select_entry(const IRBlock& block, uint64_t start_pc);
     void rp_emit_entry_loads();
@@ -1547,6 +1622,7 @@ private:
     uint64_t rp_capture_layout() const;
     // The entry a chain slot of `source` at code offset `slot` should jump to in `target`.
     const uint8_t* chain_target_for(const BlockEntry& source, size_t slot, const BlockEntry& target) const;
+    const uint8_t* chain_target_for(uint64_t layout, const BlockEntry& target) const;  // `layout`: what the slot leaves
     // What a block (or a side-exit stub) passes: its register entry, and the layouts its chain slots leave. Append-only like
     // flag_dep_table_, indexed by BlockEntry::reg_pass; BlockEntry is read on every dispatch lookup and stays small.
     struct RegPass {
@@ -1559,13 +1635,13 @@ private:
     // into the register entry. An edge whose slot holds the other entry registers is patched to the stub that loads the fewest that covers
     // what it lacks.
     struct RegStub { uint32_t off; uint8_t loaded; };
-    std::vector<RegStub> reg_stubs_;
+    SegmentedArray<RegStub> reg_stubs_;
     void rp_emit_stubs(size_t target_off);
     std::vector<uint64_t> rp_pred_scratch_;
     uint32_t rp_succ_want_ = 0;  // guest registers a translated successor of the block reads first
     uint32_t rp_stub_first_ = 0;
-    int rp_pred_layouts(uint64_t pc, std::vector<uint64_t>& layouts) const;
-    std::vector<RegPass> reg_pass_;
+    int rp_pred_layouts(uint64_t pc, std::vector<uint64_t>& layouts);
+    SegmentedArray<RegPass> reg_pass_;
     const RegPass* reg_pass_of(const BlockEntry& e) const { return e.reg_pass ? &reg_pass_[e.reg_pass - 1] : nullptr; }
     uint32_t add_reg_pass(const RegPass& info) {
         reg_pass_.push_back(info);
@@ -1973,7 +2049,9 @@ private:
     // reuse without eviction. Only scratch vregs (33+) are tracked — ARM
     // reg vregs (0-31) represent architectural state that must be flushed
     // at the epilogue, so they must not be killed early.
+    // Holds kill_ops_ lists (0 outside the compile loop); the rest keep their memory for the next block.
     std::vector<std::vector<uint16_t>> kills_per_op_;
+    size_t kill_ops_ = 0;
     // Index of the IR op currently being compiled (set in translate_block's
     // compile loop). Lets codegen query kills_per_op_[cur_op_index_] to
     // decide whether a source vreg is dead AFTER this op (no later reader),
@@ -1982,6 +2060,7 @@ private:
     size_t cur_op_index_ = 0;
     // The IR block being compiled by Lean (null elsewhere), for emitters that look at the next op.
     const std::vector<IRInst>* cur_insts_ = nullptr;
+    std::vector<IRInst> ir_insts_scratch_;
     // vreg_last_use_op_[v] = index of the IR op that LAST reads scratch
     // vreg `v` as a source (src1/src2/aux), or -1 if `v` is never read as
     // a source in this block. Populated by the same use-scan that builds
@@ -1991,7 +2070,8 @@ private:
     // Exact because IR scratch vregs are block-local with unique-per-
     // definition numbers (VregAlloc monotonic) and the scan covers aux
     // in addition to src1/src2.
-    std::vector<int> vreg_last_use_op_;
+    std::vector<int> vreg_last_use_op_ = std::vector<int>(4096, -1);
+    int vreg_last_use_high_ = -1;  // the highest entry a block wrote
     // vreg_uses_[v] = sorted (ascending) list of IR op indices that READ
     // vreg `v` as a source (src1/src2/aux), built by the same use-scan as
     // kills_per_op_/vreg_last_use_op_. Powers Belady's-optimal register
@@ -2116,7 +2196,25 @@ private:
     // allocated monotonically (VregAlloc::next++) and defined exactly once
     // per block, so a vreg keyed here is always an IMM result. Defensively
     // erased when any non-IMM op writes the same dest vreg.
-    std::unordered_map<uint16_t, uint64_t> jit_consts_;
+    // Cleared per block in O(1) and without a hash node per constant.
+    class VregConstants {
+        struct Entry { uint64_t second; uint32_t block; };
+        std::vector<Entry> entries_ = std::vector<Entry>(4096, Entry{0, 0});
+        uint32_t block_ = 1;
+    public:
+        static constexpr const Entry* end() { return nullptr; }
+        const Entry* find(size_t v) const { return v < entries_.size() && entries_[v].block == block_ ? &entries_[v] : nullptr; }
+        size_t count(size_t v) const { return find(v) != nullptr; }
+        uint64_t at(size_t v) const { return entries_.at(v).second; }
+        void set(size_t v, uint64_t value) { if (v < entries_.size()) entries_[v] = {value, block_}; }
+        void erase(size_t v) { if (v < entries_.size()) entries_[v].block = 0; }
+        void clear() {
+            if (++block_ != 0) return;
+            for (Entry& e : entries_) e.block = 0;
+            block_ = 1;
+        }
+    };
+    VregConstants jit_consts_;
     // A CSEL operand's constant value: XZR, or a block constant above.
     bool csel_const(uint16_t v, uint64_t& out) const {
         if (v == 32) { out = 0; return true; }
@@ -2286,6 +2384,8 @@ private:
         uint16_t xmm_clobbers = 0;
     };
     bool vec_inst_effects(const IRInst& inst, VectorEffects& effects) const;
+    std::vector<uint32_t> vec_operand_sets_;         // vec_cache_may_enable's
+    std::vector<VectorEffects> vec_effects_by_op_;
     void vec_prepare_operands(uint32_t reads, uint32_t writes);
     void vec_drop_dynamic();
     void vec_writeback_one(int vreg);

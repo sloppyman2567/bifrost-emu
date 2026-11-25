@@ -37,22 +37,13 @@ static bool rp_straight_line(IROp op) {
 
 // The layouts the translated predecessor slots of `pc` leave (0 for a slot that leaves none). Single-thread code finds its
 // predecessors through back_refs_, multithreaded code through its edge cells. Returns how many slots were found.
-int FrostJIT::rp_pred_layouts(uint64_t pc, std::vector<uint64_t>& layouts) const {
+int FrostJIT::rp_pred_layouts(uint64_t pc, std::vector<uint64_t>& layouts) {
     layouts.clear();
     if (mt_active()) {
-        const auto refs = mt_edge_refs_.find(pc);
-        if (refs == mt_edge_refs_.end()) return 0;
-        for (const MtEdge* edge : refs->second) {
-            if (!edge->live || edge->internal_loop) continue;
-            const auto source = blocks_.find(edge->source_pc);
-            if (source == blocks_.end()) continue;
-            const BlockEntry& e = source->second;
-            const RegPass* info = reg_pass_of(e);
-            uint64_t layout = 0;
-            if (info && edge->slot == e.chain_patch_off) layout = info->exit_layout;
-            else if (info && e.has_taken_chain_slot && edge->slot == e.taken_chain_patch_off) layout = info->taken_layout;
-            layouts.push_back(layout);
-        }
+        core_->mt_targets_.with(pc, [&](const EdgeTarget& target) {
+            for (const MtEdge* edge = target.in; edge; edge = edge->next_in)
+                if (edge->live.load(std::memory_order_relaxed)) layouts.push_back(edge->layout);
+        });
         return static_cast<int>(layouts.size());
     }
     const auto refs = back_refs_.find(pc);
@@ -70,7 +61,7 @@ int FrostJIT::rp_pred_layouts(uint64_t pc, std::vector<uint64_t>& layouts) const
 
 // The host registers the translated predecessors of `pc` leave guest registers in: host_of[g] is the host register of the first one
 // that holds g, or -1. Returns how many predecessor slots were found.
-int FrostJIT::rp_pred_hosts(uint64_t pc, int8_t host_of[31]) const {
+int FrostJIT::rp_pred_hosts(uint64_t pc, int8_t host_of[31]) {
     for (int g = 0; g < 31; g++) host_of[g] = -1;
     std::vector<uint64_t> layouts;
     const int found = rp_pred_layouts(pc, layouts);
@@ -247,13 +238,21 @@ void FrostJIT::rp_prepare_hints(const IRBlock& block, uint64_t start_pc) {
             default: targets[target_count++] = start_pc + static_cast<uint64_t>(block.count) * 4; break;
         }
     }
+    uint64_t entry_layouts[2] = {};
+    bool known_target = false;
+    for (int t = 0; t < target_count; t++) known_target |= core_->block_starts_.may_contain(targets[t]);
+    if (known_target) with_table([&](const FrostJIT& table) {
+        for (int t = 0; t < target_count; t++) {
+            const auto known = table.blocks_.find(targets[t]);
+            if (known == table.blocks_.end()) continue;
+            const RegPass* info = table.reg_pass_of(known->second);
+            if (info && info->regs_entry_off) entry_layouts[t] = info->entry_layout;
+        }
+    });
     for (int t = 0; t < target_count; t++) {
-        const auto known = blocks_.find(targets[t]);
-        if (known == blocks_.end()) continue;
-        const RegPass* info = reg_pass_of(known->second);
-        if (!info || !info->regs_entry_off) continue;
-        for (int i = 1; i <= static_cast<int>(info->entry_layout & 0xFF); i++) {
-            const uint8_t entry = static_cast<uint8_t>(info->entry_layout >> (8 * i));
+        const uint64_t entry_layout = entry_layouts[t];
+        for (int i = 1; i <= static_cast<int>(entry_layout & 0xFF); i++) {
+            const uint8_t entry = static_cast<uint8_t>(entry_layout >> (8 * i));
             rp_want_host_[entry >> 3] = static_cast<int8_t>(RP_HOSTS[entry & 7]);
             rp_succ_want_ |= 1u << (entry >> 3);
         }
@@ -361,14 +360,17 @@ uint64_t FrostJIT::rp_capture_layout() const {
 // The entry of `target` a chain slot of `source` at code offset `slot` should jump to: its register entry when the layout the slot
 // leaves covers the target's entry layout, its plain chain entry otherwise.
 const uint8_t* FrostJIT::chain_target_for(const BlockEntry& source, size_t slot, const BlockEntry& target) const {
-    const uint8_t* plain = (chain_skip_enabled() && target.chain_entry)
-        ? reinterpret_cast<const uint8_t*>(target.chain_entry) : reinterpret_cast<const uint8_t*>(target.fn);
-    const RegPass* want = reg_pass_of(target);
     const RegPass* have = reg_pass_of(source);
-    if (!want || !want->regs_entry_off || !want->entry_layout || !chain_skip_enabled()) return plain;
     uint64_t layout = 0;
     if (have && slot == source.chain_patch_off) layout = have->exit_layout;
     else if (have && source.has_taken_chain_slot && slot == source.taken_chain_patch_off) layout = have->taken_layout;
+    return chain_target_for(layout, target);
+}
+const uint8_t* FrostJIT::chain_target_for(uint64_t layout, const BlockEntry& target) const {
+    const uint8_t* plain = (chain_skip_enabled() && target.chain_entry)
+        ? reinterpret_cast<const uint8_t*>(target.chain_entry) : reinterpret_cast<const uint8_t*>(target.fn);
+    const RegPass* want = reg_pass_of(target);
+    if (!want || !want->regs_entry_off || !want->entry_layout || !chain_skip_enabled()) return plain;
     // Which entry registers the slot leaves in the host registers the entry expects.
     const int n = static_cast<int>(want->entry_layout & 0xFF);
     unsigned covered = 0;

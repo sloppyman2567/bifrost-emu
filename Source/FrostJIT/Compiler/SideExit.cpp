@@ -183,9 +183,7 @@ void FrostJIT::flush_deferred_side_exits() {
             }
         }
         taken_chain_target_pc_ = exit.target;
-        edge_source_override_ = side_exit_key(current_start_pc_, compiled_side_exits_.size());
         emit_taken_path_epilogue();
-        edge_source_override_ = 0;
         compiled_side_exits_.push_back({exit.target, taken_chain_patch_off_, rp_taken_layout_});
         swap_guard_state(state);
     }
@@ -196,7 +194,7 @@ void FrostJIT::flush_deferred_side_exits() {
     rp_taken_layout_ = saved_layout;  // the block's own taken slot keeps the layout it was emitted with
 }
 
-// Called by publish_translation: one stub entry per exit, so the existing chaining finds each slot through back_refs_.
+// Called by publish_translation, single-thread code only: one stub entry per exit, so the existing chaining finds each slot through back_refs_.
 void FrostJIT::register_side_exit_stubs(uint64_t start_pc) {
     auto it = side_exit_table_.find(start_pc);
     if (it == side_exit_table_.end()) return;
@@ -214,7 +212,7 @@ void FrostJIT::register_side_exit_stubs(uint64_t start_pc) {
     }
     side_exit_table_.erase(it);
     if (!dbg().no_chain)
-        for (uint64_t key : keys) try_chain_block(key, blocks_[key]);
+        for (uint64_t key : keys) try_chain_block(blocks_[key]);
     side_stubs_[start_pc] = std::move(keys);
 }
 

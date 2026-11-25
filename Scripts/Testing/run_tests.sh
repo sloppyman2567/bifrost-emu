@@ -353,6 +353,8 @@ UNIT_TESTS=(
     "jit_call_helpers|Tests/Unit/jit_call_helpers.elf||15|jit_call_helpers: ALL PASS"
     "jit_call_depth|Tests/Unit/jit_call_helpers.elf 20000 deep||15|jit_call_helpers: ALL PASS deep calls"
     "jit_mt_loops|Tests/Unit/jit_mt_loops.elf||30|jit_mt_loops: ALL PASS"
+    # Eight threads translating at once: faulting accesses, shared and rewritten code, a fork in the middle.
+    "jit_mt_compile|Tests/Unit/jit_mt_compile.elf||60|jit_mt_compile: ALL PASS"
     "shift_register|Tests/Unit/jit_shift_register.elf||5|checks passed"
     "neon_permute|Tests/Unit/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|Tests/Unit/jit_neon_fixups.elf||5|checks passed"

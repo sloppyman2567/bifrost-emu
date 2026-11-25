@@ -32,9 +32,9 @@
 #include <cstring>
 namespace arm64emu {
 bool FrostJIT::ensure_code_space(size_t bytes) {
-    if (bytes > code_buf_limit_ - code_buf_used_) return false;
+    if (bytes > code_lease_end_ - code_buf_used_) return false;
     const size_t needed = code_buf_used_ + bytes;
-    if (needed > code_capacity_) {
+    if (needed > code_capacity_ && core_ == this) {
         code_capacity_ = std::min(code_buf_limit_, std::max(needed, code_capacity_ * 2));
         code_cache_growths.fetch_add(1, std::memory_order_relaxed);
     }

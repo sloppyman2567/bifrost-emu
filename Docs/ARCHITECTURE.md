@@ -63,7 +63,10 @@ declares `IROp` and `IRInst` and includes the typed parameter structs
 the `FloatSIMD/SIMD/` subdirectory. `Backend/X86Emitter.cpp` encodes host
 instructions; `RegisterAlloc/RegisterAllocator.cpp` manages scalar homes and
 spills. Runtime dispatch, fault recovery, code caching, profiling and emulator
-bridges live in `Runtime/`; `Runtime/Generations.*` replaces a full code cache
+bridges live in `Runtime/`; `Runtime/Compilers.cpp` lets several threads
+translate at once, `Runtime/GrowingTables.hpp`, `Runtime/CodeIndex.hpp` and `Runtime/PcFilter.hpp`
+hold the containers of the block tables and `Runtime/SpinWait.hpp` the short
+waits, `Runtime/Generations.*` replaces a full code cache
 and releases the old one, and `Runtime/CacheRecording.cpp` (recording, proof
 compile, install) with `Runtime/PersistentCache.*` (on-disk store) form the
 experimental cross-launch translation cache. `Runtime/SampleProfile.*` is the `BIFROST_PROF` sampler's report:

@@ -621,7 +621,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 const bool imm_32 = inst.addsub_params().bits == 32;
                 const bool imm_discard = (inst.dest == 0 && !pin_dest_active_) ||
                     (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
-                     cur_op_index_ < kills_per_op_.size() &&
+                     cur_op_index_ < kill_ops_ &&
                      vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
                 auto cit = jit_consts_.find(inst.src2);
                 if (cit != jit_consts_.end() && inst.src1 != inst.src2 && inst.dest != inst.src2 &&
@@ -663,7 +663,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 // low half of the little-endian home.
                 const bool discard = (inst.dest == 0 && !pin_dest_active_) ||
                     (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
-                     cur_op_index_ < kills_per_op_.size() &&
+                     cur_op_index_ < kill_ops_ &&
                      vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
                 if (is_sub && discard && inst.src2 == lazy_load_vreg_ && inst.src1 != inst.src2) {
                     const int arch = lazy_load_arch_;
@@ -685,7 +685,7 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
             // Restrict this test to body liveness.
             const bool discard_result = (inst.dest == 0 && !pin_dest_active_) ||
                 (inst.dest > 32 && inst.dest < vreg_last_use_op_.size() &&
-                 cur_op_index_ < kills_per_op_.size() &&
+                 cur_op_index_ < kill_ops_ &&
                  vreg_last_use_op_[inst.dest] <= static_cast<int>(cur_op_index_));
             auto consumable = [&](int v, int r) {
                 return v > 32 && vreg_last_use_this_op(v) &&
@@ -1175,7 +1175,10 @@ bool FrostJIT::compile_ir_inst_body(const IRInst& inst) {
                 // Slot initially targets slow_path; override to the block fn
                 // when already translated, else record for later patching
                 // (end of the target's translate_block).
-                uint64_t (*tfn)(CPU*, Emulator*) = lookup_only_locked(bp.target);
+                uint64_t (*tfn)(CPU*, Emulator*) = with_table([&](const FrostJIT& t) {
+                    const auto it = t.blocks_.find(bp.target);
+                    return it == t.blocks_.end() ? nullptr : it->second.fn;
+                });
                 if (call_edge) {
                     call_edge->target.cold = reinterpret_cast<uint64_t>(code_buf_ + slow_off);
                     call_edge->target.word.store(call_edge->target.cold, std::memory_order_relaxed);

@@ -58,17 +58,17 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             while (ns > max && !jit->lean_compile_max_ns.compare_exchange_weak(
                        max, ns, std::memory_order_relaxed)) {}
         }
-    } compile_timer{this};
+    } compile_timer{core_};
     block_words_.clear();
     if (!code_buf_) return nullptr;
-    if (code_budget_exhausted_) {
-        renewal_wanted_.store(true, std::memory_order_relaxed);  // retried: a renewal may have been refused
+    if (core_->code_budget_exhausted_.load(std::memory_order_relaxed)) {
+        core_->renewal_wanted_.store(true, std::memory_order_relaxed);  // retried: a renewal may have been refused
         BlockEntry fallback;
         fallback.interp_only = true;
         fallback.interp_only_count = fallback.instr_count = 1;
         fallback.verified_once = true;
         publish_or_stage(start_pc, fallback);
-        code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        core_->code_cache_budget_fallbacks.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
     // BL_CALL (native call-within-block) does NOT compose with chain-skip:
@@ -101,6 +101,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // (No-op if W^X is disabled or the buffer is already writable.)
     make_writable();
     current_start_pc_ = start_pc;
+    compile_edge_mark_ = mt_edges_.size();
     code_buf_overflow_ = false;
     // A guarded access exists only with fault sites and the window; a fault trace
     // needs each exit's block PC.
@@ -179,6 +180,11 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     size_t block_start = code_buf_used_;
     // ── Translate ARM64 → IR ─────────────────────────────────────
     IRBlock ir_block;
+    struct ReuseInsts {  // a block's IR keeps the memory of the one before
+        std::vector<IRInst>& kept; std::vector<IRInst>& used;
+        ReuseInsts(std::vector<IRInst>& k, std::vector<IRInst>& u) : kept(k), used(u) { used.swap(kept); used.clear(); }
+        ~ReuseInsts() { used.swap(kept); }
+    } reuse_insts{ir_insts_scratch_, ir_block.insts};
     ir_block.start_pc = start_pc;
     ir_reset_vreg_alloc();
     // Grow simple blocks beyond the old fixed cap, but stop dense IR
@@ -242,7 +248,27 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     int carry_exits = 0;
     // A block translated again after its profile (Carry/HotSide.cpp) goes on through code that has a block of its own by now, as it
     // did the first time: otherwise the later translation, made when more of the code exists, comes out shorter than the one measured.
-    const bool merge_known = carry_formation && carry_rounds_.count(start_pc) != 0;
+    bool merge_known = false, profile_done = false;
+    if (carry_formation && core_->carry_tripped_.may_contain(start_pc)) with_table([&](const FrostJIT& t) {
+        merge_known = t.carry_rounds_.count(start_pc) != 0;
+        profile_done = t.carry_done_.count(start_pc) != 0;
+    });
+    // What the table says about a pc: no block starts there, or one does, and is a loop tail of this block with that many
+    // instructions (0: it is not).
+    enum { kNoBlock = -1 };
+    auto block_at = [&](uint64_t pc) -> int32_t {
+        const uint64_t at = fetch_address(pc);
+        if (!core_->block_starts_.may_contain(at)) return kNoBlock;
+        return with_table([&](const FrostJIT& t) -> int32_t {
+            const auto known = t.blocks_.find(at);
+            if (known == t.blocks_.end()) return kNoBlock;
+            const BlockEntry& tail = known->second;
+            const bool back_to_start = tail.chain_target_pc == start_pc ||
+                (tail.has_taken_chain_slot && tail.taken_chain_target_pc == start_pc);
+            return tail.fn && !tail.interp_only && !tail.has_call && !tail.has_svc && tail.ends_with_branch && back_to_start
+                ? static_cast<int32_t>(tail.instr_count) : 0;
+        });
+    };
     uint64_t split_skip_pc = 0;  // a followed branch's target: its code is copied even when a block starts there
     bool followed_run = false;
     // A loop body up to twice the cap stays one block (selfloop_extent).
@@ -260,26 +286,18 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
            !block_translation_budget_reached(ir_block, instr_count, g_alloc.next)) {
         // ── Block splitting at known entry points ──────────────────
         if (instr_count > 0 && cur_pc >= loop_tail_end && cur_pc != split_skip_pc && !merge_known) {
-            const auto known = blocks_.find(fetch_address(cur_pc));
-            if (known != blocks_.end()) {
-                const BlockEntry& tail = known->second;
-                // A previously compiled tail can make a short loop depend
-                // on entry order: splitting here hides its back-edge from
-                // emit_selfloop_backedge. Use metadata only as a growth
-                // hint; translate the actual words normally, preserving
-                // code_words_, instruction counts and all complexity caps.
-                // No speculative guest reads become cache dependencies.
-                const bool back_to_start = tail.chain_target_pc == start_pc ||
-                    (tail.has_taken_chain_slot && tail.taken_chain_target_pc == start_pc);
-                // The loop may then reach twice the cap, as selfloop_extent allows.
-                if (tail.fn && !tail.interp_only && !tail.has_call && !tail.has_svc &&
-                    tail.ends_with_branch && back_to_start && tail.instr_count > 0 &&
-                    tail.instr_count <= 2 * max_block_insts - instr_count) {
-                    loop_tail_end = cur_pc + static_cast<uint64_t>(tail.instr_count) * 4;
-                    block_cap = std::max(block_cap, instr_count + static_cast<int>(tail.instr_count));
+            // A previously compiled tail can make a short loop depend on entry order: splitting here hides its back-edge from the loop
+            // optimizer. When that tail branches directly back to this block, recompile the bounded loop as one block (it may then
+            // reach twice the cap, as selfloop_extent allows). The table's facts are only a growth hint: the actual words are
+            // translated as usual, with contiguous code_words_, instruction counts and all complexity caps.
+            const int32_t tail_len = block_at(cur_pc);
+            if (tail_len != kNoBlock) {
+                if (tail_len > 0 && tail_len <= 2 * max_block_insts - instr_count) {
+                    loop_tail_end = cur_pc + static_cast<uint64_t>(tail_len) * 4;
+                    block_cap = std::max(block_cap, instr_count + tail_len);
                     loop_probed = true;
                 } else {
-                    block_profile.entry_point++;
+                    core_->block_profile.entry_point++;
                     chain_target_pc_ = cur_pc;
                     break;
                 }
@@ -288,9 +306,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         uint32_t inst;
         try {
             inst = emu.mem().fetch_inst(fetch_address(cur_pc));
-        } catch (...) { block_profile.decode_fail++; break; }
+        } catch (...) { core_->block_profile.decode_fail++; break; }
         DecodedInst d;
-        if (!decode(d, inst)) { block_profile.decode_fail++; break; }
+        if (!decode(d, inst)) { core_->block_profile.decode_fail++; break; }
         // ── Leaf inlining (before the normal BL translation) ───────
         if (d.cls == InstClass::BL && leaf_inline_enabled_ && !bl_call_disabled_) {
             uint64_t target = cur_pc + static_cast<uint64_t>(d.imm);
@@ -366,7 +384,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                     ir_block.count = instr_count;
                     has_inlined_leaf = true;
                     inlined_ranges_.emplace_back(target, leaf_count);
-                    block_profile.leaf_inlined++;
+                    core_->block_profile.leaf_inlined++;
                     if (dbg().debug_inline)
                         fprintf(stderr, "[leaf] INLINED bl@0x%llx -> 0x%llx (%d instrs)\n",
                                 (unsigned long long)cur_pc, (unsigned long long)target,
@@ -385,7 +403,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         bool will_call_interp = jit_analysis::instr_will_call_interp(d);
         if (will_call_interp && call_interp_count >= MAX_CALL_INTERP_PER_BLOCK && instr_count > 0) {
             // Split here — the next instruction starts a new block.
-            block_profile.call_interp_cap++;
+            core_->block_profile.call_interp_cap++;
             chain_target_pc_ = cur_pc;
             break;
         }
@@ -418,7 +436,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             IRInst& branch = ir_block.insts.back();
             CarryExit exit{cur_pc, cur_pc + 4, carry_formed_here, false};
             // The profile said this branch is taken more often than not: the block goes on at its target, and the exit leaves on the other side.
-            if (carry_formed_here && !dbg().no_carry_follow && carry_follow_taken_.count(cur_pc)) {
+            if (carry_formed_here && !dbg().no_carry_follow && core_->carry_tripped_.may_contain(cur_pc) &&
+                with_table([&](const FrostJIT& t) { return t.carry_follow_taken_.count(cur_pc) != 0; })) {
                 const uint64_t taken_pc = cur_pc + static_cast<uint64_t>(d.imm);
                 bool flipped = false;
                 if (branch.op == IROp::BRCOND_ZERO) {
@@ -453,12 +472,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         ir_block.count = instr_count;
         if (followed_run) ++inlined_ranges_.back().second;
         if (ends) {
-            block_profile.natural_branch++;
+            core_->block_profile.natural_branch++;
             block_ended = true;
         }
         else {
             if (bl_call_count >= MAX_BL_CALL_PER_BLOCK) {
-                block_profile.bl_call_cap++;
+                core_->block_profile.bl_call_cap++;
                 // The block's next pc is the first untranslated instruction: a block that is not contiguous (an inlined leaf
                 // or a followed branch) takes it from cur_pc, so move it past the call before leaving the loop.
                 cur_pc = follow_to ? follow_to : cur_pc + 4;
@@ -481,7 +500,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     }
     const bool size_limited = instr_count >= max_block_insts ||
         block_translation_budget_reached(ir_block, instr_count, g_alloc.next);
-    if (size_limited) block_profile.max_size++;
+    if (size_limited) core_->block_profile.max_size++;
     if (instr_count == 0) {
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
@@ -509,8 +528,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                 entry.verified_once = true;  // interp-only: no verify
                 attach_code_words(entry, !has_inlined_leaf);
                 publish_or_stage(start_pc, entry);
-                blocks_translated++;
-                block_profile.interp_only++;
+                core_->blocks_translated++;
+                core_->block_profile.interp_only++;
                 make_executable();  // W^X: balance the make_writable() at entry
                 return nullptr;
             }
@@ -598,8 +617,8 @@ if (demote_interp) {
         entry.verified_once = true;  // skip verify for interp-only
         attach_code_words(entry, !has_inlined_leaf);
         publish_or_stage(start_pc, entry);
-        blocks_translated++;
-        block_profile.interp_only++;
+        core_->blocks_translated++;
+        core_->block_profile.interp_only++;
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
     }
@@ -685,6 +704,7 @@ if (demote_interp) {
         }
         max_vreg = 4095;
     }
+    prev_max_vreg_ = 4095;  // until this compile ends well: one that stops early leaves mappings the next must clear
     // Pre-assign stack slots: vreg 33 → slot -8, vreg 34 → slot -16, etc.
     for (int v = 33; v <= max_vreg; v++) {
         vreg_slot_[v] = -8 * (v - 32);
@@ -701,13 +721,14 @@ if (demote_interp) {
     // cpu.v_lo, so a block is either vector-cached or scalar-FP-cached).
     if (!vec_cache_active_) fp_cache_may_enable(ir_block);
     // The profile of a block with exits Carry formed (Carry/HotSide.cpp), unless it had its rounds.
-    if (carry_formation && !dbg().no_carry_follow && block_has_side_exit_ && !carry_done_.count(start_pc)) {
+    if (carry_formation && !dbg().no_carry_follow && block_has_side_exit_ && !profile_done) {
         int n = 0;
         bool fits = true;
         for (const CarryExit& e : carry_exits_)
             if (e.eligible) { ++n; fits &= e.pc >= start_pc && e.pc - start_pc < UINT32_MAX; }
         if (n > 0 && n <= kCarryMaxExits && fits) {
             carry_profiles_.emplace_back();
+            core_->carry_profiled.fetch_add(1, std::memory_order_relaxed);
             carry_profile_ = &carry_profiles_.back();
             carry_profile_->block_pc = start_pc;
             carry_profile_->budget = kCarryProfileBudget;
@@ -989,7 +1010,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     //     dest), so we don't kill it (handled in the compile loop below).
     {
         size_t n = ir_block.insts.size();
-        vreg_last_use_op_.assign(4096, -1);
+        std::fill_n(vreg_last_use_op_.begin(), vreg_last_use_high_ + 1, -1);
         reset_vreg_uses();
         int highest_used = 31;  // highest vreg the scan below recorded
         for (size_t i = 0; i < n; i++) {
@@ -1016,11 +1037,14 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 if (inst.aux > highest_used) highest_used = inst.aux;
             }
         }
+        vreg_last_use_high_ = highest_used;
         // Build kills_per_op_: for each op i, the list of scratch vregs
         // whose last use is i (dest is excluded at kill time in the loop).
         // Only slots up to highest_used were written: scanning all 4096 per
         // block was about half of this function's own time.
-        kills_per_op_.assign(n, {});
+        if (kills_per_op_.size() < n) kills_per_op_.resize(n);
+        for (size_t i = 0; i < n; i++) kills_per_op_[i].clear();
+        kill_ops_ = n;
         for (int v = 32; v <= highest_used; v++) {
             if (vreg_last_use_op_[v] >= 0) {
                 kills_per_op_[vreg_last_use_op_[v]].push_back(static_cast<uint16_t>(v));
@@ -1296,7 +1320,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         if (inst.op != IROp::IMM) jit_consts_.erase(inst.dest);
         // Free host regs of vregs whose last use was this op. Dead vregs
         // are freed immediately, making room for new vregs without eviction.
-        if (i < kills_per_op_.size()) {
+        if (i < kill_ops_) {
             for (uint16_t v : kills_per_op_[i]) {
                 // Don't kill the dest of this op — it's a new definition
                 // and still live (handles dest == src1 in-place modify).
@@ -1318,7 +1342,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             kill_vreg(inst.dest);
         }
     }
-    kills_per_op_.clear();
+    kill_ops_ = 0;
     fold_ahead_kind_.clear();
     zext32_fused_.clear();
     sext_load_.clear();
@@ -1336,7 +1360,6 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     sext_load_done_ = SIZE_MAX;
     lazy_load_vreg_ = -1;
     scaled_vreg_ = -1;
-    vreg_last_use_op_.clear();
     reset_vreg_uses();
     // ── Epilogue ─────────────────────────────────────────────────
     size_t epilogue_off = code_buf_used_;
@@ -1536,6 +1559,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     note_profile_sections(block_start, epilogue_off, recovery_start);
     if (code_buf_overflow_) {
         rewind_codegen(block_start);
+        // The chunk is full, not the buffer: once more in a fresh one. A block is far smaller than a chunk.
+        if (core_ != this && code_lease_end_ - block_start < kCodeChunk && take_code_lease()) {
+            discard_staged();
+            make_executable();
+            return translate_block(emu, start_pc);
+        }
         // The budget is fixed for this JIT. Cache the failure so every
         // subsequent call does not repeat decode/IR/codegen before stepping.
         BlockEntry fallback;
@@ -1544,9 +1573,9 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         fallback.instr_count = 1;
         fallback.verified_once = true;
         publish_or_stage(start_pc, fallback);
-        code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
-        code_budget_exhausted_ = true;
-        renewal_wanted_.store(true, std::memory_order_relaxed);
+        core_->code_cache_overflows.fetch_add(1, std::memory_order_relaxed);
+        core_->code_budget_exhausted_ = true;
+        core_->renewal_wanted_.store(true, std::memory_order_relaxed);
         // W^X: make the buffer executable again before returning (we may
         // have written partial code before the overflow was detected).
         make_executable();
@@ -1663,8 +1692,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // 4096-entry tables (36 KB cleared) per translated block.
     if (dbg().jit_verify) record_verification_stores(ir_block, start_pc, entry);
     attach_code_words(entry, !has_inlined_leaf);
-    if (!compiled_side_exits_.empty()) { side_exit_table_[start_pc] = compiled_side_exits_; ++side_exit_blocks; }
-    else side_exit_table_.erase(start_pc);
+    collect_edges(entry);
+    if (!compiled_side_exits_.empty()) ++core_->side_exit_blocks;
+    if (!mt_active()) {
+        if (!compiled_side_exits_.empty()) side_exit_table_[start_pc] = compiled_side_exits_;
+        else side_exit_table_.erase(start_pc);
+    }
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
     // Verify dirty_host_regs_ invariant (active in debug or with
@@ -1688,6 +1721,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
 void FrostJIT::publish_translation(uint64_t start_pc, const BlockEntry& entry) {
     publish_block(start_pc, entry);
     blocks_translated++;
+    if (mt_active()) { link_mt_block(start_pc, mt_targets_.at(start_pc), blocks_[start_pc]); return; }
     // Maintain the back-reference index: this block's fall-through and
     // taken slots target T, so chain_back_references(T) finds it in O(k)
     // when T is translated later (e.g. a loop whose back-edge target is
@@ -1699,7 +1733,7 @@ void FrostJIT::publish_translation(uint64_t start_pc, const BlockEntry& entry) {
     // also patch any existing blocks whose chain target is this block.
     // BIFROST_NO_CHAIN disables chaining for debugging.
     if (!dbg().no_chain) {
-        try_chain_block(start_pc, blocks_[start_pc]);
+        try_chain_block(blocks_[start_pc]);
         chain_back_references(start_pc);
     }
     // Patch any direct BL call slots (from already-translated callers)

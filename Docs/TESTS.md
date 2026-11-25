@@ -97,6 +97,14 @@ mid-iteration, one loop per ARM condition for `b.cond` on edge values, and `tbz`
 exits on and off, chaining off, the ordinary frame layout and IR validation. With exits on, `-v` must report at least forty blocks formed with a
 mid-block exit. `carried_flags` and `carried_flags_bit` read NZCV after an exit that comes before the loop's first flag setter (30 failures on the build before the fix of 2026-11-25). It does not cover a `b.cond` after an `FP_CMP`, loops with an inner branch, a game, or the persistent cache (such blocks are not recorded).
 
+### Several threads translating at once (2026-11-25)
+
+`Tests/Unit/jit_mt_compile.c` (`run_tests.sh` entry `jit_mt_compile`, also a threaded oracle in `make verify`) has eight threads run 1,200 generated
+functions each, once, and 400 shared ones. Every seventh function loads from and stores to an unmapped page, with the faults counted exactly; one thread
+keeps rewriting a function the others call, and one forks three times. A model in C gives every result. `jit_mt_compile.elf THREADS FUNCTIONS FORKS`
+sets the sizes. One run rarely shows a race: loop it, with a small `kCodeChunk` ([contract](../Source/FrostJIT/AGENTS.md)). It does not cover
+signals other than its own faults, code-cache renewal (`jit_generations`) or a game.
+
 ### Carry follows the hot side of an exit (2026-11-24)
 
 `Tests/Unit/jit_carry_follow.c` and `Scripts/Testing/test_jit_carry_follow.sh` (`run_tests.sh` entry `jit_carry_follow`, also a threaded oracle in

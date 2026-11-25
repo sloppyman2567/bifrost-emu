@@ -29,7 +29,7 @@ void FrostJIT::emit_carry_trip_stub(uint64_t start_pc) {
     if (carry_trip_jcc_ == SIZE_MAX) return;
     patch_jcc_rel32(carry_trip_jcc_, static_cast<int32_t>(code_buf_used_ - (carry_trip_jcc_ + 6)));
     const bool calls_out = block_calls_out_;  // the helper reads no cpu.pc: no entry of this block needs to store it
-    emit_mov_imm64(RDI, reinterpret_cast<uint64_t>(this));
+    emit_mov_imm64(RDI, reinterpret_cast<uint64_t>(core_));
     emit_mov_imm64(RSI, reinterpret_cast<uint64_t>(carry_profile_));
     emit_call_aligned(reinterpret_cast<void*>(&jit_carry_trip), 0, false);
     block_calls_out_ = calls_out;
@@ -53,6 +53,7 @@ void FrostJIT::carry_trip(CarryProfile* p) {
     lock_table();
     std::unique_lock<std::shared_mutex> table(blocks_mutex_, std::adopt_lock);
     const uint64_t block_pc = p->block_pc;
+    carry_tripped_.add(block_pc);
     uint8_t& rounds = carry_rounds_[block_pc];
     ++rounds;
     bool changed = false;
@@ -61,6 +62,7 @@ void FrostJIT::carry_trip(CarryProfile* p) {
         uint8_t& toggles = carry_toggles_[branch];
         if (toggles < 2) {
             ++toggles;
+            carry_tripped_.add(branch);
             if (!carry_follow_taken_.erase(branch)) carry_follow_taken_.insert(branch);
             carry_flips.fetch_add(1, std::memory_order_relaxed);
             changed = true;

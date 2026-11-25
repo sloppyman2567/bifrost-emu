@@ -15,6 +15,23 @@
 #include <thread>
 #include <vector>
 using namespace arm64emu;
+// The bytes of every block published so far.
+struct PublishedCode {
+    FrostJIT* jit;
+    std::vector<std::pair<size_t, size_t>> ranges;
+    std::vector<uint8_t> bytes;
+    explicit PublishedCode(FrostJIT* j) : jit(j), ranges(j->published_code()) {
+        for (const auto& r : ranges) bytes.insert(bytes.end(), j->code_buf() + r.first, j->code_buf() + r.first + r.second);
+    }
+    bool unchanged() const {
+        size_t at = 0;
+        for (const auto& r : ranges) {
+            if (std::memcmp(bytes.data() + at, jit->code_buf() + r.first, r.second)) return false;
+            at += r.second;
+        }
+        return true;
+    }
+};
 static bool check_entry_order_loops(bool mt) {
     constexpr uint64_t head = 0x90000, stop = 0xa0000;
     // Warm the interior entry first, as CoreMark's list walk does. Every
@@ -229,8 +246,7 @@ static bool check_selfloops(uint64_t head) {
             }
         };
         run(); // compile before the instruction-byte snapshot
-        const size_t prefix = j->code_buf_used();
-        std::vector<uint8_t> before(j->code_buf(), j->code_buf() + prefix);
+        const PublishedCode before(j);
         std::atomic<bool> start{false};
         std::vector<std::thread> workers;
         for (unsigned k = 0; k < 8; ++k) workers.emplace_back([&] {
@@ -240,7 +256,7 @@ static bool check_selfloops(uint64_t head) {
         start.store(true, std::memory_order_release);
         for (unsigned repeat = 0; repeat < 100; ++repeat) j->invalidate_range(head, 4);
         for (auto& t : workers) t.join();
-        if (std::memcmp(before.data(), j->code_buf(), prefix)) { std::fprintf(stderr, "selfloop kind %u: published bytes changed\n", kind); ++failures; }
+        if (!before.unchanged()) { std::fprintf(stderr, "selfloop kind %u: published bytes changed\n", kind); ++failures; }
         // Expiry and callback sentinels must commit all carried state,
         // including the final comparison flags and dirty vector accumulators.
         // 0: fresh lease, runs to the end. 1: stale epoch, leaves at the first
@@ -370,8 +386,7 @@ int main() {
     if (!j) return 2;
     j->enter_multithreaded();
     for (uint64_t pc : {entry, head, body, body + 16}) j->lookup_or_translate(*e, pc);
-    const size_t prefix = j->code_buf_used();
-    std::vector<uint8_t> before(j->code_buf(), j->code_buf() + prefix);
+    const PublishedCode before(j);
     std::atomic<unsigned> failures{0};
     auto run = [&] {
         CPU cpu;
@@ -387,7 +402,7 @@ int main() {
         }
     };
     auto unchanged = [&](const char* when) {
-        if (!std::memcmp(before.data(), j->code_buf(), prefix)) return;
+        if (before.unchanged()) return;
         std::fprintf(stderr, "published bytes changed %s\n", when);
         ++failures;
     };

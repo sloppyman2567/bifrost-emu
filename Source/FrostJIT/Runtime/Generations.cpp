@@ -205,23 +205,27 @@ void FrostJIT::release_resources() {
     // The fault handler tests fault_sites_ before it reads anything else.
     destroy_fault_recovery();
     fault_sites_ = nullptr;
-    fault_site_count_.store(0, std::memory_order_relaxed);
-    fault_site_constructed_ = 0;
+    fault_chunks_ = nullptr;
+    compilers_count_.store(0, std::memory_order_release);
+    for (auto& compiler : compilers_) compiler.reset();
+    free_compilers_.clear();
     if (code_buf_) {
         munmap(code_buf_, code_buf_limit_);
         code_buf_ = nullptr;
         code_buf_used_ = 0;
+        code_next_lease_ = 0;
         code_capacity_ = 0;
     }
     auto clear = [](auto& container) { std::remove_reference_t<decltype(container)>().swap(container); };
     // Blocks first: their entries point at the edges below.
     clear(blocks_);
+    block_starts_.release();
+    carry_tripped_.release();
     clear(code_index_);
     clear(back_refs_);
     clear(pending_call_sites_);
     clear(direct_call_sites_);
-    clear(mt_edge_refs_);
-    clear(mt_source_refs_);
+    mt_targets_.clear();
     clear(mt_edges_);
     clear(code_words_);
     clear(carry_info_);

@@ -35,7 +35,7 @@ for source in "${sources[@]}"; do
     if [[ ! -f "$fixture" || "$source" -nt "$fixture" ]]; then
         echo "FAIL: missing/stale $fixture; run make setup-tests"; failed=1; continue
     fi
-    if [[ "$name" == jit_mt_loops || "$name" == jit_host_fault || "$name" == jit_llsc_native || "$name" == jit_cache_generations ||
+    if [[ "$name" == jit_mt_loops || "$name" == jit_mt_compile || "$name" == jit_host_fault || "$name" == jit_llsc_native || "$name" == jit_cache_generations ||
        "$name" == jit_dispatch_cache_growth || "$name" == jit_unmap_reuse_race || "$name" == jit_side_exit ||
        "$name" == jit_reg_pass || "$name" == jit_carry_follow ]]; then
         # These fixtures exercise concurrent publication/invalidation or faults.

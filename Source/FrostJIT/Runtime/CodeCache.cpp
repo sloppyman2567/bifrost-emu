@@ -21,8 +21,9 @@
 //   chain_back_references — patch all blocks whose target is `target_pc`
 #include "FrostJIT/Compiler/FrostJIT.hpp"
 #include "FrostJIT/Runtime/Generations.hpp"
+#include "FrostJIT/Runtime/SpinWait.hpp"
+#include "FrostJIT/Runtime/TranslationClock.hpp"
 #include "System/Core/Emulator.hpp"
-#include "System/Core/WaitProfile.hpp"
 #include "System/Memory/Memory.hpp"
 #include "System/Core/CPU.hpp"
 #include "FrostJIT/Runtime/Preemption.hpp"
@@ -64,21 +65,18 @@ uint64_t (*FrostJIT::translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emu
     BlockEntry entry;
     return translate_entry(emu, pc, entry) ? entry.fn : nullptr;
 }
-static uint64_t elapsed_ns(std::chrono::steady_clock::time_point start) {
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now() - start).count());
-}
+// Another thread holds the table for a microsecond or two: spin before sleeping.
 void FrostJIT::lock_table_shared() {
     if (blocks_mutex_.try_lock_shared()) return;
     const auto start = std::chrono::steady_clock::now();
-    blocks_mutex_.lock_shared();
-    table_lock_wait_ns.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
+    if (!spin_until(kSpinLimit, [&] { return blocks_mutex_.try_lock_shared(); })) blocks_mutex_.lock_shared();
+    table_lock_wait_ns.fetch_add(TranslationClock::elapsed_ns(start), std::memory_order_relaxed);
 }
 void FrostJIT::lock_table() {
     if (blocks_mutex_.try_lock()) return;
     const auto start = std::chrono::steady_clock::now();
-    blocks_mutex_.lock();
-    table_lock_wait_ns.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
+    if (!spin_until(kSpinLimit, [&] { return blocks_mutex_.try_lock(); })) blocks_mutex_.lock();
+    table_lock_wait_ns.fetch_add(TranslationClock::elapsed_ns(start), std::memory_order_relaxed);
 }
 // Caller holds blocks_mutex_ exclusively after a shared-lock compile.
 bool FrostJIT::staged_entry_invalidated(uint64_t pc) {
@@ -105,28 +103,6 @@ bool FrostJIT::translate_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     if (renewal_wanted()) emu.renew_jit(this);
     return found;
 }
-namespace {
-// BIFROST_PROF: splits one compile_entry call into waiting for locks and translating, for the thread's waiting report.
-class TranslationClock {
-public:
-    TranslationClock() : on_(dbg().cpu_profile) { if (on_) start_ = std::chrono::steady_clock::now(); }
-    ~TranslationClock() {
-        if (!on_) return;
-        const uint64_t total = elapsed_ns(start_);
-        wait_prof_note_translation(total - wait_ns_, wait_ns_);
-    }
-    template <class Lock> void wait(Lock&& lock) {
-        if (!on_) { lock(); return; }
-        const auto from = std::chrono::steady_clock::now();
-        lock();
-        wait_ns_ += elapsed_ns(from);
-    }
-private:
-    const bool on_;
-    std::chrono::steady_clock::time_point start_;
-    uint64_t wait_ns_ = 0;
-};
-}  // namespace
 bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     TranslationClock clock;
     auto copy_locked = [&] {
@@ -144,6 +120,7 @@ bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
         blocks_mutex_.unlock();
         return found;
     }
+    if (parallel_compiles(emu)) return compile_entry_parallel(emu, pc, out, clock);
     // MT: one compiler at a time, while other CPUs keep reading the table.
     // Codegen only reads blocks_; the edge/counter metadata it appends is
     // read by exclusive-lock holders, which cannot run until it finishes.
@@ -152,7 +129,7 @@ bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
         if (!compiling.try_lock()) {
             const auto start = std::chrono::steady_clock::now();
             compiling.lock();
-            table_lock_wait_ns.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
+            table_lock_wait_ns.fetch_add(TranslationClock::elapsed_ns(start), std::memory_order_relaxed);
         }
         lock_table_shared();
     });
@@ -182,15 +159,9 @@ bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     } else if (staged_) {
         // Never published, so nothing can reach this code except its own
         // edges; revoke them. Another translation's edges stay intact.
-        auto refs = mt_source_refs_.find(pc);
         for (size_t i = edge_mark; i < edge_end; ++i) {
-            MtEdge* edge = mt_edges_[i].get();
-            edge->live = false;
-            edge->target.store(0, std::memory_order_release);
-            if (refs != mt_source_refs_.end()) {
-                auto& v = refs->second;
-                v.erase(std::remove(v.begin(), v.end(), edge), v.end());
-            }
+            mt_edges_[i]->live = false;
+            mt_edges_[i]->target.store(0, std::memory_order_release);
         }
         // Guest code changed while compiling: translate the current bytes
         // with the table held, which no invalidation can interleave.
@@ -264,11 +235,18 @@ void FrostJIT::dump_compile_stats() {
     }
     fprintf(stderr, "[JIT] invalidate (calls/retired/kept):%s\n", line.c_str());
 }
+std::vector<std::pair<size_t, size_t>> FrostJIT::published_code() {
+    std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
+    std::vector<std::pair<size_t, size_t>> ranges{{0, code_buf_used_}};  // the core's own
+    for (const auto& kv : blocks_)
+        if (kv.second.fn) ranges.emplace_back(reinterpret_cast<const uint8_t*>(kv.second.fn) - code_buf_, kv.second.emitted_bytes);
+    return ranges;
+}
 void FrostJIT::dump_code_cache_stats() {
     flush_stat_tls();
     std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
     fprintf(stderr, "[JIT] code-cache: used=%zu capacity=%zu limit=%zu blocks=%zu growths=%llu overflows=%llu budget_fallbacks=%llu mt=%d\n",
-            code_buf_used_, code_capacity_, code_buf_limit_, blocks_.size(),
+            code_buf_used(), code_capacity_, code_buf_limit_, blocks_.size(),
             (unsigned long long)code_cache_growths.load(std::memory_order_relaxed),
             (unsigned long long)code_cache_overflows.load(std::memory_order_relaxed),
             (unsigned long long)code_cache_budget_fallbacks.load(std::memory_order_relaxed),
@@ -311,7 +289,7 @@ void FrostJIT::dump_code_cache_stats() {
     fprintf(stderr, "[JIT] MT publication: edges=%llu\n", (unsigned long long)mt_edges_published_.load());
     fprintf(stderr, "[JIT] side-exit blocks: %llu\n", (unsigned long long)side_exit_blocks.load());
     if (dbg().carry && !dbg().no_carry_follow)
-        fprintf(stderr, "[JIT] carry follow: blocks profiled=%zu, trips=%llu, branches flipped=%llu\n", carry_profiles_.size(),
+        fprintf(stderr, "[JIT] carry follow: blocks profiled=%zu, trips=%llu, branches flipped=%llu\n", static_cast<size_t>(carry_profiled.load(std::memory_order_relaxed)),
                 (unsigned long long)carry_trips.load(), (unsigned long long)carry_flips.load());
     if (dbg().carry && !dbg().no_reg_pass)
         fprintf(stderr, "[JIT] register passing: edges into the register entry=%llu, into a partial-entry stub=%llu, into a plain entry of a block that has one=%llu\n",
@@ -347,23 +325,30 @@ void FrostJIT::emit_preempt_compare(int cpu_reg, int scratch) {
 // lease; expiry or a host callback sentinel returns through the cold tail.
 FrostJIT::MtEdge* FrostJIT::create_chain_edge(uint64_t target_pc, bool cold_entry, size_t off) {
     auto cell = std::make_unique<MtEdge>();
-    const uint64_t source = edge_source_override_ ? edge_source_override_ : current_start_pc_;
-    cell->source_pc = source;
+    cell->source_pc = current_start_pc_;
     cell->cold_entry = cold_entry;
     cell->target_pc = target_pc;
     cell->slot = static_cast<uint32_t>(off);
     MtEdge* edge = cell.get();
     mt_edges_.push_back(std::move(cell));
-    mt_edge_refs_[target_pc].push_back(edge);
-    mt_source_refs_[source].push_back(edge);
     return edge;
 }
-FrostJIT::MtEdge* FrostJIT::mt_slot_edge(uint64_t source_pc, size_t slot) {
-    auto refs = mt_source_refs_.find(source_pc);
-    if (refs == mt_source_refs_.end()) return nullptr;
-    for (MtEdge* edge : refs->second)
-        if (edge->slot == slot) return edge;
-    return nullptr;
+// The edges this compile created become its entry's, each with the registers its slot leaves.
+void FrostJIT::collect_edges(BlockEntry& entry) {
+    const RegPass* pass = reg_pass_of(entry);
+    for (size_t i = compile_edge_mark_; i < mt_edges_.size(); ++i) {
+        MtEdge& edge = *mt_edges_[i];
+        if (!edge.cold_entry) {
+            if (pass && edge.slot == entry.chain_patch_off) edge.layout = pass->exit_layout;
+            else if (pass && entry.has_taken_chain_slot && edge.slot == entry.taken_chain_patch_off) edge.layout = pass->taken_layout;
+            else
+                for (const SideExitSlot& exit : compiled_side_exits_)
+                    if (exit.slot == edge.slot) edge.layout = exit.layout;
+        }
+        if (mt_active()) edge.to = &core_->mt_targets_.at(edge.target_pc);
+        edge.next_out = entry.edges;
+        entry.edges = &edge;
+    }
 }
 size_t FrostJIT::emit_mt_chain_slot(uint64_t target_pc, bool cold_entry, int cpu_reg) {
     const size_t off = code_buf_used_;
@@ -470,49 +455,46 @@ void FrostJIT::emit_indirect_branch_probe() {
         code_buf_[after - 1] = static_cast<uint8_t>(distance);
     }
 }
-void FrostJIT::refresh_mt_edges(uint64_t pc) {
-    auto refs = mt_edge_refs_.find(pc);
-    if (refs == mt_edge_refs_.end()) return;
-    auto block = blocks_.find(pc);
-    uint64_t fn = 0;
-    if (block != blocks_.end() && block->second.fn && !block->second.interp_only)
-        fn = reinterpret_cast<uint64_t>(chain_skip_enabled() && block->second.chain_entry
-            ? block->second.chain_entry : block->second.fn);
-    for (MtEdge* edge : refs->second) {
-        // A body entry carries this translation's pins and frame. It must
-        // never jump into another translation.
-        if (!edge->live || edge->internal_loop) continue;
-        uint64_t target = edge->cold_entry && block != blocks_.end()
-            ? reinterpret_cast<uint64_t>(block->second.fn) : fn;
-        // An edge out of a block that passes registers may enter the target past its entry loads.
-        if (fn && !edge->cold_entry && block != blocks_.end()) {
-            const auto source = blocks_.find(edge->source_pc);
-            if (source != blocks_.end())
-                target = reinterpret_cast<uint64_t>(chain_target_for(source->second, edge->slot, block->second));
-        }
-        if (edge->target.exchange(target, std::memory_order_release) != target && target && mt_active())
-            mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
+// Points an edge at its target's translation, or at the edge's own cold exit when there is none.
+void FrostJIT::link_mt_edge(MtEdge& edge, const BlockEntry* target) {
+    uint64_t to = 0;
+    if (target && target->fn && !target->interp_only)
+        to = edge.cold_entry ? reinterpret_cast<uint64_t>(target->fn)
+                             : reinterpret_cast<uint64_t>(chain_target_for(edge.layout, *target));
+    if (edge.target.load(std::memory_order_relaxed) == to) return;
+    edge.target.store(to, std::memory_order_release);
+    if (to) mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
+}
+// Publication, both directions: the new block's edges to blocks that exist, and the edges that wait for it. `entry` is the
+// block's entry in blocks_, `self` the record of its pc.
+void FrostJIT::link_mt_block(uint64_t pc, EdgeTarget& self, const BlockEntry& entry) {
+    for (MtEdge* edge = entry.edges; edge; edge = edge->next_out) {
+        std::lock_guard<std::mutex> lock(mt_targets_.mutex_of(edge->target_pc));
+        EdgeTarget& target = *edge->to;
+        edge->next_in = target.in;
+        target.in = edge;
+        link_mt_edge(*edge, target.block);
+    }
+    std::lock_guard<std::mutex> lock(mt_targets_.mutex_of(pc));
+    self.block = &entry;
+    if (!dbg().no_chain) refresh_mt_edges(self);
+}
+void FrostJIT::refresh_mt_edges(EdgeTarget& target) {
+    for (MtEdge** link = &target.in; MtEdge* edge = *link;) {
+        if (!edge->live) { *link = edge->next_in; continue; }  // its source is retired
+        link_mt_edge(*edge, target.block);
+        link = &edge->next_in;
     }
 }
-void FrostJIT::retire_mt_source(uint64_t pc) {
-    auto refs = mt_source_refs_.find(pc);
-    if (refs == mt_source_refs_.end()) return;
-    for (MtEdge* edge : refs->second) {
+void FrostJIT::retire_mt_source(const BlockEntry& entry) {
+    for (MtEdge* edge = entry.edges; edge; edge = edge->next_out) {
         edge->live = false;
         edge->target.store(0, std::memory_order_release);
     }
-    mt_source_refs_.erase(refs);
 }
-bool FrostJIT::patch_chain(uint64_t source_pc, size_t chain_patch_off, const uint8_t* target_fn) {
+bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     if (!code_buf_) return false;
-    // MT publication updates only the data cell, never live instructions.
-    if (mt_active()) {
-        MtEdge* edge = mt_slot_edge(source_pc, chain_patch_off);
-        if (!edge || !edge->live) return false;
-        edge->target.store(reinterpret_cast<uint64_t>(target_fn), std::memory_order_release);
-        mt_edges_published_.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    }
+    if (mt_active()) return false;  // link_mt_block updates data cells, never live instructions
     if (chain_patch_off + 5 > CODE_BUF_SIZE) return false;
     // Verify the slot still contains the unpatched pattern: `ret` + NOPs
     // (default) or one five-byte NOP (chain-skip lease layout, kSlotNop5).
@@ -585,7 +567,7 @@ void FrostJIT::unpatch_direct_calls(uint64_t target_pc) {
     }
     std::atomic_thread_fence(std::memory_order_release);
 }
-void FrostJIT::try_chain_block(uint64_t pc, BlockEntry& entry) {
+void FrostJIT::try_chain_block(BlockEntry& entry) {
     // Fall-through chain slot.
     if (!entry.chained && entry.chain_target_pc != 0) {
         auto it = blocks_.find(entry.chain_target_pc);
@@ -593,7 +575,7 @@ void FrostJIT::try_chain_block(uint64_t pc, BlockEntry& entry) {
             // Chain-skip: patch to the successor's chain_entry (past its
             // prologue) so the successor reuses this block's frame.
             const uint8_t* target = chain_target_for(entry, entry.chain_patch_off, it->second);
-            if (patch_chain(pc, entry.chain_patch_off, target)) {
+            if (patch_chain(entry.chain_patch_off, target)) {
                 entry.chained = true;
                 block_chains_patched++;
             }
@@ -606,7 +588,7 @@ void FrostJIT::try_chain_block(uint64_t pc, BlockEntry& entry) {
         auto it = blocks_.find(entry.taken_chain_target_pc);
         if (it != blocks_.end() && it->second.fn != nullptr) {
             const uint8_t* target = chain_target_for(entry, entry.taken_chain_patch_off, it->second);
-            if (patch_chain(pc, entry.taken_chain_patch_off, target)) {
+            if (patch_chain(entry.taken_chain_patch_off, target)) {
                 entry.taken_chained = true;
                 block_chains_patched++;
             }
@@ -614,7 +596,6 @@ void FrostJIT::try_chain_block(uint64_t pc, BlockEntry& entry) {
     }
 }
 void FrostJIT::chain_back_references(uint64_t target_pc) {
-    refresh_mt_edges(target_pc);
     if (mt_active()) return;
     // Legacy instruction-patching path below is single-thread only.
     // Patch any cached block whose chain_target_pc == target_pc.
@@ -635,7 +616,7 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         BlockEntry& entry = sit->second;
         // Fall-through slot.
         if (!entry.chained && entry.chain_target_pc == target_pc) {
-            if (patch_chain(src_pc, entry.chain_patch_off, chain_target_for(entry, entry.chain_patch_off, target_it->second))) {
+            if (patch_chain(entry.chain_patch_off, chain_target_for(entry, entry.chain_patch_off, target_it->second))) {
                 entry.chained = true;
                 block_chains_patched++;
             }
@@ -643,7 +624,7 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         // Taken-path slot.
         if (!entry.taken_chained && entry.has_taken_chain_slot
             && entry.taken_chain_target_pc == target_pc) {
-            if (patch_chain(src_pc, entry.taken_chain_patch_off, chain_target_for(entry, entry.taken_chain_patch_off, target_it->second))) {
+            if (patch_chain(entry.taken_chain_patch_off, chain_target_for(entry, entry.taken_chain_patch_off, target_it->second))) {
                 entry.taken_chained = true;
                 block_chains_patched++;
             }
@@ -663,7 +644,7 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
     // translate time in that scan).
 }
 void FrostJIT::add_back_ref(uint64_t target_pc, uint64_t src_pc) {
-    // MT chaining reaches its predecessors through mt_edge_refs_ cells, and
+    // MT chaining reaches its predecessors through mt_targets_ cells, and
     // the MT transition clears this index; keeping it would cost ~80 bytes
     // per block for no reader.
     if (mt_active()) return;
@@ -685,17 +666,12 @@ void FrostJIT::add_back_ref(uint64_t target_pc, uint64_t src_pc) {
     back_refs_[target_pc].push_back(src_pc);
 }
 void FrostJIT::remember_code_granules(uint64_t pc, const BlockEntry& entry) {
-    // Called under the compiler lock before publishing any public entry.
+    // Called under the table lock before publishing any public entry.
     auto remember = [&](uint64_t start, int count) {
         const uint64_t bytes = static_cast<uint64_t>(std::max(count, 1)) * 4;
         uint64_t last;
         if (__builtin_add_overflow(start, bytes - 1, &last)) last = UINT64_MAX;
-        last &= ~(CODE_INDEX_GRANULE - 1);
-        for (uint64_t granule = start & ~(CODE_INDEX_GRANULE - 1);; granule += CODE_INDEX_GRANULE) {
-            auto& pcs = code_index_[granule];
-            if (std::find(pcs.begin(), pcs.end(), pc) == pcs.end()) pcs.push_back(pc);
-            if (granule == last) break;
-        }
+        code_index_.add(pc, start, last);
     };
     remember(pc, entry.instr_count);
     for (const auto& range : entry.inlined_ranges_) remember(range.first, range.second);
@@ -714,8 +690,8 @@ void FrostJIT::write_perf_map(uint64_t pc, const BlockEntry& entry) {
     static std::mutex mu;
     static FILE* file;
     const auto* start = reinterpret_cast<const uint8_t*>(entry.fn);
-    const uint8_t* end = code_buf_ + code_buf_used_;
-    if (!start || start < code_buf_ || start >= end) return;
+    if (!start || start < code_buf_ || start >= code_buf_ + code_buf_limit_) return;
+    const uint8_t* end = start + entry.emitted_bytes;
     std::lock_guard<std::mutex> lock(mu);
     if (!file) {
         char path[64];
@@ -731,11 +707,14 @@ void FrostJIT::write_perf_map(uint64_t pc, const BlockEntry& entry) {
     fflush(file);
 }
 
-void FrostJIT::publish_block(uint64_t pc, const BlockEntry& entry) {
+void FrostJIT::note_published(uint64_t pc, const BlockEntry& entry) {
     remember_code_granules(pc, entry);
     if (dbg().jit_perf_map) write_perf_map(pc, entry);
-    if (retired_pcs_.erase(pc))
+    if (block_starts_.add(pc) && retired_pcs_.erase(pc))  // a retired block was here before
         lean_recompiles.fetch_add(1, std::memory_order_relaxed);
+}
+void FrostJIT::publish_block(uint64_t pc, const BlockEntry& entry) {
+    note_published(pc, entry);
     blocks_[pc] = entry;
 }
 
@@ -743,20 +722,18 @@ void FrostJIT::publish_block(uint64_t pc, const BlockEntry& entry) {
 // the block's contiguous instruction range.
 void FrostJIT::attach_code_words(BlockEntry& entry, bool contiguous) {
     const size_t count = block_words_.size();
-    if (!contiguous || count == 0 || count != static_cast<size_t>(entry.instr_count) ||
-        code_words_.size() > UINT32_MAX - count) return;
+    if (!contiguous || count == 0 || count != static_cast<size_t>(entry.instr_count)) return;
     size_t dep_words = 0;
     for (const auto& dep : flag_deps_scratch_) dep_words += dep.words.size();
     if (entry.flag_deps_count != flag_deps_scratch_.size() ||
-        code_words_.size() > UINT32_MAX - count - dep_words) return;
-    entry.code_words_off = static_cast<uint32_t>(code_words_.size());
+        count + dep_words > code_words_.kMaxRun ||
+        code_words_.size() > UINT32_MAX - 2 * code_words_.kMaxRun) return;
+    entry.code_words_off = static_cast<uint32_t>(code_words_.append_run(block_words_.data(), count));
     entry.code_words_count = static_cast<uint32_t>(count);
-    code_words_.insert(code_words_.end(), block_words_.begin(), block_words_.end());
     // Dead-NZCV successor words follow the block's own words.
     for (size_t i = 0; i < flag_deps_scratch_.size(); ++i) {
-        flag_dep_table_[entry.flag_deps_off + i].words_off = static_cast<uint32_t>(code_words_.size());
-        code_words_.insert(code_words_.end(), flag_deps_scratch_[i].words.begin(),
-                           flag_deps_scratch_[i].words.end());
+        flag_dep_table_[entry.flag_deps_off + i].words_off = static_cast<uint32_t>(
+            code_words_.append_run(flag_deps_scratch_[i].words.data(), flag_deps_scratch_[i].words.size()));
     }
 }
 
@@ -777,7 +754,7 @@ bool FrostJIT::block_code_unchanged(const BlockEntry& entry, uint64_t pc) const 
         const uint8_t f = flags[p].load(std::memory_order_acquire);
         if ((f & need) != need || (f & Memory::GUEST_PAGE_UFFD_MISSING)) return false;
     }
-    if (std::memcmp(window_base_ + pc, code_words_.data() + entry.code_words_off, bytes) != 0)
+    if (std::memcmp(window_base_ + pc, &code_words_[entry.code_words_off], bytes) != 0)
         return false;
     // The successor streams a dead-NZCV exit relied on must still match.
     for (unsigned i = 0; i < entry.flag_deps_count; ++i) {
@@ -790,7 +767,7 @@ bool FrostJIT::block_code_unchanged(const BlockEntry& entry, uint64_t pc) const 
             const uint8_t f = flags[p].load(std::memory_order_acquire);
             if ((f & need) != need || (f & Memory::GUEST_PAGE_UFFD_MISSING)) return false;
         }
-        if (std::memcmp(window_base_ + dep.pc, code_words_.data() + dep.words_off, dep_bytes) != 0)
+        if (std::memcmp(window_base_ + dep.pc, &code_words_[dep.words_off], dep_bytes) != 0)
             return false;
     }
     return true;
@@ -802,10 +779,15 @@ bool FrostJIT::block_code_unchanged(const BlockEntry& entry, uint64_t pc) const 
 // compile observes the change, or the change is logged.
 void FrostJIT::log_invalidation_for_compiles(uint64_t lo, uint64_t hi) {
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (!shared_compile_active_.load(std::memory_order_relaxed)) return;
-    std::lock_guard<std::mutex> g(compile_invalidations_mu_);
-    if (compile_invalidations_.size() >= 64) compile_invalidations_overflow_ = true;
-    else compile_invalidations_.emplace_back(lo, hi);
+    auto note = [&](FrostJIT& compiler) {
+        if (!compiler.shared_compile_active_.load(std::memory_order_relaxed)) return;
+        std::lock_guard<std::mutex> g(compiler.compile_invalidations_mu_);
+        if (compiler.compile_invalidations_.size() >= 64) compiler.compile_invalidations_overflow_ = true;
+        else compiler.compile_invalidations_.emplace_back(lo, hi);
+    };
+    note(*this);
+    const size_t count = compilers_count_.load(std::memory_order_acquire);
+    for (size_t i = 0; i < count; ++i) note(*compilers_[i]);
 }
 
 void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation reason) {
@@ -826,16 +808,14 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
     log_invalidation_for_compiles(first, last);
     auto& stats = invalidation_stats[static_cast<size_t>(reason)];
     stats.calls.fetch_add(1, std::memory_order_relaxed);
-    const uint64_t glo = first & ~(CODE_INDEX_GRANULE - 1);
-    uint64_t ghi;
-    if (__builtin_add_overflow(last, CODE_INDEX_GRANULE - 1, &ghi)) ghi = UINT64_MAX;
-    ghi &= ~(CODE_INDEX_GRANULE - 1);
+    const uint64_t glo = CodeIndex::granule_of(first);
+    const uint64_t last_granule = CodeIndex::granule_of(last - 1);  // last > first
+    const uint64_t ghi = last_granule + std::min(CodeIndex::kGranule, UINT64_MAX - last_granule);
     // Data-only ranges (most mappings, data-cache maintenance) touch no
     // indexed granule; answer them without blocking table readers.
     if (!dbg().no_code_page_filter) {
         std::shared_lock<std::shared_mutex> g(blocks_mutex_);
-        auto granule = code_index_.lower_bound(glo);
-        if (granule == code_index_.end() || granule->first >= ghi) return;
+        if (!code_index_.any(glo, ghi)) return;
     }
     std::unique_lock<std::shared_mutex> g(blocks_mutex_);
     // 1. Collect victims: blocks whose [pc, pc+instr_count*4) or an inlined
@@ -862,22 +842,14 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
         // mmap/munmap/mprotect and ART GC change data mappings much more often
         // than code mappings, and guest JITs issue IC IVAU per cache line.
         // Visit only blocks indexed on these granules instead of the whole
-        // table. The map walk handles enormous ranges without visiting every
+        // table. The walk handles enormous ranges without visiting every
         // granule.
-        auto granule = code_index_.lower_bound(glo);
-        if (granule == code_index_.end() || granule->first >= ghi) return;
-        for (; granule != code_index_.end() && granule->first < ghi;) {
-            auto& pcs = granule->second;
-            size_t kept = 0;
-            for (uint64_t pc : pcs) {
-                auto it = blocks_.find(pc);
-                if (it == blocks_.end()) continue;  // retired: prune
-                pcs[kept++] = pc;
-                if (overlaps(pc, it->second)) victims.push_back(pc);
-            }
-            pcs.resize(kept);
-            granule = pcs.empty() ? code_index_.erase(granule) : std::next(granule);
-        }
+        code_index_.visit(glo, ghi, [&](uint64_t pc) {
+            const auto it = blocks_.find(pc);
+            if (it == blocks_.end()) return false;  // retired: prune
+            if (overlaps(pc, it->second)) victims.push_back(pc);
+            return true;
+        });
         // A block spanning several granules in the range is listed on each.
         std::sort(victims.begin(), victims.end());
         victims.erase(std::unique(victims.begin(), victims.end()), victims.end());
@@ -900,7 +872,7 @@ void FrostJIT::invalidate_range(uint64_t addr, uint64_t size, CodeInvalidation r
 }
 
 void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& selected) {
-    // Caller holds the compiler lock and has selected exact victims.
+    // Caller holds the table lock and has selected exact victims.
     if (selected.empty()) return;
     // A block with mid-block exits owns stub entries (SideExit.cpp); they go with it.
     std::vector<uint64_t> with_stubs;
@@ -916,11 +888,7 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& selected) {
     }
     const std::vector<uint64_t>& victims = with_stubs.empty() ? selected : with_stubs;
     invalidate_dispatch_cache();
-    auto unpatch_slot = [&](uint64_t source_pc, size_t off) {
-        if (mt_active()) {
-            if (MtEdge* edge = mt_slot_edge(source_pc, off)) edge->target.store(0, std::memory_order_release);
-            return;
-        }
+    auto unpatch_slot = [&](size_t off) {
         if (off + 5 > CODE_BUF_SIZE) return;
         if (code_buf_[off] != 0xE9) return;  // not patched — leave alone
         // Chain-skip falls through all five bytes. Leaving the old rel32
@@ -930,10 +898,12 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& selected) {
     if (!mt_active()) make_writable();
     for (uint64_t vpc : victims) {
         auto victim_entry = blocks_.find(vpc);
-        retire_mt_source(vpc);
-        auto refs = mt_edge_refs_.find(vpc);
-        if (refs != mt_edge_refs_.end())
-            for (MtEdge* edge : refs->second) edge->target.store(0, std::memory_order_release);
+        if (victim_entry != blocks_.end()) retire_mt_source(victim_entry->second);
+        if (mt_active())
+            mt_targets_.with(vpc, [](EdgeTarget& target) {
+                target.block = nullptr;
+                for (MtEdge* edge = target.in; edge; edge = edge->next_in) edge->target.store(0, std::memory_order_release);
+            });
         // 2. Unpatch predecessors chained to this victim.
         auto bref = back_refs_.find(vpc);
         if (bref != back_refs_.end()) {
@@ -942,12 +912,12 @@ void FrostJIT::retire_blocks_locked(const std::vector<uint64_t>& selected) {
                 if (sit == blocks_.end()) continue;
                 BlockEntry& se = sit->second;
                 if (se.chained && se.chain_target_pc == vpc) {
-                    unpatch_slot(src_pc, se.chain_patch_off);
+                    unpatch_slot(se.chain_patch_off);
                     se.chained = false;
                 }
                 if (se.taken_chained && se.has_taken_chain_slot
                     && se.taken_chain_target_pc == vpc) {
-                    unpatch_slot(src_pc, se.taken_chain_patch_off);
+                    unpatch_slot(se.taken_chain_patch_off);
                     se.taken_chained = false;
                 }
             }
@@ -977,7 +947,7 @@ void FrostJIT::invalidate_all() {
         edge->live = false;
         edge->target.store(0, std::memory_order_release);
     }
-    mt_source_refs_.clear();
+    mt_targets_.reset();
     if (blocks_.empty()) return;
     for (const auto& kv : blocks_) retired_pcs_.insert(kv.first);
     if (mt_active()) {
@@ -1027,7 +997,7 @@ void FrostJIT::enter_multithreaded() {
         edge->live = false;
         edge->target.store(0, std::memory_order_release);
     }
-    mt_source_refs_.clear();
+    mt_targets_.reset();
     for (auto& kv : blocks_) {
         auto& entry = kv.second;
         for (size_t off : {entry.chain_patch_off, entry.taken_chain_patch_off})

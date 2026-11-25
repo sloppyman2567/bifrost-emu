@@ -72,6 +72,7 @@ struct DebugFlags {
     bool no_fp_cache = false;  // BIFROST_NO_FP_CACHE: no cached scalar FP registers across instructions (A/B control)
     bool step_trace = false;  // BIFROST_STEP_TRACE: trace the interpreter steps the JIT bridge takes
     bool no_shared_jit = false;  // BIFROST_NO_SHARED_JIT: one JIT per thread instead of one shared instance
+    int jit_compilers = 0;       // BIFROST_JIT_COMPILERS: threads that may translate at once (1 to 16); 0 is one per host CPU, at most 16
     bool block_prof = false;  // BIFROST_BLOCK_PROF: print the block-end reason counters at exit
     bool pc_hist = false;  // BIFROST_PC_HIST: histogram of the guest pcs the JIT bridge runs
     bool interp_bl_call = false;  // BIFROST_INTERP_BL_CALL: run BL through the interpreter bridge
@@ -103,7 +104,7 @@ struct DebugFlags {
     uint64_t dump_pc = 0;  // BIFROST_DUMP_PC=addr: BIFROST_JIT_DUMP only dumps the block at addr (0 = all)
     int fp_native_gate = -1;  // BIFROST_FP_NATIVE_GATE=mask: FP op classes the translator handles natively (-1 = all)
     bool no_ssa = false; // BIFROST_NO_SSA — skip the scalar SSA pipeline (BIFROST_LEAN_SSA has no effect)
-    bool lean_ssa = false; // BIFROST_LEAN_SSA=1 — run the scalar SSA adapter on Lean blocks (slower to translate, see Docs/JIT.md)
+    bool lean_ssa = false; // BIFROST_LEAN_SSA=1 — run the scalar SSA adapter on Lean blocks (slower to translate, see Docs/archive/JIT-history.md)
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;  // [lo, hi) guest pcs
     Ranges fwd_ranges;   // BIFROST_FWD_RANGES=lo-hi,...  — FWD only for blocks starting here
@@ -307,6 +308,7 @@ struct DebugFlags {
         f.no_fp_cache = env("BIFROST_NO_FP_CACHE");
         f.step_trace = env("BIFROST_STEP_TRACE");
         f.no_shared_jit = env("BIFROST_NO_SHARED_JIT");
+        if (const char* n = std::getenv("BIFROST_JIT_COMPILERS")) f.jit_compilers = std::max(1, std::min(16, static_cast<int>(std::strtol(n, nullptr, 10))));
         f.block_prof = env("BIFROST_BLOCK_PROF");
         f.pc_hist = env("BIFROST_PC_HIST");
         f.interp_bl_call = env("BIFROST_INTERP_BL_CALL");
