@@ -53,6 +53,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <deque>
 #include <vector>
 namespace arm64emu {
 struct CPU;
@@ -810,6 +811,7 @@ private:
     struct DeferredSideExit {
         size_t branch; uint64_t target; GuardState state;
         bool flags_in_host = false, flags_from_sub = false, flags_match_pstate = false, need_cmc = false;
+        uint64_t branch_pc = 0;  // the guest branch (CarryExit lookup)
     };
     struct SideExitSlot { uint64_t target; size_t slot; uint64_t layout; };  // layout: RegLayout the exit passes (register passing)
     std::vector<DeferredSideExit> deferred_side_exits_;
@@ -817,6 +819,49 @@ private:
     std::unordered_map<uint64_t, std::vector<SideExitSlot>> side_exit_table_;  // block pc -> its exits, until published
     std::unordered_map<uint64_t, std::vector<uint64_t>> side_stubs_;      // block pc -> the stub keys in blocks_
     bool block_has_side_exit_ = false;
+    // ── Following the hot side of a mid-block exit (BIFROST_CARRY; Carry/HotSide.cpp) ──────────────────────────
+    // A block with exits Carry formed starts with a profile: an entry budget and a count of taken exits per exit. When the budget runs out the
+    // block leaves for the dispatcher before running (carry_trip), the first exit taken more than half of the time is flipped (the block goes
+    // on at the branch's target, and the exit leaves on the other side), and the block is retired so the next dispatch translates it again.
+    // The decision is stored by branch pc (carry_follow_taken_); a block that had its rounds is translated without profile code (carry_done_).
+    struct CarryExit {
+        uint64_t pc;      // the guest branch
+        uint64_t cont;    // where the code goes on after the exit (pc + 4, or the branch target when the exit was flipped)
+        bool eligible;    // formed by BIFROST_CARRY (a loop's own exits are not profiled or flipped)
+        bool flipped;
+    };
+    std::vector<CarryExit> carry_exits_;  // this compile, in the order the exits were formed
+    const CarryExit* carry_exit_at(uint64_t pc) const {
+        for (const CarryExit& e : carry_exits_) if (e.pc == pc) return &e;
+        return nullptr;
+    }
+    uint64_t carry_continuation(uint64_t pc) const {
+        const CarryExit* e = carry_exit_at(pc);
+        return e ? e->cont : pc + 4;
+    }
+public:
+    static constexpr int kCarryMaxExits = 6;
+    static constexpr int32_t kCarryProfileBudget = 1024;  // entries a profiled block runs before its decision
+    struct CarryProfile {
+        int32_t budget = 0;                   // entries left
+        uint32_t taken[kCarryMaxExits] = {};  // times each exit was taken
+        uint32_t branch_off[kCarryMaxExits] = {};  // each exit's branch pc minus the block's
+        uint64_t block_pc = 0;
+        uint8_t exits = 0;
+        uint8_t flipped = 0;                  // bit i: exit i is already a flipped one
+        std::atomic<bool> tripped{false};
+    };
+    // Called from a block's trip stub (jit_carry_trip): decides, then retires the block.
+    void carry_trip(CarryProfile* profile);
+    std::atomic<uint64_t> carry_trips{0}, carry_flips{0};
+private:
+    std::deque<CarryProfile> carry_profiles_;  // addressed by generated code: never freed before the JIT
+    CarryProfile* carry_profile_ = nullptr;    // this compile
+    size_t carry_trip_jcc_ = SIZE_MAX;
+    std::unordered_set<uint64_t> carry_follow_taken_, carry_done_;  // under blocks_mutex_
+    std::unordered_map<uint64_t, uint8_t> carry_toggles_, carry_rounds_;
+    void emit_carry_budget_check();
+    void emit_carry_trip_stub(uint64_t start_pc);
     std::atomic<uint64_t> side_exit_blocks{0};  // blocks translated with a mid-block exit (-v)
     uint64_t edge_source_override_ = 0;  // create_chain_edge's source while a side-exit tail is emitted
     static constexpr uint64_t kSideExitKeyBit = 1ull << 63;

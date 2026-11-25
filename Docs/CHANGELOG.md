@@ -25,6 +25,9 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   of loading them again: CoreMark another 1.1% fewer host instructions and about 5% more iterations per second (`BIFROST_NO_REG_PASS=1`
   turns it off). Only CoreMark has been timed, not a game. A switch, `BIFROST_REG_PASS_THROUGH=1`, also hands registers over blocks that do not
   use them; it was slower on every benchmark tried, so it is off.
+- With `BIFROST_CARRY=1` a block that continues past a forward branch also notices when the branch is taken most of the time and is translated again
+  along the taken side. CoreMark: 0.15% fewer host instructions (the same loop shape with an always-taken branch: 22% fewer); the Android runtime's start-up
+  spends about 11% longer translating. `BIFROST_NO_CARRY_FOLLOW=1` turns it off. The `cbz`/`tbz` exits also skip a flag store that nothing reads (0.75%).
 - Code that reads and writes memory runs a little faster: the window address is loaded once per call chain instead of at every block
   (CoreMark: 2.8% fewer host instructions and about 2.4% fewer cycles, five alternating runs; no game has been timed).
 - `BIFROST_PROF` with `BIFROST_PC_HIST=1` also lists the hot loops of several blocks (`[carry]` lines): how much of the JIT time they take and how many

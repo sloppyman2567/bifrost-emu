@@ -37,7 +37,7 @@ for source in "${sources[@]}"; do
     fi
     if [[ "$name" == jit_mt_loops || "$name" == jit_host_fault || "$name" == jit_llsc_native || "$name" == jit_cache_generations ||
        "$name" == jit_dispatch_cache_growth || "$name" == jit_unmap_reuse_race || "$name" == jit_side_exit ||
-       "$name" == jit_reg_pass ]]; then
+       "$name" == jit_reg_pass || "$name" == jit_carry_follow ]]; then
         # These fixtures exercise concurrent publication/invalidation or faults.
         # Shared-memory differential replay is deliberately unsafe here.
         run_check "$name" threaded-oracle 60 "$fixture"

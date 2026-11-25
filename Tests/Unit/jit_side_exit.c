@@ -42,6 +42,37 @@ extern uint64_t loop_tbnz0(uint64_t n, const uint64_t *, uint64_t key, uint64_t 
 extern uint64_t loop_tbz63(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
 extern uint64_t loop_tbnz63(uint64_t n, const uint64_t *, uint64_t key, uint64_t *taken);
 
+__asm__(".text\n.align 4\n.global flag_live\n.type flag_live,%function\nflag_live:\n"
+        " cmp x0, x1\n"
+        " cbz x2, 2f\n"
+        " add x3, x1, #1\n"
+        " cset x0, lo\n"
+        " add x0, x0, x3\n ret\n"
+        "2: cset x0, hi\n ret\n"
+        ".size flag_live,.-flag_live\n"
+        ".global flag_live_bit\n.type flag_live_bit,%function\nflag_live_bit:\n"
+        " cmp x0, x1\n"
+        " tbz x2, #0, 2f\n"
+        " add x3, x1, #1\n"
+        " cset x0, lo\n"
+        " add x0, x0, x3\n ret\n"
+        "2: cset x0, hi\n ret\n"
+        ".size flag_live_bit,.-flag_live_bit\n"
+        ".global flag_dead\n.type flag_dead,%function\nflag_dead:\n"
+        " cmp x0, x1\n"
+        " cbz x2, 2f\n"
+        " cmp x1, #7\n"
+        " cset x0, hi\n ret\n"
+        "2: cmp x0, #3\n cset x0, lo\n ret\n"
+        ".size flag_dead,.-flag_dead\n"
+        ".global cover_exit\n.type cover_exit,%function\ncover_exit:\n"
+        " ldr x3, [x0]\n"
+        " cbz x1, 9f\n"
+        " ldr x4, [x0]\n"
+        " add x3, x3, x4\n"
+        " str x3, [x0]\n"
+        "9: mov x0, x3\n ret\n"
+        ".size cover_exit,.-cover_exit\n");
 __asm__(".text\n.align 4\n.global walk\n.type walk,%function\nwalk:\n"
         " mov x3, #0\n"
         "1: cbz x0, 3f\n"
@@ -355,6 +386,27 @@ static void cond_cases(void) {
     }
 }
 
+// Flags set before a mid-block exit: read after it on both paths (the exit must commit them), or overwritten first on both (it may skip the store).
+extern uint64_t flag_live(uint64_t a, uint64_t b, uint64_t sel);
+extern uint64_t flag_dead(uint64_t a, uint64_t b, uint64_t sel);
+extern uint64_t flag_live_bit(uint64_t a, uint64_t b, uint64_t sel);
+// A second access to the address of the first, after an exit: n == 0 leaves at the exit.
+extern uint64_t cover_exit(uint64_t *p, uint64_t n);
+static void flag_cases(void) {
+    static const uint64_t v[] = {0, 1, 2, 3, 7, 8, 100, 0x8000000000000000ull, 0xffffffffffffffffull};
+    for (unsigned i = 0; i < sizeof v / sizeof *v; ++i)
+        for (unsigned j = 0; j < sizeof v / sizeof *v; ++j)
+            for (uint64_t sel = 0; sel < 2; ++sel) {
+                const uint64_t a = v[i], b = v[j];
+                CHECK(flag_live(a, b, sel) == (sel ? (uint64_t)(a < b) + b + 1 : (uint64_t)(a > b)), "flag_live(%llx,%llx,%llu)", (unsigned long long)a, (unsigned long long)b, (unsigned long long)sel);
+                CHECK(flag_live_bit(a, b, sel) == (sel ? (uint64_t)(a < b) + b + 1 : (uint64_t)(a > b)), "flag_live_bit(%llx,%llx,%llu)", (unsigned long long)a, (unsigned long long)b, (unsigned long long)sel);
+                CHECK(flag_dead(a, b, sel) == (sel ? (uint64_t)(b > 7) : (uint64_t)(a < 3)), "flag_dead(%llx,%llx,%llu)", (unsigned long long)a, (unsigned long long)b, (unsigned long long)sel);
+            }
+    uint64_t cell = 21;
+    CHECK(cover_exit(&cell, 0) == 21 && cell == 21, "cover_exit left at the exit: %llu", (unsigned long long)cell);
+    CHECK(cover_exit(&cell, 1) == 42 && cell == 42, "cover_exit went on: %llu", (unsigned long long)cell);
+}
+
 static void run_all(unsigned rounds) {
     enum { N = 40 };
     node nodes[N];
@@ -372,6 +424,7 @@ static void run_all(unsigned rounds) {
         }
         CHECK(walk(NULL, 1) == -1, "walk of an empty list");
         if (round == 0) cond_cases();
+        flag_cases();
         // scan: strings of every length, so the exit is taken at the first test and at the last
         for (int len = 0; len < 40; ++len) {
             for (int i = 0; i < len; ++i) text[i] = (uint8_t)(1 + (i * 37 + round) % 250);

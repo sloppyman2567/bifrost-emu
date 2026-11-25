@@ -22,8 +22,8 @@ A new history section can make an older "not measured" or "next section" line wr
   records differential replay footprints. Prediction must track actual fallback
   support, but final fallback counts come from optimized IR.
 - `Carry/` is the planned register-resident second JIT ([design](../../Docs/JIT.md#planned-codegen-retaining-guest-state-across-regions)).
-  Today it holds `LoopReport.cpp` only: `note_carry_block` and `dump_carry_candidates` read sampled hotness, each block's static
-  chain targets and `carry_info_`, print the `[carry]` lines of the `BIFROST_PROF`/`BIFROST_PC_HIST` report and emit no code. `carry_info_` is
+  Today it holds `HotSide.cpp` (the exit profile and flip, below) and `LoopReport.cpp`. The loop report's `note_carry_block` and `dump_carry_candidates` read sampled hotness, each block's static
+  chain targets and `carry_info_`, print the `[carry]` lines of the `BIFROST_PROF`/`BIFROST_PC_HIST` report and emit no code (`HotSide.cpp` does emit: the budget check and the trip stub). `carry_info_` is
   written under the compile lock, so the reader takes `compile_mutex_` (try-lock, as `dump_memory_stats` does) and then the table lock.
   `carry_report` covers it.
 - A mid-block exit (`BRCOND_ZERO`, `BRCOND_BIT` or `BRCOND` with `aux = 1`, `Compiler/SideExit.cpp`; a `BRCOND` after an `FP_CMP` is never one) leaves through a tail emitted after the block from a captured layout: it
@@ -31,6 +31,15 @@ A new history section can make an older "not measured" or "next section" line wr
   branch barriers must stay (dead-store elimination clears at a branch). Its chain slot lives in a stub `BlockEntry` under `side_exit_key`; anything
   that enumerates `blocks_` must tolerate those entries (no guest pc, `fn` null), anything that retires a block must retire its `side_stubs_`, and
   a new place that creates MT edges for a tail sets `edge_source_override_`. Such a block is `has_call` and unrecordable; `jit_side_exit` covers it.
+- Carry's profile and flip (`Carry/HotSide.cpp`, `BIFROST_NO_CARRY_FOLLOW`): a block with exits Carry formed runs a 1,024-entry budget check at its
+  common entry and counts each exit's taken tail; the trip stub leaves for the dispatcher before the block runs, so it may only sit where nothing is
+  dirty (after the entry loads, before the pc store). `carry_trip` runs in a generated frame with no lock held, takes the table lock, and must keep
+  `back_refs_[pc]` across `retire_blocks_locked` (the retire erases it, and a retranslation whose predecessors were forgotten is chained into by nobody).
+  A flipped exit's continuation is the branch target, not `pc + 4`: anything that reasons about what runs after a mid-block exit (the NZCV-dead check
+  in `SideExit.cpp`) asks `carry_continuation`. A flipped block is not contiguous: it takes the `has_inlined_leaf` path and records its ranges in
+  `inlined_ranges_`, so nothing may assume `start_pc + count * 4` for it, and a loop exit that leaves the block early (the two-call limit) must first move `cur_pc` to the
+  first untranslated instruction, because a non-contiguous block takes its next pc from it. The profile structs live until the JIT is released, because retired code still
+  addresses them. `jit_carry_follow` covers it.
 - `fold_ahead_kind_` 4 (a constant stored by the next eager `STORE_REG`) is decided by the pre-scan under the same guards the `STORE_REG` case re-checks
   (not `keep_store_dest_`, GPR/SP destination, imm32 fit): a skipped `mov` whose consumer then stores a register leaves the vreg unmapped. Do not
   defer stores into RAX/RCX/RDX/R8 for a block that is not a loop to save the eager store: it was tried and added instructions (a spill at each clobber).

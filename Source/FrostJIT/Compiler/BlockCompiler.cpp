@@ -124,6 +124,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     selfloop_target_off_ = 0;
     selfloop_reconcile_after_ = false;
     block_has_side_exit_ = false;
+    carry_exits_.clear();
+    carry_profile_ = nullptr;
+    carry_trip_jcc_ = SIZE_MAX;
     compiled_side_exits_.clear();
     deferred_side_exits_.clear();
     has_taken_chain_slot_ = false;
@@ -236,8 +239,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // Carry formation (BIFROST_CARRY=1): past any forward conditional branch the block goes on along its fall-through, the taken side
     // becomes a mid-block exit, and the guest registers stay in host registers across what used to be a block edge.
     const bool carry_formation = dbg().carry && side_exits_allowed;
-    constexpr int kCarryMaxExits = 6;
     int carry_exits = 0;
+    // A block translated again after its profile (Carry/HotSide.cpp) goes on through code that has a block of its own by now, as it
+    // did the first time: otherwise the later translation, made when more of the code exists, comes out shorter than the one measured.
+    const bool merge_known = carry_formation && carry_rounds_.count(start_pc) != 0;
+    uint64_t split_skip_pc = 0;  // a followed branch's target: its code is copied even when a block starts there
+    bool followed_run = false;
     // A loop body up to twice the cap stays one block (selfloop_extent).
     int block_cap = max_block_insts;
     bool loop_probed = false;
@@ -252,7 +259,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     while (!block_ended && within_cap() &&
            !block_translation_budget_reached(ir_block, instr_count, g_alloc.next)) {
         // ── Block splitting at known entry points ──────────────────
-        if (instr_count > 0 && cur_pc >= loop_tail_end) {
+        if (instr_count > 0 && cur_pc >= loop_tail_end && cur_pc != split_skip_pc && !merge_known) {
             const auto known = blocks_.find(fetch_address(cur_pc));
             if (known != blocks_.end()) {
                 const BlockEntry& tail = known->second;
@@ -383,6 +390,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             break;
         }
         bool side_exit_here = false;
+        bool carry_formed_here = false;
+        uint64_t follow_to = 0;
         if (side_exits_allowed && (d.cls == InstClass::CBZ || d.cls == InstClass::CBNZ || d.cls == InstClass::TBZ ||
                                    d.cls == InstClass::TBNZ || d.cls == InstClass::Bcond)) {
             if (!side_exit_scanned) {
@@ -396,6 +405,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             side_exit_here = std::find(side_exit_pcs.begin(), side_exit_pcs.end(), cur_pc) != side_exit_pcs.end();
             if (!side_exit_here && carry_formation && d.imm > 0 && carry_exits < kCarryMaxExits && instr_count + 2 < max_block_insts) {
                 side_exit_here = true;
+                carry_formed_here = true;
                 ++carry_exits;
             }
         }
@@ -405,7 +415,32 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         const bool after_fp_cmp = ir_block.insts.size() >= 2 && ir_block.insts[ir_block.insts.size() - 2].op == IROp::FP_CMP;
         if (side_exit_here && ends && (last_op == IROp::BRCOND_ZERO || last_op == IROp::BRCOND_BIT ||
                                        (last_op == IROp::BRCOND && !after_fp_cmp))) {
-            ir_block.insts.back().aux = 1;  // a mid-block exit: the block goes on
+            IRInst& branch = ir_block.insts.back();
+            CarryExit exit{cur_pc, cur_pc + 4, carry_formed_here, false};
+            // The profile said this branch is taken more often than not: the block goes on at its target, and the exit leaves on the other side.
+            if (carry_formed_here && !dbg().no_carry_follow && carry_follow_taken_.count(cur_pc)) {
+                const uint64_t taken_pc = cur_pc + static_cast<uint64_t>(d.imm);
+                bool flipped = false;
+                if (branch.op == IROp::BRCOND_ZERO) {
+                    BrCondZeroParams p = branch.brcond_zero_params();
+                    p.cond ^= 1; p.target = cur_pc + 4;
+                    branch = IRInst::make_brcond_zero(branch.src1, p, branch.arm_pc);
+                    flipped = true;
+                } else if (branch.op == IROp::BRCOND_BIT) {
+                    BrCondBitParams p = branch.brcond_bit_params();
+                    p.cond ^= 1; p.target = cur_pc + 4;
+                    branch = IRInst::make_brcond_bit(branch.src1, p, branch.arm_pc);
+                    flipped = true;
+                } else if (branch.op == IROp::BRCOND && branch.brcond_params().cond < 14) {
+                    BrCondParams p = branch.brcond_params();
+                    p.cond ^= 1; p.target = cur_pc + 4;
+                    branch = IRInst::make_brcond(p, branch.arm_pc);
+                    flipped = true;
+                }
+                if (flipped) { exit.cont = taken_pc; exit.flipped = true; follow_to = taken_pc; }
+            }
+            branch.aux = 1;  // a mid-block exit: the block goes on
+            carry_exits_.push_back(exit);
             ends = false;
             block_has_side_exit_ = true;
         }
@@ -416,6 +451,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         block_words_.push_back(inst);
         instr_count++;
         ir_block.count = instr_count;
+        if (followed_run) ++inlined_ranges_.back().second;
         if (ends) {
             block_profile.natural_branch++;
             block_ended = true;
@@ -423,10 +459,24 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         else {
             if (bl_call_count >= MAX_BL_CALL_PER_BLOCK) {
                 block_profile.bl_call_cap++;
-                chain_target_pc_ = cur_pc + 4;
+                // The block's next pc is the first untranslated instruction: a block that is not contiguous (an inlined leaf
+                // or a followed branch) takes it from cur_pc, so move it past the call before leaving the loop.
+                cur_pc = follow_to ? follow_to : cur_pc + 4;
+                if (follow_to) has_inlined_leaf = true;
+                chain_target_pc_ = cur_pc;
                 break;
             }
-            cur_pc += 4;
+            if (follow_to) {
+                // The code from here is not contiguous with the block start: like an inlined leaf, it is a range of its own
+                // for invalidation, and the block's next pc is where the last instruction left cur_pc.
+                cur_pc = follow_to;
+                split_skip_pc = follow_to;
+                followed_run = true;
+                has_inlined_leaf = true;
+                inlined_ranges_.emplace_back(follow_to, 0);
+            } else {
+                cur_pc += 4;
+            }
         }
     }
     const bool size_limited = instr_count >= max_block_insts ||
@@ -650,6 +700,25 @@ if (demote_interp) {
     // this block — the two are exclusive (both pin into XMM3-15 and share
     // cpu.v_lo, so a block is either vector-cached or scalar-FP-cached).
     if (!vec_cache_active_) fp_cache_may_enable(ir_block);
+    // The profile of a block with exits Carry formed (Carry/HotSide.cpp), unless it had its rounds.
+    if (carry_formation && !dbg().no_carry_follow && block_has_side_exit_ && !carry_done_.count(start_pc)) {
+        int n = 0;
+        bool fits = true;
+        for (const CarryExit& e : carry_exits_)
+            if (e.eligible) { ++n; fits &= e.pc >= start_pc && e.pc - start_pc < UINT32_MAX; }
+        if (n > 0 && n <= kCarryMaxExits && fits) {
+            carry_profiles_.emplace_back();
+            carry_profile_ = &carry_profiles_.back();
+            carry_profile_->block_pc = start_pc;
+            carry_profile_->budget = kCarryProfileBudget;
+            for (const CarryExit& e : carry_exits_) {
+                if (!e.eligible) continue;
+                carry_profile_->branch_off[carry_profile_->exits] = static_cast<uint32_t>(e.pc - start_pc);
+                if (e.flipped) carry_profile_->flipped |= static_cast<uint8_t>(1u << carry_profile_->exits);
+                ++carry_profile_->exits;
+            }
+        }
+    }
     // ── Prologue ─────────────────────────────────────────────────
     emit_push(RBX); emit_push(RBP); emit_push(R12);
     emit_push(R13); emit_push(R14); emit_push(R15);
@@ -756,7 +825,10 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     current_block_instr_count_ = ir_block.count;
     // -v / BIFROST_STATS_PERIOD: count this entry's guest instructions, after chain_entry_off_ so chain-skip
     // edges count too.
-    if (!rp_entry_) emit_guest_stat(static_cast<uint32_t>(ir_block.count));  // a register-entry block counts past its entry loads
+    if (!rp_entry_) {  // a register-entry block counts past its entry loads
+        emit_carry_budget_check();
+        emit_guest_stat(static_cast<uint32_t>(ir_block.count));
+    }
     // BIFROST_BLOCK_TRACE: log every cold and chained entry. It runs before anything is cached, so the
     // caller-saved registers are free. Self-loop iterations re-enter past the prologue and are not logged.
     if (bifrost::DebugFlags::in_ranges(dbg().block_trace, start_pc)) {
@@ -782,6 +854,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // vector loads run on both entries.
         rp_emit_entry_loads();
         regs_entry_off_ = code_buf_used_;
+        emit_carry_budget_check();
         emit_guest_stat(static_cast<uint32_t>(ir_block.count));
         if (rp_pc_store_) {
             emit_mov_imm_to_rax(start_pc);
@@ -1372,6 +1445,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     flush_deferred_guards();
     flush_deferred_fp_steps();
     flush_deferred_side_exits();
+    emit_carry_trip_stub(start_pc);
     // The chain entry to publish (see chain_entry_pc_off_). A block that
     // called out without the inline PC store gets it here, ahead of a jump
     // to the plain entry.
@@ -1711,7 +1785,8 @@ void FrostJIT::scan_pin_inplace(const std::vector<IRInst>& insts) {
 // A guarded scalar access whose address an earlier access of the same block already checked (the same base value
 // and offset, a width no smaller) needs no gate compare of its own: `ldr x3, [x19]; str x4, [x19]`. Only
 // straight-line scalar ops may sit between the two, and none may redefine the base: the check compares the address
-// the earlier access used. A branch, call, fallback or barrier ends the search, and a block with BRCOND_SKIP is not
+// the earlier access used. A branch, call, fallback or barrier ends the search, except a mid-block exit (its taken side
+// leaves the block, so the path that reaches the second access has passed the first), and a block with BRCOND_SKIP is not
 // scanned because a skip can land between the two. The gate is raised without a handshake, so an access already
 // past its check can run after it closes; skipping the second compare lengthens that window by the straight-line
 // ops between the accesses and nothing else.
@@ -1743,6 +1818,7 @@ void FrostJIT::scan_covered_guards(const std::vector<IRInst>& insts) {
         for (size_t j = i; j-- > 0;) {
             const IRInst& prev = insts[j];
             const bool prev_mem = prev.op == IROp::LOAD_MEM || prev.op == IROp::STORE_MEM;
+            if (prev.aux == 1 && (prev.op == IROp::BRCOND_ZERO || prev.op == IROp::BRCOND_BIT || prev.op == IROp::BRCOND)) continue;
             if (!prev_mem && !straight_line(prev.op)) break;
             // A load into the base moves the address under every later access; so does any other write to it.
             if (prev.dest == base && prev.op != IROp::STORE_MEM) break;

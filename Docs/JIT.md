@@ -257,6 +257,30 @@ alternating runs), and a 100 s SpongeBob start-up showed no crash and about 10% 
 taken often enough in game code (the cold share of JIT samples went from 0.3% to 2.9%) that a direction chosen from samples is the next step.
 The registers that stay in host registers across a block edge are handed on by [register passing](#register-passing-bifrost_carry1).
 
+### Following the hot side of an exit (`BIFROST_CARRY=1`)
+
+Carry continues a block along a forward branch's fall-through and makes the taken side an exit. When the branch is taken more often than not, the
+common path leaves through an exit tail and the code it goes on to runs in a block of its own. So a block that has exits Carry formed starts with a
+profile (`CarryProfile`, `Carry/HotSide.cpp`): an entry budget of 1,024 (`sub dword [rax], 1; jle trip` at the entry all entries share, after the register
+entry's loads) and a count of taken exits in each exit's tail (`add dword [rax], 1`). When the budget runs out the block leaves for the
+dispatcher before it runs, which is safe because nothing is dirty at an entry (`emit_carry_trip_stub`, `carry_trip`). `carry_trip` takes the first
+exit taken more than half of the time it was evaluated (exit i is evaluated only when the exits before it were not taken), records its branch pc in
+`carry_follow_taken_`, and retires the block, keeping its predecessor list so the new translation is chained into again.
+
+The next translation of that block flips the branch: the IR op is rebuilt with the inverted condition and the fall-through as its target, so the
+exit leaves on the side the branch used to continue on, and formation goes on at the branch's target. That code is not contiguous with the block's
+start, so the block takes the inlined-leaf path (`has_inlined_leaf`: a range of its own for invalidation, no recorded code words, its next pc is where
+formation stopped), and it is copied in even where a block already starts there (`split_skip_pc`). A flipped branch can flip back when its new exit
+turns out hotter (at most two toggles a branch, three rounds a block); after that the block is translated without profile code (`carry_done_`). A block
+translated again after its profile also goes on through code that has a block of its own by now (`merge_known`), as the first translation did,
+because otherwise the later translation comes out shorter than the one measured. A flipped block that stops at the two-call limit (`MAX_BL_CALL_PER_BLOCK`)
+takes its next pc from `cur_pc`, which is moved past the call before the loop is left. `BIFROST_NO_CARRY_FOLLOW=1` turns the profile and the flip off.
+
+A mid-block `cbz`/`tbz` exit commits NZCV at its test; that store is skipped when both the exit target and the code after the branch overwrite the flags
+first (`exit_flags_dead`; for a flipped exit the code after the branch is the branch's target, `carry_continuation`), and the tail of a `b.cond` exit
+skips it when its own target overwrites them. The guard-cover scan steps over mid-block exits: a later access to the address of an earlier one needs no
+compare of its own on the path that went on.
+
 ### Register passing (`BIFROST_CARRY=1`)
 
 A chain edge used to hand over nothing: the predecessor stored what it wrote, and the successor loaded the registers it reads first. With
@@ -1703,6 +1727,8 @@ by method rather than by fixed address ranges.
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
+- [Register passing: partial entries and pass-through (2026-11-24)](archive/JIT-history.md#register-passing-partial-entries-and-pass-through-2026-11-24)
+- [Carry: flag stores at exits, covered guards across exits, the hot side of an exit (2026-11-24)](archive/JIT-history.md#carry-flag-stores-at-exits-covered-guards-across-exits-the-hot-side-of-an-exit-2026-11-24)
 - [Register passing between chained blocks (2026-11-24)](archive/JIT-history.md#register-passing-between-chained-blocks-2026-11-24)
 - [Carry formation behind BIFROST_CARRY, and what did not help (2026-11-24)](archive/JIT-history.md#carry-formation-behind-bifrost_carry-and-what-did-not-help-2026-11-24)
 - [Loops with CBZ/CBNZ exits become one block (2026-11-24)](archive/JIT-history.md#loops-with-cbzcbnz-exits-become-one-block-2026-11-24)

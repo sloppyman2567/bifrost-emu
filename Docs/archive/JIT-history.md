@@ -2,6 +2,56 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Carry: flag stores at exits, covered guards across exits, the hot side of an exit (2026-11-24)
+
+Three changes to Carry's mid-block exits (design in `Docs/JIT.md`, "Following the hot side of an exit"), asked for after a profile of CoreMark under
+`BIFROST_CARRY=1` put guest state moves at 40.6% of body time, memory with guards at 17.2%, flag setting at 10.8% and the entry code at 4.3%.
+
+CoreMark, 20,000 iterations, one pinned core, host instructions (deterministic to four digits), `BIFROST_CARRY=1`:
+
+- Skipping the NZCV commit at `cbz`/`tbz` exits when the exit and the code after the branch both overwrite the flags first (the `BRCOND` path did;
+  the mid-block forms always committed) and at `b.cond` exit tails when their own target does: 17.585 G to 17.453 G (-0.75%).
+- The guard-cover scan stepping over mid-block exits: 17.453 G to 17.442 G (-0.06%).
+- Following the hot side: 17.442 G to 17.415 G (-0.15%) on CoreMark, and -21.9% (232.5 M to 181.7 M) with identical results on a loop whose forward
+  `cbnz` is always taken, 0.0% when it never is. 33 branches are flipped on CoreMark.
+
+Why following gains so little on CoreMark is not established. A counting build (temporary, not kept) said exits are taken in 35.5% of their evaluations there,
+and 75% of the taken ones sit on exits taken more than half the time (the ART bootstrap: 21.3% and 85%), which is room for a few percent. Nearly every
+block with exits has a flip candidate (333 blocks profiled, against 320 blocks with exits in the counting build) and 33 branches flipped, so it is not that
+the candidates are missing. Untested guesses: the flipped branches' targets are often the heads of pinned loops or joins that still end in an exit of
+their own, and a retranslated block disturbs the register-passing layouts around it (below).
+
+Things that went wrong on the way, each of which would have been invisible in a benchmark that only counted instructions:
+
+- Retiring a block erases `back_refs_[pc]`, so after its retranslation no predecessor was chained into it again and every edge went through the
+  dispatcher (CoreMark at a third of its speed, 30% of samples in the dispatcher). The trip keeps the list across the retire.
+- The same retranslation, with no flip at all, cost 1.1% more host instructions: translated later, a block stops at the blocks that exist by then
+  (formation splits at known entries), so it comes out shorter than the first translation. A block translated again after its profile now goes on through
+  known blocks (`merge_known`); with that the profile alone is 0.2% better than without, and the flips on top of it are the figure above.
+- Register passing's layouts depend on the order blocks are translated in; a retranslated block leaves a predecessor's layout stale, so more edges
+  enter the plain entry. It eats into the 0.15% and is not solved.
+- The new fixture failed one run in two with Carry off as well: its four threads refilled one static pattern array. It is a per-thread array now.
+
+- A flipped block that reached the two-call limit returned to the address of its own last call: the loop left before `cur_pc` moved past the call,
+  and a non-contiguous block takes its next pc from `cur_pc`, so the call ran twice. It showed only in the ordinary frame layout (chain-skip
+  frames do not run calls inline), and in `jit_side_exit` only with threads (probably because which blocks have flipped by then depends on the threads; not
+  checked). Found by forcing every flip on the first translation (temporary switch, not kept), bisecting by flip count (the 29th flip
+  broke a single-threaded program that walks `__init_array`), and reading the block's code: its end set `pc = 0x4004f0`, the `blr`, where
+  `0x4004f4` belonged. `jit_carry_follow` has a loop with a call before the branch and one at its target; without the fix its `bias_calls` checks fail for patterns 0, 2, 3 and 4.
+
+Profile cost: a 1,024-entry window of `movabs; sub; jle` at the entry of a block that has Carry exits, a 64-byte profile for each such block, and one
+more translation for each that reaches the window (82 blocks of 322 on CoreMark; 88 trips and 33 flips in the final CoreMark run). The Android runtime's
+start-up (`test_android_jni.py`, JIT compile line, three runs each): 62.5k blocks and 11.8k recompiles in 609 to 624 ms with `BIFROST_NO_CARRY_FOLLOW=1`, 65.3k and
+14.1k in 680 to 687 ms with it on (about +11%, 24.3k blocks profiled, 2,470 trips, 920 flips); with Carry off, 92.4k blocks in 512 ms. CoreMark, five alternating
+pairs: 17.442 G to 17.415 G host instructions, cycles 4.723 G to 4.611 G on average (noisy: the best of five was 4.542 G and 4.503 G). Not measured: a game.
+
+Checked: `jit_carry_follow` (new: three branch kinds, a flag shape and a call shape over patterns that flip a branch and flip it back, on one thread and four) and
+`jit_side_exit` (new `flag_live`, `flag_dead`, `cover_exit`) pass with and without the feature; the 58 tests of `run_tests.sh --filter 'jit|reg_pass|carry_follow|side_exit' --strict --quick`
+pass with and without `BIFROST_CARRY=1`, and `verify_jit.sh` (112 differential fixtures, 15 threaded oracle runs) passes both ways. The toybox, real-world
+and dynamic-link tests pass with Carry on (88 of 89 in the default frame layout; the failure is `test_dyn_thunk_stub`, which needs GL, in the headless side
+build). In the ordinary frame layout `test_dyn_system` fails with Carry off as well, and on the root build; not investigated. The compare-and-trap build ran the
+JIT tests, toybox, real-world and integration tests before the hot-side change, not after it.
+
 ## Register passing: partial entries and pass-through (2026-11-24)
 
 The two things the first register-passing write-up (below) left undone: an edge that covers only some of a successor's entry registers, and a

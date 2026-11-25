@@ -94,6 +94,17 @@ mid-iteration, one loop per ARM condition for `b.cond` on edge values, and `tbz`
 exits on and off, chaining off, the ordinary frame layout and IR validation. With exits on, `-v` must report at least forty blocks formed with a
 mid-block exit. It does not cover a `b.cond` after an `FP_CMP`, loops with an inner branch, a game, or the persistent cache (such blocks are not recorded).
 
+### Carry follows the hot side of an exit (2026-11-24)
+
+`Tests/Unit/jit_carry_follow.c` and `Scripts/Testing/test_jit_carry_follow.sh` (`run_tests.sh` entry `jit_carry_follow`, also a threaded oracle in
+`make verify`) run loops with a forward `cbnz`, `tbnz` or `b.ne` whose direction comes from a pattern array (always taken, never, taken for bit 1
+only, alternating, mostly), in phases so a branch is flipped and flipped back, and a loop that reads a flag set before the branch on both sides of
+it, and a loop with a call before the branch and one at its target (the flipped block reaches the two-call limit at that call), against C, then repeat them on four threads (each with its own pattern array: a shared one made the fixture fail with Carry off). They run with
+`BIFROST_CARRY=1`, with `BIFROST_NO_CARRY_FOLLOW=1`, with Carry off, with chaining off, in the ordinary frame layout, with IR validation and with
+register passing off; with the feature on, `-v` must report at least one flipped branch. `jit_side_exit` gained `flag_live`, `flag_dead`,
+`flag_live_bit` and `cover_exit` for the exit flag store and the guard cover. They do not cover a game or the persistent cache (blocks with mid-block
+exits are not recorded).
+
 ### Register passing (2026-11-24)
 
 `Tests/Unit/jit_reg_pass.c` and `Scripts/Testing/test_jit_reg_pass.sh` (`run_tests.sh` entry `jit_reg_pass`, also a threaded oracle in `make verify`) run

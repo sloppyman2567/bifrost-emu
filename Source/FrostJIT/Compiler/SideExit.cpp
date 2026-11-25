@@ -69,12 +69,14 @@ int FrostJIT::side_exit_loop_extent(uint64_t start_pc, int limit, std::vector<ui
 // so the exit (and every later one) sees it in pstate.
 int FrostJIT::compile_cbz_side_exit(const IRInst& inst) {
     const BrCondZeroParams bp = inst.brcond_zero_params();
-    clobber_flags(false);
+    // The test leaves the NZCV store to this commit: it is dead when both the exit and the code after the branch overwrite the flags first.
+    clobber_flags(flags_in_host_ && exit_flags_dead(carry_continuation(inst.arm_pc)) && exit_flags_dead(bp.target));
     const int s1 = ensure_vreg(inst.src1);
     if (const uint8_t prefix = rex(bp.sf, s1 >= 8, false, s1 >= 8); prefix != 0x40) emit_byte(prefix);
     emit_byte(0x85); emit_byte(modrm(3, s1 & 7, s1 & 7));  // test s1, s1
     const size_t jcc = emit_jcc_rel32_placeholder(bp.cond == 0 ? 4 /*JE*/ : 5 /*JNE*/);
     deferred_side_exits_.push_back({jcc, bp.target, capture_guard_state()});
+    deferred_side_exits_.back().branch_pc = inst.arm_pc;
     block_has_side_exit_ = true;
     return 0;
 }
@@ -82,12 +84,13 @@ int FrostJIT::compile_cbz_side_exit(const IRInst& inst) {
 // TBZ/TBNZ: the same bit test as BRCOND_BIT, the block goes on.
 int FrostJIT::compile_bit_side_exit(const IRInst& inst) {
     const BrCondBitParams bp = inst.brcond_bit_params();
-    clobber_flags(false);
+    clobber_flags(flags_in_host_ && exit_flags_dead(carry_continuation(inst.arm_pc)) && exit_flags_dead(bp.target));
     const int s1 = ensure_vreg(inst.src1);
     emit_byte(rex(true, false, false, s1 >= 8));
     emit_byte(0x0F); emit_byte(0xBA); emit_byte(modrm(3, 4, s1 & 7)); emit_byte(bp.bit);  // bt s1, bit
     const size_t jcc = emit_jcc_rel32_placeholder(bp.cond == 0 ? 3 /*JNC: bit clear*/ : 2 /*JC: bit set*/);
     deferred_side_exits_.push_back({jcc, bp.target, capture_guard_state()});
+    deferred_side_exits_.back().branch_pc = inst.arm_pc;
     block_has_side_exit_ = true;
     return 0;
 }
@@ -132,6 +135,7 @@ int FrostJIT::compile_cond_side_exit(const IRInst& inst) {
     }
     const size_t jcc = emit_jcc_rel32_placeholder(cc);
     DeferredSideExit exit{jcc, bp.target, capture_guard_state()};
+    exit.branch_pc = inst.arm_pc;
     exit.flags_in_host = flags_in_host_ && !direct_mask;  // a direct test left nothing in RFLAGS
     exit.flags_from_sub = flags_from_sub_;
     exit.flags_match_pstate = flags_match_pstate_;
@@ -164,12 +168,20 @@ void FrostJIT::flush_deferred_side_exits() {
         flags_in_host_ = exit.flags_in_host;
         flags_from_sub_ = exit.flags_from_sub;
         flags_match_pstate_ = exit.flags_match_pstate;
-        if (exit.flags_in_host && !host_flags_match_pstate()) materialize_flags_to_pstate(false, false);
+        if (exit.flags_in_host && !host_flags_match_pstate()) materialize_flags_to_pstate(false, exit_flags_dead(exit.target));
         flags_in_host_ = saved_in_host;
         flags_from_sub_ = saved_from_sub;
         flags_match_pstate_ = saved_match;
         // RAX is about to carry the target PC: its occupant is already stored above, and must not be stored again as a PC.
         invalidate_host_regs(1u << RAX);
+        if (carry_profile_) {  // count the taken exit
+            for (int i = 0; i < carry_profile_->exits; ++i) {
+                if (carry_profile_->block_pc + carry_profile_->branch_off[i] != exit.branch_pc) continue;
+                emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(&carry_profile_->taken[i]));
+                emit_byte(0x83); emit_byte(0x00); emit_byte(0x01);  // add dword [rax], 1
+                break;
+            }
+        }
         taken_chain_target_pc_ = exit.target;
         edge_source_override_ = side_exit_key(current_start_pc_, compiled_side_exits_.size());
         emit_taken_path_epilogue();

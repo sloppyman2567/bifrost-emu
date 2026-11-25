@@ -63,6 +63,7 @@ struct DebugFlags {
     bool carry = false;  // BIFROST_CARRY=1: a block continues past a forward conditional branch along its fall-through (the taken side is a mid-block exit)
     bool no_reg_pass = false;  // BIFROST_NO_REG_PASS: with BIFROST_CARRY, chain edges enter the successor through its normal entry (no guest registers passed in host registers)
     bool reg_pass_through = false;  // BIFROST_REG_PASS_THROUGH=1: with BIFROST_CARRY, a block also loads registers it does not touch when every predecessor holds them, to hand them on (a loss on CoreMark and the small benchmarks)
+    bool no_carry_follow = false;  // BIFROST_NO_CARRY_FOLLOW: with BIFROST_CARRY, a block never profiles its exits or follows the taken side of one
     bool no_reg_pass_partial = false;  // BIFROST_NO_REG_PASS_PARTIAL: an edge that covers only some entry registers enters the plain entry
     bool no_side_exit = false;  // BIFROST_NO_SIDE_EXIT: a loop whose only inner branches are CBZ/CBNZ exits stays split into blocks
     bool no_selfloop = false;  // BIFROST_NO_SELFLOOP: keep self-loop blocks as ordinary blocks (no pinned loop body)
@@ -298,6 +299,7 @@ struct DebugFlags {
         f.no_reg_pass = env("BIFROST_NO_REG_PASS");
         f.reg_pass_through = env("BIFROST_REG_PASS_THROUGH");
         f.no_reg_pass_partial = env("BIFROST_NO_REG_PASS_PARTIAL");
+        f.no_carry_follow = env("BIFROST_NO_CARRY_FOLLOW");
         f.no_side_exit = env("BIFROST_NO_SIDE_EXIT");
         f.no_selfloop = env("BIFROST_NO_SELFLOOP");
         f.no_native_libc = env("BIFROST_NO_NATIVE_LIBC");

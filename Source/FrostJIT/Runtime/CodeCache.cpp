@@ -284,6 +284,9 @@ void FrostJIT::dump_code_cache_stats() {
     }
     fprintf(stderr, "[JIT] MT publication: edges=%llu\n", (unsigned long long)mt_edges_published_.load());
     fprintf(stderr, "[JIT] side-exit blocks: %llu\n", (unsigned long long)side_exit_blocks.load());
+    if (dbg().carry && !dbg().no_carry_follow)
+        fprintf(stderr, "[JIT] carry follow: blocks profiled=%zu, trips=%llu, branches flipped=%llu\n", carry_profiles_.size(),
+                (unsigned long long)carry_trips.load(), (unsigned long long)carry_flips.load());
     if (dbg().carry && !dbg().no_reg_pass)
         fprintf(stderr, "[JIT] register passing: edges into the register entry=%llu, into a partial-entry stub=%llu, into a plain entry of a block that has one=%llu\n",
                 (unsigned long long)rp_edges_passed_.load(), (unsigned long long)rp_edges_partial_.load(), (unsigned long long)rp_edges_plain_.load());

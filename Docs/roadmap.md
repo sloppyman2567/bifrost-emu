@@ -404,6 +404,8 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    [design](JIT.md#planned-codegen-retaining-guest-state-across-regions). Nothing of the second JIT is built. Two pieces of its register traffic
    work inside Lean blocks behind `BIFROST_CARRY=1`: blocks continue past forward branches (CoreMark -2.0% host instructions) and chain edges pass
    registers in host registers ([-1.08% instructions, -4.9% cycles](archive/JIT-history.md#register-passing-between-chained-blocks-2026-11-24)).
+   A profile also makes a block follow the hot side of its forward branches ([-0.15% on CoreMark](archive/JIT-history.md#carry-flag-stores-at-exits-covered-guards-across-exits-the-hot-side-of-an-exit-2026-11-24),
+   about 11% more translation time in the Android runtime's start-up; why it gains so little is not established).
    Partial-entry stubs are in; passing a register through blocks that do not touch it is built but off
    (`BIFROST_REG_PASS_THROUGH=1`, a [loss](archive/JIT-history.md#register-passing-partial-entries-and-pass-through-2026-11-24) on CoreMark). Block-entry
    loads are 2 to 6% of CoreMark's JIT samples now; guest state moves in block bodies (the stores after each write) are the larger part, and loops
