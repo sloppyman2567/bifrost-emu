@@ -146,7 +146,7 @@ app exit leaves the library and the other apps usable.
   host window keeps its size on rotation and the panel refits inside it, with a per-app Rotation setting for the old reshaping;
   a window that closed maximised opens maximised, so a game's first size is the one it keeps
   ([details](Android/ANDROID_RUNTIME_REFERENCE.md#fullscreen-and-remembered-size-2026-11-07)). Open: confirm rotation in Umamusume and opening
-  maximised in Geometry Dash Lite and Family Island; a game maximised on a second display of another scale (reported stuck 2026-11-25; a fix is in, not re-tested);
+  maximised in Geometry Dash Lite and Family Island;
   `eglQuerySurface` answering the old size right after a resize (read from source, no fault tied to it); fractional scales and
   several monitors, with no other report so far.
 - Realm idle policy: done for the broker (it ends after 10 minutes with no app attached, `ASGARD_REALM_IDLE_SECONDS`; tested

@@ -82,8 +82,8 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
 - Geometry Dash Lite and Family Island keep the shape they opened at and are scaled when you resize (Window: "Keep the app's shape").
 - A game that turns between portrait and landscape leaves your window alone and turns inside it, so it no longer grows past the
   edge of the screen. A new Rotation setting (`asgard config APP rotation reshape`) brings the old behaviour back for an app.
-- Fixed: on Wayland a window change that kept the same size (maximising, moving to another display) could be ignored. Meant for games that
-  stayed stuck when maximised on a second display; not yet confirmed there.
+- Fixed: on Wayland a window change that kept the same size (maximising, moving to another display) could be ignored. Hungry Shark World
+  stayed stuck when maximised on a second display, and no longer does.
 - Fixed: a Google sign-in window opened by a game saved its own size over the game's.
 - Melon Sandbox is recorded as playable, and Hungry Shark World's Play Games sign-in now connects the account, both on the maintainer's
   report of 2026-11-25. Seven other games were played the same day without a crash. Melon is slow to load; see

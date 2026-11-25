@@ -2542,7 +2542,9 @@ changes to take effect"), and while an interactive resize runs it acknowledges o
 draws in child surfaces; the window's own one holds the black backdrop, which was committed only when the pixel size changed. A
 state with the same pixel size was acknowledged and never applied. `commit_window_state` commits the backdrop again. Reported
 by the maintainer on KWin 6.8.3 with displays at scale 2 (21:9) and 1.5 (16:9): a game maximised on the 16:9 one stayed put until
-the title bar's menu sent it back. Not reproduced here, so that this was its cause is not established.
+the title bar's menu sent it back. The maintainer reports it fixed with this
+change (Hungry Shark World, 2026-11-25). The same build also gave a window that opened maximised its remembered size to return
+to, so which of the two cured it is not isolated.
 
 Checked: the file contract and fitting (`make test-android-window-size`), and the backend against a fake SDL
 (`make test-android-sdl-backend`): F11 toggling, never reaching the app, opening maximised (landscape, portrait, refused), restore
@@ -2550,7 +2552,7 @@ once, clamping to the display, orientation fit, a fixed-size app's panel unchang
 request and skipped for the three states, and no file without the variable. The SDL 3.2 source maximises a window created that
 way before showing it and waits for it in `SDL_SyncWindow`. On KWin 6.8.3 (2026-11-25) Hungry Shark World, closed maximised, opened
 its next session at 3440x1384 before its first frame (session log) and looks right on the 21:9 display (maintainer-reported).
-Not checked: other games and compositors, rotation, and the surface commit above.
+Not checked: other games and compositors, and rotation.
 
 Found by reading, not fixed and not shown to cause a fault: `eglQuerySurface` after a resize. On Android the size comes from the
 native window at once (Mesa `droid_query_surface`); Mesa's Wayland platform keeps the old size while a back buffer is held
