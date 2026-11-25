@@ -13,9 +13,11 @@ Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC.
 [![Games: 18 playable of 21](https://img.shields.io/badge/games-18%20playable%20of%2021-brightgreen.svg)](Docs/COMPATIBILITY.md)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 
-<img src="Docs/Images/SpongeBob-2026-11-01/gameplay.png" alt="SpongeBob cooking gameplay" width="260">
-<img src="Docs/Images/AzurLane-2026-10-14/login.png" alt="Azur Lane title and login screen" width="260">
-<img src="Docs/Images/Neverball-2026-10-04/gameplay.png" alt="Neverball gameplay" width="260">
+<img src="Docs/Images/SpongeBob-2026-11-01/gameplay.png" alt="SpongeBob: Krusty Cook-Off, cooking (Android)" width="49%">
+<img src="Docs/Images/AzurLane-2026-11-01/home.png" alt="Azur Lane home screen (Android)" width="49%">
+<br>
+<img src="Docs/Images/Neverball-2026-10-04/gameplay.png" alt="Neverball gameplay (Linux)" width="49%">
+<img src="Docs/Images/MinecraftWeekend-2026-10-04/daytime.png" alt="Minecraft Weekend (Linux)" width="49%">
 
 </div>
 

@@ -17,7 +17,8 @@ Speed:
 
 - Several threads can translate code at the same time. Before, one did it and the others waited. With eight threads a translation test takes 0.39 s instead of
   3.99 s. Short pauses while the JIT's tables grew are gone too. `BIFROST_JIT_COMPILERS=1` goes back to one at a time.
-- Starting the Android runtime uses 10% fewer CPU cycles than before that change.
+- The same change makes the Android runtime's start-up about 10% cheaper in CPU cycles. Carry (below) makes it heavier, and nobody has compared the two together
+  with beta.3 yet.
 - Carry is on by default. It lets translated code run past a branch, and into the next block, without putting registers back in memory. CoreMark uses about
   10% fewer CPU cycles. Translating takes longer with it, so big Android apps use more CPU and memory while they start. You can turn it off for an app with
   "JIT Carry" in its settings (`asgard config APP jit_carry off`), or everywhere with `BIFROST_CARRY=0`.

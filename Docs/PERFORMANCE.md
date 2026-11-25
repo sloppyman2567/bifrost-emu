@@ -44,7 +44,8 @@ How long it takes to translate about 500,000 blocks of code, before and after se
 | 8 | 3.99 s | 0.39 s |
 | 16 | 4.14 s | 0.41 s |
 
-Starting the Android runtime spends 12% less time translating and uses 10% fewer CPU cycles. Game loading times haven't been measured yet.
+"Before" is the version just before this change, with Carry already on, not beta.3. Compared with it, starting the Android runtime spends 12% less time translating
+and uses 10% fewer CPU cycles. Game loading times haven't been measured yet.
 
 ## Small programs
 
