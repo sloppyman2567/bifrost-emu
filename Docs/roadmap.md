@@ -407,9 +407,11 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    A profile also makes a block follow the hot side of its forward branches ([-0.15% on CoreMark](archive/JIT-history.md#carry-flag-stores-at-exits-covered-guards-across-exits-the-hot-side-of-an-exit-2026-11-24),
    about 11% more translation time in the Android runtime's start-up; why it gains so little is not established).
    Partial-entry stubs are in; passing a register through blocks that do not touch it is built but off
-   (`BIFROST_REG_PASS_THROUGH=1`, a [loss](archive/JIT-history.md#register-passing-partial-entries-and-pass-through-2026-11-24) on CoreMark). Block-entry
-   loads are 2 to 6% of CoreMark's JIT samples now; guest state moves in block bodies (the stores after each write) are the larger part, and loops
-   still preload their pins.
+   (`BIFROST_REG_PASS_THROUGH=1`, a [loss](archive/JIT-history.md#register-passing-partial-entries-and-pass-through-2026-11-24) on CoreMark). A
+   [profile](archive/JIT-history.md#coremark-with-carry-on-the-bottleneck-is-still-guest-state-traffic-2026-11-24) puts entry at 5.8% of CoreMark's
+   JIT samples with Carry on (1.4% with `BIFROST_NO_REG_PASS=1`, so it is the register-passing entry loads) and guest state moves at 37% of all
+   samples (42% of the body); only 11.3% of samples are in loops of several blocks, and 50.1% are outside any loop, so loop residency alone reaches
+   little of it.
 5. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
 
 Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the

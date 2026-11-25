@@ -1728,6 +1728,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [CoreMark with Carry on: the bottleneck is still guest state traffic (2026-11-24)](archive/JIT-history.md#coremark-with-carry-on-the-bottleneck-is-still-guest-state-traffic-2026-11-24)
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
 - [Register passing: partial entries and pass-through (2026-11-24)](archive/JIT-history.md#register-passing-partial-entries-and-pass-through-2026-11-24)
 - [Carry: flag stores at exits, covered guards across exits, the hot side of an exit (2026-11-24)](archive/JIT-history.md#carry-flag-stores-at-exits-covered-guards-across-exits-the-hot-side-of-an-exit-2026-11-24)

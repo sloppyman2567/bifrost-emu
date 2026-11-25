@@ -2,6 +2,51 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## CoreMark with Carry on: the bottleneck is still guest state traffic (2026-11-24)
+
+Where CoreMark's time goes with `BIFROST_CARRY=1` (register passing and the exit work in), and what the guest state moves touch. Method: 200,000
+iterations, one pinned core, governor `performance`, `BIFROST_PROF=1` alone (no instruction counters), three alternating runs each way; `perf stat`
+and `-v` on separate runs. Sampling is 100 Hz, about 1,000 samples per 10 s run.
+
+Rates: 19,644 iterations/s with Carry on (19,644, 19,631, 19,658) against 17,817 off (18,008, 17,754, 17,688), +10.3%. `perf stat`: 45.12 G cycles
+against 50.55 G (-10.7%), 172.65 G host instructions against 179.82 G (-4.0%), 29.10 G branches against 34.52 G (-15.7%); IPC 3.83 against 3.56.
+62.08 G guest instructions (310k per iteration), 1,004 blocks, 8.0 guest instructions per block execution.
+
+Sections with Carry on: entry 5.8%, body 88.6%, exit 3.9%, cold 1.6%. Body by operation, Carry on / off:
+
+| body operation | on | off |
+|---|---|---|
+| guest state moves | 42.2% | 37.0% |
+| memory (with guards) | 20.0% | 15.9% |
+| integer ALU | 18.0% | 17.2% |
+| branches | 12.6% | 17.8% |
+| flag setting | 6.7% | 11.7% |
+| in code with spills or reloads | 1.4% | 0.8% |
+
+As a share of all JIT samples with Carry on: guest state moves 37%, memory 18%, ALU 16%, branches 11%, flags 6%. Carry cuts branches and flag stores
+(the exit work in the next section) but leaves the state traffic; the smaller parts' shares rise because the rest shrank. Set against the
+40.6/17.2/10.8/4.3 profile that prompted that section, the shares match within sampling noise apart from flag setting, which fell from 10.8% to
+6.7%, the change that section made.
+
+Entry is register passing, not the follow profile: with `BIFROST_NO_REG_PASS=1` entry is 1.4%, with `BIFROST_NO_CARRY_FOLLOW=1` it is 4.8 to 5.0%.
+Small blocks pay most: three hot blocks (39, 32 and 31 samples) are 25.0 to 41.9% entry.
+
+The moves are not a cache problem: `perf stat` counts 67.2 G L1 loads and 29.7 M L1 load misses (0.04%), 5.3 M last-level misses (1.9% of 279 M
+references), IPC 3.83. It is the count of load/store uops, one host load or store per guest register read or write at a block edge (the earlier
+simulation's 0.93 per guest instruction, not re-measured), not misses on the 808 bytes they touch.
+
+That memory: a `CPU` is 4,352 bytes; the architectural state generated code addresses is the first 808 — `regs[32]` at 0 (`regs[31]`, XZR, stays
+zero), `sp` 256, `pc` 264, `nzcv_host` 272, `v[32]` 288, `fpcr`/`fpsr` 800/804, `tpidr_el0` at 808. RBX is `CPU*` and every access is
+`mov r64,[rbx+disp32]` or `mov [rbx+disp32],r64` (`emit_load_arm`/`emit_store_arm`, `REGS_OFF = 0`). CoreMark runs one vCPU: 13 cache lines of
+state; the rest of the struct is host bookkeeping.
+
+Loop split (`BIFROST_PC_HIST=1`; that run overlapped another job, so its rate is invalid but its CPU-time shares are not): 38.6% of samples in
+single-block loops already pinned, 11.3% in loops of several blocks, 50.1% elsewhere. More loop residency reaches 11%; the other half is the
+block-edge traffic register passing does not remove.
+
+Not checked: a game, threads, other hosts, the persistent cache. Sampling puts ±1 to 2 points on the smaller buckets, and the `perf` figures are
+one run each. `-v` adds about 15%, so its rate (8,524) is not one.
+
 ## Carry: flag stores at exits, covered guards across exits, the hot side of an exit (2026-11-24)
 
 Three changes to Carry's mid-block exits (design in `Docs/JIT.md`, "Following the hot side of an exit"), asked for after a profile of CoreMark under
