@@ -13,7 +13,7 @@
   <ol class="flow">
     <li><strong>ARM64 code</strong><span>The game's own machine code, read from its files.</span></li>
     <li><strong>Decode</strong><span>Each instruction is read by the decoder the interpreter also uses.</span></li>
-    <li><strong>IR and SSA</strong><span>A typed intermediate form where values are tracked and simplified.</span></li>
+    <li><strong>Typed IR</strong><span>An intermediate form where values are tracked and simplified.</span></li>
     <li><strong>x86_64 code</strong><span>Registers are assigned and native PC instructions written.</span></li>
     <li><strong>Chained blocks</strong><span>Translated blocks jump straight to each other.</span></li>
   </ol>
@@ -25,13 +25,13 @@
   <h2 id="fast-title">What makes it fast</h2>
   <div class="features">
     <div><h3>Translated once, run many times</h3><p>Code is compiled in blocks of up to 32 instructions (a loop body up
-    to 64) the first time it runs, and kept in a code cache.</p></div>
+    to 64) the first time it runs, and kept in a code cache. Several threads of a game can translate at the same time.</p></div>
     <div><h3>Blocks jump to each other</h3><p>A translated block jumps straight into the next one. Returns and other
     computed jumps go through a per-thread lookup table, not back through the emulator.</p></div>
     <div><h3>Values stay in registers</h3><p>Loop counters and hot values stay in the PC's registers across loop
-    iterations, and ARM condition flags stay in the PC's own flags wherever the next instruction can use them.</p></div>
+    iterations, past branches and from one block to the next, and ARM condition flags stay in the PC's own flags wherever the next instruction can use them.</p></div>
     <div><h3>Native vector and float math</h3><p>ARM NEON and floating-point instructions become SSE and AVX
-    instructions. The JIT uses AVX2, FMA3, BMI2 and the other extensions your CPU has, with fallbacks.</p></div>
+    instructions. The JIT needs SSE4.1 and FMA3, and uses AVX2 and other extensions where your CPU has them.</p></div>
     <div><h3>One cache for every thread</h3><p>A game's threads share one JIT. A full code cache (512 MiB by default) is
     replaced as a whole and the old code freed once no thread can still be running it.</p></div>
     <div><h3>Warm helper processes</h3><p>Android starts an app's helper processes by forking a prepared process. Each
@@ -44,7 +44,8 @@
 <section id="performance" aria-labelledby="performance-title">
   <h2 id="performance-title">How fast</h2>
   <p class="lead">CoreMark, an integer and control-flow benchmark, measured on $host ($measured): the current build runs
-  <strong>$vs_qemu times</strong> as many iterations per second as QEMU's user-mode emulator.</p>
+  <strong>$vs_qemu times</strong> as many iterations per second as QEMU's user-mode emulator, and <strong>$vs_native%</strong> of what
+  the same program does when it is compiled for the PC itself.</p>
   <figure class="chart">
     <figcaption id="coremark-title">CoreMark iterations per second (higher is better)</figcaption>
     <table class="bars" aria-labelledby="coremark-title">
@@ -54,6 +55,13 @@ $coremark_rows
       </tbody>
     </table>
   </figure>
+  <h3 class="table-title">CoreMark with several threads (iterations per second, all threads together)</h3>
+  <table class="table bench">
+    <thead><tr><th>Threads</th><th>Native</th><th>bifrost-emu</th><th>QEMU</th><th>bifrost-emu / native</th></tr></thead>
+    <tbody>
+$thread_rows
+    </tbody>
+  </table>
   <h3 class="table-title">The same programs with and without the JIT</h3>
   <table class="table bench">
     <thead><tr><th>Benchmark</th><th>Interpreter</th><th>JIT</th><th>Speedup</th></tr></thead>
@@ -80,7 +88,7 @@ $bench_rows
 
 <section aria-labelledby="more-title">
   <h2 id="more-title">Read more</h2>
-  <p class="lead">The <a href="$repo/blob/main/Docs/JIT.md">JIT guide</a> describes every mechanism for contributors,
+  <p class="lead">The <a href="$repo/blob/main/Docs/JIT.md">JIT guide</a> describes how it works for contributors,
   and <a href="$repo/blob/main/Docs/archive/JIT-history.md">its history</a> records each change with its measurements.
   The JIT needs an x86_64 CPU with SSE4.1 and FMA3; see the <a href="${url}install/">install page</a>.</p>
 </section>

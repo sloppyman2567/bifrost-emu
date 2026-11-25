@@ -248,6 +248,8 @@ namespace arm64emu {
 //   fast and runs cheaper float compares and widening multiplies, large memcpy/memset run on the host, BIFROST_PROF reports
 //   stalls and an optional Tracy timeline, a per-app Resolution setting, an app launcher that keeps a log, and uninstall
 //   targets that find a `make bootstrap` install; see CHANGELOG.md. The v2.0 goals in Docs/roadmap.md are still not complete.
-constexpr const char* VERSION  = "2.0.0-beta.3";
+// 2.0.0-rc.1 (2026-11-25), a release candidate: several threads translate at once, Carry on by default, Tier-2 removed,
+//   windows that keep their shape and rotate inside; see CHANGELOG.md. What keeps it from being production grade is in Docs/roadmap.md.
+constexpr const char* VERSION  = "2.0.0-rc.1";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

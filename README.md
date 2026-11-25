@@ -9,7 +9,7 @@ Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC.
 [Website](https://sloppyman2567.github.io/bifrost-emu/) · [Install](Docs/INSTALL.md) · [What has been run](Docs/COMPATIBILITY.md) · [Screenshots](Docs/SCREENSHOTS.md) · [Changelog](Docs/CHANGELOG.md)
 
 [![CI](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml/badge.svg)](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml)
-[![Version: 2.0.0-beta.3](https://img.shields.io/badge/version-2.0.0--beta.3-orange.svg)](Docs/CHANGELOG.md)
+[![Version: 2.0.0-rc.1](https://img.shields.io/badge/version-2.0.0--rc.1-green.svg)](Docs/CHANGELOG.md)
 [![Games: 18 playable of 21](https://img.shields.io/badge/games-18%20playable%20of%2021-brightgreen.svg)](Docs/COMPATIBILITY.md)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 
@@ -30,7 +30,8 @@ There is no phone, no emulated device and no virtual machine to set up. It trans
 | Asgard | Its Android layer. `bifrost-emu game.apk` installs a game and starts it, and `asgard launcher` opens a library of what you installed. |
 
 > [!NOTE]
-> bifrost-emu is a beta. Some games play well, others only start, and a few are blocked.
+> 2.0.0-rc.1 is a release candidate: most games tried so far play well, and it is not production grade yet.
+> Expect rough edges, above all in Android apps.
 > [What has been run](Docs/COMPATIBILITY.md) says which.
 
 ## Quick start
@@ -79,7 +80,7 @@ versions, frame rates and known problems, is [What has been run](Docs/COMPATIBIL
 | Run Linux programs that need libraries | [Rootfs guide](Docs/ROOTFS.md) |
 | See what is planned | [Roadmap](Docs/roadmap.md) and [changelog](Docs/CHANGELOG.md) |
 | Build it, change settings, report a bug or contribute | [Build, configure and contribute](Docs/BUILDING.md) |
-| Understand how it works | [Source layout](Docs/ARCHITECTURE.md), [JIT guide](Docs/JIT.md), [speed](Docs/PERFORMANCE.md) |
+| Understand how it works | [Source layout](Docs/ARCHITECTURE.md), [JIT guide](Docs/JIT.md), [profiling](Docs/PROFILING.md), [speed](Docs/PERFORMANCE.md) |
 | Use it from my own program | [Embedding](Docs/EMBEDDING.md) |
 | Run the tests | [Test guide](Docs/TESTS.md) |
 
