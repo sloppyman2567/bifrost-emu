@@ -830,12 +830,16 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         emit_guest_stat(static_cast<uint32_t>(ir_block.count));
     }
     // BIFROST_BLOCK_TRACE: log every cold and chained entry. It runs before anything is cached, so the
-    // caller-saved registers are free. Self-loop iterations re-enter past the prologue and are not logged.
+    // caller-saved vreg registers are free; WIN_REG is not (the cold prologue loaded it above and a memory guard
+    // reads it), so the call saves it like every other call site that continues in generated code.
+    // Self-loop iterations re-enter past the prologue and are not logged.
     if (bifrost::DebugFlags::in_ranges(dbg().block_trace, start_pc)) {
         emit_mov_reg(RDI, CPU_REG);
         emit_mov_imm64(RSI, start_pc);
         emit_mov_imm64(RDX, ir_block.fwd_enabled ? 1 : 0);
-        emit_call_aligned(&jit_trace_block_entry, 0);
+        emit_push(WIN_REG);
+        emit_call_aligned(&jit_trace_block_entry, 1);
+        emit_pop(WIN_REG);
     }
     // A guest memcpy/memmove/memset (recorded by the loader, NativeLibc.hpp): large calls leave for the host's routine.
     // Not under differential replay (the replay would re-run the guest routine for one block and diverge), store
