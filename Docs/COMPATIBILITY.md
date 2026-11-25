@@ -13,7 +13,7 @@ recorded capture. A passing build or a launch is not gameplay.
 
 | Program | Kind | Status |
 |---|---|---|
-| [SpongeBob – Krusty Cook-Off 5.12.0](Apps/spongebob.md) | Android, Unity/IL2CPP | User-confirmed cooking levels, reaching level 16 at about 60 FPS (2026-11-01), outfits and menus at native resolution. Child-age path; the adult path waits on Google Play services. |
+| [SpongeBob – Krusty Cook-Off 5.12.0](Apps/spongebob.md) | Android, Unity/IL2CPP | User-confirmed cooking levels, reaching level 16 at about 60 FPS (2026-11-01), outfits and menus at native resolution. Both age choices reach the lobby (adult age user-confirmed 2026-11-25, without a level played). |
 | [Azur Lane 9.3.7](Apps/azur-lane.md) | Android, Unity/IL2CPP | User-reported playable online through a finished battle, with audio and pause/resume (2026-11-01). Home screen captured at 60 FPS. Google sign-in through microG works (user-reported 2026-11-23). |
 | [Arknights 37.7.41](Apps/arknights.md) | Android, Unity/IL2CPP | User-reported playable: Google sign-in through microG (also reported working 2026-11-23) and a battle at about 60 FPS (2026-11-03). |
 | The Battle Cats 15.6.1 | Android | User-reported playable (2026-10-29). |

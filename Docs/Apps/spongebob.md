@@ -7,16 +7,21 @@ phone). Runtime contracts and the bug history behind each checkpoint are in
 As of 2026-11-01 the user plays cooking levels, reaching level 16, at about 60 FPS on 2.0.0-alpha.3. As of 2026-10-14
 they complete levels, open Settings and Help Center, and the main HUD stays after closing Settings. Play renders
 at the host display's native density (2560x1384 or 3440x1384 px, 320 dpi on a
-200%-scaled 3440x1440 monitor). The child-age path is required: the adult path
-stalled at 73% on Firebase/Google Play services.
+200%-scaled 3440x1440 monitor).
+
+Either age works at the age gate. On 2026-11-25 the user chose the adult age on cleared app data (2.0.0-beta.3 development build, default
+settings, a run limited to 120 s) and reached the lobby, as with the child age. The log has COPPA false, a Firebase consent change at
+01:41:32, an Adjust attribution property sent to Firebase, city level files written and no crash. Earlier builds stalled at 73% on the adult
+age, waiting for Firebase and Google Play services; which change removed the stall was not isolated. Cooking a level on the adult-age
+profile has not been tried.
 
 On 2026-10-17 the `GoogleApiHandler` crash on `activity.getContentProvider`
 was fixed by running microG in its own processes (see the runtime guide).
 A 180 s JIT run on the saved child-age profile reached the Unity tracker
 setup with GmsCore, its `:persistent` process and the Play Store companion
 running, without a fatal exception or the earlier FirebaseInstanceId
-"Google Play services missing" error. The adult-age path has not been
-retested on this build.
+"Google Play services missing" error. The adult age was not
+tried on that build.
 
 ## Screenshots (2026-11-01)
 
@@ -117,6 +122,12 @@ sessions, before and after the max-bounds fix:
 Next steps: find the faulting PC and library for the null read, then compare
 the WebView's layout size with the Activity window. Logs:
 `android-state/com.tiltingpoint.spongebob/managed/sessions/0766a3a30f904fcaa889e32cefc16b94/`.
+
+### Push tokens and Chartboost (2026-11-25, uninvestigated)
+
+In the adult-age run `FirebaseInstanceId` could not get a push token (`SERVICE_NOT_AVAILABLE`, retried), and Chartboost's SDK logged a
+`SecurityException: Receiver export flag required` from `FrameworkBroadcasts.register`. Neither stopped the game; whether Chartboost
+ads load was not checked.
 
 ### No mail/news (2026-10-12, uninvestigated)
 

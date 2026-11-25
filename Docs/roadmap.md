@@ -69,8 +69,7 @@ otherwise.
 
 - **Needs real Google attestation or a real device:** Roblox is disconnected after joining (reason 304); TrickCal's
   anti-cheat ends it; Umamusume JP stops at its device integrity check. Bifrost does not bypass or forge any of them.
-- **Needs Google Play services beyond microG:** SpongeBob's adult-age path stalls at 73%; Hungry Shark World's Play Games
-  sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
+- **Needs Google Play services beyond microG:** Hungry Shark World's Play Games sign-in gets HTTP 404 and `SIGN_IN_REQUIRED`.
 - **Architecture:** Bifrost runs AArch64 only; an APK with only `armeabi-v7a` or `x86` libraries (Angry Birds Space)
   cannot start.
 - **Platform gaps:** YouTube stays in its landscape layout when the window is narrowed, although a host resize reaches an app

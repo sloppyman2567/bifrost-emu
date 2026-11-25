@@ -50,7 +50,7 @@ integrity check when it connects). These are single checks, not compatibility
 guarantees, and gameplay is confirmed only where the file says `playable`.
 
 Google account support is experimental. Play services come from microG, so behaviour that needs real Google services
-(device attestation, a Play Games profile, an adult-age check) is unavailable.
+(device attestation, a Play Games profile) is unavailable.
 Settings screens, host mDNS, HDR and arbitrary APK compatibility are not provided or
 claimed. The Android Vulkan HAL copies each presented frame through a host staging buffer (no zero-copy swapchain): a GPU
 read-back, a wait for the GPU and a CPU copy into the app's buffer on release, then another copy into the window; the

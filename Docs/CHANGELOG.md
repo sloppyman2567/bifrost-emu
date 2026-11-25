@@ -72,6 +72,7 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
 - Tight loops run with fewer instructions: they read and write the registers they keep in host registers directly, without copies and stores on each
   pass. CoreMark: 6.7% fewer host instructions and about 2% fewer cycles, 7.6% and 3.5% with JIT Carry; gzip, bzip2, zstd and sha256sum 1.5 to 2%
   fewer instructions. No game has been timed. `BIFROST_NO_PIN_INPLACE=1` switches it off.
+- SpongeBob: Krusty Cook-Off now gets past the age question with an adult age too: the lobby opens on fresh data (it used to stop at 73%).
 - Fixed: a loop left early through `cbz`, `cbnz`, `tbz` or `tbnz` could hand wrong condition flags to the code after it.
 - Hot loops that count or accumulate in a register (`add x0, x0, #1`, a running sum) update it in place instead of through a
   scratch copy: fewer instructions per iteration. About 1% on CoreMark and gzip on one machine, nothing on programs without

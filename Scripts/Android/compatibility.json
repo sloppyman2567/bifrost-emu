@@ -14,7 +14,7 @@
       "checked": "2026-11-01",
       "evidence": "The maintainer plays and completes cooking levels, reaching level 16 at about 60 FPS, and uses Settings and Help Center; screenshots in the app page.",
       "notes": [
-        "Choose the child-age path in the game: the adult-age path needs Google Play services (microG) and stalled at 73%; it was not retested on this build.",
+        "Either age choice reaches the lobby. Levels were played on the child-age path; the adult-age path was confirmed to the lobby on 2026-11-25 (older builds stalled at 73% there).",
         "Rewarded ads do not complete (Kidoz ad stays on its loading screen)."
       ],
       "page": "Docs/Apps/spongebob.md"
