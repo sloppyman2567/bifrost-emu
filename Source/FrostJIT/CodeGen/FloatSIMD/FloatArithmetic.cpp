@@ -915,7 +915,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // FCMP Dn, #0.0 — XORPS xmm1, xmm1 to get 0.0
                 emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC9); // xorps xmm1, xmm1
             }
-            // A compare that the next op, a BRCOND, consumes alone (Tier-1 only, like branch_follows below): leave the
+            // A compare that the next op, a BRCOND, consumes alone (Lean only, like branch_follows below): leave the
             // raw ucomis flags in the host and let the branch pick one jcc for its condition, swapping the operands where
             // that saves a second jump (fp_raw_flags_cc). The exits that still need NZCV convert the raw flags
             // themselves (materialize_fp_raw_flags_to_pstate), so the common exit whose successor rewrites the flags

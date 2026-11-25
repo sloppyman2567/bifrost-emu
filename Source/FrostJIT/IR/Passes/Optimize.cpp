@@ -282,9 +282,9 @@ void optimize_ir(IRBlock& block) {
     const auto& fwd_ranges = dbg().fwd_ranges;
     if (!fwd_ranges.empty() && !bifrost::DebugFlags::in_ranges(fwd_ranges, block.start_pc))
         fwd_requested = false;
-    // Tier-1 blocks keep the legacy scalar pipeline unless BIFROST_TIER1_SSA=1: the SSA adapter was a third of translation time
+    // Lean blocks keep the legacy scalar pipeline unless BIFROST_LEAN_SSA=1: the SSA adapter was a third of translation time
     // for under 1% fewer instructions (Docs/JIT.md).
-    block.ssa_optimized = fwd_requested && dbg().tier1_ssa && !dbg().no_ssa &&
+    block.ssa_optimized = fwd_requested && dbg().lean_ssa && !dbg().no_ssa &&
         optimize_ir_ssa(block, dbg().ir_validate);
     bool block_has_atomics = false;
     if (fwd_requested) {

@@ -239,7 +239,7 @@ tagged data access/protection behavior and exact CRC opcode validity.
 `jit_simd_addlv` covers 2,624 signed/unsigned widening reductions and pairwise
 adds, including operand aliases and all valid widths. `jit_crc32` covers
 2,048 IEEE/Castagnoli cases with an independent bitwise oracle. Both instruction
-fixtures also pass QEMU and Tier-1 differential verification.
+fixtures also pass QEMU and Lean differential verification.
 
 After audio fix `9403911`, the strict ART-foundation Linux suite passes 275/275
 in default JIT mode and 268/268 in interpreter mode, with seven expected

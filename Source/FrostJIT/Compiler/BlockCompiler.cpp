@@ -53,9 +53,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             if (!jit) return;
             const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - start).count());
-            jit->tier1_compile_ns.fetch_add(ns, std::memory_order_relaxed);
-            uint64_t max = jit->tier1_compile_max_ns.load(std::memory_order_relaxed);
-            while (ns > max && !jit->tier1_compile_max_ns.compare_exchange_weak(
+            jit->lean_compile_ns.fetch_add(ns, std::memory_order_relaxed);
+            uint64_t max = jit->lean_compile_max_ns.load(std::memory_order_relaxed);
+            while (ns > max && !jit->lean_compile_max_ns.compare_exchange_weak(
                        max, ns, std::memory_order_relaxed)) {}
         }
     } compile_timer{this};
@@ -693,7 +693,7 @@ if (demote_interp) {
     if (num_stack_slots_ < 1) num_stack_slots_ = 1;
     uint32_t stack_bytes = static_cast<uint32_t>(num_stack_slots_ * 8 + 64) & ~15U;
     // ── Vector register cache pre-scan ─────────────────────────────
-    // Tier-1 allocates vectors on demand under pressure, with a stable hot
+    // Lean allocates vectors on demand under pressure, with a stable hot
     // loop core. Incompatible operations synchronize the vector file locally.
     vec_cache_may_enable(ir_block);
     // Scalar-FP cache (lo-only): only when the vec cache is NOT active for
@@ -1682,7 +1682,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     make_executable();
     return fn;
 }
-// Publishes a native Tier-1 translation and links it with the table: back
+// Publishes a native Lean translation and links it with the table: back
 // references, chaining in both directions and pending direct calls. The
 // caller holds blocks_mutex_ exclusively.
 void FrostJIT::publish_translation(uint64_t start_pc, const BlockEntry& entry) {
@@ -1715,7 +1715,7 @@ void FrostJIT::publish_or_stage(uint64_t pc, const BlockEntry& entry) {
     staged_ = true;
     staged_linked_ = false;
 }
-// W-form fusion and sign-extending loads, for Tier-1 blocks
+// W-form fusion and sign-extending loads, for Lean blocks
 // alike: both are decided from op i and its only reader at i + 1, through the
 // last-use table of the unit being compiled, and need no materializer.
 void FrostJIT::scan_w32_and_sext_loads(const std::vector<IRInst>& insts) {

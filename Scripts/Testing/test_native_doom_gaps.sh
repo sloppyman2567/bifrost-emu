@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exhaustive captured-opcode checks against actual Tier-1 code generation.
+# Exhaustive captured-opcode checks against actual Lean code generation.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 build_dir=${BIFROST_BUILD_DIR:-build/release-sdl1-gl1}

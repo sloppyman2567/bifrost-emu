@@ -86,7 +86,7 @@ void FrostJIT::write_allocation_profile(size_t begin, size_t hot_end, size_t col
             (unsigned long long)evictions, reason, counted ? "ir-delta" : "range-only");
     };
     for (const auto& e : allocation_events_)
-        emit(e.pc, e.begin, e.end, "tier1-ir", e.op, e.scalar,
+        emit(e.pc, e.begin, e.end, "lean-ir", e.op, e.scalar,
              e.vector_spills, e.vector_reloads, e.vector_evictions,
              e.boundary ? "synchronize" : "allocate");
     const size_t body = allocation_events_.empty() ? hot_end : allocation_events_.front().begin;
@@ -146,7 +146,7 @@ void FrostJIT::select_arch_pins(const std::vector<IRInst>& instructions) {
     // may take the register of an operand that dies in the op; a guarded access
     // needs a scratch register besides its address and result, and one for the
     // address when it has an offset. At most four candidate prefixes are scored;
-    // no search through register permutations on Tier-1's compilation path.
+    // no search through register permutations on Lean's compilation path.
     std::array<bool, 32> chosen{};
     const auto peak_temporaries = [&]() {
         std::array<bool, 4096> live{};

@@ -211,7 +211,7 @@ void FrostJIT::emit_memory_fault_exit(const IRInst& inst, bool recoverable) {
 }
 // XMM0 holds a tentative packed FP result; architectural inputs are intact.
 // A rare ARM-semantic step preserves all live GPRs and reloads pinned vectors.
-// The caller finishes the guard after committing the native result. Tier-1
+// The caller finishes the guard after committing the native result. Lean
 // defers the step with its captured register layout; outside a block's
 // deferred guards an inline cold step is patched. Neither path changes compiler mappings or dirty flags.
 FrostJIT::SimdFpGuard FrostJIT::emit_simd_fp_nan_guard(const IRInst& inst, int esize, bool q, bool mask_ready) {
@@ -268,7 +268,7 @@ void FrostJIT::flush_deferred_fp_steps() {
 }
 // Scalar FP: each `cold_sites` JCC was taken before the result's commit,
 // which the caller has just emitted. The cold sites land on the ARM-semantic
-// step and rejoin after the commit. Tier-1 emits the step after the
+// step and rejoin after the commit. Lean emits the step after the
 // block with the layout captured here, as the vector guards do, so the hot
 // path falls through with no jump over it; otherwise hot code jumps past it.
 void FrostJIT::emit_fp_cold_tail(const IRInst& inst, std::initializer_list<size_t> cold_sites) {

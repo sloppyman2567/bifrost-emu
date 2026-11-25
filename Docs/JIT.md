@@ -10,7 +10,7 @@ entry before changing that code. Figures quoted here carry their date and are no
 
 The [source map](ARCHITECTURE.md) describes the subsystem layout and split
 boundaries. Compiler prediction/leaf analysis lives in `Compiler/BlockAnalysis.cpp`,
-Tier-1 orchestration in `BlockCompiler.cpp` and differential store-footprint
+Lean orchestration in `BlockCompiler.cpp` and differential store-footprint
 analysis in `VerificationStores.cpp`. The refactor's build/test checkpoint is
 recorded in [TESTS.md](archive/TESTS-history.md#subsystem-layout-and-source-splits-2026-10-11);
 it does not establish a new performance improvement.
@@ -33,14 +33,16 @@ AArch64 word
 | Define typed IR parameters and factories | `Source/FrostJIT/IR/IR.hpp`, `Parameters.hpp`, `Factories.hpp`, `Builder.hpp` |
 | Optimize and validate IR | `Source/FrostJIT/IR/Passes/Optimize.cpp`, `Source/FrostJIT/IR/Passes/Validate.cpp` |
 | Construct, verify, optimize and lower scalar SSA | `Source/FrostJIT/IR/SSA/SSA.hpp`, `Source/FrostJIT/IR/SSA/SSA.cpp` |
-| Analyze and compile Tier-1 blocks | `Source/FrostJIT/Compiler/BlockAnalysis.cpp`, `BlockCompiler.cpp`; replay footprints in `VerificationStores.cpp` |
+| Analyze and compile Lean blocks | `Source/FrostJIT/Compiler/BlockAnalysis.cpp`, `BlockCompiler.cpp`; replay footprints in `VerificationStores.cpp` |
 | Emit x86_64 for IR operations and exits | `Source/FrostJIT/Compiler/FrostJIT.cpp`, `Source/FrostJIT/CodeGen/Integer/`, `CodeGen/FloatSIMD/` |
 | Allocate host registers and spill vregs | `Source/FrostJIT/RegisterAlloc/RegisterAllocator.cpp` |
 | Dispatch, cache and chain blocks | `Source/FrostJIT/Runtime/Dispatch.cpp`, `CodeCache.cpp` |
 | Define reference instruction semantics | `Source/Interpreter/Core/`, `Source/Interpreter/FloatSIMD/` including `SIMD/` |
 
-Tier-1 compiles one block at a time (32 instructions by default, a loop body up to twice that) and chains blocks through
-patched slots in single-threaded (ST) code or atomic target cells in multithreaded (MT) code.
+The JIT has two modes. **Lean** is the block compiler: it compiles one block at a time (32 instructions by default, a loop body up to
+twice that) and chains blocks through patched slots in single-threaded (ST) code or atomic target cells in multithreaded (MT) code.
+**Carry**, on by default (`BIFROST_CARRY=0` is Lean alone), lets a Lean block continue past forward branches and hands registers to the
+next block ([Register passing](#register-passing)). Dated history calls Lean "Tier-1".
 The interpreter is the reference semantics and the fallback for every instruction the JIT does not emit natively.
 
 ## Adding or changing an instruction
@@ -124,7 +126,7 @@ read it; inside chained code it is stale.
 
 ## Block exits and chaining
 
-- **Exits store no scratch values.** `BR` and `BRCOND_FALLTHRU` end a Tier-1 block and use `flush_all_vregs_exit`, like
+- **Exits store no scratch values.** `BR` and `BRCOND_FALLTHRU` end a Lean block and use `flush_all_vregs_exit`, like
   the shared epilogue. A memory fault exit drops its scratch stores too: every path through it ends the frame.
 - **Shared cold stubs.** Each JIT emits one copy before its first block (`FrostJIT::emit_cold_stubs`): page-check stubs, one
   per allocatable address register, width and direction, built by `emit_guard_page_checks` (a stub preserves every
@@ -178,8 +180,8 @@ paths, not a measurement of executed spill traffic. See
 for the independent value/flag checks and timing bounds.
 
 The default block instruction limit remains 32. `BIFROST_JIT_BLOCK_LIMIT=8..128`
-allows bounded comparisons; Tier-1 stops growth
-at the instruction cap or the shared IR/vreg complexity budget. A Tier-1 loop
+allows bounded comparisons; Lean stops growth
+at the instruction cap or the shared IR/vreg complexity budget. A Lean loop
 body may reach twice the cap: at the cap `selfloop_extent` looks for a branch
 back to the block start, and an already compiled loop tail is absorbed under the
 same limit ([details](archive/JIT-history.md#vector-fmla-by-element-ld1r-loop-bodies-and-q-accesses-2026-11-03)). Long blocks
@@ -190,11 +192,11 @@ are diagnostic options, not a verified performance default for every game.
 a long body with fifteen live GPRs.
 
 Belady eviction reads per-vreg use lists (`vreg_uses_`, 4,096 entries).
-Each Tier-1 use-scan starts with `reset_vreg_uses()`, which
+Each Lean use-scan starts with `reset_vreg_uses()`, which
 empties only the lists that the previous scan filled (`note_vreg_use`
 records them) and keeps their storage. Outside a compile every list is
 empty, so `next_use_after` returns -1 as before. Rebuilding all 4,096
-lists per block had been about a third of Tier-1 compile time in a
+lists per block had been about a third of Lean compile time in a
 SpongeBob startup profile (2026-10-13).
 
 ### Loop back edges
@@ -338,7 +340,7 @@ on one thread and four. Figures and the attempts that came before are in
 
 ### Peepholes
 
-Tier-1 decides each with a pre-scan and the emitter re-checks it:
+Lean decides each with a pre-scan and the emitter re-checks it:
 
 - `LDRSB`/`LDRSH`/`LDRSW` are one sign-extending load (`sext_load_`).
 - `sxtb`/`sxth`/`sxtw` through `SBFM` are one `movsx`/`movsxd`.
@@ -351,9 +353,9 @@ Tier-1 decides each with a pre-scan and the emitter re-checks it:
   instructions.
 
 The last two leave a value unmaterialized for one op; `materialize_scaled` and `materialize_lazy_load` emit the original
-instruction for any consumer that does not fold it, and the Tier-1 loop calls them before every other op. W-form fusion and
+instruction for any consumer that does not fold it, and the Lean loop calls them before every other op. W-form fusion and
 `sext_load_` come from `scan_w32_and_sext_loads`; `fp_load_`, `lazy_load_` and `scaled_add_` need the per-op materializers
-of the Tier-1 compile loop. The kill-list scan stops at the highest vreg the block uses.
+of the Lean compile loop. The kill-list scan stops at the highest vreg the block uses.
 
 ### Conditional compares
 
@@ -394,7 +396,7 @@ immediately following consumer as an x86 immediate, and a shared constant
 register defeats that. Lowering also rematerializes a constant reached by more
 than one use (for example through a STORE_REG/LOAD_REG pair) right before each
 consumer that can fold it as src2, using the backend's fold rules (any shift
-count; ALU constants that sign-extend from 32 bits). Tier-1 input loads are
+count; ALU constants that sign-extend from 32 bits). Lean input loads are
 placed at their first use in the entry block, never after a store to their own
 slot and never between an IMM and its consumer; hoisting every input to the
 block start held all live-ins at once against ten host registers.
@@ -403,10 +405,10 @@ system-register operations, barriers, and guest-state stores retain order;
 loads from guest memory are never commoned or speculated by SSA. Flag consumers
 remain ordered effects because NZCV is not yet an SSA value.
 
-Tier-1 does not run this pipeline by default (`BIFROST_NO_SSA=1` keeps it off even with `BIFROST_TIER1_SSA=1`): the adapter was a third of
+Lean does not run this pipeline by default (`BIFROST_NO_SSA=1` keeps it off even with `BIFROST_LEAN_SSA=1`): the adapter was a third of
 translation time for 0.6% fewer instructions and about 2% fewer cycles on CoreMark
 ([measured](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
-`BIFROST_TIER1_SSA=1` runs it on supported scalar blocks before the existing constant folding passes (`BIFROST_NO_FWD=1` and FWD
+`BIFROST_LEAN_SSA=1` runs it on supported scalar blocks before the existing constant folding passes (`BIFROST_NO_FWD=1` and FWD
 range restrictions bypass its forwarding); the legacy forwarding cache does not run again on an SSA-lowered block.
 `BRCOND_SKIP`, direct FP/SIMD operations, calls/helpers, and atomics retain their
 existing pipeline until their operand and state effects are modeled explicitly.
@@ -439,7 +441,7 @@ forced software guards and slow-store tracing retain their existing path.
 and byte/halfword/word/doubleword accesses; the host-fault and userfaultfd
 fixtures cover recovery and retry behavior.
 
-A Tier-1 access whose address an earlier access of the same block already checked emits no gate compare
+A Lean access whose address an earlier access of the same block already checked emits no gate compare
 (`scan_covered_guards`, `guard_cover_`): the same base value and offset, a width no larger, only straight-line scalar ops
 between them (`ldr x3,[x19]; str x4,[x19]`), and no `BRCOND_SKIP` in the block. The access is still a registered fault site
 with its fault exit; only the compare, its scratch register and the software page checks are gone. The earlier access
@@ -583,7 +585,7 @@ References: Arm [FMULX](https://www.scs.stanford.edu/~zyedidia/arm64/fmulx_advsi
 ## Android interpreter and generated-code contracts
 
 Android data pointers carry a tag in bits 63:56 (Bionic's allocator uses top-byte tags even without MTE), which data accesses
-ignore (`Memory::data_address`). A Tier-1 memory guard copies the address (adding the offset), clears the tag with one
+ignore (`Memory::data_address`). A Lean memory guard copies the address (adding the offset), clears the tag with one
 `and reg, [window_base - 16]` against a mask word in the window's header page, then bound-checks and accesses; the guest register
 keeps its tag. Tag 0, 2, 0xb4 and 0xff are compared with the interpreter, with no interpreter steps, in `android_loader_host`.
 
@@ -781,7 +783,7 @@ offsets are relative to the mapping, as the
 requires. `test_sdl_gl_mapbuffer` checks valid GL usage only and passes natively
 on the host driver as well; it is not an ES 3 conformance test.
 
-## Tier-1 zero and bit branches
+## Lean zero and bit branches
 
 CBZ/CBNZ and TBZ/TBNZ first commit pending NZCV with `clobber_flags()`.
 Their TEST/BT instructions can then overwrite host flags: guest flags remain
@@ -1046,7 +1048,7 @@ reports `CTR_EL0.DIC=1`, so compiler-rt's `__clear_cache` (used by ART) issues
 only `DC CVAU` per line; previously each line retired every block on its
 page, including hot translations next to newly published methods.
 
-A Tier-1 translation depends only on the instruction words it fetched.
+A Lean translation depends only on the instruction words it fetched.
 `translate_block` records them in an append-only `code_words_` array (four
 bytes per guest instruction; leaf-inlined blocks record
 none). Cache maintenance and `mprotect`/`pkey_mprotect` keep a block whose
@@ -1063,7 +1065,7 @@ called the stale translation; chain-skip (the default) disables native
 `BL_CALL`, so only `BIFROST_NO_CHAIN_SKIP=1` exposed it. `rewind_codegen`
 drops pending/direct call records in a discarded tail.
 
-In multithreaded mode, Tier-1 compiles no longer hold `blocks_mutex_`
+In multithreaded mode, Lean compiles no longer hold `blocks_mutex_`
 exclusively. `translate_entry` serializes compilers with `compile_mutex_`,
 compiles under the shared lock while other CPUs keep looking up and running
 published code, and takes the exclusive lock only to publish. In staging
@@ -1079,7 +1081,7 @@ the staged result, revokes only the edges that compile created, and
 retranslates under the exclusive lock. ST execution keeps the exclusive
 compile: it patches published instructions and may toggle W^X.
 
-`BIFROST_STATS_PERIOD` and `--verbose` print `[JIT] compile:` (Tier-1 blocks,
+`BIFROST_STATS_PERIOD` and `--verbose` print `[JIT] compile:` (Lean blocks,
 recompiles of previously retired PCs, total/average/maximum compile time,
 shared compiles, retries and contended table/compiler lock wait) and
 `[JIT] invalidate (calls/retired/kept):` per reason. Recompiles include the
@@ -1100,7 +1102,7 @@ three alternating runs measured the code-page phase at 0.064-0.068 s against
 0.062-0.068 s for the previous binary; a page-granular index had measured
 0.079-0.082 s. A cold ART framework startup (`test_android_framework.py --mode
 jit`, five interleaved runs per binary) was unchanged at about 3.05 s. Its first
-second compiled 39,975 Tier-1 blocks in 484 ms (12 us average, 1.1 ms maximum)
+second compiled 39,975 Lean blocks in 484 ms (12 us average, 1.1 ms maximum)
 and kept 368 blocks across `mprotect`; the next second ran 4,182 compiles under
 the shared lock with no retries and 35 ms of contended waiting. Its 3,063
 recompiles came from the purge when the second CPU starts. The probe issued no
@@ -1139,7 +1141,7 @@ renewals with sleepers, nested calls, rewritten code, signals and a fork) and `t
 ## Persistent translation cache
 
 Experimental and off by default. `--jit-disk-cache` (`BIFROST_JIT_DISK_CACHE=1`, `[jit] disk_cache = true`, or the per-app
-setting) stores Tier-1 translations of file-backed guest code so a later launch installs them instead of compiling.
+setting) stores Lean translations of file-backed guest code so a later launch installs them instead of compiling.
 `--jit-disk-cache=verify` compiles every block anyway and compares the fresh record with the stored one
 (`verify_mismatches` in the statistics). `Runtime/CacheRecording.cpp` records and installs; `Runtime/PersistentCache.*`
 stores.
@@ -1339,7 +1341,7 @@ classification change before the spec was corrected.
 
 ### Bounded MT self-loops
 
-Tier-1 conditional branches to their own block now retain the current frame,
+Lean conditional branches to their own block now retain the current frame,
 eligible GPR pins and cached vectors in MT mode. The back-edge uses an immutable
 guard and an atomic cell pointing to this translation's body, bypassing prologue
 reloads. It checks the callback stop PC and the preemption epoch; expiry or revocation commits carried state and returns to dispatch.
@@ -1468,8 +1470,9 @@ A guest `memset` of tens of kilobytes is a loop of guarded vector stores; in a M
 
 This is the proposed direction, with milestones and targets in [the roadmap](roadmap.md#jit-codegen-retain-guest-state-across-hot-regions).
 Nothing in this section is built (its first piece that runs, passing registers along chain edges between Lean blocks, is
-[Register passing](#register-passing)). **Lean** is the working name for today's first JIT (what these docs still call Tier-1: cheap
-translation and chaining); **Carry** is the planned second JIT. The names are used for new work only; Tier-1 has not been renamed.
+[Register passing](#register-passing)). **Lean** is the block compiler (cheap translation and chaining; called Tier-1
+until 2026-11-25, as the dated history still does). **Carry** is what keeps registers across blocks on top of it: the pieces that run
+today work inside Lean blocks ([Register passing](#register-passing), on by default), the regions below are planned.
 Tier-2 regions, the only code that fused blocks, were removed on 2026-11-24
 ([why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)); Carry starts again from Lean blocks. Scalar SSA does not yet model
 complete vector/FP architectural state.
@@ -1553,7 +1556,7 @@ BIFROST_PROF=1 BIFROST_STATS_PERIOD=30 bifrost-emu program   # and every 30 s
 `BIFROST_PROF=1` samples the host pc at 100 Hz of CPU time (`ITIMER_PROF`) and prints, besides the dispatch / translate /
 interpreter / other split, one line for the JIT samples: how many, on how many threads, how many were lost, and how they divide
 into the parts of a translated block. **Entry** loads the canonical register layout, **body** is the translated instructions,
-**exit** publishes state back, **cold** is recovery and exit code (the same four parts as the `entry`, `tier1-ir`, `exit` and
+**exit** publishes state back, **cold** is recovery and exit code (the same four parts as the `entry`, `lean-ir`, `exit` and
 `cold` rows of the allocation profile), and **shared stubs** is code outside any registered block: the frame-exit and cold-path
 stubs, and blocks loaded from the persistent cache, which are not registered. Below it come the busiest eight threads, and with
 `BIFROST_PC_HIST=1` the twenty hottest guest blocks (`pc=` values map to functions with `aarch64 objdump`) and the loop report.
@@ -1593,7 +1596,7 @@ count what generated code retires, not dispatches. When `-v` or `BIFROST_STATS_P
 two-instruction counter in every block entry (after the chain-skip entry, so chained edges count too) and in every
 self-loop back edge, and the dispatcher folds it into the JIT's totals; without either nothing is emitted and nothing is
 paid, so `BIFROST_PROF`'s sampler keeps its profile free of the counters. The counting code runs in the measured run: on
-CoreMark it costs about 15 %, so the rate it gives is a floor. The figure is exact for Tier-1 code; blocks served from
+CoreMark it costs about 15 %, so the rate it gives is a floor. The figure is exact for Lean code; blocks served from
 the persistent cache (recorded before the counters existed) are not counted.
 
 **Where threads wait.** The sampler counts CPU time, so a thread that waits shows nothing. With `BIFROST_PROF` set, the report

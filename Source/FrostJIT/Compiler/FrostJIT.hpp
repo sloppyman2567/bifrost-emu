@@ -200,11 +200,11 @@ public:
     std::atomic<uint64_t> cache_misses{0};
     std::atomic<uint64_t> interpreter_fallbacks{0};
     std::atomic<uint64_t> block_chains_patched{0};
-    // Tier-1 compile cost and churn (BIFROST_STATS_PERIOD). The max is an
+    // Lean compile cost and churn (BIFROST_STATS_PERIOD). The max is an
     // interval value that the periodic reporter resets. Lock waits count
     // only contended table/compiler lock acquisitions on dispatch paths.
-    std::atomic<uint64_t> tier1_compile_ns{0}, tier1_compile_max_ns{0}, tier1_recompiles{0};
-    std::atomic<uint64_t> tier1_shared_compiles{0}, tier1_compile_retries{0};
+    std::atomic<uint64_t> lean_compile_ns{0}, lean_compile_max_ns{0}, lean_recompiles{0};
+    std::atomic<uint64_t> lean_shared_compiles{0}, lean_compile_retries{0};
     std::atomic<uint64_t> table_lock_wait_ns{0};
     struct InvalidationStats {
         std::atomic<uint64_t> calls{0}, retired{0}, kept{0};
@@ -589,7 +589,7 @@ public:
     void dump_memory_stats();
     // BIFROST_PROF with BIFROST_PC_HIST: the cycles among the hottest blocks (Carry/LoopReport.cpp). Prints; changes no code.
     void dump_carry_candidates(const ProfReport& report);
-    // Interval Tier-1 compile time/stalls and invalidations by reason.
+    // Interval Lean compile time/stalls and invalidations by reason.
     void dump_compile_stats();
     // ── SMC / mapping invalidation ──────────────────────────────────
     // Erase every cached block whose guest range [pc, pc+instr_count*4)
@@ -754,7 +754,7 @@ private:
     bool compile_guarded_mem(const IRInst& inst);
     bool compile_guarded_vec16(const IRInst& inst);
     void emit_memory_fault_exit(const IRInst& inst, bool recoverable);
-    // Tier-1 guarded accesses keep only the bounds and sticky software-check
+    // Lean guarded accesses keep only the bounds and sticky software-check
     // tests inline. The software page checks and the recoverable fault exit
     // are emitted after the block (flush_deferred_guards) from the GPR/vector
     // cache state captured where the access diverts, so the fast path takes
@@ -781,7 +781,7 @@ private:
     };
     bool defer_guards_ = false;
     std::vector<DeferredGuard> deferred_guards_;
-    // One copy per JIT of what each Tier-1 cold tail would otherwise repeat:
+    // One copy per JIT of what each Lean cold tail would otherwise repeat:
     // the software page checks (per address register, width and direction) and
     // the recoverable fault exit. A persistent-cache recording keeps the full
     // tails, since a call out of the block has no meaning in another process.
@@ -998,7 +998,7 @@ private:
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
         int     call_interp_count = 0; // post-optimization IR CALL_INTERP count
         // The instruction words this translation fetched, as a span of
-        // code_words_. Recorded only for contiguous Tier-1 blocks (no
+        // code_words_. Recorded only for contiguous Lean blocks (no
         // inlined leaf). Cache maintenance and mprotect keep a
         // block whose words still match and remain executable; a zero
         // count always retires it.
@@ -1113,7 +1113,7 @@ private:
     // Dead-NZCV successor scans of the current compile (see exit_flags_dead).
     struct FlagDepScratch { uint64_t pc; std::vector<uint32_t> words; };
     std::vector<FlagDepScratch> flag_deps_scratch_;
-    bool flag_scan_active_ = false;   // public Tier-1 compiles only
+    bool flag_scan_active_ = false;   // public Lean compiles only
     // The host flags were loaded from cpu.pstate and nothing has changed them
     // since, so storing them back would rewrite what pstate already holds.
     // Set by a BRCOND that loads its flags; cleared by every flag setter.
@@ -1127,9 +1127,9 @@ private:
     // One past the highest recorded call slot; rewind_codegen purges records
     // in a discarded tail only when this lies beyond the rewind point.
     size_t call_site_end_ = 0;
-    // Retired Tier-1 PCs, so a later publication counts as a recompile.
+    // Retired Lean PCs, so a later publication counts as a recompile.
     std::unordered_set<uint64_t> retired_pcs_;
-    // MT Tier-1 compiles run under the shared table lock, serialized by
+    // MT Lean compiles run under the shared table lock, serialized by
     // compile_mutex_, and publish under the exclusive lock. Invalidations
     // in that window are logged and checked before publication.
     std::mutex compile_mutex_;
@@ -1653,7 +1653,7 @@ private:
     // LOAD_MEM/ATOMIC results would land in a scratch register the next
     // iteration clobbers. Explicit list, NOT a dest<=30 catch-all: branch
     // ops carry a dummy dest=0 and FP ops use dest for FP register numbers.
-    // Used by the self-loop pin selector (Tier-1 once lacked
+    // Used by the self-loop pin selector (Lean once lacked
     // SIMD_SMOV and lost loop-carried SMOV results).
     static bool writes_arch_gpr_directly(const IRInst& inst) {
         switch (inst.op) {
@@ -1980,7 +1980,7 @@ private:
     // which permits skipping the flush→reload sandwich for scratch vregs
     // already cached in the target host reg.
     size_t cur_op_index_ = 0;
-    // The IR block being compiled by Tier-1 (null elsewhere), for emitters that look at the next op.
+    // The IR block being compiled by Lean (null elsewhere), for emitters that look at the next op.
     const std::vector<IRInst>* cur_insts_ = nullptr;
     // vreg_last_use_op_[v] = index of the IR op that LAST reads scratch
     // vreg `v` as a source (src1/src2/aux), or -1 if `v` is never read as
@@ -2004,7 +2004,7 @@ private:
     // Indexed by any vreg in [0, 4096). Each compile's use-scan starts with
     // reset_vreg_uses(), which empties only the lists the previous scan
     // filled (vreg_uses_touched_) and keeps their capacity; rebuilding all
-    // 4096 lists per block was a measurable share of Tier-1 compile time.
+    // 4096 lists per block was a measurable share of Lean compile time.
     std::vector<std::vector<uint16_t>> vreg_uses_;
     std::vector<uint16_t> vreg_uses_touched_;
     void reset_vreg_uses();
@@ -2031,7 +2031,7 @@ private:
     // zext32_fused_[i] = 1: op i (ADD/SUB/AND/OR/XOR/MUL, CSEL, SEXT 8/16) defines a
     // scratch vreg read only by op i+1, a ZEXT 32 of it. Op i is emitted in
     // its 32-bit x86 form (bits 63:32 cleared) and the ZEXT emits nothing
-    // when it keeps the same host register. Tier-1 blocks
+    // when it keeps the same host register. Lean blocks
     // (scan_w32_and_sext_loads); empty elsewhere.
     std::vector<uint8_t> zext32_fused_;
     // Fills zext32_fused_ and sext_load_ for one compile unit; needs vreg_last_use_op_.
@@ -2045,7 +2045,7 @@ private:
     size_t sext_load_done_ = SIZE_MAX;
     // guard_cover_[i] = j: op i is a LOAD_MEM/STORE_MEM at the same base value and offset as the earlier access j,
     // of at least its width, with only straight-line scalar ops between (scan_covered_guards; empty for a block
-    // with BRCOND_SKIP and outside Tier-1). guard_checked_[j] = 1 once op j's guarded access emitted its gate
+    // with BRCOND_SKIP and outside Lean). guard_checked_[j] = 1 once op j's guarded access emitted its gate
     // compare or was covered itself; only then does op i skip its own compare. The access stays a registered
     // fault site with its fault exit.
     std::vector<uint32_t> guard_cover_;
@@ -2054,14 +2054,14 @@ private:
     // fp_load_[i] = 1: op i is a 4- or 8-byte LOAD_MEM whose only reader is the
     // FMOV_G2F at i + 1 (LDR S/D). When the destination is in the vector cache
     // the guarded load is `movss/movsd xmm, [mem]` straight into its XMM and
-    // sets fp_load_done_ = i; the FMOV_G2F then emits nothing. Tier-1 only.
+    // sets fp_load_done_ = i; the FMOV_G2F then emits nothing. Lean only.
     std::vector<uint8_t> fp_load_;
     size_t fp_load_done_ = SIZE_MAX;
     // lazy_load_[i] = 1: op i is a LOAD_REG read only by the discarded SUBS
     // (a CMP) at i + 1, as its second operand. The load then emits nothing
     // and the compare reads cpu.regs[] as a memory operand. lazy_load_vreg_
     // is the pending vreg (-1: none); materialize_lazy_load() emits the load
-    // after all for a consumer that does not fold it. Tier-1 only.
+    // after all for a consumer that does not fold it. Lean only.
     std::vector<uint8_t> lazy_load_;
     int lazy_load_vreg_ = -1;
     int lazy_load_arch_ = -1;
@@ -2070,9 +2070,9 @@ private:
     // or i + 2 past one LOAD_REG), as its second operand. For a 64-bit shift by a constant 1-3 the SHL then emits
     // no shift (its result vreg holds the unshifted value, scaled_vreg_ and
     // scaled_shift_ say so) and the ADD is `lea d, [a + b*2^n]`.
-    // materialize_scaled() emits the shift after all. Tier-1 only.
+    // materialize_scaled() emits the shift after all. Lean only.
     std::vector<uint8_t> scaled_add_;
-    // In-place updates of pinned registers (scan_pin_inplace; Tier-1 self-loops with pins, empty elsewhere). A guest
+    // In-place updates of pinned registers (scan_pin_inplace; Lean self-loops with pins, empty elsewhere). A guest
     // `add x0, x0, #1` is LOAD_REG t <- x0; OP s <- t, y; [ZEXT 32 s']; STORE_REG x0 <- s'. With x0 pinned the generic
     // path computes into a scratch copy of the pin and copies the result back: three host instructions on the
     // loop-carried chain. For such a chain, pin_inplace_[i] = a + 1 on the OP: the compile loop emits it as `a <- a OP y`
@@ -2225,7 +2225,7 @@ private:
     std::vector<std::pair<uint64_t, int>> inlined_ranges_;
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
     // ── XMM vector register cache ───────────────────
-    // Tier-1 assigns a fixed hot loop core and, under pressure, a
+    // Lean assigns a fixed hot loop core and, under pressure, a
     // demand-allocated tail in XMM3-15. Unsupported instructions synchronize
     // locally.
     // XMM0-2 remain instruction scratch. Deferred fault guards snapshot the
@@ -2240,7 +2240,7 @@ private:
     bool vec_cache_active_ = false;
     int  vec_pinned_count_ = 0;
     int  vec_pinned_[32];     // pinned vector regs, in assignment order
-    // Tier-1 keeps a stable loop core and uses the remaining XMMs on
+    // Lean keeps a stable loop core and uses the remaining XMMs on
     // demand. Loop edges reconcile the initial demand layout explicitly.
     bool vec_allocator_active_ = false;
     int vec_fixed_count_ = 0;
@@ -2272,7 +2272,7 @@ private:
                    ? vec_cache_[vreg] : -1;
     }
     // Shared vector operand/effect scan admits synchronization boundaries
-    // and pressure for Tier-1 blocks.
+    // and pressure for Lean blocks.
     // Both paths retain the existing FMA3/AVX host feature requirement.
     bool vec_cache_may_enable(const IRBlock& block);
     bool vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& writes) const;
@@ -2366,7 +2366,7 @@ private:
     // target): the first instructions at `pc` overwrite all four flags before
     // anything that could read them, fault or branch. Records the words the
     // verdict relies on as a dependency of the block being compiled. Public
-    // Tier-1 compiles only; false otherwise.
+    // Lean compiles only; false otherwise.
     bool exit_flags_dead(uint64_t pc);
     // A loop body just past the block cap would split every iteration in two,
     // reloading the vector cache at the seam. Returns the block length that

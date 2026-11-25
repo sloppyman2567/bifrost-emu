@@ -26,7 +26,7 @@ this an apparent improvement, not a matched-scene comparison.
 
 ### Previous gameplay checkpoint (2026-10-05)
 
-Use the default tier-1 JIT with MT chaining. Tier-2 was made opt-in after a
+Use the default Lean JIT with MT chaining. Tier-2 was made opt-in after a
 reported gameplay slowdown with MT region promotion (it was removed on 2026-11-24).
 The live comparison logs showed higher reported throughput with tier-2 off,
 but were not a matched-scene FPS benchmark. A renderer fault in a recent

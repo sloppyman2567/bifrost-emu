@@ -40,7 +40,7 @@ Not the focus: games behind attestation or anti-cheat, and compatibility sweeps 
 | 2.0.0-alpha.1 (2026-10-12) | Released | Subsystem layout; Asgard on the pinned Android 15 framework; SpongeBob playable |
 | 2.0.0-alpha.2 (2026-10-21) | Released; goals partly met | Toasts, `NsdManager`, all of `IAppOpsService`, declined Settings intents, scaled fixed-size apps |
 | 2.0.0-alpha.3 (2026-11-01) | Released; WebView, media and ad scope mostly open | `media.extractor`, POSIX timers, installable Asgard and rootfs, `bifrost-emu app.apk`, window stats |
-| 2.0.0-beta.1 (2026-11-03) | Released as a label; scope partly met | Library cards, per-app settings, clear-data/uninstall, run-ended cards; app Keystore, WebView GPU fences, Vulkan for apps through a guest HAL, a faster Tier-1 JIT |
+| 2.0.0-beta.1 (2026-11-03) | Released as a label; scope partly met | Library cards, per-app settings, clear-data/uninstall, run-ended cards; app Keystore, WebView GPU fences, Vulkan for apps through a guest HAL, a faster Lean JIT |
 | 2.0.0-beta.2 (2026-11-14) | Released; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns (since removed), NativeActivity games |
 | 2.0.0-beta.3 (2026-11-24) | Current; a large release, scope partly met | Graphics calls cost a game much less CPU, the JIT translates about twice as fast and runs cheaper scalar float compares and widening multiplies, large memcpy and memset run on the host, `BIFROST_PROF` stall reports and a Tracy timeline, a per-app Resolution setting, an app launcher that keeps a log, and uninstall targets that find a `make bootstrap` install |
 
@@ -57,7 +57,7 @@ across a long game session.
 On November 10 and 11: an app's helper processes fork from a session Zygote, microG maps a compiled vdex, games link one shared
 read-only copy of Android, launch preparation reuses file hashes and compiles after the session, the package parse cache
 survives updates, static AudioTracks and SoundPool play, the JIT disk cache reads its records instead of mapping them, and
-Tier-1 got the changes listed under [the JIT workstream](#jit-codegen-retain-guest-state-across-hot-regions).
+Lean got the changes listed under [the JIT workstream](#jit-codegen-retain-guest-state-across-hot-regions).
 Measured on Battle Cats and Subway Surfers launches and kernels; the shared copy has not run from an installed Asgard and no
 game was timed for the JIT changes.
 
@@ -313,7 +313,7 @@ exit; then the Azur Lane interaction is checked in a real window and its frame d
 Goal: keep guest registers, vectors and NZCV in host registers across hot paths, reconstructing state only at observable
 boundaries ([design](JIT.md#planned-codegen-retaining-guest-state-across-regions)).
 
-Done: a cheaper Tier-1 (CoreMark 13,156 iterations/s on October 27, 14,874 on November 8 and 16,880 on November 23 (pinned, 200,000 iterations), over the 10,000
+Done: a cheaper Lean (CoreMark 13,156 iterations/s on October 27, 14,874 on November 8 and 16,880 on November 23 (pinned, 200,000 iterations), over the 10,000
 target; [method](archive/JIT-history.md#coremark-re-measurement-2026-11-08)); compact scalar memory guards; shared cold stubs; native scalar and vector FP by element and LD1R; loop bodies up
 to twice the block cap; lighter Q-register accesses. On a set of engine-shaped kernels the JIT went from 5.8× to 4.2× the
 time of a native AVX2 build ([details](JIT.md)).
@@ -365,7 +365,7 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    while loading; the purge at the first thread costs the Android start-up 4% CPU and no wall time), but MT code compiles one block at a
    time, and while loading SpongeBob and Battle Cats the threads waited for that 1.2 to 2 times as long as they compiled. Next: a
    `BIFROST_PROF` run of a game's start (the report now shows translating and waiting per thread) to see whether the game's own threads are the
-   ones waiting; if so, compiling several blocks at once, and then the table growth that stops everyone for 10-30 ms. Open: whether Tier-1 should run SSA on hot blocks only (about 2% of CoreMark's cycles).
+   ones waiting; if so, compiling several blocks at once, and then the table growth that stops everyone for 10-30 ms. Open: whether Lean should run SSA on hot blocks only (about 2% of CoreMark's cycles).
 2. **State moves and copies around the arithmetic.** Real FP math is 2-7% of the generated ops in games and in the game-style
    kernels; the rest is moving guest state, copying vector registers and checking results. One track, in three parts:
    - *Inside a block* (game-style kernels, 2026-11-23): XMM moves and zeroing are 28-36% of the generated ops, vector state
@@ -403,7 +403,7 @@ Open, in priority order (the maintainer put translation speed ahead of the cross
    still runs in the interpreter (Zenless Zone Zero, 2026-11-23, `BIFROST_CLASS_PROF`): the exclusive pairs `ldxp`/`stxp`/`ldaxp`/
    `stlxp` with their retry loops; 64-bit-lane saturating narrowing shifts stay interpreted too (scalar `fmax`/`fmin` stepped
    the interpreter for every zero result until 2026-11-24; now only a NaN input does).
-4. **Carry** (planned second JIT; Tier-2 was removed on 2026-11-24 because it never beat Tier-1 by more than a few percent and no game was
+4. **Carry** (planned second JIT; Tier-2 was removed on 2026-11-24 because it never beat Lean by more than a few percent and no game was
    shown to gain, [why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)). It keeps guest registers in host registers across blocks and
    back edges, with sampled hotness and no timed trials. A CoreMark simulation puts the ceiling at 63-84% of register moves
    ([limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)). Next: a clean gameplay profile, then the

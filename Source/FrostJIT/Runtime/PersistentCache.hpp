@@ -1,4 +1,4 @@
-// PersistentCache.hpp — the experimental cross-launch store of Tier-1
+// PersistentCache.hpp — the experimental cross-launch store of Lean
 // translations (BIFROST_JIT_DISK_CACHE=1, or `verify` to recompile and
 // compare every hit).
 //

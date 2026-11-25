@@ -144,7 +144,7 @@ int main() {
             std::string block, pc, begin, end, kind;
             if (!(fields >> block >> pc >> begin >> end >> kind)) { check(false); continue; }
             check(std::stoull(begin, nullptr, 0) < std::stoull(end, nullptr, 0));
-            if (kind == "tier1-ir") {
+            if (kind == "lean-ir") {
                 const auto guest = std::stoull(pc, nullptr, 0);
                 check(guest >= head && guest < head + sizeof(code) && !(guest & 3));
                 ++rows;

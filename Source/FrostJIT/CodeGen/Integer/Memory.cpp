@@ -195,7 +195,7 @@ bool FrostJIT::compile_guarded_mem(const IRInst& inst) {
     pinned_host_regs_ = saved_pins;
     return true;
 }
-// A single Q-register load or store (Tier-1): the scalar guard above at width
+// A single Q-register load or store (Lean): the scalar guard above at width
 // 16, then one MOVUPD between guest memory and the register's pinned XMM, or
 // XMM0 and v_lo/v_hi when it is not cached. A fault leaves the register and
 // memory untouched, so the fault exit interprets the whole instruction. A
@@ -289,7 +289,7 @@ bool FrostJIT::compile_guarded_vec16(const IRInst& inst) {
     return true;
 }
 // The fault exit reads only the host-register mappings, their dirty bits and
-// the vector cache's live layout and dirty flags. Tier-1's demand allocator
+// the vector cache's live layout and dirty flags. Lean's demand allocator
 // may reuse an XMM between the access and deferred recovery emission.
 FrostJIT::GuardState FrostJIT::capture_guard_state() const {
     GuardState state;
@@ -394,7 +394,7 @@ constexpr bool FrostJIT::cold_stub_register(int r) {
 // Called once before a JIT's first block. A page-check stub takes the address in
 // its register, preserves every register and returns ZF set when the access may
 // proceed. The fault exit takes the guest PC in RAX and ends the frame, whichever
-// Tier-1 block jumps to it: both frame layouts return the same way.
+// Lean block jumps to it: both frame layouts return the same way.
 void FrostJIT::emit_cold_stubs() {
     const bool recording = recording_;
     recording_ = false;  // not part of the block being recorded

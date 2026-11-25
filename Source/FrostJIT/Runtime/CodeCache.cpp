@@ -171,7 +171,7 @@ bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
     staging_ = false;
     const size_t edge_end = mt_edges_.size();
     blocks_mutex_.unlock_shared();
-    tier1_shared_compiles.fetch_add(1, std::memory_order_relaxed);
+    lean_shared_compiles.fetch_add(1, std::memory_order_relaxed);
     clock.wait([&] { lock_table(); });
     shared_compile_active_.store(false, std::memory_order_relaxed);
     const bool raced = blocks_.count(pc) != 0;
@@ -195,7 +195,7 @@ bool FrostJIT::compile_entry(Emulator& emu, uint64_t pc, BlockEntry& out) {
         // Guest code changed while compiling: translate the current bytes
         // with the table held, which no invalidation can interleave.
         if (stale && !raced) {
-            tier1_compile_retries.fetch_add(1, std::memory_order_relaxed);
+            lean_compile_retries.fetch_add(1, std::memory_order_relaxed);
             translate_block(emu, pc);
         }
     }
@@ -235,12 +235,12 @@ void FrostJIT::dump_compile_stats() {
     static uint64_t last_blocks, last_ns, last_recompiles, last_shared, last_retries, last_wait;
     static uint64_t last_inv[static_cast<size_t>(CodeInvalidation::Count)][3];
     const uint64_t blocks = blocks_translated.load(std::memory_order_relaxed);
-    const uint64_t ns = tier1_compile_ns.load(std::memory_order_relaxed);
-    const uint64_t recompiles = tier1_recompiles.load(std::memory_order_relaxed);
-    const uint64_t shared = tier1_shared_compiles.load(std::memory_order_relaxed);
-    const uint64_t retries = tier1_compile_retries.load(std::memory_order_relaxed);
+    const uint64_t ns = lean_compile_ns.load(std::memory_order_relaxed);
+    const uint64_t recompiles = lean_recompiles.load(std::memory_order_relaxed);
+    const uint64_t shared = lean_shared_compiles.load(std::memory_order_relaxed);
+    const uint64_t retries = lean_compile_retries.load(std::memory_order_relaxed);
     const uint64_t wait = table_lock_wait_ns.load(std::memory_order_relaxed);
-    const uint64_t max_ns = tier1_compile_max_ns.exchange(0, std::memory_order_relaxed);
+    const uint64_t max_ns = lean_compile_max_ns.exchange(0, std::memory_order_relaxed);
     const uint64_t d_blocks = blocks - last_blocks, d_ns = ns - last_ns;
     fprintf(stderr, "[JIT] compile: blocks=%llu recompiles=%llu ms=%.2f avg_us=%.1f max_us=%.1f "
             "shared=%llu retries=%llu lock_wait_ms=%.2f\n",
@@ -735,7 +735,7 @@ void FrostJIT::publish_block(uint64_t pc, const BlockEntry& entry) {
     remember_code_granules(pc, entry);
     if (dbg().jit_perf_map) write_perf_map(pc, entry);
     if (retired_pcs_.erase(pc))
-        tier1_recompiles.fetch_add(1, std::memory_order_relaxed);
+        lean_recompiles.fetch_add(1, std::memory_order_relaxed);
     blocks_[pc] = entry;
 }
 

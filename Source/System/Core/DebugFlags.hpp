@@ -102,8 +102,8 @@ struct DebugFlags {
     uint64_t dbg_pc = 0;
     uint64_t dump_pc = 0;  // BIFROST_DUMP_PC=addr: BIFROST_JIT_DUMP only dumps the block at addr (0 = all)
     int fp_native_gate = -1;  // BIFROST_FP_NATIVE_GATE=mask: FP op classes the translator handles natively (-1 = all)
-    bool no_ssa = false; // BIFROST_NO_SSA — skip the scalar SSA pipeline (BIFROST_TIER1_SSA has no effect)
-    bool tier1_ssa = false; // BIFROST_TIER1_SSA=1 — run the scalar SSA adapter on Tier-1 blocks (slower to translate, see Docs/JIT.md)
+    bool no_ssa = false; // BIFROST_NO_SSA — skip the scalar SSA pipeline (BIFROST_LEAN_SSA has no effect)
+    bool lean_ssa = false; // BIFROST_LEAN_SSA=1 — run the scalar SSA adapter on Lean blocks (slower to translate, see Docs/JIT.md)
     bool ir_validate = false;  // BIFROST_IR_VALIDATE — per-op IR param contract checks after translate
     using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;  // [lo, hi) guest pcs
     Ranges fwd_ranges;   // BIFROST_FWD_RANGES=lo-hi,...  — FWD only for blocks starting here
@@ -278,7 +278,7 @@ struct DebugFlags {
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.no_ssa = env("BIFROST_NO_SSA");
-        f.tier1_ssa = env("BIFROST_TIER1_SSA");
+        f.lean_ssa = env("BIFROST_LEAN_SSA");
         f.ir_validate = all || env("BIFROST_IR_VALIDATE");
         f.fwd_ranges = parse_ranges(std::getenv("BIFROST_FWD_RANGES"));
         f.block_trace = parse_ranges(std::getenv("BIFROST_BLOCK_TRACE"));

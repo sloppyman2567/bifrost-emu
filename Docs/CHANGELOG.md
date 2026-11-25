@@ -12,7 +12,9 @@ Older releases are in the archive, unchanged: [2.0.0-alpha.2](archive/CHANGELOG-
 
 A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagnostics.
 
-- Tier-2 regions are removed. They were opt-in (`BIFROST_TIER2=1`) and never beat Tier-1 by more than a few percent on CoreMark, and no
+- The JIT's two modes are called Lean (the block compiler, until now "Tier-1") and Carry (what it adds on top, on by default). Only the names
+  changed, with one switch: `BIFROST_TIER1_SSA` is now `BIFROST_LEAN_SSA`.
+- Tier-2 regions are removed. They were opt-in (`BIFROST_TIER2=1`) and never beat Lean by more than a few percent on CoreMark, and no
   game was shown to gain. `BIFROST_TIER2`, `BIFROST_TIER2_*`, `BIFROST_T2_REGIONDUMP` and the region-only `BIFROST_NO_*` switches
   (`CALLREGION`, `DESTSRC`, `RDCE`, `LICM`, `KEEPRES`, `EXITCHAIN`) do nothing now, and the `tier2:` and `block-runs` lines are gone
   from the JIT stats. Nothing changes in a default run, and the emulator binary is about 150 KB smaller.
@@ -58,7 +60,7 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   "Couldn't read the app library: Expecting value".
 - Translating code takes about half the time (the JIT no longer runs its SSA pass on every block, stops building a verification
   record nobody reads outside `BIFROST_JIT_VERIFY`, and keeps its per-block tables in flat arrays). Starting the real Android
-  runtime went from 1.57 s to 1.02 s. Generated code is about 2% slower on CoreMark; `BIFROST_TIER1_SSA=1` brings the old pass back.
+  runtime went from 1.57 s to 1.02 s. Generated code is about 2% slower on CoreMark; `BIFROST_LEAN_SSA=1` brings the old pass back.
 - A float compare followed by a branch (`fcmp` then `b.lt`, `b.mi`, `b.gt` and the rest) is one compare and one jump (two for equal
   and not-equal) instead of nine instructions, and the condition flags are no longer saved when the next instructions only do float
   arithmetic before another compare. A culling loop runs 12% fewer host instructions, a collision loop 6.5% and a particle loop
@@ -125,7 +127,7 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
 - The `guest: N MIPS` line, the `-v` `executed N instructions` line and its MIPS rate now include chained blocks and
   self-loop iterations; the last two used the run loop's dispatch count, which a chained guest reaches once per chain.
   With `-v` or `BIFROST_STATS_PERIOD` the translator emits the counters (about 15 % slower on CoreMark), so the figure is
-  exact for Tier-1 code instead of a small fraction of it; `BIFROST_PROF` alone does not emit them. Persistent-cache
+  exact for Lean code instead of a small fraction of it; `BIFROST_PROF` alone does not emit them. Persistent-cache
   blocks are not counted.
 
 ### Added (`BIFROST_PROF` names the call behind a freeze)

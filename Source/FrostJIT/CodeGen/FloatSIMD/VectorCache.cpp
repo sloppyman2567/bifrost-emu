@@ -4,7 +4,7 @@
 #include <vector>
 #include <stdexcept>
 //
-// XMM0-2 are instruction scratch. Tier-1 keeps a stable hot loop core
+// XMM0-2 are instruction scratch. Lean keeps a stable hot loop core
 // in XMM3-15 and allocates the remaining slots by next use under pressure.
 // Unsupported operations synchronize locally. Retained loop edges reconcile
 // demand values with the entry layout, including parallel-copy cycles.
@@ -59,7 +59,7 @@ static bool vec_cache_compatible_op(IROp op) {
     }
 }
 
-// Vector operands/effects used both by admission and Tier-1's allocator.
+// Vector operands/effects used both by admission and Lean's allocator.
 // Unknown operations are synchronization boundaries; no guessed effects.
 bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& writes) const {
     reads = writes = 0;

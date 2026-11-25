@@ -1,7 +1,7 @@
-// CacheRecording.cpp — Tier-1 translations that later processes reuse
+// CacheRecording.cpp — Lean translations that later processes reuse
 // (BIFROST_JIT_DISK_CACHE; storage in PersistentCache.cpp).
 //
-// A recording compile (recording_) is an ordinary public Tier-1 compile of
+// A recording compile (recording_) is an ordinary public Lean compile of
 // code mapped from a file. Its 64-bit immediates are logged, the sites that
 // embed host addresses name them (note_host_reloc) and every constant a
 // 32-bit form could hold takes its imm64 form (wide_guest_pc). Before publication the block is compiled a second
