@@ -53,6 +53,13 @@ static void build_permute_masks(uint8_t opc6, int esize, bool q,
         }
     }
 }
+bool FrostJIT::simd_xtn_inline(unsigned subop, unsigned esize) const {
+    if (subop == 0) return true;  // XTN: every source size
+    if (esize != 2 && esize != 4) return false;
+    // SQXTN is SSE2; SQXTUN needs packusdw for 32-bit sources, UQXTN pminuw/pminud.
+    return subop == 2 || (subop == 1 && esize == 2) || has_sse41();
+}
+
 bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
     switch (inst.op) {
         case IROp::SIMD_2REG: {
@@ -322,12 +329,14 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
         // ── SIMD XTN (XTN/SQXTUN/SQXTN/UQXTN, narrowing) — native ────
         // width = SOURCE esize (2/4/8); imm = subop (0=XTN, 1=SQXTUN,
         // 2=SQXTN, 3=UQXTN); flags_op = Q (0 → v_lo + zero v_hi, 1 → v_hi,
-        // preserving v_lo). Full 128-bit source; 8 result bytes.
+        // preserving v_lo). Full 128-bit source; 8 result bytes. Cache-aware (vec_inst_operands): the
+        // source and Vd go through load_vec/store_vec and the result is one whole-register write.
         case IROp::SIMD_XTN: {
-            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
             const SimdSubopParams sp = inst.xtn_params();
             const int esize = static_cast<int>(sp.esize);
             const int subop = static_cast<int>(sp.subop);
+            // The vector cache admits only the inline forms (vec_inst_operands); the others run as boundaries.
+            if (vec_cache_active_ && !simd_xtn_inline(subop, esize)) { emit_call_interp(inst.arm_pc, false); return true; }
             clobber_flags();
             load_vec(0, static_cast<int>(inst.src1));
             const bool native_sat = esize != 8 &&
@@ -411,11 +420,19 @@ bool FrostJIT::compile_simd_elements_(const IRInst& inst) {
                     break;
                 }
             }
+            // Whole-register 16-byte stores only: a later 16-byte reload cannot be forwarded from two 8-byte stores.
             if (sp.q) {
-                store_lo(0, vhi_off(static_cast<int>(inst.dest)));
+                const int pinned = vec_xmm(static_cast<int>(inst.dest));
+                if (pinned >= 0 && !fp_cache_active_) {
+                    sse2_op(0x6C, pinned, 0);               // punpcklqdq in place: [Vd.lo, narrowed]
+                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
+                } else {
+                    load_vec(1, static_cast<int>(inst.dest));  // Vd keeps its low half
+                    sse2_op(0x6C, 1, 0);
+                    store_vec(1, static_cast<int>(inst.dest), true);
+                }
             } else {
-                store_lo(0, vlo_off(static_cast<int>(inst.dest)));
-                fp_zero_hi(static_cast<int>(inst.dest));
+                store_vec(0, static_cast<int>(inst.dest), false);
             }
             return true;
         }

@@ -265,17 +265,15 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
 // ── The main optimizer ────────────────────────────────────────────────
 void optimize_ir(IRBlock& block) {
     if (block.insts.empty()) return;
-    // LDXR_FAST, STXR_FAST, or STLR_FAST ops. If so, disable the
-    // arm_reg_cache load-forwarding (FWD) for the ENTIRE block. These
-    // ops have complex memory + register side effects that the FWD
-    // optimizer can't model correctly:
-    //   - ATOMIC reads cpu.regs[imm] directly (bypassing vregs)
-    //   - ATOMIC writes memory (invalidates forwarded loads)
-    //   - LL/SC ops interact with the exclusive monitor
-    // Forwarding stale values across these ops causes LSE atomic
-    // correctness bugs (CAS writes wrong desired value, etc.).
-    // FWD is a ~5.6% speedup on compute loops — we skip it only for
-    // blocks with atomics, which are rare in compute workloads.
+    // Blocks with an ATOMIC (LSE) op skip the arm_reg_cache load-forwarding
+    // (FWD) for the ENTIRE block: CAS reads its expected value from
+    // cpu.regs[imm] directly (bypassing vregs) and writes the old value
+    // there, and the op writes memory, so the FWD optimizer cannot model
+    // it. FWD is a ~5.6% speedup on compute loops; atomics are rare there.
+    // LDXR/STXR/STLR_FAST take and return vregs, and SIMD_NATIVE_STRUCT /
+    // SIMD_NATIVE_EXTRA / CALL_INTERP / SVC are barriers inside the pass
+    // (they clear the caches and the pending dead stores), so those blocks
+    // keep forwarding on both sides of the op.
     static bool fwd_off_ = dbg().no_fwd;
     // (legacy BIFROST_ENABLE_FWD=1 is accepted and means on, which is now
     // the default — it only matters if some script still exports it.)
@@ -291,10 +289,7 @@ void optimize_ir(IRBlock& block) {
     bool block_has_atomics = false;
     if (fwd_requested) {
         for (const auto& inst : block.insts) {
-            if (inst.op == IROp::SIMD_NATIVE_STRUCT || inst.op == IROp::SIMD_NATIVE_EXTRA || inst.op == IROp::ATOMIC ||
-                inst.op == IROp::LDXR_FAST ||
-                inst.op == IROp::STXR_FAST ||
-                inst.op == IROp::STLR_FAST) {
+            if (inst.op == IROp::ATOMIC) {
                 block_has_atomics = true;
                 break;
             }
@@ -499,7 +494,7 @@ void optimize_ir(IRBlock& block) {
                 // correctness bug that crashed `toybox ls /`.
                 //
                 // On by default (BIFROST_NO_FWD=1 opts out; bench_mips gets
-                // ~10% from it). Disabled for blocks containing ATOMIC/LL/SC ops (see
+                // ~10% from it). Disabled for blocks containing ATOMIC ops (see
                 // block_has_atomics above).
                 const uint16_t* cached_slot = fwd_enabled ? arm_reg_cache.find(ar) : nullptr;
                 if (cached_slot) {

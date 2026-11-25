@@ -1884,6 +1884,8 @@ private:
     // for every word it accepts.
     bool native_simd_inlinable(uint32_t w) const;
     bool native_simd_cache_compatible(uint32_t w) const;
+    // SIMD_XTN forms the emitter encodes inline (the others call the interpreter, which the cache treats as a boundary).
+    bool simd_xtn_inline(unsigned subop, unsigned esize) const;
     bool emit_native_simd_inline(const IRInst& inst);
     // SSE/VEX encoding helpers shared by the SIMD families (SIMD/Encoders.cpp).
     void load_fp_vector(int xmm, int v, bool q);

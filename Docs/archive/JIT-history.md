@@ -2,6 +2,44 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Narrowing in the vector cache, one-store half results and forwarding across LL/SC (2026-11-24)
+
+Found by reading the hottest generated code of a 4 minute SpongeBob run (loading and ad start-up only, `BIFROST_PROF=1 BIFROST_PC_HIST=1 BIFROST_CARRY=1`,
+`perf record -F 1999` for host pcs, gdb attached through ptrace to disassemble the hottest 256-byte regions; the profile was flat, the hottest guest block
+2.3% of JIT samples). Three patterns in the hottest blocks:
+
+1. **Two 8-byte stores, one 16-byte reload.** A narrowing op (`XTN` family) wrote `movsd [lo]` and, for the zero upper half, `pxor; movsd [hi]`; the
+   next vector read of that register was a 16-byte `movups`, which cannot be forwarded from two stores. `SIMD_XTN` was also not in
+   `vec_inst_operands`, so any block holding one had that op as a cache boundary (everything written back, the cache dropped).
+2. **`sp` reloaded after every access.** In a frame prologue every `stp` re-read `[rbx+0x100]` although the previous instruction had just stored it.
+   Cause: `optimize_ir` switched register forwarding off for the whole block if it held an `ATOMIC`, `LDXR/STXR/STLR_FAST` (an `ldar` is
+   `LDXR_FAST`), `SIMD_NATIVE_STRUCT` or any `SIMD_NATIVE_EXTRA`. Reproduced with a guest fixture: the same prologue forwards `sp` without an `ldar`
+   and reloads it with one.
+3. Not changed: the `lock not [cpu+0x10d8]` that an acquire load costs in that block (a memory-ordering choice), a NaN check after every scalar FP
+   divide (relaxing NaN semantics is the maintainer's decision), and one bounds guard per spilled register (31% of body time is memory with guards).
+
+Changes. `SIMD_XTN` reads Vn (and Vd for the `*2` forms), writes Vd and uses `load_vec`/`store_vec`, so the cache keeps the result in an XMM; the forms
+the emitter sends to the interpreter (64-bit-source saturating forms, the SSE4.1 forms without SSE4.1) stay boundaries (`simd_xtn_inline`). `store_vec`
+with Q=0 on the uncached path is `movq xmm, xmm` (zeroes bits 127:64) and one `movups` store instead of `movsd; pxor; movsd` (every caller ends its
+handler after the store, so the XMM's upper half is dead). The `*2` forms update a pinned register in place with one `punpcklqdq`. The block-wide
+forwarding veto is now only for `ATOMIC` (LSE: CAS reads its expected value from `cpu.regs` directly); LL/SC and native SIMD ops are already
+barriers inside the pass (caches cleared, pending dead stores flushed).
+
+Measured, `perf stat` user events, one pinned core, 5 alternating runs each way, a micro workload that is the two patterns (two `xtn`, `str s`, and a
+five-`stp` frame around an `ldar`, 6 M iterations): host instructions 1.5435 G -> 1.4293 G (-7.4%), cycles median 792 M -> 516 M (-35%; individual runs 477-527 M
+new, 772-811 M old). With `BIFROST_CARRY=1`: instructions 1.5422 G -> 1.4400 G (-6.6%); cycles scatter widely (476-995 M new, 766-996 M old) so no cycle
+figure is claimed. Controls: CoreMark 369.362 G instructions in both builds (cycles inside run noise, CRC validated), `bench_matrix` and
+`bench_doom_vector_fp` within noise. The micro workload is built from the patterns, so the cycle gain is an upper bound for real code.
+
+Checked: `make verify` (112 differential fixtures, 15 threaded oracle runs), 260 tests of `run_tests.sh --filter 'jit|atomic|llsc|ldxr|ldaxr|stxr|lse|cas|mutex|thread|futex|simd|neon|fp_|vec|signal|sig'`,
+a 48-form XTN/SQXTN/UQXTN/SQXTUN differential against `qemu-aarch64` (identical output, FPSR.QC included), and the `jit_neon_xtn` all-forms test (now in
+`run_tests.sh`; it was built but never run). `jit_llsc_native` gained the registers-across-exclusives check; its existing ABA-stack check fails under QEMU
+(also on the unmodified file), so QEMU is the oracle only for the new check. A cached `XTN` was confirmed by reading the generated code of a loop
+(`pand; packuswb; punpcklqdq`, no state-slot access).
+
+Not measured: any game (this run only loaded), and the `fp_zero_hi` pair for scalar FP results, which also leaves two 8-byte stores in front of a
+possible 16-byte reload (`mov qword [hi], 0` was slower there in [an earlier test](#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10); not retried).
+
 ## CoreMark with Carry on: the bottleneck is still guest state traffic (2026-11-24)
 
 Where CoreMark's time goes with `BIFROST_CARRY=1` (register passing and the exit work in), and what the guest state moves touch. Method: 200,000

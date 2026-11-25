@@ -33,6 +33,10 @@ A large release: more than 60 commits since 2.0.0-beta.2, mostly speed and diagn
   (CoreMark: 2.8% fewer host instructions and about 2.4% fewer cycles, five alternating runs; no game has been timed).
 - `BIFROST_PROF` with `BIFROST_PC_HIST=1` also lists the hot loops of several blocks (`[carry]` lines): how much of the JIT time they take and how many
   registers each touches. It only reports.
+- NEON narrowing instructions (`xtn`, `sqxtn`, `uqxtn`, `sqxtun`) keep their result in a host register, and vector results that fill half a register are
+  written with one store instead of two. Blocks that hold an `ldar`, `stlr`, `ldxr`, `stxr` or a NEON instruction no longer reload every register
+  from memory at each instruction (a frame setup around an `ldar` did that for `sp`). A micro workload built from these patterns needs 7% fewer host
+  instructions and about 35% fewer cycles; CoreMark is unchanged, and no game has been timed.
 - Android apps run memory-heavy code with fewer instructions: an access through a tagged pointer (Android's allocator tags them) is one
   instruction shorter, about 5% fewer in the Android runtime's start-up code.
 - Hot loops in Android code run three instructions shorter per iteration (the loop's stop check now runs once when the loop is entered).

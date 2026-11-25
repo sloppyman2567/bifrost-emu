@@ -114,6 +114,14 @@ bool FrostJIT::vec_inst_operands(const IRInst& inst, uint32_t& reads, uint32_t& 
             read(inst.src1); read(inst.src2); write(inst.dest); return true;
         case IROp::SIMD_FP_UNARY:
             read(inst.src1); write(inst.dest); return true;
+        case IROp::SIMD_XTN: {
+            const auto p = inst.xtn_params();
+            // The interpreter forms stay boundaries: they run with the cache off.
+            if (!simd_xtn_inline(p.subop, p.esize)) return false;
+            read(inst.src1);
+            if (p.q) read(inst.dest);  // XTN2 keeps the low half of Vd
+            write(inst.dest); return true;
+        }
         case IROp::SIMD_DUP:
         case IROp::SIMD_MOVI:
             write(inst.dest); return true;

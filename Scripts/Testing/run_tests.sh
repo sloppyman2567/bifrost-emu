@@ -388,6 +388,8 @@ UNIT_TESTS=(
     "simd_pmull|Tests/Unit/jit_simd_pmull.elf||15|10240 checks passed"
     "crc32_instructions|Tests/Unit/jit_crc32.elf||5|checks passed"
     "simd_sat_narrow|Tests/Unit/jit_simd_sat_narrow.elf||5|672 checks passed"
+    # XTN/SQXTN/UQXTN/SQXTUN, base and *2, in blocks where the vector cache keeps the narrowed register in an XMM.
+    "neon_xtn|Tests/Unit/jit_neon_xtn.elf||5|13 checks, 0 failures"
     "jit_shrn_sat|Tests/Unit/jit_shrn_sat.elf||15|jit_shrn_sat: ALL PASS"
     "simd_sat|Tests/Unit/test_simd_sat.elf||5|ALL PASS"
     "fp_pw_elem|Tests/Unit/jit_fp_pw_elem.elf||5|ALL PASS"

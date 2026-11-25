@@ -205,7 +205,9 @@ A new history section can make an older "not measured" or "next section" line wr
   register's cached XMM with `movss`/`movsd` (a registered fault site, slot claimed before the guard captures
   the layout) and the `FMOV_G2F` emits nothing. A scalar result written to a cached XMM leaves every bit above it
   zero (`xorps; movss` or `movq`), so the vector cache's `fp_zero_hi` is free that op (`fp_hi_zeroed_vreg_`, reset
-  per op). Keep `v_hi` zero stores as `pxor; movsd`: an immediate `mov qword` made scalar loops ~30% slower.
+  per op). Keep a scalar result's `v_hi` zero store as `pxor; movsd`: an immediate `mov qword` made scalar loops ~30% slower.
+  A whole-vector result with Q=0 (`store_vec`) is different: zero it in the XMM (`movq xmm, xmm`) and store 16 bytes, so a later 16-byte
+  reload forwards; callers must not use the XMM's upper half afterwards.
 - Vn is `CPU::v[n]`, 16 contiguous bytes (`lo` bits 63:0, then `hi`), addressed as `vlo_off(n)`/`vhi_off(n)`; byte `b` of
   Vn is `vlo_off(n) + b`. Move a whole register with one 16-byte access (`load_v16`/`store_v16`), never a lo/hi pair, but the
   lo-only scalar FP cache stores 8 bytes: its XMM does not hold `v_hi`.
@@ -231,6 +233,9 @@ A new history section can make an older "not measured" or "next section" line wr
 - Every op that writes an architectural GPR directly must update the optimizer's
   forwarding cache and `writes_arch_gpr_directly()` pin-selection predicate.
   Flags-only ops such as CCMP/CCMN do not write placeholder GPR destinations.
+- An IR op that reads or writes `cpu.regs[]` by index instead of through vregs must be a barrier in `optimize_ir`'s forwarding pass and its
+  dead-store pass (`SIMD_NATIVE_*`, `CALL_INTERP`, `SVC`, calls), or force the block-wide forwarding veto, which only an LSE `ATOMIC` does.
+  `LDXR/STXR/STLR_FAST` use vregs and need neither; `jit_llsc_native` covers registers across them in one block.
 - A pre-call pinned-vector writeback must include values written anywhere in a
   loop block, including writes after the call that carry into the next iteration.
 - An exit may omit its NZCV store only through `exit_flags_dead` (public Tier-1

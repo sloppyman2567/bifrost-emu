@@ -82,7 +82,8 @@ moves a whole register with one `movups` (`load_v16`/`store_v16`): the vector ca
 `load_vec`/`store_vec`, the Q forms of the FP vector helpers, LD2-LD4/ST2-ST4 and the uncached 16-byte guarded access. The
 low-half scalar FP cache stores 8 bytes, because its XMM does not hold `hi`. Element offsets are `vlo_off(n) + byte`. C++
 reads `cpu.v[n].lo`/`.hi`; a whole-state copy is one `memcpy` of `v`. Keep 16-byte reloads behind 16-byte stores: a 16-byte
-load that spans two earlier 8-byte stores cannot be served by store forwarding.
+load that spans two earlier 8-byte stores cannot be served by store forwarding. A half-width vector result (Q=0) is therefore zeroed in
+the XMM (`movq xmm, xmm`) and written as one 16-byte store (`store_vec`); only scalar FP results keep the lo store and a zero `hi` store.
 
 ### NZCV
 
@@ -795,6 +796,11 @@ STORE_REG. `Tests/Unit/jit_ccmp_forward.c` covers the FreeType rasterizer patter
 that exposed this as missing glyph pixels in Neverball. See
 [the Neverball validation notes](Apps/neverball.md) for the application repro.
 
+Register forwarding is off for a whole block only when it holds an LSE `ATOMIC` (CAS reads its expected value from `cpu.regs[]` directly).
+`LDXR`/`STXR`/`STLR_FAST` take and return vregs, and `SIMD_NATIVE_STRUCT`, `SIMD_NATIVE_EXTRA`, `CALL_INTERP` and `SVC` are barriers inside the
+pass (the forwarding cache, constants, copies and pending dead stores are cleared), so a block with an `ldar` or a NEON op still forwards `sp` and the
+other registers on both sides of it. `jit_llsc_native` checks registers across the exclusives in one block.
+
 ## Same-operand two-register ops
 
 FWD forwards both reads of `cmp w23, w23` to one vreg. ADDS/SUBS and TST
@@ -1222,7 +1228,9 @@ distinguishes single-precision L/H lane bits from the double-precision H bit.
 `SimdFpArithParams::lane` is -1 for a vector operand and otherwise selects
 the scalar lane. Both sources are loaded before destination writes, including
 high-half scalar lanes when the destination aliases Rm. Q=0 clears v_hi.
-Indexed FMUL and vector FABS/FNEG/FSQRT participate in the vector cache.
+Indexed FMUL and vector FABS/FNEG/FSQRT participate in the vector cache, and so do XTN, SQXTN, UQXTN and SQXTUN with their `*2` forms (`*2` keeps
+Vd's low half and replaces the high half in place). The forms emitted as interpreter calls (64-bit-source saturating forms, and the SSE4.1
+forms on a host without it) are cache boundaries (`simd_xtn_inline`).
 Indexed sources are broadcast into scratch XMM0 before writing the destination,
 preserving source/destination aliases and high lanes. Unary operations use
 register operands; sign masks are constructed across all lanes without
@@ -1728,6 +1736,7 @@ by method rather than by fixed address ranges.
 
 Optimization checkpoints and fixes are in [the history](archive/JIT-history.md), unchanged, newest first:
 
+- [Narrowing in the vector cache, one-store half results and forwarding across LL/SC (2026-11-24)](archive/JIT-history.md#narrowing-in-the-vector-cache-one-store-half-results-and-forwarding-across-llsc-2026-11-24)
 - [CoreMark with Carry on: the bottleneck is still guest state traffic (2026-11-24)](archive/JIT-history.md#coremark-with-carry-on-the-bottleneck-is-still-guest-state-traffic-2026-11-24)
 - [SpongeBob profile with the stats counters off (2026-11-24)](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)
 - [Register passing: partial entries and pass-through (2026-11-24)](archive/JIT-history.md#register-passing-partial-entries-and-pass-through-2026-11-24)

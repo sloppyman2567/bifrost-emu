@@ -6,7 +6,11 @@
 //    that share a cache line, and an ABA-prone LIFO (pop reads next through the head, nodes are recycled):
 //    a store-exclusive must fail when another CPU completed a store-exclusive to the same word in between,
 //    which a bare value compare cannot see.
-// 3. Faults: a store-exclusive to a read-only page, a load-exclusive from a PROT_NONE page and a store-release
+// 3. One block, registers across the exclusives: general registers written before and read after a load-acquire,
+//    store-release, load-exclusive, store-exclusive, a NEON compare and an sp-relative save and restore (a frame
+//    prologue around an LDAR), against the values computed in C. The optimizer forwards a register's value
+//    across these operations, so a stale forward shows here.
+// 4. Faults: a store-exclusive to a read-only page, a load-exclusive from a PROT_NONE page and a store-release
 //    to a read-only page each raise SIGSEGV once; the handler opens the page and the loop completes.
 #define _GNU_SOURCE
 #include <pthread.h>
@@ -240,11 +244,49 @@ static void faults(void) {
     CHECK(segv_count == 1 && s2 == 1 && *(uint64_t*)(page + 80) == 5, "F4 stxr after a signal", s2, *(uint64_t*)(page + 80));
 }
 
+static void registers_across_exclusives(void) {
+    for (uint64_t round = 0; round < 8; round++) {
+        uint64_t cell = 0x1111 + round, seed = 5 + 7 * round, out_a, out_b, out_c, spill;
+        uint32_t status, lanes;
+        __asm__ volatile(
+            "mov x9, %[seed]\n"
+            "stp x29, x30, [sp, #-32]!\n"      // frame: sp changes, then is read by every access below
+            "str x9, [sp, #16]\n"
+            "ldar x10, [%[p]]\n"               // x10 = cell
+            "add x9, x9, x10\n"                // x9 = seed + cell
+            "movi v0.4s, #1\n"
+            "movi v1.4s, #1\n"
+            "cmeq v2.4s, v0.4s, v1.4s\n"       // a NEON op between register uses
+            "umov %w[lanes], v2.s[3]\n"
+            "stlr x9, [%[p]]\n"                // cell = seed + cell
+            "ldxr x11, [%[p]]\n"               // x11 = seed + cell
+            "add x11, x11, x9\n"               // 2 * (seed + cell)
+            "stxr %w[status], x11, [%[p]]\n"   // cell = 2 * (seed + cell), status 0
+            "ldr x12, [sp, #16]\n"             // seed back from the frame
+            "ldp x29, x30, [sp], #32\n"
+            "mov %[a], x9\n"
+            "mov %[b], x11\n"
+            "add %[c], x12, x10\n"
+            "mov %[spill], x12\n"
+            : [a]"=&r"(out_a), [b]"=&r"(out_b), [c]"=&r"(out_c), [spill]"=&r"(spill),
+              [status]"=&r"(status), [lanes]"=&r"(lanes)
+            : [p]"r"(&cell), [seed]"r"(seed)
+            : "x9", "x10", "x11", "x12", "v0", "v1", "v2", "memory");
+        const uint64_t base = (0x1111 + round);
+        CHECK(out_a == seed + base, "register after LDAR and STLR", out_a, seed + base);
+        CHECK(out_b == 2 * (seed + base), "register after LDXR", out_b, 2 * (seed + base));
+        CHECK(status == 0 && cell == 2 * (seed + base), "STXR stored the doubled value", cell, 2 * (seed + base));
+        CHECK(spill == seed && out_c == seed + base, "frame slot and register read after the exclusives", spill, seed);
+        CHECK(lanes == 0xFFFFFFFFu, "NEON compare between exclusives", lanes, 0xFFFFFFFFu);
+    }
+}
+
 int main(void) {
     h = 1469598103934665603ull;
     single_cpu();
     static const uint64_t want = 0xbcc73c5d51090ef6ull;
     CHECK(h == want, "single-CPU hash", h, want);
+    registers_across_exclusives();
     contention();
     faults();
     printf("jit_llsc_native: %s\n", fails ? "FAILED" : "ALL PASS");
