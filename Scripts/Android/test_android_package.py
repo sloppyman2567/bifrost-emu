@@ -393,6 +393,8 @@ class LauncherArgumentTests(unittest.TestCase):
                 self.assertEqual(launch_changes({"jit_disk_cache": value}), ([], {"BIFROST_JIT_DISK_CACHE": expected}))
             self.assertEqual(launch_changes({"jit_disk_cache": "default", "jit_disk_cache_mb": "default"}), ([], {}))
             self.assertEqual(launch_changes({"jit_disk_cache_mb": "1024"}), ([], {"BIFROST_JIT_DISK_CACHE_MB": "1024"}))
+            self.assertEqual(launch_changes({"jit_carry": "on"}), ([], {"BIFROST_CARRY": "1"}))
+            self.assertEqual(launch_changes({"jit_carry": "default"}), ([], {}))
             native = dict(app, launcher="native_activity")
             self.assertNotIn("--trace-apk", launch_request(native, trace=True))
             # Saved choices apply to every launch, below the command line and the environment.

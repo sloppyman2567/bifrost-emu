@@ -247,6 +247,8 @@ in `-v` shows how many blocks were formed. On CoreMark it removes 1.8% of host i
 
 ### Carry formation (`BIFROST_CARRY=1`)
 
+An Android app turns Carry on from its settings page in the library ("JIT Carry"), or with `asgard config APP jit_carry on`; both set `BIFROST_CARRY=1` for that app's launches.
+
 The mid-block exits above also let a block go on past an ordinary forward conditional branch. With `BIFROST_CARRY=1`, `translate_block` treats every
 forward `cbz`, `cbnz`, `tbz`, `tbnz` or `b.cond` (taken target above the branch) as an exit when the block has room (at most six such exits, and two
 instructions of the cap left): the not-taken side is the next instruction in memory, so the block stays contiguous and its code words stay one run,

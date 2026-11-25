@@ -19,6 +19,9 @@ JIT_DISK_CACHE_VALUES = {"on": "1", "off": "0", "verify": "verify"}
 # On-disk budget per app in MB (BIFROST_JIT_DISK_CACHE_MB); default follows [jit] disk_cache_mb, normally 512.
 JIT_DISK_CACHE_SIZES = (("default", "Default (512 MB)"), ("128", "128 MB"), ("256", "256 MB"), ("512", "512 MB"),
                         ("1024", "1 GB"), ("2048", "2 GB"), ("4096", "4 GB"))
+# Carry (BIFROST_CARRY, experimental): the JIT keeps guest registers in host registers across forward branches and block edges.
+# The emulator reads the variable by presence, so there is no explicit off: default is off.
+JIT_CARRIES = (("default", "Default (off)"), ("on", "On (experimental)"))
 # What a gamepad does for an app that only takes touch: auto (the default) leaves the pad a pad and lets Start and Select
 # together turn on a touch cursor (BIFROST_ANDROID_CONTROLLER), gamepad never has a cursor and leaves Start and Select to the
 # game, cursor has the cursor on from the start.
@@ -46,12 +49,13 @@ CHOICES = {"window_stats_mode": tuple(name for name, _ in STATS_MODES),
            "back_key": tuple(name for name, _ in BACK_KEYS),
            "enter_key": tuple(name for name, _ in ENTER_KEYS),
            "jit_disk_cache": tuple(name for name, _ in JIT_DISK_CACHES),
-           "jit_disk_cache_mb": tuple(name for name, _ in JIT_DISK_CACHE_SIZES), "network": NETWORKS,
+           "jit_disk_cache_mb": tuple(name for name, _ in JIT_DISK_CACHE_SIZES),
+           "jit_carry": tuple(name for name, _ in JIT_CARRIES), "network": NETWORKS,
            "window_mode": tuple(name for name, _ in WINDOW_MODES),
            "resolution": tuple(name for name, _ in RESOLUTIONS),
            "controller": tuple(name for name, _ in CONTROLLERS)}
-KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "network",
-        "window_mode", "resolution", "controller", "menu_entry")
+KEYS = ("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "jit_carry",
+        "network", "window_mode", "resolution", "controller", "menu_entry")
 BOOLEANS = {"on": True, "true": True, "yes": True, "1": True, "off": False, "false": False, "no": False, "0": False}
 PROPERTY_PREFIX = "property."
 
@@ -165,6 +169,8 @@ def launch_changes(settings):
         env["BIFROST_JIT_DISK_CACHE"] = JIT_DISK_CACHE_VALUES[settings["jit_disk_cache"]]
     if settings.get("jit_disk_cache_mb", "default") != "default":
         env["BIFROST_JIT_DISK_CACHE_MB"] = settings["jit_disk_cache_mb"]
+    if settings.get("jit_carry") == "on":
+        env["BIFROST_CARRY"] = "1"
     if settings.get("network") == "offline":
         env["BIFROST_ANDROID_OFFLINE"] = "1"
     if "window_mode" in settings:

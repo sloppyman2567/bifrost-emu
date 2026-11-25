@@ -17,7 +17,7 @@ import time
 
 import android_gamepad
 from android_package import PACKAGE, ROOT
-from android_settings import (BACK_KEYS, ENTER_KEYS, JIT_DISK_CACHE_SIZES, JIT_DISK_CACHES, NETWORKS, RESOLUTIONS, STATS_MODES, WINDOW_MODES,
+from android_settings import (BACK_KEYS, ENTER_KEYS, JIT_CARRIES, JIT_DISK_CACHE_SIZES, JIT_DISK_CACHES, NETWORKS, RESOLUTIONS, STATS_MODES, WINDOW_MODES,
                               CONTROLLERS,
                               load as load_settings, save as save_settings)
 from android_sessions import session_log
@@ -537,6 +537,12 @@ def settings_dialog(window, app, settings):
             self.disk_cache_mb.setToolTip("Most disk space this app's cache may use. "
                                           "Default follows [jit] disk_cache_mb in bifrost.toml, normally 512 MB")
             form.addRow("JIT disk cache size", self.disk_cache_mb)
+            self.carry = QComboBox()
+            for name, text in JIT_CARRIES: self.carry.addItem(text, name)
+            self.carry.setCurrentIndex(max(0, self.carry.findData(settings.get("jit_carry", "default"))))
+            self.carry.setToolTip("Experimental: the JIT keeps guest registers in host registers across branches and between blocks. "
+                                  "A few percent faster on CoreMark; not yet checked on many apps. Default is off")
+            form.addRow("JIT Carry", self.carry)
             self.network = QComboBox()
             for name, text in zip(NETWORKS, ("Follow this computer", "Offline")): self.network.addItem(text, name)
             self.network.setCurrentIndex(max(0, self.network.findData(settings.get("network", "auto"))))
@@ -569,7 +575,7 @@ def settings_dialog(window, app, settings):
             self.menu = QCheckBox("Show a launcher for this app in the desktop's application menu")
             self.menu.setChecked(settings.get("menu_entry", self.menu_default)); form.addRow("Application menu", self.menu)
             self.choices = {"window_stats_mode": self.stats_mode, "back_key": self.back, "enter_key": self.enter,
-                            "jit_disk_cache": self.disk_cache, "jit_disk_cache_mb": self.disk_cache_mb, "network": self.network,
+                            "jit_disk_cache": self.disk_cache, "jit_disk_cache_mb": self.disk_cache_mb, "jit_carry": self.carry, "network": self.network,
                             "window_mode": self.window_mode, "resolution": self.resolution, "controller": self.controller}
             form.addRow("Runtime", dim(QLabel(f"Android API {API} · bundled runtime")))
             directory = window.state / app["package"]
@@ -642,7 +648,7 @@ def settings_dialog(window, app, settings):
             for button in buttons.buttons(): button.setIcon(QIcon())
             buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
-                            self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
+                            self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(), self.carry.currentData(),
                             self.network.currentData(), self.window_mode.currentData(), self.resolution.currentData(),
                             self.controller.currentData(), self.menu.isChecked())
             # The gamepad page's rows draw their own focus; the desktop widgets get a ring.
@@ -674,7 +680,7 @@ def settings_dialog(window, app, settings):
 
             rows = [toggle("Show FPS, load and temperatures", self.stats), choice("Stats layout", self.stats_mode),
                     choice("Back key", self.back), choice("Enter key", self.enter),
-                    choice("JIT disk cache", self.disk_cache), choice("JIT disk cache size", self.disk_cache_mb),
+                    choice("JIT disk cache", self.disk_cache), choice("JIT disk cache size", self.disk_cache_mb), choice("JIT Carry", self.carry),
                     choice("Network", self.network), choice("Window", self.window_mode),
                     choice("Resolution", self.resolution), choice("Controller", self.controller),
                     toggle("Show in the desktop's application menu", self.menu)]
@@ -746,24 +752,24 @@ def settings_dialog(window, app, settings):
             self.settings = {}
             self.stats.setChecked(False); self.stats_mode.setCurrentIndex(self.stats_mode.findData("normal"))
             self.back.setCurrentIndex(0); self.enter.setCurrentIndex(0); self.disk_cache.setCurrentIndex(0)
-            self.disk_cache_mb.setCurrentIndex(0); self.network.setCurrentIndex(0); self.window_mode.setCurrentIndex(0)
+            self.disk_cache_mb.setCurrentIndex(0); self.carry.setCurrentIndex(0); self.network.setCurrentIndex(0); self.window_mode.setCurrentIndex(0)
             self.resolution.setCurrentIndex(0); self.controller.setCurrentIndex(0); self.menu.setChecked(self.menu_default)
             for key, value in defaults.items():   # the app's own defaults, not the global ones
                 if key in self.choices: self.choices[key].setCurrentIndex(max(0, self.choices[key].findData(value)))
                 elif key == "window_stats": self.stats.setChecked(value)
                 elif key == "menu_entry": self.menu.setChecked(value)
             self.initial = (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
-                            self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
+                            self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(), self.carry.currentData(),
                             self.network.currentData(), self.window_mode.currentData(), self.resolution.currentData(),
                             self.controller.currentData(), self.menu.isChecked())
             self.emulator.setCurrentIndex(0); self.properties.setRowCount(0); self.error.hide()
 
         def result_settings(self):
             result = {k: v for k, v in self.settings.items() if not android_settings.property_name(k)}
-            for key, value, initial in zip(("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb",
+            for key, value, initial in zip(("window_stats", "window_stats_mode", "back_key", "enter_key", "jit_disk_cache", "jit_disk_cache_mb", "jit_carry",
                      "network", "window_mode", "resolution", "controller", "menu_entry"),
                     (self.stats.isChecked(), self.stats_mode.currentData(), self.back.currentData(),
-                     self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(),
+                     self.enter.currentData(), self.disk_cache.currentData(), self.disk_cache_mb.currentData(), self.carry.currentData(),
                      self.network.currentData(), self.window_mode.currentData(), self.resolution.currentData(),
                      self.controller.currentData(), self.menu.isChecked()), self.initial):
                 if value != initial or key in result: result[key] = value
