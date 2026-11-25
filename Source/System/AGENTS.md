@@ -41,7 +41,7 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
   `USE_TRACY` the macros are empty. Tracy is built without its crash handler (`TRACY_NO_CRASH_HANDLER`), because guest fault
   recovery depends on the host SIGSEGV handler; it starts only through `tracy_consider_process`; and `fork_guest`'s child calls
   `tracy_fork_child`, since the profiler's threads exist only in the parent. The sources are fetched and pinned by
-  `Tools/Fetch/fetch-tracy.sh` (never committed); a new version needs the script, `Docs/JIT.md` and a re-check with Tracy's `capture`
+  `Tools/Fetch/fetch-tracy.sh` (never committed); a new version needs the script, `Docs/PROFILING.md` and a re-check with Tracy's `capture`
   and `csvexport`, and the viewer must match it. `test_tracy_profile` covers the option, not the timeline's content.
 - Private `*Internal.hpp` headers stay within their subsystem. Public embedding
   interfaces are under `Include/Bifrost/` and `Source/System/API/`.

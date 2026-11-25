@@ -7,7 +7,7 @@ graphics/audio adapters.
 ## Where things are
 
 - [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md): source layout, subsystem ownership and entry points. Start here.
-- [Docs/JIT.md](Docs/JIT.md): **read before any JIT, shared decoder or IR work.**
+- [Docs/JIT.md](Docs/JIT.md): **read before any JIT, shared decoder or IR work.** Keep it short (how it works now). [Docs/PROFILING.md](Docs/PROFILING.md): profiler and trace switches.
 - [Docs/TESTS.md](Docs/TESTS.md), [Docs/ROOTFS.md](Docs/ROOTFS.md), `Docs/Android/`: tests, guest rootfs, Android runtime.
 - [Docs/INSTALL.md](Docs/INSTALL.md): the plain install, update and remove steps for people; keep it in step with the README quick start
   and the site's Install page (`Tools/Site/install.html`).
@@ -41,7 +41,7 @@ graphics/audio adapters.
   `Docs/SCREENSHOTS.md`, `compatibility.json` and `Tools/Site/*.html`, never the generated pages. Record a compatibility change
   in the `Docs/COMPATIBILITY.md` row (the site shows it as the row's details), `compatibility.json` and the README's games count
   and badge; the site build fails if the table and `compatibility.json` disagree. The JIT page reads `Docs/PERFORMANCE.md` (the
-  CoreMark date and host sentence, its table and the `bench_*` table); keep their headers when re-measuring. The site's
+  CoreMark date and host sentence, the one-thread table with one Native and one QEMU row, the threads table and the `bench_*` table); keep their headers when re-measuring. The site's
   screenshots are the images listed in `Docs/SCREENSHOTS.md`.
 - Setup scripts find host tools through `Scripts/Setup/find-host-tools.sh` and download through
   `download_progress.fetch`. The setup step list in `Scripts/Android/android_provisioning.py` stays in step with

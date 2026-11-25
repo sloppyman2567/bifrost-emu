@@ -2,6 +2,70 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Several threads translate at once (2026-11-25)
+
+MT compiles no longer wait for each other ([guide](../JIT.md#several-compilers-at-once)). Ryzen 5800X3D; a Debian VM and browsers were open.
+
+- **Translate-only guest test** (throwaway: N threads, each calling 200,000/N distinct generated functions once, about 500,000 blocks). Wall time, median of seven alternating
+  runs, governor on `performance`, same checksums. *Before* is `62007bdf`, *parallel* the first working version of the same day, *now* the committed one:
+
+  | Threads | Before | Parallel | Now |
+  |---|---|---|---|
+  | 1 | 2.488 s | 2.421 s | 2.088 s |
+  | 2 | 3.533 s | 1.348 s | 1.093 s |
+  | 4 | 3.711 s | 0.862 s | 0.594 s |
+  | 8 | 3.994 s | 0.723 s | 0.392 s |
+  | 16 | 4.139 s | 0.968 s | 0.406 s |
+
+- **What the second half did**, at eight threads (cycles per published block from a lap build; each step alternated with the one before it):
+  a compile took the shared lock 6.6 times at 1,300 to 3,300 cycles each, waited 10,800 for the exclusive lock and held it for about 2,700. `PcFilter`
+  (no lock for a pc that has no block) and a thread keeping its compiler: 0.69 to 0.50 s. `CodeIndex`, the map node and the caller's copy made before the lock: 4%. Edge-target
+  records found under a shard lock before the table lock (the last shared read, 4,200 cycles, gone; the lock is now held for about 1,470): 0.50 to 0.40 s. Scratch that keeps its
+  memory (about 30 heap allocations and a 16 KB clear per block before): 10% on one thread. Lock functions went from about 41% of the CPU cycles at eight threads to about 11%.
+- **Sixteen threads** waited for the default eight compilers (0.65 s); with the cap at 16 they take 0.38 s. A compiler costs 86 KB and its scratch, with no
+  visible change in peak memory. **Rejected:** spinning for a free compiler (four compilers for eight threads 0.98 to 0.88 s, but 16 for 32 threads 0.57 to 0.65 s).
+- **ART start-up** (`bifrost-art Bootstrap`, seven alternating runs, all pass): 5.06 to 4.56 G cycles (-9.9%), 8.29 to 7.72 G instructions, 674 to 590 ms translating
+  (10.3 to 9.0 us a block; with Carry off 4.8 us), 43 to 0.25 ms of contended lock wait. The first parallel version alone changed none of these but the lock wait.
+- **Memory.** The JIT's metadata for the translate-only test is 247 MiB instead of 369 MiB, mostly because MT side exits need no stub entries.
+- **Why eight threads waited.** Per publication at eight threads: 113,553 cycles waiting for the exclusive lock and about 7,600 holding it (edge index 2,608, side-exit
+  stubs 1,874, code granules 1,110, block entry 680); 10 of about 30 thread-seconds were CPU. A compile also took the shared lock once per guest
+  instruction, and every MT dispatch of a block without a chain target tried the exclusive one. The spin was tried and dropped earlier that day when
+  one compile ran at a time (the lock was then held for a whole compile).
+- **Growth pauses.** Publications over 0.5 ms with the old containers: 26 ms at 351k blocks (`blocks_` rehash), pairs of 12 ms at 259k and 24 to 28 ms at 527k (the two edge
+  maps), 6 ms at 192k (a `std::vector` copy), 262 ms at 2.9M. With `Sharded` and `SegmentedArray` the worst at 351k is under 1 ms; in a standalone
+  model with staggered growth the worst insert is 1.2 ms (50 ms) and the worst 2,000 inserts 3.5 ms (50 ms). Sharding by address instead of by page
+  cost 11% of translation time (cache misses).
+- **Crashes found.** Built with 32 KiB chunks. (1) A compile that overflowed its chunk left register mappings the retry trusted: guest SIGSEGV at exit, 28 of 400
+  runs, 24 of 400 with only the rewind fix, 0 of 400 with the mappings cleared. (2) A fault site registered at exactly the lease's end went into
+  the next chunk's table: host SIGSEGV 3 of 150 runs, 0 of 300 after. (3) By reading: a rewind could drop the next chunk's sites, an exactly full chunk counted as a full cache, and
+  threads could take the serialized path while the first was still setting up the compilers.
+- **CoreMark** of the first parallel version (Carry on, alternating, CRCs equal): one pinned thread, five runs, median 18,579 old and 18,503 new (ranges overlap).
+  Two, four and eight threads, three runs: no difference.
+
+Checks: `jit_mt_compile` built with 32 KiB chunks, about 1,700 runs: 2, 8, 16 and 32 threads, 1 to 3 compilers, Carry off, no chaining, ordinary frames, no register passing, and 1, 4 and
+16 MiB code caches, all without a failure. One of 40 runs with per-thread JITs (`BIFROST_NO_SHARED_JIT=1`) timed out after 60 s and left no evidence; 620 runs
+each of that mode on the old and on the new build did not repeat it, so its cause is unknown. `make verify` (112 differential fixtures, 16 threaded oracles) and 64 JIT tests pass.
+`test_fork_lock_contention` times out on the old build too. Traced: the fork cannot get the guest memory index lock while two threads map and unmap memory (43,978 and
+43,644 failed tries on the old and new build, 3 and 0 on the JIT's locks), which is not the JIT's. Not measured: a game, other CPUs.
+
+## CoreMark, native and multithreaded (2026-11-25)
+
+The figures of [PERFORMANCE.md](../PERFORMANCE.md). CoreMark v1.01, `-O2 -DPERFORMANCE_RUN=1 -DUSE_PTHREAD -DMULTITHREAD=N`, seeds `0x0 0x0 0x66`: native with gcc 16.2.1
+(no `-march`), the guest with gcc 11.2.1 (musl, static). The compilers differ by several versions, so part of the gap to native is theirs. 400,000 iterations native, 200,000
+for bifrost-emu, 100,000 for QEMU 11.1.3, at least ten seconds each, three interleaved rounds. "Correct operation validated" every time, and one `crcfinal` per count (0x65c5, 0x4983, 0xd340). Ryzen 7 5800X3D,
+governor and energy preference on `performance`; one thread pinned to core 5, the others not pinned. The shipped SDL/GL build for rc.1 (its sources before the version bump), a headless build of the tag for beta.3.
+
+| | 1 | 2 | 4 | 8 | 16 threads |
+|---|---|---|---|---|---|
+| Native | 38,414 / 38,677 / 38,647 | 77,213 / 75,923 / 76,967 | 152,135 / 149,017 / 151,774 | 293,902 / 297,122 / 298,842 | 405,860 / 398,878 / 404,756 |
+| rc.1 | 18,699 / 19,133 / 19,194 | 34,916 / 34,011 / 34,971 | 65,237 / 68,476 / 68,021 | 128,020 / 130,007 / 130,018 | 135,438 / 138,642 / 136,246 |
+| QEMU | 7,571 / 7,648 / 7,784 | 16,145 / 15,586 / 16,071 | 31,713 / 31,969 / 31,479 | 60,487 / 61,553 / 61,101 | 63,748 / 67,542 / 67,004 |
+| beta.3 | 14,543 / 14,898 / 15,277 | | | 99,881 / 102,531 / 102,191 | |
+
+The first round was the slowest for nearly every emulated row (documents were being edited meanwhile); medians are used. QEMU's one-thread row is below half of its two-thread row, which is
+not explained. `bench_*`: four rounds, the first discarded: fib 6.806 s and 0.064 s, memcpy 201 and 12,071 MiB/s, qsort 4.305 s and 0.071 s, matrix 13.2 and 1,091 MFLOPS, `bench_mips`
+15.013 s and 0.180 s of wall time. The page used to say the JIT uses AVX-512, SHA-NI and BMI; its code generators emit none of them, so the sentence is corrected.
+
 ## Translation in several threads, measured (2026-11-25)
 
 Question: is translation time worth hunting? Nothing in the JIT's code generation changed; the waiting report of `BIFROST_PROF` gained
@@ -674,7 +738,7 @@ Unordered sets CF, ZF and PF, so GE, LT, GT, LE, VS and VC read them directly (`
 PL, CS and CC do after swapping the compare's operands (`jb`, `jae`, `ja`, `jbe`, `jbe`, `ja`); EQ and NE need ZF without PF, two jumps,
 so they keep the old sequence. An exit that must store NZCV converts the raw flags first (the old sequence, one `mov`/`cmovp` more in the
 swapped order, then the pack), so a live exit costs about what it did and a dead one nothing. Mechanism:
-[the guide](../JIT.md#scalar-fp-in-the-xmm-caches).
+[the guide](JIT-guide-2.0.0-beta.3.md#scalar-fp-in-the-xmm-caches).
 
 The first version regressed `cull` by 2.4% and `particles` by 0.9%: their exits are all live, because the dead-NZCV scan stopped at any
 scalar FP instruction other than `fcmp` and these blocks begin with `fmul`/`fmadd`, and the swapped conversion costs two more
@@ -706,7 +770,7 @@ multiplied, then loaded the accumulator into RDX and added it, which for `umull`
 
 Now the translator lowers the four instructions like `MADD`: `SEXT`/`ZEXT` 32 of both operands, a 64-bit `MUL`, then `ADD`/`SUB`
 against Xa (XZR reads as a constant 0 and folds). The emitter, the four IR ops and `emit_aux` are gone; `aux` stays, as the SIMD
-element and lane carrier. Mechanism: [the guide](../JIT.md#widening-multiply-accumulate).
+element and lane carrier. Mechanism: [the guide](JIT-guide-2.0.0-beta.3.md#widening-multiply-accumulate).
 
 Measured (host instructions per frame, the difference of two repetition counts, one pinned core, nine kernels reconstructed in one
 source; every checksum equal to the old build's): `collide` 204,949 to 176,287 (-14.0%), `skinning` 2,388,156 to 2,326,568 (-2.6%);
@@ -780,7 +844,7 @@ function in that C++ was `Emulator::exec_simd_imm` at 7.0% of all samples, with 
 entry points bringing the fallback total to about 11%. `BIFROST_CLASS_PROF` named the instruction: `sqrshrun v.8b, v.8h,
 #7` and its `2` form, about 20 million executions in the sampled windows (the pixel conversion of the game's CRI Mana video
 decoder). The translator sent the whole family to `CALL_INTERP`, with a comment that native lowering was "disabled until
-rounding overflow and FPSR.QC are implemented correctly". Mechanism: [the guide](../JIT.md#saturating-narrowing-shifts).
+rounding overflow and FPSR.QC are implemented correctly". Mechanism: [the guide](JIT-guide-2.0.0-beta.3.md#saturating-narrowing-shifts).
 
 Measured: a loop of `sqrshrun`, `sqrshrun2` and two `add`s (20,000,000 iterations, one pinned core, checksum and QC equal to QEMU's):
 4.22 s with the interpreter fallback, 0.09 s native, about 47 times faster on that loop. `jit_shrn_sat` runs 32,257 checks

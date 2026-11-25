@@ -1,7 +1,7 @@
 #!/bin/bash
 # Fetch the Tracy profiler's client sources (public/ and LICENSE) for `make USE_TRACY=1`. The release is pinned by version and
 # SHA-256. An existing copy of that version is kept. The profiler window that shows the timeline is a separate program: build
-# it from the same release (see Docs/JIT.md, "Timeline with Tracy"); its version must match the client's.
+# it from the same release (see Docs/PROFILING.md, "Timeline with Tracy"); its version must match the client's.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 version=0.15.0

@@ -1,12 +1,11 @@
 # bifrost-emu v2.0 roadmap
 
-Status: in progress. The current pre-release is **2.0.0-beta.3** (November 24, 2026): its scope is
-only partly met. Updated November 24, 2026.
+Status: in progress. The current version is **2.0.0-rc.1** (November 25, 2026), a release candidate: most of what it
+promises works, and it is not production grade ([why](#what-keeps-it-from-being-production-grade)). Updated November 25, 2026.
 
 Everything below is a development target, not a compatibility guarantee or a release date. "Done" means the contract is
-implemented and checked as the linked document says, not that every app using it works. Dated checkpoints, measurements
-and investigations that used to live here are in [the roadmap snapshot of 2026-11-03](archive/roadmap-2026-11-03.md) and
-the [changelog](CHANGELOG.md).
+implemented and checked as the linked document says, not that every app using it works. The list of finished work that used to be here is in
+[the snapshot of 2026-11-25](archive/roadmap-2026-11-25.md), and what changed for users is in the [changelog](CHANGELOG.md).
 
 ## Goals for v2.0
 
@@ -17,18 +16,13 @@ the [changelog](CHANGELOG.md).
 - Make input dependable across mouse, keyboard, touch and gamepads.
 - Keep correctness the gate for every optimization, and keep existing Linux applications working.
 
-## Direction: apps that feel native
+## Direction: games that feel native
 
-The aim is an Android game that behaves like any other window on a Linux desktop. In the order that costs a session most:
+The aim is an Android game that behaves like any other window on a Linux desktop. It should not crash, its window and its input should behave, and then it
+should run **smoothly**. With compatibility mostly in place, the next releases go to the last point, in two parts:
 
-1. **It does not crash.** Ads come first: most free games carry them, and an ad is the commonest thing that ends a session
-   (Geometry Dash Lite's WebView crash on `InputDevice.hasKeys`, SpongeBob's Kidoz ad layer failure).
-2. **The window behaves:** tiling, resizing, fullscreen and a remembered size, and an app that takes the window's new shape.
-3. **Input works** from the mouse, the keyboard, a pad, and a pad-driven pointer for apps that only take touch.
-4. **It does not hitch**, ads included. Measure before fixing. The session logs already say where the main thread stalls
-   ([measured so far](#measured-so-far-ads-webview-and-windows)): WebView's first start is the commonest, then cold app and SDK
-   code and other WebView work. What no log shows is frame pacing while an ad is up, which needs a frame-time record.
-5. **It starts quickly and stays small:** the persistent JIT cache and the memory breakdown.
+1. **[Less bookkeeping](#1-less-bookkeeping-in-generated-code).** Most of what generated code runs is not the program's own work.
+2. **[Less stutter](#2-games-without-stutter).** A game that averages 60 FPS and stops for a second when an ad loads does not feel native.
 
 Not the focus: games behind attestation or anti-cheat, and compatibility sweeps with no concrete game to fix (see
 [not planned](#not-planned)).
@@ -42,24 +36,15 @@ Not the focus: games behind attestation or anti-cheat, and compatibility sweeps 
 | 2.0.0-alpha.3 (2026-11-01) | Released; WebView, media and ad scope mostly open | `media.extractor`, POSIX timers, installable Asgard and rootfs, `bifrost-emu app.apk`, window stats |
 | 2.0.0-beta.1 (2026-11-03) | Released as a label; scope partly met | Library cards, per-app settings, clear-data/uninstall, run-ended cards; app Keystore, WebView GPU fences, Vulkan for apps through a guest HAL, a faster Lean JIT |
 | 2.0.0-beta.2 (2026-11-14) | Released; scope partly met | Installs and updates that rebuild what changed, `make check-fresh`, a session Zygote and one shared Android image, gamepad control of the library, Tier-2 through calls and returns (since removed), NativeActivity games |
-| 2.0.0-beta.3 (2026-11-24) | Current; a large release, scope partly met | Graphics calls cost a game much less CPU, the JIT translates about twice as fast and runs cheaper scalar float compares and widening multiplies, large memcpy and memset run on the host, `BIFROST_PROF` stall reports and a Tracy timeline, a per-app Resolution setting, an app launcher that keeps a log, and uninstall targets that find a `make bootstrap` install |
+| 2.0.0-beta.3 (2026-11-24) | Released; a large release, scope partly met | Graphics calls cost a game much less CPU, the JIT translates about twice as fast and runs cheaper scalar float compares and widening multiplies, large memcpy and memset run on the host, `BIFROST_PROF` stall reports and a Tracy timeline, a per-app Resolution setting, an app launcher that keeps a log, and uninstall targets that find a `make bootstrap` install |
+| 2.0.0-rc.1 (2026-11-25) | Current; release candidate, not production grade | Several threads translate at once, registers stay in host registers across branches and blocks (Carry), Tier-2 removed, windows that keep their shape, rotation inside the window; CoreMark 28% faster than beta.3 on the same guest build, half of native speed |
 
-**In 2.0.0-beta.2, since the beta.1 label:** the desktop library can be driven with a gamepad (a gamepad layout, menus,
-confirmations and the settings page drawn inside its window); per-app `window_mode` and `controller` settings, with a touch
-cursor driven by a pad; fixed-size apps can be tiled to a half or a corner; the Android setup's main downloads (the system image, microG, AAPT2, the Bionic runtime, the package tools, SDL3) resume
-when interrupted, and `make bootstrap` finds host tools and libraries without root, building SDL3 where the distribution has none; a minimised or hidden game window pauses the app, F11 toggles fullscreen and the size is remembered, Activities are relaunched on a resize they do not handle, the library offers **Set up…**, packages up to 4 GiB install, a realm with no app ends after 10 minutes, and the JIT has native NEON structure loads and stores and cheaper FP compares. All of it was checked with fakes, on Qt's
-offscreen platform or in an Ubuntu 24.04 chroot, apart from what the maintainer saw on one KDE/Wayland desktop with a Steam
-Controller; on a Steam Deck only Desktop mode has run (Subway Surfers, 2026-11-08); none has run in Game Mode (a black screen), on a fresh Debian 13 or against a plain pad.
-On November 8: Vulkan apps get ASTC LDR textures on hosts that have BC7 but no ASTC (converted on the CPU at upload; Zenless Zone Zero's
-Unity stopped decompressing them itself), a swapchain acquire no longer re-uploads the frame, `/proc/self/pagemap` is read without
-rebuilding every mapping, and the crash line names the library. Each is checked as its changelog entry says; none is yet measured
-across a long game session.
-On November 10 and 11: an app's helper processes fork from a session Zygote, microG maps a compiled vdex, games link one shared
-read-only copy of Android, launch preparation reuses file hashes and compiles after the session, the package parse cache
-survives updates, static AudioTracks and SoundPool play, the JIT disk cache reads its records instead of mapping them, and
-Lean got the changes listed under [the JIT workstream](#jit-codegen-retain-guest-state-across-hot-regions).
-Measured on Battle Cats and Subway Surfers launches and kernels; the shared copy has not run from an installed Asgard and no
-game was timed for the JIT changes.
+### What keeps it from being production grade
+
+- **Android is experimental.** Media decoding and many system services are partial or missing, and Google services come from microG.
+- **Few hosts are tested.** One AMD desktop for most of it, Ubuntu 24.04 in CI without a display; a Steam Deck only in Desktop mode.
+- **Long sessions are little tested.** Statuses come from people playing, not from repeatable 30-minute runs with frame times.
+- **Two changes in this version have not been timed in a game:** translating in several threads, and Carry.
 
 **Games:** 21 recorded, 18 of them playable (14 Android, 4 Linux), 1 starts without confirmed gameplay and 2 are blocked; see
 [What has been run](COMPATIBILITY.md) and `Scripts/Android/compatibility.json`. Statuses are user reports unless a page says
@@ -67,8 +52,12 @@ otherwise.
 
 **Known blockers, by cause:**
 
-- **Needs real Google attestation or a real device:** Roblox is disconnected after joining (reason 304); TrickCal's
-  anti-cheat ends it; Umamusume JP stops at its device integrity check. Bifrost does not bypass or forge any of them.
+- **Needs real Google attestation or a real device:** TrickCal's anti-cheat ends it; Umamusume JP stops at its device
+  integrity check. Bifrost does not bypass or forge any of them.
+- **Cause not established:** Roblox logs in, joins live servers, and about 170 s later the server disconnects it with
+  reason 304 ("missing or corrupted files", 2026-10-19). The client logs no file or hash failure and its Play Integrity
+  token request also fails; that the failed request causes the kick is inferred, not proven, and so is whether Roblox
+  checks Google attestation at all. Not investigated since.
 - **Needs Google Play services beyond microG:** Play Games sign-in got HTTP 404 and `SIGN_IN_REQUIRED` in Hungry Shark World and Umamusume
   (2026-10-21). Hungry Shark World signed in on 2026-11-25; why it works now is not established, and Umamusume was not re-checked.
 - **Architecture:** Bifrost runs AArch64 only; an APK with only `armeabi-v7a` or `x86` libraries (Angry Birds Space)
@@ -84,9 +73,59 @@ otherwise.
 
 ## Next release priorities
 
-In order. Each carries into the next pre-release until its acceptance test passes.
+In order. Each carries into the next release until its acceptance test passes.
 
-### 1. Easier setup and a dependable app library (the beta.1 scope)
+### 1. Less bookkeeping in generated code
+
+Generated code runs many host instructions per guest instruction, and little of it is the program's arithmetic:
+
+| Measured on | What it is |
+|---|---|
+| Zenless Zone Zero and Umamusume (2026-11-23) | Guest state traffic is 23 to 24% of the generated code's uops ([details](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)) |
+| SpongeBob loading (2026-11-24) | Body time: guest state moves 41%, memory with guards 22%, integer ALU 14%, branches 14%, FP and SIMD 6% ([details](archive/JIT-history.md#spongebob-profile-with-the-stats-counters-off-2026-11-24)) |
+| Game-style kernels (2026-11-23) | XMM moves and zeroing 28 to 36%, vector state 15 to 21%, NaN checks 11 to 14%, FP math 5 to 7% |
+| CoreMark with Carry (2026-11-24) | Guest state moves 37% of all samples ([details](archive/JIT-history.md#coremark-with-carry-on-the-bottleneck-is-still-guest-state-traffic-2026-11-24)) |
+
+Work, in order of expected gain for its risk:
+
+1. **Flag saves.** A guarded access saves NZCV first because a fault must show it (6.5% of CoreMark's generated-code ops). Keep the flags in the host across the
+   access and rebuild them in the fault's recovery code.
+2. **Loop bodies.** Loop-invariant registers are reloaded and overwritten temporaries stored on every iteration. RSI and RDI as more pins; align loop bodies (a
+   body that crosses a 64-byte line costs a cycle per iteration on Zen 3, and placement alone moved bzip2 by 17%).
+3. **Block edges.** Merge a block into its single predecessor (up to 6.6% of a game's uops, an upper bound), shorter chain cells (about 1.9%), a cheaper preemption
+   poll (1.5%), and a cheaper return path.
+4. **Vector copies.** 128-bit VEX three-operand forms instead of a copy and a two-operand one (untried; FMA3 is already required, so AVX is there), and the
+   256-bit paths that handle 128-bit vectors. Measure over several code placements, on a branchy and a predictable kernel.
+5. **Memory guards.** Their share in a game is unmeasured: break a game's generated code down first, then paired accesses and safe forwarding around atomics.
+6. **What still reaches the interpreter:** `ldxp`/`stxp` pairs with their retry loops, and 64-bit-lane saturating narrowing shifts. Profile the ART
+   start-up for the hottest of these.
+7. **Carry regions** ([design](JIT.md#planned-codegen-retaining-guest-state-across-regions)): guest registers kept in host registers across loops of several blocks. A simulation on
+   CoreMark puts the ceiling at 63 to 84% of register moves; only 11% of CoreMark's samples and 1.4% of SpongeBob's loading are in such loops, so it comes after the above.
+8. **Candidates:** `xmm16` to `xmm31` on AVX-512 hosts; relaxed NaN checks are the maintainer's decision.
+
+Acceptance: fewer host instructions per guest instruction on CoreMark, the kernels and a sampled game, with cycles checked over several code placements,
+`make verify` and the fault and signal fixtures passing, and no slower Android start-up.
+
+### 2. Games without stutter
+
+Known causes, and what comes next for each:
+
+| Cause | What is known | Next |
+|---|---|---|
+| No frame-time record | Stalls under about 1.5 s are invisible in the logs, and an average FPS hides them | An opt-in frame-time log, first; then an ad-heavy session split into the ad showing, the game while it loads, and closing it |
+| Translating new code | Threads waited for one compiler 1.2 to 2 times as long as they compiled (SpongeBob, Battle Cats loading). Several compile at once now: eight threads finish a translate-only test ten times sooner than before ([numbers](archive/JIT-history.md#several-threads-translate-at-once-2026-11-25)) | `BIFROST_PROF` on a game's loading, which shows translating and waiting per thread; the publication itself is the serial rest |
+| Cold code pays for Carry | 9.0 us a block against 4.8 us with Carry off on the ART start-up (2026-11-25) | **Lean first, Carry when hot**: a Lean trigger that goes away once it fires. Accept when the ART start-up is back near Lean's time and CoreMark keeps Carry's |
+| WebView's first start | 53 of 146 main-thread stalls, median 1.7 s, worst 11.7 s (2026-11-07) | A hidden WebView during the loading screen (untried); the stall log shows whether the median drops |
+| Cold app and SDK code | 40 of 146 stalls, median 1.7 s | Persistent JIT cache on by default, once a game shows a gain and plays from it |
+| A full code cache | Replaced as a whole, so the working set is translated again | Keep hot blocks across the replacement, with bounded memory |
+| Texture transcoding | 60 to 70% of Zenless Zone Zero's samples in story scenes before its helpers got the lowest priority | A faster encoder and a transcode cache that survives a restart |
+| Presenting Vulkan frames | A full frame is read back and copied per present | dma-buf gralloc buffers, if a 60 FPS game cannot hold 60 (details under graphics below) |
+| Shaders and pipelines | Not measured | A cache of their own, measured apart from translation |
+
+Acceptance: repeatable runs of a game report load time, compile time and median, p95 and p99 frame times against a baseline, with correctness checks. A window title's
+FPS is not the measurement.
+
+### 3. Easier setup and a dependable app library
 
 - Guide runtime provisioning and signed APK installation from the library, with actionable missing-runtime and
   window-backend errors. Done: a card says why a run ended and the drawer what to try; the library asks `asgard setup --check`
@@ -111,7 +150,7 @@ Acceptance: a fresh user provisions and launches a supported app without editing
 Supported apps complete repeatable 30-minute interactive sessions with correct saves, audio and input; a failed install or
 app exit leaves the library and the other apps usable.
 
-### 2. Ads, WebView and windows that behave (carried from alpha.3)
+### 4. Ads, WebView and windows that behave
 
 - Finish attached WebView pointer, focus and scroll delivery, then Chromium editors, caret-anchored candidate windows and
   clipboard exchange ([WebView input](#webview-text-input-and-external-pages)).
@@ -126,12 +165,6 @@ app exit leaves the library and the other apps usable.
   runtime, not with a real app that needs it. It does not explain YouTube, which declares orientation, size and layout in
   `configChanges` and so is never relaunched. Open: trace why YouTube keeps its landscape layout when narrowed (what its
   `onConfigurationChanged` receives, the metrics it reads).
-- Measure frame pacing around ads before choosing a rendering fix: an ad-heavy session with the window-stats overlay on and an
-  opt-in frame-time log (not written yet), split into the ad showing, the game while the ad loads, and closing it. The
-  stall data below covers only main-thread blocks of about 1.5 s or more.
-- Move WebView's first start off the critical path: the UI thread waits in `startBrowserProcessesSync` the first time an ad
-  opens a WebView (53 episodes, median 1.7 s). Creating a hidden WebView during the loading screen is untried; the stall
-  log shows whether the median drops.
 - Tell the app about its window. The window plugin has seven events (close, resize, key, pointer, text, gamepad,
   visibility). Done in 2.0.0-beta.2: a window the desktop minimises, hides or covers stops the app's Activities
   and resumes them when it is visible again ([visibility](Android/ANDROID_RUNTIME_REFERENCE.md#window-visibility-2026-11-07));
@@ -173,22 +206,12 @@ renderer exit leave the game usable. Narrowing a resizable app's window (YouTube
 is tiled to a half or a corner without distortion, and a recorded ad-heavy session says where the lag is before any fix
 for it is chosen.
 
-### 3. Broader game support and less stutter (carried from alpha.2)
+### 5. Broader game support
 
 - Fix concrete startup and interaction blockers in selected games, starting with Azur Lane's delayed login UI, by
   completing service contracts rather than answering with empty success.
-- Profile matching cold-load and warm gameplay scenes; reduce compilation stalls, repeated translation, memory-guard and
-  spill costs where measurements justify it.
 - Measure rendering, ART/GC, Binder and input delays alongside JIT cost.
 - Exercise several engines and apps with audio, saves, resize, pause/resume and process exit, keeping Linux games working.
-
-Measured 2026-11-23 (one unattended run of each at its title or connect screen, IBS sampling of the game process; not gameplay):
-Zenless Zone Zero is 54% generated code and 38% the emulator's own C++ (texture transcoding 6.7%; before the `sqrshrun` change
-the interpreter ran about 11%); Umamusume is 83% generated code and 12% C++. Guest state traffic is about 13% (Zenless) and
-19% (Umamusume) of the process. [Details](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23).
-
-Acceptance: repeatable GPU-enabled runs report load time, CPU and compilation cost and median/p95/p99 frame times against a
-baseline, with correctness checks and sustained interaction. A window title's instantaneous FPS is not the measurement.
 
 ## Workstreams
 
@@ -308,150 +331,6 @@ Open:
 Acceptance: editor and WebView tests cover composition, scrolling, focus, resize, browser failure, callbacks and process
 exit; then the Azur Lane interaction is checked in a real window and its frame delays profiled.
 
-### JIT codegen: retain guest state across hot regions
-
-Goal: keep guest registers, vectors and NZCV in host registers across hot paths, reconstructing state only at observable
-boundaries ([design](JIT.md#planned-codegen-retaining-guest-state-across-regions)).
-
-Done: a cheaper Lean (CoreMark 13,156 iterations/s on October 27, 14,874 on November 8 and 16,880 on November 23 (pinned, 200,000 iterations), over the 10,000
-target; [method](archive/JIT-history.md#coremark-re-measurement-2026-11-08)); compact scalar memory guards; shared cold stubs; native scalar and vector FP by element and LD1R; loop bodies up
-to twice the block cap; lighter Q-register accesses. On a set of engine-shaped kernels the JIT went from 5.8× to 4.2× the
-time of a native AVX2 build ([details](JIT.md)).
-
-Also done on 2026-11-07, measured on a different, reconstructed kernel set (one clang source built for AArch64 and for
-x86-64-v3, one pinned core, a game running; not a game): `LD2`-`LD4`/`ST2`-`ST4` native inside the block (a quaternion blend
-22.7× to 4.2× native, 4-bone skinning 45.8× to 11.2×); scalar FP NaN steps emitted after the block (the profiled loop's
-executed code spans 29% fewer cache lines); `fcmp` feeding a branch or integer select left in the host flags (cull 33.9× to
-27.1×, collide 11.4× to 8.1×). The set's geometric mean went from 7.63× to about 4.96×. A kernel's ratio is guest
-instructions over native instructions (the compiler: cull's AArch64 loop has 4.5 times the x86 build's instructions) times
-host instructions per guest instruction (the JIT: 5 to 15 here); only the second is the JIT's to fix. L1 miss counters did
-not move beyond noise, and CoreMark's last-level misses are fixed startup and translation costs
-([details](archive/JIT-history.md#fp-compares-in-the-host-flags-and-where-last-level-misses-come-from-2026-11-07)).
-
-Also done on 2026-11-10 and 11-11 (instruction and cycle counts on CoreMark, the `bench_*` programs and the kernel set; no
-game measured): NZCV stored as the `lahf` image, PC stores behind the chain slot, `b.cond` loop pins kept in registers,
-`fcsel` without `pushfq`, `ldr s`/`ldr d` straight into the cached XMM, one 16-byte slot per vector register, and `ccmp`/`ccmn`
-flags left in the host. CoreMark runs 11.9% fewer host instructions; skinning and animation blending 35-42% fewer cycles.
-A fork child keeps its parent's JIT ([details](JIT.md)).
-
-Also done on 2026-11-23: a pinned register updated by a loop (`add x0, x0, #1`) is updated in place, not through a scratch copy
-(CoreMark about +0.5%, busybox gzip -1.3% cycles; [details](archive/JIT-history.md#in-place-updates-of-pinned-registers-2026-11-23));
-the saturating narrowing shifts (`sqrshrun`, `sqshrn`, ...) are native for 16- and 32-bit lanes (a loop of them 47 times faster; the
-interpreter's share of Zenless Zone Zero fell from about 8.5% to 4.9%; [details](archive/JIT-history.md#saturating-narrowing-shifts-are-native-2026-11-23)).
-The widening multiplies go through the register allocator ([details](archive/JIT-history.md#widening-multiply-accumulate-is-extend-multiply-and-add-2026-11-23)),
-and a scalar `fcmp` followed by a branch is one compare and one or two jumps
-([details](archive/JIT-history.md#fp-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23),
-[equal and not-equal](archive/JIT-history.md#fp-equality-compare-and-branch-on-the-raw-ucomis-flags-2026-11-23)): up to 14% (multiply)
-and 12% (compare) fewer host instructions per frame in the kernels that use them. No game was run with either.
-Also done on 2026-11-24, found by IBS samples attributed to IR ops through the allocation profile on the ART bootstrap: the Android
-tag untag is one `and` against a mask word in the window's header page (`LOAD_MEM` and `STORE_MEM` host ops -15% and -14%, -5.2% of all
-generated-code ops in that workload), and scalar `fmax`/`fmin` no longer step the interpreter when the result is zero (a clamp loop went
-from 864 to 44 host instructions per iteration; checked against QEMU, no game run;
-[details](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)).
-Measured the same day, on a reconstructed set of nine game-style kernels the JIT is 4.8 times native and about 3 times faster than QEMU user mode.
-
-Also done on 2026-11-25: self-loops read and write their pinned registers without copies, and registers they write first are pinned too (CoreMark -6.7%
-host instructions and about -2% cycles, with Carry -7.6% and -3.5%; [details](archive/JIT-history.md#pins-read-and-written-without-copies-2026-11-25)).
-Open from that work: loop bodies are not aligned (a body crossing a 64-byte line costs a cycle per iteration on Zen 3, and placement alone moves bzip2 by
-17%), RSI and RDI as more pins, and the flag stores before memory accesses (6.5% of CoreMark's generated-code ops).
-
-Open, in priority order (the maintainer put translation speed ahead of the cross-block work on 2026-11-23, so item 1 comes first):
-
-1. **Translation cost.** Translating the ART bootstrap now takes about half the time (1,056 to about 500 ms; the startup 1.57 s to
-   1.02 s, [details](archive/JIT-history.md#translation-cost-no-tier-1-ssa-no-store-footprints-outside-verify-flat-vreg-tables-2026-11-23)).
-   Left in the profile: `translate_block` itself (7.6%), `optimize_ir` (6.8%), the guard bookkeeping (2.7%: every deferred guard
-   copies a ~460-byte `GuardState`), the vector and FP cache scans and `remember_code_granules` (about 2% each). Measured 2026-11-25
-   ([details](archive/JIT-history.md#translation-in-several-threads-measured-2026-11-25)): repeats are not worth chasing (games recompile 2-3% of their blocks
-   while loading; the purge at the first thread costs the Android start-up 4% CPU and no wall time), but MT code compiles one block at a
-   time, and while loading SpongeBob and Battle Cats the threads waited for that 1.2 to 2 times as long as they compiled. Next: a
-   `BIFROST_PROF` run of a game's start (the report now shows translating and waiting per thread) to see whether the game's own threads are the
-   ones waiting; if so, compiling several blocks at once (item 4), and then the table growth that stops everyone for 10-30 ms. Open: whether Lean should run SSA on hot blocks only (about 2% of CoreMark's cycles).
-2. **State moves and copies around the arithmetic.** Real FP math is 2-7% of the generated ops in games and in the game-style
-   kernels; the rest is moving guest state, copying vector registers and checking results. One track, in three parts:
-   - *Inside a block* (game-style kernels, 2026-11-23): XMM moves and zeroing are 28-36% of the generated ops, vector state
-     loads and stores 15-21%, NaN checks 11-14% and FP math 5-7%, at 8-10.5 host instructions per guest instruction. The cheap
-     part is done (loads into the cached XMM, one-instruction result writes). Untried: VEX three-operand scalar ops to drop the
-     operand copies (FMA3 is already required, so AVX is there). Dropping NaN checks exactly fits 3 of 277 checked ops; more would
-     need relaxed NaN semantics, which is the maintainer's decision. A plain `v_hi` zero store (cull and collide about 30%
-     slower) and `insertps` result writes were slower, so measure each change on a branchy and a predictable kernel, over
-     several code placements ([details](archive/JIT-history.md#scalar-fp-loads-into-cached-xmms-and-cheaper-scalar-results-2026-11-10)).
-     Reading a hot block's generated code found the widening-multiply emitter and the scalar `fcmp` + branch pair (both done, above);
-     the other fixed-register emitters have not been audited, and the dead-flags scan stops at FP loads and stores and at vector instructions.
-   - *Loop back edges and block entry/exit* (SpongeBob, 2026-11-24, 60 s of IBS on the live game): in MT code each iteration of a
-     self-loop pays the preemption poll (about 6.3% of generated-code ops) and the callback-sentinel compare (about 4.7%, three ops
-     because an Android pc is wider than imm32, now two: a compare of the sentinel's low 32 bits, 2026-11-24, one instruction per
-     iteration; the compare itself must stay, as tests and the contract let the sentinel name real code); `BIFROST_PROF` puts block entry and exit at 11.8% and 11.9% of JIT time
-     ([details](archive/JIT-history.md#hotspots-from-ibs-and-the-allocation-profile-tag-untag-and-scalar-fmaxfmin-zeros-2026-11-24)).
-   - *Across blocks* (games, 2026-11-23, dispatched uops of the generated code): guest state traffic is about 24% (Zenless Zone
-     Zero) and 23% (Umamusume). On Umamusume's direct chained edges the exit sequence (`movabs r11, cell; jmp [r11]`) is 5.8%, the
-     loads at block entries 4.8% of which 49% are redundant (2.3%), and about 9% of uops are guest-register stores inside
-     blocks, not at exits. Ideas by size: merge single-predecessor blocks (up to 6.6%, an upper bound), defer the store-through
-     writes (needs the recovery metadata of the design step), rip-relative chain cells (about 1.9%), keep boundary loads in
-     registers (at most 2.3%), a cheaper preemption poll (1.5%)
-     ([details](archive/JIT-history.md#game-profiles-zenless-zone-zero-and-umamusume-2026-11-23)). Guest register loads and
-     stores are 20-27% of executed ops in the integer kernels, mostly block-entry loads and live-out stores that only
-     cross-block allocation removes; a pass that hoists scratch work above a flag setter is measured but not merged (cycles
-     within placement noise, [details](archive/JIT-history.md#guest-register-traffic-and-flag-windows-measured-not-merged-2026-11-10)).
-   - *Design step:* model guest state explicitly, define recovery and helper contracts, then hand values between two regions
-     and choose layouts by measured benefit (the five-stage plan in
-     [the snapshot](archive/roadmap-2026-11-03.md#jit-codegen-retain-guest-state-across-hot-regions)). The cheap ideas above add
-     up to roughly 10-12% at best; a larger gain is expected to need this.
-3. **Memory guards and interpreter fallbacks.** Compact scalar memory guards are done, but the 2026-11-23 game profiles do not
-   break out memory-access guards, so their share in a game is unmeasured. First step: a per-category breakdown (guest state
-   traffic, copies, memory guards, math) of the generated code on a game, so the next fix is chosen from numbers. Then
-   **paired-memory guards**, SIMD values kept past the all-or-nothing cache limits, and safe forwarding around atomics. What a game
-   still runs in the interpreter (Zenless Zone Zero, 2026-11-23, `BIFROST_CLASS_PROF`): the exclusive pairs `ldxp`/`stxp`/`ldaxp`/
-   `stlxp` with their retry loops; 64-bit-lane saturating narrowing shifts stay interpreted too (scalar `fmax`/`fmin` stepped
-   the interpreter for every zero result until 2026-11-24; now only a NaN input does).
-4. **Several compilers at once** ([design](JIT.md#planned-several-compilers-at-once), not built; maintainer, 2026-11-25): one thread compiles at a time in MT code. The
-   ceiling on a guest test that only translates is 5 times faster at four threads and 11 times at eight; no game is measured. Accept when that test scales, `jit_mt_*`,
-   fork and invalidation tests pass under stress, and a game's loading is shorter or no worse.
-5. **Lean first, Carry when hot** is the goal (maintainer, 2026-11-25): Lean translates everything, Carry only hot code. Not built: today every block is formed
-   with Carry on its first translation ([the gap](JIT.md#planned-codegen-retaining-guest-state-across-regions)). Next: give a Lean block a trigger that
-   costs little and goes away once it fires, as Carry's entry budget does; accept when the ART start-up is back near Lean's time and CoreMark keeps Carry's.
-6. **Carry regions** (planned second JIT; Tier-2 was removed on 2026-11-24 because it never beat Lean by more than a few percent and no game was
-   shown to gain, [why](archive/JIT-history.md#tier-2-regions-removed-2026-11-24)). It keeps guest registers in host registers across blocks and
-   back edges, with sampled hotness and no timed trials. A CoreMark simulation puts the ceiling at 63-84% of register moves
-   ([limits](archive/JIT-history.md#carry-ceiling-guest-register-moves-in-coremark-2026-11-24)). Next: a clean gameplay profile, then the
-   [design](JIT.md#planned-codegen-retaining-guest-state-across-regions). Nothing of the second JIT is built. Pieces of its register traffic
-   work inside Lean blocks, on by default since 2026-11-25 (`BIFROST_CARRY=0` turns them off; CoreMark about 10% fewer cycles, ART start-up 21% more): blocks continue past forward branches (CoreMark -2.0% host instructions) and chain edges pass
-   registers in host registers ([-1.08% instructions, -4.9% cycles](archive/JIT-history.md#register-passing-between-chained-blocks-2026-11-24)).
-   A profile also makes a block follow the hot side of its forward branches ([-0.15% on CoreMark](archive/JIT-history.md#carry-flag-stores-at-exits-covered-guards-across-exits-the-hot-side-of-an-exit-2026-11-24),
-   about 11% more translation time in the Android runtime's start-up; why it gains so little is not established).
-   Partial-entry stubs are in; passing a register through blocks that do not touch it is built but off
-   (`BIFROST_REG_PASS_THROUGH=1`, a [loss](archive/JIT-history.md#register-passing-partial-entries-and-pass-through-2026-11-24) on CoreMark). A
-   [profile](archive/JIT-history.md#coremark-with-carry-on-the-bottleneck-is-still-guest-state-traffic-2026-11-24) puts entry at 5.8% of CoreMark's
-   JIT samples with Carry on (1.4% with `BIFROST_NO_REG_PASS=1`, so it is the register-passing entry loads) and guest state moves at 37% of all
-   samples (42% of the body); only 11.3% of samples are in loops of several blocks, and 50.1% are outside any loop, so loop residency alone reaches
-   little of it.
-7. Candidate: on AVX-512 hosts, `xmm16`-`xmm31` could hold more of the 32 guest vectors than the 13 cached today.
-
-Targets: CoreMark at least 10,000 iterations/s (met); the proposed 26%-of-native CoreMark milestone (met on CoreMark: on the
-5800X3D on November 7, native CoreMark v1.01 built with gcc 16.2.1 `-O2` ran 37,950 iterations/s on one core and the JIT 14,785,
-about 39%; the Ryzen 5 9600X at 5.68 GHz that measured about 24,000 on November 4 is also at roughly 40%; both with the CPU
-governor on `performance`; see [the checkpoint](archive/JIT-history.md#coremark-native-reference-2026-11-07)); game kernels toward 2× native
-where the guest code allows it.
-
-Acceptance: each stage passes architectural regressions, reference checks and real applications, and reduces spills and
-state transfers without excessive compile time or code growth; then matched gameplay frame times are measured.
-
-### JIT and graphics caching
-
-Done: a larger per-thread lookup cache; MT publication through atomic target cells; whole-cache replacement at 512 MiB with
-safe reclamation; compile-time, recompile and invalidation counters; an experimental persistent translation cache
-(`--jit-disk-cache`).
-
-Open:
-
-- Profile ART startup (dispatch and interpreter fallbacks dominated it) and give the hottest fallbacks native IR.
-- Measure gameplay compile bursts, then choose between a background compiler and the persistent cache.
-- Keep hot blocks across cache replacement without unbounded memory or unsafe eviction.
-- The persistent cache defaults on only after a measured gain on a game, play from the cache and other hosts.
-- Shader and pipeline cache reuse, measured separately from CPU translation.
-
-Acceptance: repeat visits avoid recompilation, invalidation stays correct under concurrent code updates, memory stays
-bounded, and cold/warm A/B runs show fewer stutters.
-
 ### Linux games: linker, rootfs and performance
 
 Done: the `games` rootfs profile; Doom 3 (dhewm3) at mostly 60 FPS in its demo by the maintainer's report; an experimental
@@ -466,6 +345,9 @@ Open:
   crashes at address 0.
 - Doom 3 frame pacing: profiler attribution for every thread, matched-scene median and p95/p99 frame times, then the
   remaining drops. Fix save/load fidelity so routes are reproducible.
+- `test_fork_lock_contention` fails on some machines and runs, on 2.0.0-beta.3 too: a fork tries every emulator lock at once for up to 3 s, and while two
+  threads map and unmap memory nearly all its failed tries are on the memory index lock (43,978 of about 46,000 in a trace of 2026-11-25; 3 on the
+  JIT's). It then forks without the locks. A game that starts helper processes while it loads can pay that wait. Give the fork a fair turn at that lock.
 - A guest process hangs at exit while another of its threads is blocked in `pause()` (JIT and interpreter; QEMU exits). Found on 2026-11-25, not
   investigated.
 
