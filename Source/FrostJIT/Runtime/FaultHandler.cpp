@@ -4,6 +4,7 @@
 #include "System/Core/Emulator.hpp"
 #include "System/Core/Signals.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Core/HostPagePolicy.hpp"
 #include "System/Graphics/Thunks/ThunkCallRecord.hpp"
 #include <csignal>
 #include <cerrno>
@@ -154,6 +155,9 @@ void FrostJIT::init_fault_recovery() {
     void* p = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED) return; // allocation failure keeps software guards
+    // A chunk reserves 1 MiB of slots and most of them stay empty, so one written site must not
+    // commit a 2 MiB page.
+    host_pages_no_huge(p, bytes);
     std::call_once(install_once, [] {
         struct sigaction sa{};
         sa.sa_sigaction = native_fault_handler;
