@@ -197,6 +197,24 @@
         "The audio popped in the runs the maintainer checked on 2026-11-06. It is not AAudio's sample format (the game asks for FLOAT and gets FLOAT). The pushed PCM had a discontinuity every 1024 frames: SDL's AAudio backend writes with a 1 ms timeout and discards a short write, and the thunk returned short counts on a full ring. Android's legacy path blocks until everything is written. The write path now does too; after the fix the same segment of captured PCM shows no boundary clicks (about 1.3x the background curvature, from about 190x). The maintainer listened to the fixed build on 2026-11-08 and confirmed the audio is clean.",
         "Resizing the window corrupts the graphics: afterwards backgrounds, sprites and the textbox draw black while text still draws (maintainer screenshots). Traced on 2026-11-08: Ren'Py's on_resize deletes every GL texture on Android (TextureLoader.init calls quit) and keeps drawing the old names, because it re-uploads them only when pygame_sdl2 reports a recreated GL context, and SDL leaves the context alone on a size-only surfaceChanged. This is the game's own resize path, not a mistranslated GL call; whether a real device behaves the same was not checked. The app therefore carries a built-in default of Window: \"Keep the app's shape\" (window_mode keep, which a saved choice overrides): the maintainer confirmed the images stay with it at 2026-11-08."
       ]
+    },
+    "com.rappidstudios.simulatorbattle": {
+      "name": "Epic Battle Simulator",
+      "tested_version": "1.9.40",
+      "status": "playable",
+      "checked": "2026-11-27",
+      "evidence": "The maintainer reports gameplay at about 30 FPS (issue #9).",
+      "notes": []
+    },
+    "com.paradyme.solarsmash": {
+      "name": "Solar Smash",
+      "tested_version": "2.7.5",
+      "status": "playable",
+      "checked": "2026-11-27",
+      "evidence": "The maintainer reports gameplay at about 60 FPS, with erratic frame times (issue #9).",
+      "notes": [
+        "Maximising the window while pressing Play in the menu can freeze it indefinitely (maintainer-reported)."
+      ]
     }
   }
 }

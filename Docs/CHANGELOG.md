@@ -34,7 +34,9 @@ Windows and games:
 - Geometry Dash Lite and Family Island keep the shape they opened at and scale when you resize the window.
 - A game that rotates now turns inside its window instead of resizing it off the screen. `asgard config APP rotation reshape` brings the old behaviour back.
 - SpongeBob: Krusty Cook-Off gets past the age question with an adult age.
-- Melon Sandbox is playable (slow to load), and Hungry Shark World connects to Play Games. 18 of 21 games are playable ([list](COMPATIBILITY.md)).
+- Melon Sandbox is playable (slow to load), Hungry Shark World connects to Play Games, and Epic Battle Simulator (1.9.40) and Solar Smash (2.7.5)
+  are playable at about 30 and 60 FPS; Solar Smash's frame times are erratic, and maximising it while pressing Play can freeze it.
+  20 of 23 games are playable ([list](COMPATIBILITY.md)).
 - The stats overlay has a new look, modelled on MangoHud.
 
 Fixed:

@@ -1,6 +1,6 @@
 # What has been run
 
-**21 games recorded (2026-11-25): 18 playable** (14 Android, 4 Linux), **1 starts** without confirmed gameplay
+**23 games recorded (2026-11-27): 20 playable** (16 Android, 4 Linux), **1 starts** without confirmed gameplay
 (Teeworlds) and **2 are blocked** (Roblox, TrickCal). Umamusume counts as playable through its
 Global client; its JP client is blocked. Apps such as YouTube and Firefox are not counted.
 
@@ -32,6 +32,8 @@ The frame rates are single readings from the stats overlay.
 | YouTube 21.42.247 | Android | Home screen, search and video playback seen (2026-10-28); not reported as fully working. |
 | [Oddmar](Apps/oddmar.md) | Android, Unity/IL2CPP | User-confirmed gameplay (2026-11-08, first level) and very stable (2026-11-25): a level played on the boar captured at 164 FPS. |
 | Family Island 2026370.1.94765 | Android, Defold | User-reported stable play on 2.0.0-beta.2 (2026-11-14): home island, the Torch Island map and the Beaver Grove screen captured at about 27 to 47 FPS on the overlay while other programs loaded the machine; one session, no longer run recorded. User-reported stable again on 2026-11-25, but the one capture shows the game asking to be updated (at 888 FPS, uncapped), so island play on that day is not recorded. A resize after the first frame leaves the screen laid out for the old size until the next scene, so it keeps the shape it opened at by default. |
+| Epic Battle Simulator 1.9.40 | Android | User-reported playable at about 30 FPS during gameplay (2026-11-27). |
+| Solar Smash 2.7.5 | Android | User-reported playable at about 60 FPS (2026-11-27), with erratic frame times. Maximising the window while pressing Play in the menu can freeze it indefinitely. |
 | Uptodown | Android | Draws its home list, then asks for all-files access, which Bifrost cannot grant. |
 | Roblox, TrickCal | Android | Blocked: Roblox logs in and joins a game, then the server disconnects it after about 170 seconds with error 304 ("missing or corrupted files", 2026-10-19). The cause isn't known. It probably isn't Google attestation, which Roblox doesn't use by default: the games the maintainer tried work fine in Sober, which also runs the Android build of Roblox, on the same CPU type, and provides what it asks for itself. TrickCal's own anti-cheat stops it. |
 | [Neverball 1.6.0](Apps/neverball.md) | Linux, SDL2/GL | User-confirmed stable gameplay, replays, menus and fonts. |

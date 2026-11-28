@@ -128,7 +128,7 @@ It's done when the dynamic linking, threads and TLS tests and the Linux games pa
 
 ## Games that don't work
 
-21 games have been tried and 18 are playable; see [What has been run](COMPATIBILITY.md).
+23 games have been tried and 20 are playable; see [What has been run](COMPATIBILITY.md).
 
 - **Roblox** logs in and joins a game, then the server disconnects it after about three minutes with error 304 ("missing or corrupted files"). The cause isn't known. It
   probably isn't Google attestation: Roblox doesn't use it by default, and the games tried in Sober work fine. Sober runs the Android build of Roblox too, without
