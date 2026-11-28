@@ -1,5 +1,6 @@
 // DecodeCache.cpp — the per-vCPU interpreter decode cache's storage (see CPU::DecodeCache).
 #include "System/Core/CPU.hpp"
+#include "System/Core/HostPagePolicy.hpp"
 #include <new>
 #include <sys/mman.h>
 
@@ -17,7 +18,7 @@ void CPU::DecodeCache::allocate() {
     if (p == MAP_FAILED) throw std::bad_alloc();
     // A 1.7 MiB mapping next to others could be merged into a huge page, which would make a
     // handful of touched entries cost 2 MiB again.
-    ::madvise(p, kBytes, MADV_NOHUGEPAGE);
+    host_pages_no_huge(p, kBytes);
     entries_ = static_cast<CacheEntry*>(p);
     lru_ = reinterpret_cast<uint8_t*>(entries_ + DECODE_CACHE_SIZE);
 }

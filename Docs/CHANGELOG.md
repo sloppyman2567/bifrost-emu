@@ -42,6 +42,10 @@ Fixed:
 - Maximising a window, or moving it to another display, could be ignored on Wayland.
 - A game's Google sign-in window overwrote the size saved for the game.
 - A loop left through `cbz`, `cbnz`, `tbz` or `tbnz` could pass on wrong condition flags.
+- Sparse host tables no longer take transparent huge pages when the system is set to `always`. The JIT's fault-recovery table
+  could keep hundreds of megabytes, sometimes gigabytes, resident for a few thousand used chunks. In the two games measured,
+  peak memory fell by 2.5 to 4.5 GB. If you changed the system to `madvise` as a workaround, you can set it back. On a host
+  that runs `always`, this is worth taking even if you only play one game.
 
 Other changes:
 

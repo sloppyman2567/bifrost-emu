@@ -1,6 +1,7 @@
 // PcFilter.hpp — answers "could this table hold the guest pc?" without the table's lock. A bit is set before its pc is inserted
 // and never cleared by a removal, so "no" is exact for everything published before the question and "maybe" costs a locked lookup.
 #pragma once
+#include "System/Core/HostPagePolicy.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <sys/mman.h>
@@ -24,7 +25,10 @@ public:
     ~PcFilter() { if (words_) ::munmap(words_, kBytes); }
     void reserve() {
         void* p = ::mmap(nullptr, kBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if (p != MAP_FAILED) words_ = static_cast<uint64_t*>(p);
+        if (p == MAP_FAILED) return;
+        // The bits are sparse: one set bit must not commit a 2 MiB page.
+        host_pages_no_huge(p, kBytes);
+        words_ = static_cast<uint64_t*>(p);
     }
     bool may_contain(uint64_t pc) const {
         return !words_ || (__atomic_load_n(word_of(pc), __ATOMIC_ACQUIRE) & bit_of(pc));

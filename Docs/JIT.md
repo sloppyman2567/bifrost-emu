@@ -136,7 +136,8 @@ Pairs check everything first.
 
 The signal handler only accepts a fault from a known instruction, inside a `FaultScope`, with the right memory base and an address in guest memory. It then jumps to that
 instruction's recovery code, which puts the guest state back and runs the instruction in the interpreter. Each 256 KiB chunk of code has its own sorted list of
-these instructions. Test: `jit_host_fault`.
+these instructions. The lists are a sparse reservation and opt out of transparent huge pages (`HostPagePolicy.hpp`), so one fault site does not commit 2 MiB.
+Test: `jit_host_fault`.
 
 ### Software page checks
 

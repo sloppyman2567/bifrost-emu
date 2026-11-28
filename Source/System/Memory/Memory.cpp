@@ -5,11 +5,14 @@
 // plus bookkeeping under mu_: vmas_ (the mapping index), allocations_ and
 // free_ranges_ (placement and reuse), file_pages_ (private/shared file backings)
 // and the per-page flag mirror read lock-free by check_access and the JIT.
+// Guest storage is dense and keeps the host's transparent-huge-page setting; the
+// sparse per-page flag mirror opts out (HostPagePolicy.hpp).
 // Allocation.cpp places and frees mappings; Discard.cpp implements madvise,
 // userfaultfd and MREMAP_DONTUNMAP.
 #include "System/Memory/Memory.hpp"
 #include "System/Memory/MemoryInternal.hpp"
 #include "System/Core/DebugFlags.hpp"
+#include "System/Core/HostPagePolicy.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cpuid.h>
@@ -152,6 +155,9 @@ Memory::Memory(bool start_reporter, uint64_t window_max) {
             ::munmap(window, size + PAGE_SIZE);
             continue;
         }
+        // One byte per guest page, so scattered guest mappings touch scattered flag pages: under
+        // THP=always each of those would cost 2 MiB.
+        host_pages_no_huge(flags, size / PAGE_SIZE);
         direct_window_ = static_cast<uint8_t*>(window) + PAGE_SIZE;
         jit_software_checks_ = new (direct_window_ + JIT_SOFTWARE_CHECKS_OFF)
             std::atomic<bool>(false);

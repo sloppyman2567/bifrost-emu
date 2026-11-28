@@ -69,6 +69,8 @@ FrostJIT::FrostJIT() {
     } else {
         code_buf_ = static_cast<uint8_t*>(p);
     }
+    // Dense generated code keeps the host's THP setting: huge pages cut iTLB misses. Only the
+    // sparse host tables opt out (HostPagePolicy.hpp).
     // Initialize W^X state. If we started RW (no EXEC), enable W^X and
     // mark the buffer as currently writable (since we just allocated it
     // RW and will write to it during the first translate_block).

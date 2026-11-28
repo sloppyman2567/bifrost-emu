@@ -2,6 +2,27 @@
 
 Dated optimization checkpoints, measurements and fixes moved out of [the JIT guide](../JIT.md) unchanged; the sections moved most recently come first. Their measurements describe the revisions they were recorded on, not the current executable. The guide and `Source/FrostJIT/AGENTS.md` hold the current contracts.
 
+## Sparse host tables opt out of transparent huge pages (2026-11-27)
+
+The fault-site table, `PcFilter`, the guest page-flag mirror and the decode cache now call `host_pages_no_huge()`
+(`Source/System/Core/HostPagePolicy.hpp`) right after mapping. Before, only the decode cache did; the others followed the host's
+`/sys/kernel/mm/transparent_hugepage/enabled`, so with `always` the first touch of a 4 KiB page could commit 2 MiB. The fault
+table reserves 1 MiB of slots per 256 KiB code chunk (2 GiB at the default 512 MiB budget), and the page-flag mirror is one byte
+per guest page (16 GiB of address space for a 64 TiB window), so both are sparse. Guest storage and the JIT code buffer keep the
+host's setting: they are dense, and huge pages help there.
+
+Ryzen 5800X3D, THP `[always]`, no `PR_SET_THP_DISABLE`:
+
+- **Control**, a 2 GiB `MAP_NORESERVE` anonymous mapping with one byte written per MiB: without advice `Rss 2,097,152 kB`,
+  `AnonHugePages 2,097,152 kB`; with `host_pages_no_huge()` `Rss 8,192 kB`, `AnonHugePages 0`, `VmFlags` has `nh`.
+- **Emulator**, `toybox sleep 5`: the 2 GiB fault table read `Rss 120 kB`, `AnonHugePages 0`, `nh`; the 16 GiB page-flag mirror
+  `Rss 32 kB`, `AnonHugePages 0`, `nh`; the 512 MiB code buffer `AnonHugePages 2,048 kB` and no `nh`, unchanged.
+- **Solar Smash with ads**: peak about 9 GB before the change, 4 to 5 GB after (5 GB with ads).
+- **Epic Battle Simulator**: about 6 GB before, 3.5 GB after. Other games were not measured.
+
+Not changed: guest memory and the code buffer keep THP. A host that wants no huge pages at all can still set the system to
+`madvise`; the emulator no longer depends on it for these tables.
+
 ## Several threads translate at once (2026-11-25)
 
 MT compiles no longer wait for each other ([guide](../JIT.md#several-compilers-at-once)). Ryzen 5800X3D; a Debian VM and browsers were open.

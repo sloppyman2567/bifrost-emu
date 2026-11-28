@@ -70,7 +70,9 @@ A new history section can make an older "not measured" or "next section" line wr
   scalar values; do not assume MemorySSA or complete vector/FP state coverage.
 - `CodeGen/` owns operation emission; `Backend/` owns host instruction encoding;
   `RegisterAlloc/` owns scalar mappings and spills; `Runtime/` owns dispatch,
-  caching, fault recovery and profiling.
+  caching, fault recovery and profiling. Sparse host-side tables (fault sites,
+  `PcFilter` bits) call `host_pages_no_huge()` (`System/Core/HostPagePolicy.hpp`)
+  right after mapping; the code buffer and guest storage keep the host's THP setting.
 - JIT lifetime across fork/exec: a fork child keeps the parent's JIT and translations (a Zygote child
   starts warm). `fork_guest` takes every live instance's locks with its own, all or none
   (`FrostJIT::try_lock_for_fork`), and the child re-creates them and restarts the preemption ticker

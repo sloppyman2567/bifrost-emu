@@ -19,6 +19,8 @@ devices, `Android/` Android host integration, and `Graphics/`/`Audio/` host APIs
 - Per-vCPU state is paid once per guest thread, and a game runs hundreds: do not fill or allocate it eagerly. The
   interpreter's decode cache (`CPU::DecodeCache`) is one lazily mapped, zero-initialized region (empty = zero tag, tags
   hold `~pc`); a copied CPU gets an empty cache. `test_thread_memory.sh` bounds the cost of an idle thread.
+  Sparse host-side tables (the decode cache, the guest page-flag mirror) call `host_pages_no_huge()`
+  (`Core/HostPagePolicy.hpp`) after mapping; guest storage keeps the host's THP setting.
 - `Core/ExclusiveMonitor.hpp` is the one LL/SC monitor (version table); the interpreter,
   the JIT helpers and the native sequences share its protocol, so change them together
   (see the FrostJIT guide).

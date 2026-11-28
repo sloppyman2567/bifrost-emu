@@ -8,6 +8,9 @@ State shared between them goes in `MemoryInternal.hpp`.
 - Guest memory is one host reservation: translate through the actual
   `window_base`/`window_size`, never a hardcoded address limit. Keep bounds,
   permission and crossing-page checks, including host-address overflow checks.
+- Guest storage keeps the host's transparent-huge-page setting; the sparse
+  per-page flag mirror calls `host_pages_no_huge()` (`Core/HostPagePolicy.hpp`)
+  after mapping.
 - The window is the largest power of two the host grants, 512 GiB to 64 TiB,
   capped by the constructor's `window_max`. Binder realm processes and the
   broker's per-endpoint mirrors use `BINDER_REALM_WINDOW_SIZE` (512 GiB, a
