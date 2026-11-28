@@ -10,7 +10,7 @@ Play Android games and run ARM64 Linux programs on an ordinary x86_64 Linux PC.
 
 [![CI](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml/badge.svg)](https://github.com/sloppyman2567/bifrost-emu/actions/workflows/ci.yml)
 [![Version: 2.0.0-rc.1](https://img.shields.io/badge/version-2.0.0--rc.1-green.svg)](Docs/CHANGELOG.md)
-[![Games: 18 playable of 21](https://img.shields.io/badge/games-18%20playable%20of%2021-brightgreen.svg)](Docs/COMPATIBILITY.md)
+[![Games: 20 playable of 23](https://img.shields.io/badge/games-20%20playable%20of%2023-brightgreen.svg)](Docs/COMPATIBILITY.md)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 
 <img src="Docs/Images/SpongeBob-2026-11-01/gameplay.png" alt="SpongeBob: Krusty Cook-Off, cooking (Android)" width="49%">
@@ -58,7 +58,7 @@ Updating, removing, Debian packages and immutable systems such as Bazzite are in
 
 ## Does my game run?
 
-18 of the 21 games tried so far are playable, according to the people who played them: SpongeBob Krusty Cook-Off, Azur Lane,
+20 of the 23 games tried so far are playable, according to the people who played them: SpongeBob Krusty Cook-Off, Azur Lane,
 Arknights, Umamusume (Global), Subway Surfers, Neverball, Doom 3 and more. Roblox and TrickCal don't work yet. The full list, with
 versions, frame rates and known problems, is [What has been run](Docs/COMPATIBILITY.md).
 
